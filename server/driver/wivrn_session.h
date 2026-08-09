@@ -168,6 +168,9 @@ public:
 	void operator()(from_headset::crypto_handshake &&) {}
 	void operator()(from_headset::pin_check_1 &&) {}
 	void operator()(from_headset::pin_check_3 &&) {}
+	// Handled by the main loop process, never reaches the session
+	void operator()(from_headset::attach_path &&) {}
+	void operator()(from_headset::path_ping &&);
 	void operator()(from_headset::headset_info_packet &&);
 	void operator()(const from_headset::settings_changed &);
 	void operator()(from_headset::handshake &&) {}

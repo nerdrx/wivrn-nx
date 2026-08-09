@@ -319,6 +319,7 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("bitrate_bps", &configuration::bitrate_bps),
 	        scalar("bitrate_auto", &configuration::bitrate_auto),
 	        scalar("sharp_text", &configuration::sharp_text),
+	        scalar("multipath_usb", &configuration::multipath_usb),
 	        scalar("comfort_vignette", &configuration::comfort_vignette),
 	        scalar("cas_sharpening", &configuration::cas_sharpening),
 	        scalar("cas_sharpness", &configuration::cas_sharpness),

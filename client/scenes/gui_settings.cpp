@@ -411,6 +411,16 @@ void settings_streaming(const settings_context & ctx)
 	});
 
 	list.push_back({
+	        .id = "##multipath_usb",
+	        .label = _("USB backup connection"),
+	        .description = _("Use the USB cable as a backup connection while streaming over Wi-Fi. Requires the tunnel to be armed by the WiVRn dashboard."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.multipath_usb; },
+	        .set_bool = [&config](bool v) { config.multipath_usb = v; config.save(); },
+	        .default_bool = default_config.multipath_usb,
+	});
+
+	list.push_back({
 	        .id = "##sharp_text",
 	        .label = _("Text clarity mode"),
 	        .description = _("Optimise the encoder for fine detail such as text and user interfaces, at the expense of a slightly noisier image. Takes effect on the next connection."),

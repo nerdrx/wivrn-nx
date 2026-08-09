@@ -25,6 +25,7 @@
 #include "render/imgui_impl.h"
 #include "scene.h"
 #include "scenes/input_profile.h"
+#include "secondary_path.h"
 #include "stream_defoveator.h"
 #include "utils/thread_safe.h"
 #include "wifi_lock.h"
@@ -76,6 +77,13 @@ private:
 
 	std::unique_ptr<wivrn_session> network_session;
 	std::thread network_thread;
+
+	// Declared after network_session so that it is stopped before the session is
+	// destroyed
+	std::optional<secondary_path_manager> path_manager;
+	std::atomic<int64_t> secondary_rtt_ns = 0;
+	std::chrono::steady_clock::time_point secondary_rtt_next_log{};
+
 	thread_safe<to_headset::tracking_control> tracking_control{};
 	std::array<std::atomic<interaction_profile>, 3> interaction_profiles; // left hand, right hand, gamepad
 	std::atomic<bool> interaction_profile_changed = false;
@@ -237,6 +245,9 @@ public:
 	void operator()(to_headset::pin_check_2 &&) {};
 	void operator()(to_headset::pin_check_4 &&) {};
 	void operator()(to_headset::handshake &&) {};
+	// Handled by the path manager during the attach handshake
+	void operator()(to_headset::attach_path_response &&) {};
+	void operator()(to_headset::path_pong &&);
 	void operator()(to_headset::server_message &&);
 	void operator()(to_headset::video_stream_data_shard &&);
 	void operator()(to_headset::haptics &&);

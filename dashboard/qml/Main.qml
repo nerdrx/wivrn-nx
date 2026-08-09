@@ -15,6 +15,19 @@ Kirigami.ApplicationWindow {
         id: select_usb_device
     }
 
+    // USB backup path: the reverse tunnel is only useful while a session runs
+    Binding {
+        target: Adb
+        property: "sessionActive"
+        value: WivrnServer.headsetConnected
+    }
+
+    Binding {
+        target: Adb
+        property: "usbTunnelEnabled"
+        value: DashboardSettings.usb_backup_tunnel
+    }
+
     SystemTrayIcon {
         id: systray
         visible: true

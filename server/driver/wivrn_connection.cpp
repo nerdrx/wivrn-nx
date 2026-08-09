@@ -28,8 +28,11 @@
 #include <arpa/inet.h>
 #include <chrono>
 #include <poll.h>
+#include <random>
 #include <regex>
 #include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
 #include <variant>
 
 using namespace std::chrono_literals;
@@ -56,13 +59,105 @@ static std::string clean_key(std::string key)
 wivrn::incorrect_pin::incorrect_pin() :
         std::runtime_error("Incorrect PIN") {}
 
+static std::array<uint8_t, 16> random_session_token()
+{
+	std::array<uint8_t, 16> token;
+
+	std::random_device rd;
+	std::uniform_int_distribution<int> distrib(0, 255);
+	for (uint8_t & i: token)
+		i = distrib(rd);
+
+	return token;
+}
+
+// Timeout on sends over a secondary path: a stalled USB tunnel must not block
+// the thread that duplicates tracking onto it
+static const timeval secondary_send_timeout{.tv_sec = 0, .tv_usec = 50'000};
+
 wivrn::wivrn_connection::wivrn_connection(std::stop_token stop_token, encryption_state state, std::string pin, TCP && tcp) :
         control(std::move(tcp)),
         stream(-1),
         pin(pin),
-        state(state)
+        state(state),
+        token(random_session_token())
 {
 	init(stop_token);
+}
+
+void wivrn::wivrn_connection::attach_secondary(int fd, const path_secrets & secrets)
+{
+	if (secondary)
+		drop_secondary("replaced by a new path");
+
+	try
+	{
+		secondary = decltype(secondary)(fd);
+		setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &secondary_send_timeout, sizeof(secondary_send_timeout));
+
+		if (secrets.encrypted)
+		{
+			auto key = secrets.key;
+			auto iv_from = secrets.iv_from_headset;
+			auto iv_to = secrets.iv_to_headset;
+			secondary.set_aes_key_and_ivs(key, iv_from, iv_to);
+		}
+
+		secondary_path_id = secrets.path_id;
+		secondary_received = 0;
+		secondary_last_receive = std::chrono::steady_clock::now();
+		secondary_next_report = secondary_last_receive + std::chrono::seconds(5);
+
+		U_LOG_I("Secondary path %d attached%s", (int)secondary_path_id, secrets.encrypted ? "" : " (unencrypted)");
+	}
+	catch (const std::exception & e)
+	{
+		U_LOG_W("Failed to attach secondary path: %s", e.what());
+		secondary = decltype(secondary)(-1);
+	}
+}
+
+void wivrn::wivrn_connection::drop_secondary(std::string_view reason)
+{
+	if (not secondary)
+		return;
+
+	U_LOG_I("Secondary path %d detached: %.*s", (int)secondary_path_id, (int)reason.size(), reason.data());
+
+	::shutdown(secondary.get_fd(), SHUT_RDWR);
+	secondary = decltype(secondary)(-1);
+	secondary_received = 0;
+}
+
+void wivrn::wivrn_connection::on_secondary_received()
+{
+	++secondary_received;
+	secondary_last_receive = std::chrono::steady_clock::now();
+}
+
+void wivrn::wivrn_connection::report_secondary_status()
+{
+	if (not secondary)
+		return;
+
+	auto now = std::chrono::steady_clock::now();
+	auto since_last = std::chrono::duration_cast<std::chrono::milliseconds>(now - secondary_last_receive);
+
+	// The headset sends a keepalive every 250ms
+	if (since_last > 3s)
+	{
+		drop_secondary("no keepalive received");
+		return;
+	}
+
+	if (now >= secondary_next_report)
+	{
+		secondary_next_report = now + 5s;
+		U_LOG_I("Secondary path %d alive, %lu packets received, last %ld ms ago",
+		        (int)secondary_path_id,
+		        (unsigned long)secondary_received,
+		        (long)since_last.count());
+	}
 }
 
 void wivrn::wivrn_connection::init(std::stop_token stop_token, std::function<void()> tick)
@@ -258,7 +353,7 @@ void wivrn::wivrn_connection::init(std::stop_token stop_token, std::function<voi
 	if (not std::holds_alternative<from_headset::crypto_handshake>(receive().first))
 		throw std::runtime_error("No handshake received from client");
 
-	control.send(to_headset::handshake{.stream_port = port});
+	control.send(to_headset::handshake{.stream_port = port, .session_token = token});
 
 	auto [stream_handshake, client_port] = receive(10s, true);
 
@@ -279,7 +374,7 @@ void wivrn::wivrn_connection::init(std::stop_token stop_token, std::function<voi
 		stream = decltype(stream)(-1);
 	}
 
-	control.send(to_headset::handshake{.stream_port = port});
+	control.send(to_headset::handshake{.stream_port = port, .session_token = token});
 
 	info_packet = std::get<from_headset::headset_info_packet>(receive(10s).first);
 
@@ -299,12 +394,17 @@ void wivrn::wivrn_connection::reset(std::stop_token stop, TCP && tcp, std::funct
 	if (stream)
 		stream = decltype(stream)();
 
+	// The secondary path belonged to the previous connection, its keys are gone
+	drop_secondary("primary connection was reset");
+
 	control = std::move(tcp);
 	init(stop, tick);
 }
 
 void wivrn::wivrn_connection::shutdown()
 {
+	drop_secondary("session shutting down");
+
 	if (stream)
 		::shutdown(stream.get_fd(), SHUT_RDWR);
 	if (control)

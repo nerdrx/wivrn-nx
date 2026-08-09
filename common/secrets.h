@@ -35,4 +35,13 @@ struct secrets
 	std::array<std::uint8_t, 8> stream_iv_header_from_headset;
 
 	secrets(crypto::key & my_key, crypto::key & peer_key, const std::string & pin);
+
+	// Key material for an additional path of an already established session
+	// (multipath). Unlike the constructor above, the shared secret really takes
+	// part in the derivation, so that each path has its own key stream: two TCP
+	// paths sharing one AES-CTR key stream would be a two-time pad.
+	static secrets for_additional_path(crypto::key & my_key, crypto::key & peer_key, const std::string & pin);
+
+private:
+	secrets() = default;
 };

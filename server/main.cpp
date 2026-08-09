@@ -37,6 +37,7 @@
 #include "exit_codes.h"
 #include "ipc_server_cb.h"
 #include "protocol_version.h"
+#include "secrets.h"
 #include "start_application.h"
 #include "start_systemd_unit.h"
 #include "utils/overloaded.h"
@@ -49,9 +50,12 @@
 #include "wivrn_server_dbus.h"
 
 #include <CLI/CLI.hpp>
+#include <algorithm>
+#include <array>
 #include <avahi-glib/glib-watch.h>
 #include <chrono> // IWYU pragma: keep
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <libnotify/notification.h>
@@ -59,6 +63,7 @@
 #include <memory>
 #include <poll.h>
 #include <random>
+#include <regex>
 #include <sys/signalfd.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -214,6 +219,14 @@ wivrn::service_publication publication;
 
 guint listener_watch;
 
+// Secondary (multipath) paths: while a session is running, the same port keeps
+// accepting connections, but the only thing they may do is attach to the
+// running session
+std::unique_ptr<TCPListener> attach_listener;
+guint attach_listener_watch;
+std::optional<std::jthread> attach_thread;
+std::array<uint8_t, 16> session_token{};
+
 wivrn_connection::encryption_state enc_state = wivrn_connection::encryption_state::enabled;
 guint pairing_timeout;
 std::string pin;
@@ -232,7 +245,10 @@ std::optional<avahi_publisher> publisher;
 std::optional<sleep_inhibitor> inhibitor;
 
 gboolean headset_connected(gint fd, GIOCondition condition, gpointer user_data);
+gboolean attach_path_connected(gint fd, GIOCondition condition, gpointer user_data);
 void stop_listening();
+void start_attach_listening();
+void stop_attach_listening();
 void on_headset_info_packet(const wivrn::from_headset::headset_info_packet & info);
 void expose_known_keys_on_dbus();
 void set_encryption_state(wivrn_connection::encryption_state new_enc_state);
@@ -244,6 +260,11 @@ void update_fsm();
 
 void start_server(configuration config)
 {
+	// Drop path handoffs left over from a previous session, they belong to a
+	// token that no longer exists
+	while (auto stale = receive_path_from_main())
+		::close(stale->first);
+
 	server_pid = do_fork ? fork() : 0;
 
 	if (server_pid < 0)
@@ -348,6 +369,246 @@ void stop_listening()
 	listener.reset();
 }
 
+// Same normalisation as wivrn_connection, so that keys can be compared with the
+// ones stored in the configuration
+std::string clean_key(std::string key)
+{
+	static const std::regex header{"^-+BEGIN .*-+$", std::regex_constants::multiline};
+	static const std::regex footer{"^-+END .*-+$", std::regex_constants::multiline};
+	static const std::regex whitespace{"[[:space:]]"};
+
+	key = std::regex_replace(key, header, "");
+	key = std::regex_replace(key, footer, "");
+	key = std::regex_replace(key, whitespace, "");
+
+	return key;
+}
+
+void attach_path_handshake_inner(std::stop_token stop_token,
+                                 typed_socket<TCP, from_headset::packets, to_headset::packets> & socket,
+                                 const std::array<uint8_t, 16> & token,
+                                 wivrn_connection::encryption_state enc_state);
+
+// Runs on its own thread: read the first packet of a connection received while a
+// session is running, and hand the socket to the monado process if it is a valid
+// attach request. Anything else is closed.
+void attach_path_handshake(std::stop_token stop_token, TCP && tcp, std::array<uint8_t, 16> token, wivrn_connection::encryption_state enc_state)
+{
+	typed_socket<TCP, from_headset::packets, to_headset::packets> socket(std::move(tcp));
+
+	try
+	{
+		attach_path_handshake_inner(stop_token, socket, token, enc_state);
+	}
+	catch (std::exception & e)
+	{
+		std::cerr << "Path attach failed: " << e.what() << std::endl;
+	}
+}
+
+void attach_path_handshake_inner(std::stop_token stop_token,
+                                 typed_socket<TCP, from_headset::packets, to_headset::packets> & socket,
+                                 const std::array<uint8_t, 16> & token,
+                                 wivrn_connection::encryption_state enc_state)
+{
+	auto receive = [&](std::chrono::seconds timeout) -> std::optional<from_headset::packets> {
+		auto deadline = std::chrono::steady_clock::now() + timeout;
+
+		while (not stop_token.stop_requested())
+		{
+			pollfd fds{.fd = socket.get_fd(), .events = POLLIN};
+
+			int r = ::poll(&fds, 1, 100);
+			if (r < 0)
+				return {};
+
+			if (fds.revents & (POLLHUP | POLLERR))
+				return {};
+
+			if (fds.revents & POLLIN)
+			{
+				if (auto packet = socket.receive())
+					return packet;
+			}
+
+			if (std::chrono::steady_clock::now() > deadline)
+				return {};
+		}
+
+		return {};
+	};
+
+	auto packet = receive(5s);
+	if (not packet)
+	{
+		std::cerr << "Path attach: no attach request received" << std::endl;
+		return;
+	}
+
+	auto * attach = std::get_if<from_headset::attach_path>(&*packet);
+	if (not attach)
+	{
+		// A regular connection attempt while a session is running
+		std::cerr << "Path attach: unexpected packet on a new connection, closing" << std::endl;
+		return;
+	}
+
+	if (attach->protocol_version != wivrn::protocol_version)
+	{
+		std::cerr << "Path attach: incompatible protocol version" << std::endl;
+		socket.send(to_headset::attach_path_response{
+		        .state = to_headset::attach_path_response::attach_state::incompatible_version,
+		        .path_id = attach->path_id,
+		});
+		return;
+	}
+
+	if (attach->session_token != token)
+	{
+		std::cerr << "Path attach: invalid session token" << std::endl;
+		socket.send(to_headset::attach_path_response{
+		        .state = to_headset::attach_path_response::attach_state::rejected,
+		        .path_id = attach->path_id,
+		});
+		return;
+	}
+
+	wivrn::path_secrets secrets{
+	        .encrypted = enc_state != wivrn_connection::encryption_state::disabled,
+	        .path_id = attach->path_id,
+	};
+
+	crypto::key server_key;
+	if (secrets.encrypted)
+	{
+		bool is_public_key_known = std::ranges::any_of(
+		        wivrn::known_keys(),
+		        [key = clean_key(attach->public_key)](const wivrn::headset_key & k) {
+			        return k.public_key == key;
+		        });
+
+		if (not is_public_key_known)
+		{
+			std::cerr << "Path attach: unknown public key" << std::endl;
+			socket.send(to_headset::attach_path_response{
+			        .state = to_headset::attach_path_response::attach_state::rejected,
+			        .path_id = attach->path_id,
+			});
+			return;
+		}
+
+		crypto::key headset_key = crypto::key::from_public_key(attach->public_key);
+
+		// Fresh ephemeral key pair: each TCP path has its own key stream
+		server_key = crypto::key::generate_x448_keypair();
+
+		// The headset is already paired, no PIN is needed
+		auto s = ::secrets::for_additional_path(server_key, headset_key, "000000");
+		secrets.key = s.control_key;
+		secrets.iv_from_headset = s.control_iv_from_headset;
+		secrets.iv_to_headset = s.control_iv_to_headset;
+	}
+
+	socket.send(to_headset::attach_path_response{
+	        .public_key = secrets.encrypted ? server_key.public_key() : "",
+	        .state = to_headset::attach_path_response::attach_state::accepted,
+	        .path_id = attach->path_id,
+	});
+
+	// Everything after the response is encrypted with the keys above and is
+	// handled by the monado process, nothing must be left in our buffer
+	if (auto extra = socket.receive_pending())
+	{
+		std::cerr << "Path attach: unexpected data after the attach request, closing" << std::endl;
+		return;
+	}
+
+	if (not send_path_to_monado(socket.get_fd(), secrets))
+	{
+		std::cerr << "Path attach: failed to hand the connection to the session" << std::endl;
+		return;
+	}
+
+	std::cerr << "Path attach: secondary path " << int(attach->path_id) << " handed to the session" << std::endl;
+}
+
+gboolean attach_path_connected(gint fd, GIOCondition condition, gpointer user_data)
+{
+	assert(attach_listener);
+
+	TCP tcp = attach_listener->accept().first;
+
+	if (attach_thread and attach_thread->joinable())
+	{
+		// One attach at a time
+		attach_thread->request_stop();
+		attach_thread->join();
+	}
+
+	attach_thread.emplace(&attach_path_handshake, std::move(tcp), session_token, enc_state);
+
+	return G_SOURCE_CONTINUE;
+}
+
+int attach_listen_retries;
+
+gboolean retry_attach_listening(void *)
+{
+	// Only while a session is running
+	if (server_watch != 0 and not quitting_main_loop)
+		start_attach_listening();
+
+	return G_SOURCE_REMOVE;
+}
+
+void start_attach_listening()
+{
+	if (attach_listener)
+		return;
+
+	try
+	{
+		attach_listener = std::make_unique<TCPListener>(configuration().port);
+		attach_listen_retries = 0;
+	}
+	catch (std::exception & e)
+	{
+		// The monado process may still hold the port from a reconnect
+		if (++attach_listen_retries <= 10)
+		{
+			g_timeout_add(200, retry_attach_listening, nullptr);
+			return;
+		}
+
+		std::cerr << "Cannot listen for secondary paths: " << e.what() << std::endl;
+		return;
+	}
+
+	auto source_listener = g_unix_fd_source_new(attach_listener->get_fd(), GIOCondition::G_IO_IN);
+	g_source_set_callback(source_listener, G_SOURCE_FUNC(&attach_path_connected), nullptr, nullptr);
+	attach_listener_watch = g_source_attach(source_listener, nullptr);
+	g_source_unref(source_listener);
+
+	std::cerr << "Listening for secondary paths on port " << configuration().port << std::endl;
+}
+
+void stop_attach_listening()
+{
+	attach_listen_retries = 0;
+
+	if (not attach_listener)
+		return;
+
+	assert(attach_listener_watch != 0);
+
+	g_source_remove(attach_listener_watch);
+	attach_listener_watch = 0;
+	attach_listener.reset();
+	attach_thread.reset();
+
+	std::cerr << "No longer listening for secondary paths" << std::endl;
+}
+
 void start_publishing()
 {
 	switch (publication)
@@ -385,6 +646,7 @@ void update_fsm()
 	if (quitting_main_loop)
 	{
 		connection_thread.reset();
+		stop_attach_listening();
 
 		if (server_running)
 			kill_server();
@@ -406,8 +668,10 @@ void update_fsm()
 		if (not server_running)
 		{
 			runtime_setter.reset();
+			stop_attach_listening();
 
 			g_timeout_add(delay_next_try.count(), [](void *) {
+				stop_attach_listening();
 				start_listening();
 				start_publishing();
 				wivrn_server_set_headset_connected(dbus_server, false);
@@ -439,6 +703,9 @@ gboolean headset_connected_success(void *)
 
 	expose_known_keys_on_dbus();
 
+	// The monado process inherits the connection (and its token) through fork
+	session_token = connection->session_token();
+
 	configuration c;
 	start_server(c);
 	try
@@ -453,6 +720,10 @@ gboolean headset_connected_success(void *)
 	delay_next_try = default_delay_next_try;
 
 	connection.reset();
+
+	// Keep accepting connections, but only to attach secondary paths
+	start_attach_listening();
+
 	return G_SOURCE_REMOVE;
 }
 
@@ -545,8 +816,12 @@ gboolean control_received(gint fd, GIOCondition condition, gpointer user_data)
 			                   stop_publishing();
 			                   inhibitor.emplace();
 			                   wivrn_server_set_headset_connected(dbus_server, true);
+			                   start_attach_listening();
 		                   },
 		                   [&](const from_monado::headset_disconnected &) {
+			                   // The monado process is about to listen on the same
+			                   // port to wait for the headset to come back
+			                   stop_attach_listening();
 			                   start_publishing();
 			                   inhibitor.reset();
 			                   wivrn_server_set_headset_connected(dbus_server, false);
@@ -979,6 +1254,18 @@ int inner_main(int argc, char * argv[], bool show_instructions)
 	fcntl(control_pipe_fds[1], F_SETFD, FD_CLOEXEC);
 	wivrn_ipc_socket_main_loop.emplace(control_pipe_fds[0]);
 	wivrn_ipc_socket_monado.emplace(control_pipe_fds[1]);
+
+	// Separate socketpair to pass secondary path sockets with SCM_RIGHTS
+	int path_pipe_fds[2];
+	if (socketpair(AF_UNIX, SOCK_DGRAM, 0, path_pipe_fds) < 0)
+	{
+		perror("socketpair");
+		return wivrn_exit_code::cannot_create_socketpair;
+	}
+	fcntl(path_pipe_fds[0], F_SETFD, FD_CLOEXEC);
+	fcntl(path_pipe_fds[1], F_SETFD, FD_CLOEXEC);
+	wivrn_path_socket_main_loop = path_pipe_fds[0];
+	wivrn_path_socket_monado = path_pipe_fds[1];
 
 	auto control_listener = g_unix_fd_source_new(control_pipe_fds[0], GIOCondition::G_IO_IN);
 	g_source_set_callback(control_listener, G_SOURCE_FUNC(&control_received), nullptr, nullptr);

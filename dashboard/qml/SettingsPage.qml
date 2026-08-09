@@ -104,6 +104,16 @@ Kirigami.ScrollablePage {
                 text: i18n("Auto connect from USB")
             }
 
+            RowLayout {
+                Controls.CheckBox {
+                    id: usb_backup_tunnel
+                    text: i18n("USB backup tunnel")
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("While a session is running, keep a USB tunnel open to every connected headset. The headset uses it as a backup connection if the setting is enabled there too.")
+                }
+            }
+
             Kirigami.Separator {
                 Kirigami.FormData.isSection: true
             }
@@ -324,6 +334,7 @@ Kirigami.ScrollablePage {
         Settings.hidForwarding = hid_forwarding.checked;
 
         DashboardSettings.auto_connect_usb = auto_connect_usb.checked;
+        DashboardSettings.usb_backup_tunnel = usb_backup_tunnel.checked;
     }
 
     function load() {
@@ -335,6 +346,7 @@ Kirigami.ScrollablePage {
         hid_forwarding.checked = Settings.hidForwarding;
 
         auto_connect_usb.checked = DashboardSettings.auto_connect_usb;
+        usb_backup_tunnel.checked = DashboardSettings.usb_backup_tunnel;
 
         openvr_combobox.load()
 

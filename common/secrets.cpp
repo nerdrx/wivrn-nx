@@ -30,3 +30,27 @@ secrets::secrets(crypto::key & my_key, crypto::key & peer_key, const std::string
 	static_assert(std::has_unique_object_representations_v<secrets>);
 	memcpy(this, secret.data(), secret.size());
 }
+
+secrets secrets::for_additional_path(crypto::key & my_key, crypto::key & peer_key, const std::string & pin)
+{
+	std::vector<uint8_t> dh = crypto::key::diffie_hellman(my_key, peer_key);
+
+	// PBKDF2 only takes a password and a salt: the shared secret passed to
+	// crypto::pbkdf2 is not one of its parameters and OpenSSL ignores it, so the
+	// derivation above only depends on the PIN. Fold the Diffie-Hellman result
+	// into the password to get key material that is unique to this path.
+	static const char hex[] = "0123456789abcdef";
+	std::string password = pin;
+	password.reserve(pin.size() + 2 * dh.size());
+	for (uint8_t byte: dh)
+	{
+		password += hex[byte >> 4];
+		password += hex[byte & 0xf];
+	}
+
+	secrets s;
+	std::vector<uint8_t> secret = crypto::pbkdf2(password, "saltsalt-path", dh, sizeof(s));
+	memcpy(&s, secret.data(), secret.size());
+
+	return s;
+}

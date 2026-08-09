@@ -239,6 +239,25 @@ struct pin_check_3
 	crypto::smp::msg3 message;
 };
 
+// First packet on a secondary (multipath) TCP connection: attach to an already
+// running session instead of creating a new one. No PIN/SMP exchange, the key
+// must already be paired; the token proves that the client owns the session.
+struct attach_path
+{
+	uint64_t protocol_version;
+	std::string public_key; // In PEM format, must be a known (paired) key
+	std::array<uint8_t, 16> session_token;
+	uint8_t path_id; // 1 for the first secondary path
+};
+
+// Keepalive, sent on secondary paths only, ~4/s. The server echoes it back as
+// to_headset::path_pong so the client can measure the path RTT.
+struct path_ping
+{
+	uint8_t path_id;
+	int64_t timestamp; // client steady clock, in ns
+};
+
 struct visibility_mask_changed
 {
 	struct mask
@@ -701,6 +720,8 @@ using packets = std::variant<
         crypto_handshake,
         pin_check_1,
         pin_check_3,
+        attach_path,
+        path_ping,
         headset_info_packet,
         settings_changed,
         feedback,
@@ -762,6 +783,33 @@ struct handshake
 {
 	// -1 if stream socket should not be used
 	int stream_port;
+
+	// Random, generated once per session. A secondary path is attached to this
+	// session by presenting it back in from_headset::attach_path.
+	std::array<uint8_t, 16> session_token;
+};
+
+// Reply to from_headset::attach_path
+struct attach_path_response
+{
+	enum class attach_state : uint8_t
+	{
+		accepted,
+		rejected,
+		incompatible_version,
+	};
+
+	// Ephemeral X448 public key in PEM format, empty if encryption is disabled
+	std::string public_key;
+	attach_state state;
+	uint8_t path_id;
+};
+
+// Reply to from_headset::path_ping, echoes it back
+struct path_pong
+{
+	uint8_t path_id;
+	int64_t timestamp;
 };
 
 struct server_message
@@ -946,6 +994,8 @@ using packets = std::variant<
         pin_check_2,
         pin_check_4,
         handshake,
+        attach_path_response,
+        path_pong,
         server_message,
         audio_stream_description,
         video_stream_description,

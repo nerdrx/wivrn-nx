@@ -27,13 +27,33 @@
 #include "wivrn_ipc.h"
 #include "wivrn_sockets.h"
 
+#include <chrono>
 #include <sys/poll.h>
+#include <thread>
 
 std::unique_ptr<wivrn::TCP> wivrn::accept_connection(wivrn_session & cnx, std::stop_token stop, std::function<void(wivrn_session &)> tick)
 {
 	wivrn_ipc_socket_monado->send(from_monado::headset_disconnected{});
 
-	wivrn::TCPListener listener(configuration().port);
+	// The main loop process may still be listening on the same port for
+	// secondary path attachments, it releases it when it gets the packet above
+	wivrn::TCPListener listener;
+	while (not stop.stop_requested())
+	{
+		try
+		{
+			listener = wivrn::TCPListener(configuration().port);
+			break;
+		}
+		catch (const std::exception & e)
+		{
+			U_LOG_D("Waiting for the listening port: %s", e.what());
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		}
+	}
+
+	if (not listener)
+		return {};
 
 	pollfd fds[2]{
 	        {.fd = listener.get_fd(), .events = POLLIN},

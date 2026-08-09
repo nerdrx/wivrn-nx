@@ -22,8 +22,11 @@
 #include "crypto.h"
 #include "wivrn_packets.h"
 #include "wivrn_sockets.h"
+#include <array>
 #include <chrono>
+#include <mutex>
 #include <poll.h>
+#include <shared_mutex>
 #include <spdlog/spdlog.h>
 
 using namespace wivrn;
@@ -49,6 +52,19 @@ private:
 
 	std::atomic<uint64_t> bytes_sent_ = 0;
 	std::atomic<uint64_t> bytes_received_ = 0;
+
+	// Secondary (multipath) path, attached at runtime by the path manager.
+	// Sending (tracking and keepalive threads) and receiving (network thread)
+	// only take the mutex in shared mode, so that a slow send on the secondary
+	// path can never hold up the network thread; replacing or closing the socket
+	// takes it exclusively.
+	mutable std::shared_mutex secondary_mutex;
+	control_socket_t secondary{-1};
+	uint64_t secondary_generation = 0;
+	std::atomic<bool> secondary_up = false;
+
+	// Token given by the server in the handshake, needed to attach a path
+	std::array<uint8_t, 16> session_token_{};
 
 	template <typename T>
 	void handshake(T address, bool tcp_only, crypto::key & headset_keypair, std::function<std::string(int fd)> pin_enter);
@@ -76,10 +92,79 @@ public:
 			bytes_sent_ += control.send(std::forward<T>(packet));
 	}
 
+	const std::array<uint8_t, 16> & session_token() const
+	{
+		return session_token_;
+	}
+
+	bool has_secondary() const
+	{
+		return secondary_up;
+	}
+
+	// Install an already attached (handshaken) secondary path
+	void set_secondary(control_socket_t && socket);
+
+	// Close the secondary path, the session is not affected
+	void drop_secondary(std::string_view reason);
+
+	// Duplicate a packet onto the secondary path, never throws: a failure only
+	// drops that path
+	template <typename T>
+	void send_secondary(T && packet)
+	{
+		std::shared_lock lock(secondary_mutex);
+		if (not secondary_up)
+			return;
+
+		try
+		{
+			secondary.send(std::forward<T>(packet));
+		}
+		catch (std::exception & e)
+		{
+			std::string reason = e.what();
+			lock.unlock();
+			drop_secondary(reason);
+		}
+	}
+
+	// Read whatever the secondary path has buffered
+	template <typename T>
+	void poll_secondary_pending(T && visitor)
+	{
+		while (secondary_up)
+		{
+			std::optional<to_headset::packets> packet;
+			{
+				std::shared_lock lock(secondary_mutex);
+				if (not secondary_up)
+					return;
+
+				try
+				{
+					packet = secondary.receive_pending(&bytes_received_);
+				}
+				catch (std::exception & e)
+				{
+					std::string reason = e.what();
+					lock.unlock();
+					drop_secondary(reason);
+					return;
+				}
+			}
+
+			if (not packet)
+				return;
+
+			std::visit(std::forward<T>(visitor), std::move(*packet));
+		}
+	}
+
 	template <typename T>
 	int poll(T && visitor, std::chrono::milliseconds timeout)
 	{
-		pollfd fds[2] = {};
+		pollfd fds[3] = {};
 		fds[0].events = POLLIN;
 		fds[0].fd = stream.get_fd();
 		fds[1].events = POLLIN;
@@ -90,6 +175,15 @@ public:
 			std::visit(std::forward<T>(visitor), std::move(*packet));
 		while (auto packet = control.receive_pending(&bytes_received_))
 			std::visit(std::forward<T>(visitor), std::move(*packet));
+		poll_secondary_pending(std::forward<T>(visitor));
+
+		uint64_t secondary_gen = 0;
+		{
+			std::shared_lock lock(secondary_mutex);
+			fds[2].events = POLLIN;
+			fds[2].fd = secondary_up ? secondary.get_fd() : -1;
+			secondary_gen = secondary_generation;
+		}
 
 		int r = ::poll(fds, std::size(fds), timeout.count());
 		if (r < 0)
@@ -100,6 +194,36 @@ public:
 
 		if (fds[1].revents & (POLLHUP | POLLERR))
 			throw std::runtime_error("Error on control socket");
+
+		if (fds[2].revents & (POLLHUP | POLLERR | POLLNVAL))
+		{
+			drop_secondary("socket closed by peer");
+		}
+		else if (fds[2].revents & POLLIN)
+		{
+			std::optional<to_headset::packets> packet;
+			std::string error;
+			{
+				std::shared_lock lock(secondary_mutex);
+				// The path may have been replaced while polling
+				if (secondary_up and secondary_generation == secondary_gen)
+				{
+					try
+					{
+						packet = secondary.receive(&bytes_received_);
+					}
+					catch (std::exception & e)
+					{
+						error = e.what();
+					}
+				}
+			}
+
+			if (not error.empty())
+				drop_secondary(error);
+			else if (packet)
+				std::visit(std::forward<T>(visitor), std::move(*packet));
+		}
 
 		if (fds[0].revents & POLLIN)
 		{

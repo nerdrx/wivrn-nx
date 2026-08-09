@@ -141,11 +141,62 @@ QCoro::Task<> adb::on_poll_devices_timeout()
 				co_await add_device(serial);
 		}
 
+		co_await update_usb_tunnels();
+
 		QTimer::singleShot(500, this, &adb::on_poll_devices_timeout);
 	}
 	else
 	{
 		qDebug() << "adb failed";
+	}
+}
+// END
+
+// BEGIN USB backup path
+//
+// The headset probes 127.0.0.1:9757 while streaming and attaches a secondary
+// path to the running session when it answers. That is exactly the case when
+// `adb reverse tcp:9757 tcp:9757` is set up, so arm it for every connected
+// headset while a session is running.
+QCoro::Task<> adb::update_usb_tunnels()
+{
+	if (not m_usb_tunnel_enabled or not m_session_active)
+	{
+		// The reverse tunnel dies with the session anyway, only forget about it
+		for (auto & dev: m_android_devices)
+			dev.usb_tunnel_armed = false;
+
+		co_return;
+	}
+
+	// Snapshot the serials: the device list may change while a process runs
+	std::vector<QString> to_arm;
+	for (const auto & dev: m_android_devices)
+	{
+		if (not dev.usb_tunnel_armed and dev.is_wivrn_installed)
+			to_arm.push_back(dev.serial);
+	}
+
+	for (const QString & serial: to_arm)
+	{
+		auto adb_reverse = escape_sandbox(m_path, "-s", serial, "reverse", "tcp:9757", "tcp:9757");
+		adb_reverse->setProcessChannelMode(QProcess::ForwardedErrorChannel);
+		auto co_process = qCoro(*adb_reverse);
+
+		co_await co_process.start();
+		co_await co_process.waitForFinished();
+
+		if (adb_reverse->exitStatus() != QProcess::NormalExit or adb_reverse->exitCode() != 0)
+		{
+			qWarning() << "Failed to set up the USB backup tunnel for" << serial;
+			continue;
+		}
+
+		auto it = std::ranges::find(m_android_devices, serial, &device::serial);
+		if (it != m_android_devices.end())
+			it->usb_tunnel_armed = true;
+
+		qInfo() << "USB backup tunnel armed for" << serial;
 	}
 }
 // END

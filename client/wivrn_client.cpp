@@ -116,6 +116,7 @@ void wivrn_session::handshake(T address, bool tcp_only, crypto::key & headset_ke
 			send_control(from_headset::crypto_handshake{});
 
 			to_headset::handshake h{std::get<to_headset::handshake>(receive(10s))};
+			session_token_ = h.session_token;
 			if (h.stream_port > 0 && !tcp_only)
 			{
 				stream = decltype(stream)();
@@ -166,6 +167,7 @@ void wivrn_session::handshake(T address, bool tcp_only, crypto::key & headset_ke
 			send_control(from_headset::crypto_handshake{});
 
 			to_headset::handshake h{std::get<to_headset::handshake>(receive(10s))};
+			session_token_ = h.session_token;
 			if (h.stream_port > 0 && !tcp_only)
 			{
 				stream = decltype(stream)();
@@ -207,6 +209,39 @@ void wivrn_session::handshake(T address, bool tcp_only, crypto::key & headset_ke
 			stream.send(from_headset::handshake{});
 		}
 	}
+}
+
+void wivrn_session::set_secondary(control_socket_t && socket)
+{
+	{
+		std::unique_lock lock(secondary_mutex);
+
+		// A stalled path must never block the tracking thread for long
+		timeval timeout{.tv_sec = 0, .tv_usec = 20'000};
+		setsockopt(socket.get_fd(), SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+		secondary = std::move(socket);
+		++secondary_generation;
+		secondary_up = true;
+	}
+
+	spdlog::info("Secondary path attached");
+}
+
+void wivrn_session::drop_secondary(std::string_view reason)
+{
+	{
+		std::unique_lock lock(secondary_mutex);
+		if (not secondary_up)
+			return;
+
+		::shutdown(secondary.get_fd(), SHUT_RDWR);
+		secondary = control_socket_t(-1);
+		++secondary_generation;
+		secondary_up = false;
+	}
+
+	spdlog::info("Secondary path detached: {}", reason);
 }
 
 wivrn_session::wivrn_session(in6_addr address, int port, bool tcp_only, crypto::key & headset_keypair, std::function<std::string(int fd)> pin_enter) :

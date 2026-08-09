@@ -538,11 +538,16 @@ void scenes::stream::tracking()
 			if (next_battery_check < now)
 			{
 				auto status = get_battery_status();
-				network_session->send_stream(from_headset::battery{
+				from_headset::battery battery{
 				        .charge = status.charge.value_or(-1),
 				        .present = status.charge.has_value(),
 				        .charging = status.charging,
-				});
+				};
+				network_session->send_stream(from_headset::battery{battery});
+
+				// Duplicated on the secondary path, harmless if it arrives twice
+				if (network_session->has_secondary())
+					network_session->send_secondary(from_headset::battery{battery});
 
 				next_battery_check = now + battery_check_interval;
 			}
@@ -589,6 +594,13 @@ void scenes::stream::tracking()
 			}
 
 			network_session->send_stream(std::span(packets.data(), packet_count));
+
+			// Duplicate tracking onto the secondary path: history::add_sample
+			// drops the duplicate, and if the primary lost it the pose is still
+			// there. Inputs, feedback and audio are never duplicated.
+			// The packet is serialized again because sending encrypts in place.
+			if (network_session->has_secondary())
+				network_session->send_secondary(from_headset::tracking{tracking});
 
 			XrTime old = scheduled_derived_pose;
 			if (old and now > old)

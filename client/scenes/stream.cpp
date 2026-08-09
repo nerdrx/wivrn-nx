@@ -389,6 +389,14 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 
 	self->network_thread = utils::named_thread("network_thread", &stream::process_packets, self.get());
 
+	// Secondary path over the USB tunnel, if the headset allows it
+	{
+		stream * raw = self.get();
+		self->path_manager.emplace(*self->network_session, [raw]() {
+			return application::get_config().multipath_usb and raw->current_state() == state::streaming;
+		});
+	}
+
 	self->command_buffer = std::move(self->device.allocateCommandBuffers({
 	        .commandPool = *self->commandpool,
 	        .level = vk::CommandBufferLevel::ePrimary,
@@ -598,6 +606,9 @@ void scenes::stream::on_unfocused()
 scenes::stream::~stream()
 {
 	exit();
+
+	// Stops the probe/keepalive thread and closes the secondary path
+	path_manager.reset();
 
 	if (tracking_thread && tracking_thread->joinable())
 		tracking_thread->join();

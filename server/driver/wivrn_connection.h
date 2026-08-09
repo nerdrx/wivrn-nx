@@ -24,7 +24,10 @@
 #include "wivrn_packets.h"
 #include "wivrn_sockets.h"
 
+#include <array>
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <optional>
 #include <poll.h>
 #include <stdexcept>
@@ -58,7 +61,48 @@ private:
 
 	from_headset::headset_info_packet info_packet;
 
+	// Secondary (multipath) TCP path, attached at runtime by the main loop
+	// process. It has its own liveness: an error here never affects the session.
+	typed_socket<TCP, from_headset::packets, to_headset::packets> secondary{-1};
+	uint8_t secondary_path_id = 0;
+	uint64_t secondary_received = 0;
+	std::chrono::steady_clock::time_point secondary_last_receive{};
+	std::chrono::steady_clock::time_point secondary_next_report{};
+
+	// Random, sent to the headset in to_headset::handshake, presented back by
+	// the headset to attach a secondary path
+	std::array<uint8_t, 16> token;
+
 	void init(std::stop_token stop_token, std::function<void()> tick = []() {});
+
+	// Read whatever the secondary path already has buffered, dropping the path
+	// on error
+	template <typename T>
+	void poll_secondary_pending(T && visitor)
+	{
+		while (secondary)
+		{
+			std::optional<from_headset::packets> packet;
+			try
+			{
+				packet = secondary.receive_pending();
+			}
+			catch (const std::exception & e)
+			{
+				drop_secondary(e.what());
+				return;
+			}
+
+			if (not packet)
+				return;
+
+			on_secondary_received();
+			std::visit(std::forward<T>(visitor), std::move(*packet));
+		}
+	}
+
+	void on_secondary_received();
+	void report_secondary_status();
 
 public:
 	wivrn_connection(std::stop_token stop_token, encryption_state state, std::string pin, TCP && tcp);
@@ -76,6 +120,40 @@ public:
 	}
 	void reset(std::stop_token stop, TCP && tcp, std::function<void()> tick = {});
 	void shutdown();
+
+	const std::array<uint8_t, 16> & session_token() const
+	{
+		return token;
+	}
+
+	bool has_secondary() const
+	{
+		return bool(secondary);
+	}
+
+	// Take over a secondary connection accepted and authenticated by the main
+	// loop process, fd ownership is transferred
+	void attach_secondary(int fd, const path_secrets & secrets);
+
+	// Close the secondary path, the session is not affected
+	void drop_secondary(std::string_view reason);
+
+	// Never throws, a failure only drops the secondary path
+	template <typename T>
+	void send_secondary(T && packet)
+	{
+		if (not secondary)
+			return;
+
+		try
+		{
+			secondary.send(std::forward<T>(packet));
+		}
+		catch (const std::exception & e)
+		{
+			drop_secondary(e.what());
+		}
+	}
 
 	template <typename T>
 	void send_control(T && packet)
@@ -122,19 +200,26 @@ public:
 	template <typename T>
 	int poll(T && visitor, int timeout)
 	{
-		pollfd fds[3] = {};
+		pollfd fds[5] = {};
 		fds[0].events = POLLIN;
 		fds[0].fd = stream.get_fd();
 		fds[1].events = POLLIN;
 		fds[1].fd = control.get_fd();
 		fds[2].fd = wivrn_ipc_socket_monado->get_fd();
 		fds[2].events = POLLIN;
+		fds[3].fd = wivrn_path_socket_monado;
+		fds[3].events = POLLIN;
 
 		// Malformed datagrams are dropped, only the control socket is fatal
 		while (auto packet = stream.receive_pending_lossy())
 			std::visit(std::forward<T>(visitor), std::move(*packet));
 		while (auto packet = control.receive_pending())
 			std::visit(std::forward<T>(visitor), std::move(*packet));
+		poll_secondary_pending(std::forward<T>(visitor));
+
+		// After poll_secondary_pending, the path may have been dropped
+		fds[4].fd = secondary ? secondary.get_fd() : -1;
+		fds[4].events = POLLIN;
 
 		int r = ::poll(fds, std::size(fds), timeout);
 		if (r < 0)
@@ -169,6 +254,37 @@ public:
 			if (packet)
 				std::visit(std::forward<T>(visitor), std::move(*packet));
 		}
+
+		if (fds[3].revents & POLLIN)
+		{
+			if (auto path = receive_path_from_main())
+				attach_secondary(path->first, path->second);
+		}
+
+		if (fds[4].revents & (POLLHUP | POLLERR | POLLNVAL))
+		{
+			drop_secondary("socket closed by peer");
+		}
+		else if (fds[4].revents & POLLIN)
+		{
+			std::optional<from_headset::packets> packet;
+			try
+			{
+				packet = secondary.receive();
+			}
+			catch (const std::exception & e)
+			{
+				drop_secondary(e.what());
+			}
+
+			if (packet)
+			{
+				on_secondary_received();
+				std::visit(std::forward<T>(visitor), std::move(*packet));
+			}
+		}
+
+		report_secondary_status();
 
 		if (uint64_t dropped = stream.take_dropped_datagrams())
 			U_LOG_W("Dropped %lu invalid datagram(s) on the stream socket (%lu total)",

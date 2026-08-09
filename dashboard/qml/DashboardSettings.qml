@@ -11,5 +11,9 @@ Settings {
 	property string adb_location: ""
 
 	property bool auto_connect_usb: false
+
+	// Arm `adb reverse` while a session is running so that the headset can use
+	// the cable as a backup path
+	property bool usb_backup_tunnel: true
 }
 

@@ -136,6 +136,19 @@ void scenes::stream::operator()(to_headset::timesync_query && query)
 	});
 }
 
+void scenes::stream::operator()(to_headset::path_pong && pong)
+{
+	auto now = std::chrono::steady_clock::now();
+	int64_t rtt = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count() - pong.timestamp;
+	secondary_rtt_ns = rtt;
+
+	if (now >= secondary_rtt_next_log)
+	{
+		secondary_rtt_next_log = now + std::chrono::seconds(5);
+		spdlog::info("Secondary path {} RTT {:.2f} ms", int(pong.path_id), rtt / 1.e6);
+	}
+}
+
 void scenes::stream::operator()(audio_data && data)
 {
 	if (audio_handle)

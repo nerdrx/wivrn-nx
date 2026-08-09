@@ -797,6 +797,15 @@ void wivrn_session::operator()(from_headset::timesync_response && timesync)
 	offset_est.add_sample(timesync);
 }
 
+void wivrn_session::operator()(from_headset::path_ping && ping)
+{
+	// Keepalives only exist on secondary paths, echo them back there
+	connection->send_secondary(to_headset::path_pong{
+	        .path_id = ping.path_id,
+	        .timestamp = ping.timestamp,
+	});
+}
+
 void wivrn_session::apply_auto_bitrate(std::optional<uint32_t> bitrate)
 {
 	if (bitrate)

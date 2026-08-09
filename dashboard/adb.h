@@ -37,15 +37,26 @@ class adb : public QAbstractListModel
 		QString app;
 		std::map<QString, QString> properties;
 		bool is_wivrn_installed = false;
+
+		// Whether `adb reverse` is currently set up for the USB backup path
+		bool usb_tunnel_armed = false;
 	};
 
 	Q_PROPERTY(bool adbInstalled READ adbInstalled NOTIFY adbInstalledChanged)
 
+	// Set up the reverse tunnel used by the headset as a backup path while a
+	// session is running
+	Q_PROPERTY(bool usbTunnelEnabled READ usbTunnelEnabled WRITE setUsbTunnelEnabled NOTIFY usbTunnelEnabledChanged)
+	Q_PROPERTY(bool sessionActive READ sessionActive WRITE setSessionActive NOTIFY sessionActiveChanged)
+
 	bool m_adb_installed = false;
+	bool m_usb_tunnel_enabled = true;
+	bool m_session_active = false;
 	QString m_path;
 	std::vector<device> m_android_devices;
 
 	QCoro::Task<> on_poll_devices_timeout();
+	QCoro::Task<> update_usb_tunnels();
 
 public:
 	enum Roles
@@ -62,6 +73,34 @@ public:
 	bool adbInstalled() const
 	{
 		return m_adb_installed;
+	}
+
+	bool usbTunnelEnabled() const
+	{
+		return m_usb_tunnel_enabled;
+	}
+
+	void setUsbTunnelEnabled(bool enabled)
+	{
+		if (m_usb_tunnel_enabled == enabled)
+			return;
+
+		m_usb_tunnel_enabled = enabled;
+		usbTunnelEnabledChanged(enabled);
+	}
+
+	bool sessionActive() const
+	{
+		return m_session_active;
+	}
+
+	void setSessionActive(bool active)
+	{
+		if (m_session_active == active)
+			return;
+
+		m_session_active = active;
+		sessionActiveChanged(active);
 	}
 
 	Q_INVOKABLE QCoro::QmlTask startUsbConnection(QString serial, QString pin);
@@ -81,6 +120,8 @@ protected:
 
 Q_SIGNALS:
 	void adbInstalledChanged(bool);
+	void usbTunnelEnabledChanged(bool);
+	void sessionActiveChanged(bool);
 
 private:
 	QCoro::Task<> checkIfAdbIsInstalled();

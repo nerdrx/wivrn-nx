@@ -75,6 +75,10 @@ public:
 	// Ask the server to bias the encoders for fine detail instead of a smooth image
 	bool sharp_text = false;
 
+	// Attach a secondary path over the USB cable while streaming, used as a
+	// backup for the wireless link
+	bool multipath_usb = true;
+
 	// Darken the periphery of the streamed image when the application frame rate collapses
 	bool comfort_vignette = true;
 

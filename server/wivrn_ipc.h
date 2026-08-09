@@ -22,9 +22,11 @@
 #include "wivrn_packets.h"
 #include "wivrn_sockets.h"
 
+#include <array>
 #include <memory>
 #include <optional>
 #include <stdint.h>
+#include <utility>
 #include <variant>
 
 namespace wivrn
@@ -75,6 +77,35 @@ using packets = std::variant<stop, disconnect, set_bitrate, wivrn::to_headset::s
 } // namespace to_monado
 
 extern std::optional<wivrn::typed_socket<wivrn::UnixDatagram, to_monado::packets, from_monado::packets>> wivrn_ipc_socket_monado;
+
+namespace wivrn
+{
+// Everything the monado process needs to talk on a secondary (multipath) TCP
+// connection that the main loop process accepted and authenticated
+struct path_secrets
+{
+	bool encrypted = false;
+	uint8_t path_id = 0;
+	std::array<uint8_t, 16> key{};
+	std::array<uint8_t, 16> iv_from_headset{};
+	std::array<uint8_t, 16> iv_to_headset{};
+};
+} // namespace wivrn
+
+// Dedicated AF_UNIX SOCK_DGRAM socketpair, used only to pass secondary path
+// sockets with SCM_RIGHTS. It is kept apart from the packet socketpair above
+// because the latter is read with recvmmsg without ancillary data, which would
+// silently drop the file descriptors.
+extern int wivrn_path_socket_main_loop;
+extern int wivrn_path_socket_monado;
+
+// Main loop process: hand an accepted+authenticated secondary connection over
+// to the monado process. Returns false on failure, the caller keeps the fd.
+bool send_path_to_monado(int fd, const wivrn::path_secrets & secrets);
+
+// Monado process: receive a secondary connection, the returned fd is owned by
+// the caller
+std::optional<std::pair<int, wivrn::path_secrets>> receive_path_from_main();
 
 std::optional<to_monado::packets> receive_from_main();
 template <typename T>

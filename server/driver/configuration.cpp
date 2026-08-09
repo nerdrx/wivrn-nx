@@ -178,6 +178,26 @@ configuration::configuration()
 			}
 		}
 
+		// "quad-layers": {"max-size": pixels, "allow-blended": bool}, or false to
+		// refuse the feature whatever the headset asks for
+		if (auto it = json.find("quad-layers"); it != json.end())
+		{
+			if (it->is_boolean())
+			{
+				if (not it->get<bool>())
+					quad_layers.max_size = 0;
+			}
+			else if (it->is_object())
+			{
+				if (auto size = it->find("max-size"); size != it->end())
+					quad_layers.max_size = *size;
+				if (auto blended = it->find("allow-blended"); blended != it->end())
+					quad_layers.allow_blended = *blended;
+			}
+			else
+				throw std::runtime_error("invalid quad-layers value, expected a boolean or an object");
+		}
+
 		// "bitrate-auto": true/false, or an object {"enabled": bool, "min-bitrate": bits/s}
 		if (auto it = json.find("bitrate-auto"); it != json.end())
 		{

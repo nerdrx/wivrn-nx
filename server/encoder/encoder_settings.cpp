@@ -43,16 +43,33 @@ namespace wivrn
 {
 
 static const double passthrough_bitrate_factor = 0.05;
+// The promoted quad layer is a text panel: the whole point of pulling it out of the
+// eye images is that it stays legible, so its pixels are weighted like eye pixels
+// rather than discounted the way the passthrough alpha plane is. At the default cap
+// of 1024x1024 against two 2000x2000 eyes that lands around 11% of the ceiling. The
+// stream only exists when the headset asked for it, and it is only fed on frames
+// that actually promote a layer, so nothing is spent when the feature is unused —
+// but the share is reserved for the whole session, which is why the toggle is read
+// when the encoders are created and not only per frame.
+static const double quad_bitrate_factor = 1.0;
 
-static void split_bitrate(std::array<wivrn::encoder_settings, 3> & encoders, uint64_t bitrate)
+static void split_bitrate(std::array<wivrn::encoder_settings, num_streams> & encoders, uint64_t bitrate)
 {
 	assert(bitrate > 0);
 	double total_weight = 0;
 	for (auto [i, encoder]: std::ranges::enumerate_view(encoders))
 	{
+		if (not encoder.enabled)
+		{
+			encoder.bitrate = 0;
+			encoder.bitrate_multiplier = 0;
+			continue;
+		}
 		double w = encoder.width * encoder.height;
 		if (i == 2)
 			w *= passthrough_bitrate_factor;
+		if (i == quad_stream_idx)
+			w *= quad_bitrate_factor;
 		switch (encoder.codec)
 		{
 			case wivrn::h264:
@@ -69,17 +86,21 @@ static void split_bitrate(std::array<wivrn::encoder_settings, 3> & encoders, uin
 
 	for (auto & encoder: encoders)
 	{
+		if (not encoder.enabled)
+			continue;
 		encoder.bitrate_multiplier = encoder.bitrate / total_weight;
 		encoder.bitrate = encoder.bitrate_multiplier * bitrate;
 	}
 }
 
-void print_encoders(const std::array<wivrn::encoder_settings, 3> & encoders)
+void print_encoders(const std::array<wivrn::encoder_settings, num_streams> & encoders)
 {
 	std::stringstream str;
 	str << "Encoder configuration:";
 	for (auto & encoder: encoders)
 	{
+		if (not encoder.enabled)
+			continue;
 		str << "\n\t* " << encoder.encoder_name << " (" << magic_enum::enum_name(encoder.codec) << " " << encoder.bit_depth << "-bit)"
 		    << "\n\t  size: " << encoder.width << "x" << encoder.height
 		    << "\n\t  bitrate: " << int(encoder.bitrate / 100'000) / 10. << "Mbit/s";
@@ -271,18 +292,24 @@ static uint16_t align(uint16_t value, uint16_t alignment)
 	return ((value + alignment - 1) / alignment) * alignment;
 }
 
-std::array<encoder_settings, 3> get_encoder_settings(wivrn::vk_bundle & bundle, wivrn_session & session)
+std::array<encoder_settings, num_streams> get_encoder_settings(wivrn::vk_bundle & bundle, wivrn_session & session)
 {
 	configuration config;
 
-	std::array<wivrn::encoder_settings, 3> res;
+	std::array<wivrn::encoder_settings, num_streams> res{};
 	const auto & info = session.get_info();
 	const auto settings = *session.get_settings();
+
+	// The quad layer stream costs an encoder and a share of the bitrate for the
+	// whole session, so it is only set up when the headset asked for it.
+	res[quad_stream_idx].enabled = settings.quad_layers and config.quad_layers.max_size > 0;
 
 	prober prober{bundle, info};
 
 	for (auto [src, dst]: std::ranges::zip_view(config.encoders, res))
 	{
+		if (not dst.enabled)
+			continue;
 		dst.fps = session.default_fps();
 		dst.options = src.options;
 		dst.device = src.device;
@@ -301,8 +328,21 @@ std::array<encoder_settings, 3> get_encoder_settings(wivrn::vk_bundle & bundle, 
 	{
 		dst.width = width;
 		dst.height = height;
+		dst.src_layer = i;
 		if (i == 2) // alpha channel
 			dst.height /= 2;
+	}
+
+	if (res[quad_stream_idx].enabled)
+	{
+		// The quad has an image of its own, so its size is not tied to the eyes:
+		// a square capped at the configured maximum, of which only the part
+		// matching the panel's aspect ratio is filled on any given frame.
+		auto & quad = res[quad_stream_idx];
+		quad.width = align(config.quad_layers.max_size, 64);
+		quad.height = quad.width;
+		check_video_size(quad.encoder_name, quad.codec, quad.width, quad.height);
+		quad.src_layer = 0;
 	}
 
 	auto bit_depth = config.bit_depth ? config.bit_depth : info.bit_depth;
@@ -310,8 +350,9 @@ std::array<encoder_settings, 3> get_encoder_settings(wivrn::vk_bundle & bundle, 
 	if (bit_depth and bit_depth != 8 and bit_depth != 10)
 		throw std::runtime_error("invalid bit-depth setting. supported values: 8, 10");
 
-	if (std::ranges::contains(res, video_codec::h264, &encoder_settings::codec) or
-	    std::ranges::contains(res, video_codec::raw, &encoder_settings::codec))
+	auto enabled_encoders = res | std::views::filter(&encoder_settings::enabled);
+	if (std::ranges::contains(enabled_encoders, video_codec::h264, &encoder_settings::codec) or
+	    std::ranges::contains(enabled_encoders, video_codec::raw, &encoder_settings::codec))
 		bit_depth = 8;
 	else if (not bit_depth)
 		bit_depth = 10;

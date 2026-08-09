@@ -92,7 +92,7 @@ ImPlotPoint getter(int index, void * data_)
 }
 } // namespace
 
-void scenes::stream::accumulate_metrics(XrTime predicted_display_time, const std::array<std::shared_ptr<shard_accumulator::blit_handle>, view_count + 1> & blit_handles, const gpu_timestamps & timestamps)
+void scenes::stream::accumulate_metrics(XrTime predicted_display_time, const std::array<std::shared_ptr<shard_accumulator::blit_handle>, decoder_count> & blit_handles, const gpu_timestamps & timestamps)
 {
 	uint64_t rx = network_session->bytes_received();
 	uint64_t tx = network_session->bytes_sent();
@@ -397,6 +397,7 @@ static void send_settings_changed_packet(xr::session & session, wivrn_session * 
 	                .bitrate_auto = config.bitrate_auto,
 	                .sharp_text = config.sharp_text,
 	                .motion_smoothing = config.motion_smoothing,
+	                .quad_layers = config.quad_layers,
 	                .mirror_gamepad = config.forward_gamepad,
 	                .enabled_body_parts = config.body_part_mask,
 	        });

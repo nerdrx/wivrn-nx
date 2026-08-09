@@ -252,7 +252,7 @@ void video_encoder_x264::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo
 		        .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor,
 		                             .baseMipLevel = 0,
 		                             .levelCount = 1,
-		                             .baseArrayLayer = stream_idx,
+		                             .baseArrayLayer = src_layer,
 		                             .layerCount = 1},
 		};
 		cmd.pipelineBarrier2({
@@ -269,7 +269,7 @@ void video_encoder_x264::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo
 	                .bufferRowLength = chroma_width * 2,
 	                .imageSubresource = {
 	                        .aspectMask = vk::ImageAspectFlagBits::ePlane0,
-	                        .baseArrayLayer = stream_idx,
+	                        .baseArrayLayer = src_layer,
 	                        .layerCount = 1,
 	                },
 	                .imageExtent = {
@@ -285,7 +285,7 @@ void video_encoder_x264::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo
 	                .bufferRowLength = chroma_width,
 	                .imageSubresource = {
 	                        .aspectMask = vk::ImageAspectFlagBits::ePlane1,
-	                        .baseArrayLayer = stream_idx,
+	                        .baseArrayLayer = src_layer,
 	                        .layerCount = 1,
 	                },
 	                .imageExtent = {

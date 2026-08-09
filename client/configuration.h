@@ -87,6 +87,12 @@ public:
 	// for. Off by default: the artefacts it trades judder for depend on the content.
 	bool motion_smoothing = false;
 
+	// Ask the server to stream one overlay panel (wlx-overlay-s, WayVR and the like)
+	// as a layer of its own instead of baking it into the eye images, and submit it
+	// here as a real quad layer. On by default: it is strictly sharper and the
+	// runtime, rather than the server, holds it still when the head moves.
+	bool quad_layers = true;
+
 	// Contrast adaptive sharpening, applied to the decoded image by the reprojection pass
 	bool cas_sharpening = false;
 	float cas_sharpness = 0.5;

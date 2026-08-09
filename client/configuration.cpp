@@ -322,6 +322,7 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("multipath_usb", &configuration::multipath_usb),
 	        scalar("comfort_vignette", &configuration::comfort_vignette),
 	        scalar("motion_smoothing", &configuration::motion_smoothing),
+	        scalar("quad_layers", &configuration::quad_layers),
 	        scalar("cas_sharpening", &configuration::cas_sharpening),
 	        scalar("cas_sharpness", &configuration::cas_sharpness),
 	        scalar("enable_stream_gui", &configuration::enable_stream_gui),

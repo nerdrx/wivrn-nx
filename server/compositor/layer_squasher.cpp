@@ -392,7 +392,8 @@ layer_squasher::do_layers(
         uint64_t frame_interval_ns,
         const comp_frame & frame,
         const comp_layer_accum & layers,
-        const xrt_rect & min_size)
+        const xrt_rect & min_size,
+        int skip_layer)
 {
 	// get the head/pose to reproject to
 	const pose_data poses{hmd, frame_interval_ns, frame, layers};
@@ -452,6 +453,11 @@ layer_squasher::do_layers(
 		int cur_layer = 0;
 		for (const auto & layer: std::span(layers.layers, layers.layer_count))
 		{
+			// Promoted to a stream of its own: neither composited nor counted
+			// in the field of view the eye images have to cover.
+			if (std::distance(layers.layers, &layer) == skip_layer)
+				continue;
+
 			if (not is_layer_view_visible(&layer.data, view))
 				continue;
 

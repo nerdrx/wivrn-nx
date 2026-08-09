@@ -79,6 +79,10 @@ public:
 	// newer frames have been seen, which is enough for the late "displayed" feedback to arrive.
 	static constexpr size_t frame_ring_size = 16;
 	// One video stream per encoder: left, right, alpha. Anything else is not a video frame.
+	//
+	// Deliberately not the promoted quad layer stream, which is one index further:
+	// it is silent on every frame that promotes no layer, and the headset reports the
+	// frames it never received as lost, which here would read as a saturated link.
 	static constexpr uint8_t video_stream_count = 3;
 
 	// --- Thresholds ---------------------------------------------------------------------

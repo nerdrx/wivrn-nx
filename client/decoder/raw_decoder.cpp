@@ -99,8 +99,8 @@ raw_decoder::raw_decoder(
         fence(device, vk::FenceCreateInfo{.flags = vk::FenceCreateFlagBits::eSignaled}),
         stream_index(stream_index),
         extent{
-                .width = description.width,
-                .height = description.height / (stream_index == 2 ? 2u : 1u),
+                .width = description.stream_size(stream_index).first,
+                .height = description.stream_size(stream_index).second,
         },
         weak_scene(scene),
         accumulator(accumulator)
@@ -109,13 +109,12 @@ raw_decoder::raw_decoder(
 	vk::Format format{};
 	switch (stream_index)
 	{
-		case 0: // colour left
-		case 1: // colour right
-			buffer_size += buffer_size / 2;
-			format = vk::Format::eG8B8R82Plane420Unorm;
-			break;
 		case 2: // alpha (monochrome)
 			format = vk::Format::eR8Unorm;
+			break;
+		default: // colour: left, right and the promoted quad layer
+			buffer_size += buffer_size / 2;
+			format = vk::Format::eG8B8R82Plane420Unorm;
 			break;
 	}
 	for (auto & i: input)

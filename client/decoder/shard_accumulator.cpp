@@ -113,7 +113,11 @@ void shard_accumulator::push_shard(video_stream_data_shard && shard)
 {
 	assert(current.frame_index() + 1 == next.frame_index());
 
-	uint8_t frame_diff = shard.frame_idx - current.frame_index();
+	// Not truncated to 8 bits: a stream that is silent for a while, as the quad
+	// layer stream is whenever no layer is promoted, comes back with a gap of any
+	// size, and a gap that happened to be a multiple of 256 would look like no gap
+	// at all and file the new frame's shards under the old frame index.
+	uint64_t frame_diff = shard.frame_idx - current.frame_index();
 	if (shard.frame_idx < current.frame_index())
 	{
 		// frame is in the past, drop it

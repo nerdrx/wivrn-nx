@@ -29,6 +29,7 @@
 #include <span>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <variant>
 #include <vector>
 #include <openxr/openxr.h>
@@ -322,6 +323,12 @@ struct settings_changed
 	// The server only does the work while the application is actually below the stream
 	// rate; the headset only warps while it has a field for the frame it is displaying.
 	bool motion_smoothing = false;
+	// Whether the server may pull an overlay quad layer out of the composited eye
+	// images and stream it on its own, for the headset to submit as a real quad
+	// layer. Read when the encoders are created (the stream needs its own encoder
+	// and its share of the bitrate), and again on every frame: turning it off while
+	// streaming immediately puts the layer back into the eye images.
+	bool quad_layers = true;
 	// Whether the server should mirror the gamepad to a virtual uinput device;
 	// gamepad inputs are always forwarded for the OpenXR path
 	bool mirror_gamepad = false;
@@ -866,11 +873,35 @@ struct video_stream_description
 	// alpha is half resolution
 	uint16_t width;
 	uint16_t height;
-	std::array<video_codec, 3> codec; // left, right, alpha
+	std::array<video_codec, 4> codec; // left, right, alpha, quad
 	float frame_rate;
 	float refresh_rate;
 
+	// Encoded size of the promoted quad layer stream (index 3). Zero when the
+	// server is not streaming quad layers separately, which is also how the
+	// headset knows not to create a decoder for that stream.
+	//
+	// This is the one stream whose geometry is not derived from width/height:
+	// it carries an overlay panel, capped to its own resolution, and only a
+	// sub-rectangle of it holds picture (see view_info_t::quad_info_t::source).
+	uint16_t quad_width = 0;
+	uint16_t quad_height = 0;
+
 	bool operator==(const video_stream_description &) const = default;
+
+	// Encoded size of one stream, the size the decoder for it must be created with.
+	constexpr std::pair<uint16_t, uint16_t> stream_size(uint8_t stream_index) const
+	{
+		switch (stream_index)
+		{
+			case 2: // alpha, half height
+				return {width, uint16_t(height / 2)};
+			case 3:
+				return {quad_width, quad_height};
+			default:
+				return {width, height};
+		}
+	}
 };
 
 class video_stream_data_shard
@@ -881,6 +912,7 @@ public:
 	// 0 left
 	// 1 right
 	// 2 alpha
+	// 3 promoted quad layer
 	uint8_t stream_item_idx;
 	// Counter increased for each frame
 	uint64_t frame_idx;
@@ -898,6 +930,27 @@ public:
 		std::array<foveation_parameter, 2> foveation;
 		// True when the frame contains an alpha channel
 		bool alpha;
+
+		// Where the headset must put the picture carried by stream 3. Only ever
+		// present on that stream; the eye streams leave it empty.
+		struct quad_info_t
+		{
+			// Pose of the centre of the quad, in the space named by head_locked:
+			// the same world space the eye poses above are expressed in, or the
+			// view (head) space for a layer the application asked to be head
+			// locked. The headset submits the quad in that space so that the
+			// runtime, not the server, is what holds it still.
+			XrPosef pose;
+			// Size of the quad in meters
+			XrExtent2Df size;
+			// True when pose is relative to the view space rather than the world
+			bool head_locked;
+			// Part of the encoded image that holds picture. The rest is padding:
+			// the encoded size is fixed for the session while a panel may change
+			// size or aspect ratio at any time.
+			XrRect2Di source;
+		};
+		std::optional<quad_info_t> quad;
 	};
 	std::optional<view_info_t> view_info;
 

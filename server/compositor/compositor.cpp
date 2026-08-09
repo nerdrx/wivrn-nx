@@ -24,6 +24,7 @@
 // Monado includes
 #include "driver/xrt_cast.h"
 #include "main/comp_frame.h"
+#include "math/m_api.h"
 #include "util/comp_render_helpers.h"
 #include "util/comp_vulkan.h"
 #include "util/u_debug.h"
@@ -220,6 +221,56 @@ vk::Extent3D render_extent(const wivrn::from_headset::headset_info_packet & info
 	};
 }
 
+// Whether a quad layer can be pulled out of the eye images and streamed on its own.
+//
+// The stream carries colour only, so a layer whose alpha channel the application
+// asked to have blended would come out opaque: those are left in the squash unless
+// the server configuration says the overlay is known to be a solid rectangle. Same
+// for a layer visible in one eye only (it would need a stream per eye) and for a
+// colour transform, which is applied by the squasher and is not on the wire.
+bool quad_promotable(const xrt_layer_data & data, bool allow_blended)
+{
+	if (data.type != XRT_LAYER_QUAD)
+		return false;
+	if (data.quad.visibility != XRT_LAYER_EYE_VISIBILITY_BOTH)
+		return false;
+	if (data.flags & XRT_LAYER_COMPOSITION_COLOR_BIAS_SCALE)
+		return false;
+	if ((data.flags & XRT_LAYER_COMPOSITION_BLEND_TEXTURE_SOURCE_ALPHA_BIT) and not allow_blended)
+		return false;
+	if (data.quad.size.x <= 0 or data.quad.size.y <= 0)
+		return false;
+	return true;
+}
+
+// How much of the view the quad takes up, as a solid angle in steradians, near
+// enough: its area foreshortened by how obliquely it is seen, over the square of
+// the distance to it. Both the quad pose and the head pose are in the same space,
+// which for a head locked layer is the view space where the head is the origin.
+//
+// This is the selection criterion because it is what "the panel the user is
+// looking at" means, and because it moves smoothly: a panel does not change size
+// or jump across the room between two frames, so the choice does not flicker.
+float quad_solid_angle(const xrt_layer_quad_data & q, const xrt_pose & head)
+{
+	xrt_vec3 to_quad{
+	        q.pose.position.x - head.position.x,
+	        q.pose.position.y - head.position.y,
+	        q.pose.position.z - head.position.z,
+	};
+	const float d2 = to_quad.x * to_quad.x + to_quad.y * to_quad.y + to_quad.z * to_quad.z;
+	if (d2 < 1e-4f)
+		return 0;
+
+	xrt_vec3 normal{0, 0, 1};
+	math_quat_rotate_vec3(&q.pose.orientation, &normal, &normal);
+
+	const float obliquity = std::abs(normal.x * to_quad.x + normal.y * to_quad.y + normal.z * to_quad.z) /
+	                        std::sqrt(d2);
+
+	return q.size.x * q.size.y * obliquity / d2;
+}
+
 // Motion smoothing gating. The ratio is filtered over about a second at stream
 // rate, and the two thresholds keep an application that hovers around the limit
 // from switching the estimator on and off every few frames.
@@ -325,6 +376,93 @@ xrt_result_t compositor::mark_frame(int64_t frame_id,
 	return XRT_ERROR_VULKAN;
 }
 
+std::optional<compositor::promoted_quad> compositor::select_quad_layer(int64_t display_time_ns)
+{
+	// No encoder for it (the headset did not ask when the session was set up), or
+	// the headset has since turned the feature off: everything stays in the squash.
+	if (not quad or not encoders[quad_stream_idx] or not session.get_settings()->quad_layers)
+		return std::nullopt;
+
+	beman::inplace_vector::inplace_vector<int, XRT_MAX_LAYERS> candidates;
+	for (uint32_t i = 0; i < layer_accum.layer_count and candidates.size() < candidates.capacity(); ++i)
+	{
+		if (quad_promotable(layer_accum.layers[i].data, quad_allow_blended))
+			candidates.push_back(i);
+	}
+
+	if (candidates.empty())
+		return std::nullopt;
+
+	// Head pose, to weigh the candidates by how much of the view they take up. A
+	// head locked layer is already expressed relative to the head.
+	xrt_space_relation head_rel = XRT_SPACE_RELATION_ZERO;
+	{
+		std::array<xrt_fov, XRT_MAX_VIEWS> fovs;
+		std::array<xrt_pose, XRT_MAX_VIEWS> poses;
+		session.get_hmd().get_view_poses(
+		        nullptr,
+		        display_time_ns,
+		        XRT_VIEW_TYPE_STEREO,
+		        2,
+		        &head_rel,
+		        fovs.data(),
+		        poses.data());
+	}
+	const xrt_pose identity = XRT_POSE_IDENTITY;
+
+	int best = -1;
+	float best_angle = 0;
+	for (int i: candidates)
+	{
+		const auto & data = layer_accum.layers[i].data;
+		const auto & head = is_layer_view_space(&data) ? identity : head_rel.pose;
+		const float angle = quad_solid_angle(data.quad, head);
+
+		// Hysteresis on the layer that was promoted last time: switching costs a
+		// key frame, so a challenger has to be clearly bigger, not just bigger.
+		const bool was_promoted = comp_layer_get_swapchain(&layer_accum.layers[i], 0) == quad_last_swapchain;
+		const float weighted = was_promoted ? angle * 1.25f : angle;
+
+		if (weighted > best_angle)
+		{
+			best_angle = weighted;
+			best = i;
+		}
+	}
+
+	if (best < 0 or best_angle <= 0)
+		return std::nullopt;
+
+	const auto & layer = layer_accum.layers[best];
+	const auto & data = layer.data;
+	const auto & q = data.quad;
+
+	auto * swapchain = reinterpret_cast<struct comp_swapchain *>(comp_layer_get_swapchain(&layer, 0));
+	const auto & image = swapchain->images[q.sub.image_index];
+
+	xrt_normalized_rect src_rect{};
+	// invert_flip is false here, unlike the squasher's quad path: what comes out
+	// of this is sampled straight into an image the headset hands to the runtime
+	// as a quad layer, so the source rectangle is read in texture order, top row
+	// first, and a bottom up (OpenGL) source is what needs turning around.
+	set_post_transform_rect(&data, &q.sub.norm_rect, false, &src_rect);
+
+	return promoted_quad{
+	        .layer_index = best,
+	        .view = get_image_view(&image, data.flags, q.sub.array_index),
+	        .src_rect = src_rect,
+	        .src_width = swapchain->vkic.info.width,
+	        .src_height = swapchain->vkic.info.height,
+	        .aspect = q.size.x / q.size.y,
+	        .swapchain = swapchain,
+	        .info = {
+	                .pose = xrt_cast(q.pose),
+	                .size = {.width = q.size.x, .height = q.size.y},
+	                .head_locked = is_layer_view_space(&data),
+	        },
+	};
+}
+
 xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 {
 	u_graphics_sync_unref(&sync_handle);
@@ -360,6 +498,14 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	        .alpha = layer_accum.data.env_blend_mode == XRT_BLEND_MODE_ALPHA_BLEND,
 	};
 
+	// One overlay layer may be pulled out of the stack and streamed on its own. It
+	// is then left out of the squash entirely, which also gives back the encoded
+	// field of view an off axis quad would have widened, and can even give back the
+	// single projection fast path below.
+	const auto promoted = select_quad_layer(frame.rendering.predicted_display_time_ns);
+	images[i].quad_info = promoted ? std::optional(promoted->info) : std::nullopt;
+	quad_last_swapchain = promoted ? promoted->swapchain : nullptr;
+
 	session.dump_time("begin", frame.rendering.id, os_monotonic_get_ns());
 
 	cmd_pool.reset();
@@ -373,14 +519,24 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	std::array<xrt_rect, 2> src_rect;
 	std::array<xrt_fov, 2> src_fov;
 
-	beman::inplace_vector::inplace_vector<vk::ImageMemoryBarrier2, 3> image_barriers;
+	beman::inplace_vector::inplace_vector<vk::ImageMemoryBarrier2, 4> image_barriers;
+
+	// Index of the only layer left once the promoted one is taken out, or -1 if
+	// there is not exactly one left.
+	int lone_layer = -1;
+	if (layer_accum.layer_count == 1 + (promoted ? 1u : 0u))
+	{
+		lone_layer = 0;
+		if (promoted and promoted->layer_index == 0)
+			lone_layer = 1;
+	}
 
 	// Check if we can pass a layer directly to foveation
-	if (layer_accum.layer_count == 1 and
-	    (layer_accum.layers[0].data.type == XRT_LAYER_PROJECTION or
-	     layer_accum.layers[0].data.type == XRT_LAYER_PROJECTION_DEPTH))
+	if (lone_layer >= 0 and
+	    (layer_accum.layers[lone_layer].data.type == XRT_LAYER_PROJECTION or
+	     layer_accum.layers[lone_layer].data.type == XRT_LAYER_PROJECTION_DEPTH))
 	{
-		const auto & layer = layer_accum.layers[0];
+		const auto & layer = layer_accum.layers[lone_layer];
 		for (int view = 0; view < 2; ++view)
 		{
 			const auto & data = (layer.data.type == XRT_LAYER_PROJECTION ? layer.data.proj.v : layer.data.depth.v)[view];
@@ -407,7 +563,8 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 		        pacer.get_frame_duration(),
 		        frame.rendering,
 		        layer_accum,
-		        xrt_rect{.extent{.w = int(extent.width), .h = int(extent.height)}});
+		        xrt_rect{.extent{.w = int(extent.width), .h = int(extent.height)}},
+		        promoted ? promoted->layer_index : -1);
 
 		src = squasher.get_views();
 
@@ -448,6 +605,23 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	                },
 	        });
 
+	if (promoted)
+	{
+		image_barriers.push_back(
+		        vk::ImageMemoryBarrier2{
+		                .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+		                .dstAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
+		                .oldLayout = vk::ImageLayout::eUndefined,
+		                .newLayout = vk::ImageLayout::eGeneral,
+		                .image = quad->image(i),
+		                .subresourceRange = {
+		                        .aspectMask = vk::ImageAspectFlagBits::eColor,
+		                        .levelCount = 1,
+		                        .layerCount = 1,
+		                },
+		        });
+	}
+
 	cmd.pipelineBarrier2({
 	        .imageMemoryBarrierCount = uint32_t(image_barriers.size()),
 	        .pImageMemoryBarriers = image_barriers.data(),
@@ -472,9 +646,33 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	        src_fov,
 	        view_info.alpha);
 
+	// The promoted layer goes to its own image, at its own resolution, with none of
+	// the foveation the eye images get.
+	if (promoted)
+	{
+		const auto filled = quad->convert(
+		        vk.device,
+		        cmd,
+		        i,
+		        promoted->view,
+		        promoted->src_rect,
+		        promoted->aspect,
+		        promoted->src_width,
+		        promoted->src_height);
+
+		images[i].quad_info->source = {
+		        .offset = {filled.offset.w, filled.offset.h},
+		        .extent = {filled.extent.w, filled.extent.h},
+		};
+	}
+
 	for (auto & encoder: encoders)
 	{
+		if (not encoder)
+			continue;
 		if (encoder->stream_idx == 2 and not view_info.alpha)
+			continue;
+		else if (encoder->stream_idx == quad_stream_idx and not promoted)
 			continue;
 		else if (encoder->need_transfer or encoder->target_queue == vk.queue.family_index)
 		{
@@ -496,11 +694,11 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 			                .newLayout = encoder->target_layout,
 			                .srcQueueFamilyIndex = vk.queue.family_index,
 			                .dstQueueFamilyIndex = encoder->target_queue,
-			                .image = images[i].image,
+			                .image = encoder->stream_idx == quad_stream_idx ? quad->image(i) : vk::Image(images[i].image),
 			                .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor,
 			                                     .baseMipLevel = 0,
 			                                     .levelCount = 1,
-			                                     .baseArrayLayer = encoder->stream_idx,
+			                                     .baseArrayLayer = encoder->src_layer,
 			                                     .layerCount = 1},
 			        });
 		}
@@ -569,8 +767,17 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 
 	for (auto & encoder: encoders)
 	{
+		if (not encoder)
+			continue;
 		if (encoder->stream_idx == 2 and not view_info.alpha)
 			continue;
+		if (encoder->stream_idx == quad_stream_idx)
+		{
+			if (not promoted)
+				continue;
+			encoder->present_image(quad->image(i), sem_info, info.frame_id);
+			continue;
+		}
 		encoder->present_image(
 		        images[i].image,
 		        sem_info,
@@ -819,7 +1026,23 @@ void compositor::encoder_work(std::stop_token tok)
 		{
 			for (auto & encoder: encoders)
 			{
-				if (encoder->stream_idx < 2 or image.view_info.alpha)
+				if (not encoder)
+					continue;
+
+				if (encoder->stream_idx == quad_stream_idx)
+				{
+					if (not image.quad_info)
+						continue;
+					// Same frame index and same view info as the eyes,
+					// with the quad's placement attached and the eye
+					// foveation dropped: nothing on this stream is
+					// foveated and the headset never reads it there.
+					auto view_info = image.view_info;
+					view_info.foveation = {};
+					view_info.quad = image.quad_info;
+					encoder->encode(session, view_info, image.frame_index);
+				}
+				else if (encoder->stream_idx < 2 or image.view_info.alpha)
 					encoder->encode(session, image.view_info, image.frame_index);
 			}
 		}
@@ -842,6 +1065,13 @@ void compositor::send_video_stream_description()
 	get_display_refresh_rate(&desc.refresh_rate);
 	static_assert(std::tuple_size_v<decltype(settings)> == std::tuple_size_v<decltype(desc.codec)>);
 	std::ranges::transform(settings, desc.codec.begin(), &encoder_settings::codec);
+	// Zero unless a quad layer stream exists, which is how the headset knows whether
+	// to create a decoder for it at all.
+	if (quad)
+	{
+		desc.quad_width = uint16_t(quad->extent().width);
+		desc.quad_height = uint16_t(quad->extent().height);
+	}
 	session.send_control(std::move(desc));
 }
 
@@ -935,7 +1165,36 @@ compositor::compositor(wivrn_session & session) :
 
 	print_encoders(settings);
 	for (auto [i, settings]: std::ranges::enumerate_view(settings))
+	{
+		if (not settings.enabled or i == quad_stream_idx)
+			continue;
 		encoders[i] = video_encoder::create(vk, settings, i);
+	}
+
+	// The quad layer stream is a bonus, not a requirement: a fourth encode session
+	// is one more than this build has ever asked for and some hardware refuses it.
+	// Losing it must cost the panel's sharpness, not the session.
+	if (settings[quad_stream_idx].enabled)
+	{
+		try
+		{
+			encoders[quad_stream_idx] = video_encoder::create(vk, settings[quad_stream_idx], quad_stream_idx);
+			quad = std::make_unique<wivrn::quad_converter>(vk, settings[quad_stream_idx], images.size());
+			quad_allow_blended = configuration().quad_layers.allow_blended;
+
+			U_LOG_I("Quad layer streaming enabled, up to %ux%u",
+			        quad->extent().width,
+			        quad->extent().height);
+		}
+		catch (std::exception & e)
+		{
+			U_LOG_W("Quad layer streaming disabled: %s", e.what());
+			encoders[quad_stream_idx].reset();
+			quad.reset();
+			settings[quad_stream_idx].enabled = false;
+		}
+	}
+
 	send_video_stream_description();
 
 #if WIVRN_USE_PIPEWIRE
@@ -1001,7 +1260,10 @@ xrt_system_compositor_info compositor::sys_info() const
 void compositor::set_bitrate(uint32_t bitrate)
 {
 	for (auto & encoder: encoders)
-		encoder->set_bitrate(bitrate);
+	{
+		if (encoder)
+			encoder->set_bitrate(bitrate);
+	}
 }
 
 void compositor::set_framerate(float hz)
@@ -1011,7 +1273,10 @@ void compositor::set_framerate(float hz)
 	U_LOG_IFL_D(log_level, "Framerate change from %.0f to %.0f", frame_rate.load(), hz);
 	pacer.set_frame_duration(U_TIME_1S_IN_NS / hz);
 	for (auto & encoder: encoders)
-		encoder->set_framerate(hz);
+	{
+		if (encoder)
+			encoder->set_framerate(hz);
+	}
 }
 
 void compositor::update_tracking(const from_headset::tracking & tracking)
@@ -1027,7 +1292,10 @@ void compositor::update_foveation_center_override(const from_headset::override_f
 void compositor::resume()
 {
 	for (auto & encoder: encoders)
-		encoder->reset();
+	{
+		if (encoder)
+			encoder->reset();
+	}
 	// The headset lost whatever it had; the pyramid of the frame before the pause
 	// has nothing to do with the one that comes next.
 	if (motion)
@@ -1048,7 +1316,7 @@ void compositor::request_idr()
 void compositor::on_feedback(const from_headset::feedback & feedback, const clock_offset & o)
 {
 	uint8_t stream = feedback.stream_index;
-	if (stream >= encoders.size())
+	if (stream >= encoders.size() or not encoders[stream])
 		return;
 	encoders[stream]->on_feedback(feedback);
 	if (not o)

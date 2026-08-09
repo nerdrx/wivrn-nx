@@ -228,6 +228,7 @@ video_encoder::video_encoder(vk_bundle & vk,
                              std::unique_ptr<idr_handler> idr,
                              bool async_send) :
         stream_idx(stream_idx),
+        src_layer(settings.src_layer),
         target_queue(target_queue),
         need_transfer(not vk.optimal_transfer(vk.queue.family_index, target_queue)),
         bitrate_multiplier(settings.bitrate_multiplier),

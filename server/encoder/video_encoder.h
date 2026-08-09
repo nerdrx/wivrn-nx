@@ -94,6 +94,10 @@ private:
 
 public:
 	const uint8_t stream_idx;
+	// Array layer of the presented image this encoder reads. The three streams
+	// that share the eye image read their own layer, the quad layer stream has an
+	// image of its own and reads layer 0.
+	const uint32_t src_layer;
 	const uint32_t target_queue;
 	const bool need_transfer;
 	// Layout the encoder needs y_cbcr to arrive in. Set during construction

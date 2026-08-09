@@ -109,6 +109,7 @@ if (WIVRN_BUILD_SERVER)
 			compositor/foveation.cpp
 			compositor/motion_estimator.cpp
 			compositor/pacer.cpp
+			compositor/quad_converter.cpp
 
 			encoder/encoder_settings.cpp
 			encoder/idr_handler.cpp
@@ -276,6 +277,7 @@ if (WIVRN_BUILD_SERVER)
 			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/mirror.comp"
 			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/motion_downsample.comp"
 			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/motion_estimate.comp"
+			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/quad_convert.comp"
 		)
 
 	target_compile_definitions(wivrn-server PRIVATE JSON_DIAGNOSTICS=1)

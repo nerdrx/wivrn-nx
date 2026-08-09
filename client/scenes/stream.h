@@ -27,6 +27,7 @@
 #include "scenes/input_profile.h"
 #include "secondary_path.h"
 #include "stream_defoveator.h"
+#include "stream_quad_blitter.h"
 #include "utils/thread_safe.h"
 #include "wifi_lock.h"
 #include "wivrn_client.h"
@@ -57,7 +58,9 @@ public:
 
 private:
 	static const size_t view_count = 2;
-	static const size_t decoder_count = view_count + 1;
+	// left, right, alpha, and the promoted quad layer
+	static const size_t decoder_count = view_count + 2;
+	static const size_t quad_stream_idx = 3;
 
 	struct accumulator_images
 	{
@@ -103,6 +106,13 @@ private:
 	std::array<accumulator_images, decoder_count> decoders; // Locked by decoder_mutex
 
 	std::optional<stream_defoveator> defoveator;
+
+	// Promoted quad layer: its own swapchain, sized to whatever the server is
+	// encoding, and the pass that copies the decoded picture into it. Both stay
+	// null while no quad layer is being streamed.
+	xr::swapchain quad_swapchain;
+	std::optional<stream_quad_blitter> quad_blitter;
+	void setup_quad_swapchain(vk::Sampler);
 
 	vk::raii::Fence fence = nullptr;
 	vk::raii::CommandBuffer command_buffer = nullptr;

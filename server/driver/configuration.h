@@ -71,7 +71,22 @@ struct configuration
 		uint32_t usb_max_bitrate_bps = 100'000'000;
 	};
 
-	std::array<encoder, 3> encoders; // left, right, alpha
+	// Separate streaming of overlay quad layers (wlx-overlay-s / WayVR panels and
+	// the like), the bandwidth guard for a feature the headset turns on.
+	struct quad_layer_config
+	{
+		// Largest square the promoted layer is encoded into, before alignment.
+		// Zero disables the feature server side whatever the headset asks.
+		uint16_t max_size = 1024;
+		// Promote a quad even when the application asked for its alpha channel
+		// to be blended. Off by default: only the colour of the layer is
+		// streamed, so a panel that is actually translucent would come out
+		// opaque. Turn it on for overlays known to be solid rectangles.
+		bool allow_blended = false;
+	};
+
+	std::array<encoder, 4> encoders; // left, right, alpha, quad
+	quad_layer_config quad_layers;
 	// Automatic bitrate control, the ceiling is always the bitrate requested by the client
 	bitrate_controller::config bitrate_auto;
 	multipath_config multipath;

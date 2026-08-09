@@ -111,7 +111,7 @@ void wivrn::video_encoder_raw::present_image(vk::Image y_cbcr, vk::SemaphoreSubm
 		        .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor,
 		                             .baseMipLevel = 0,
 		                             .levelCount = 1,
-		                             .baseArrayLayer = stream_idx,
+		                             .baseArrayLayer = src_layer,
 		                             .layerCount = 1},
 		};
 		cmd.pipelineBarrier2({
@@ -124,7 +124,7 @@ void wivrn::video_encoder_raw::present_image(vk::Image y_cbcr, vk::SemaphoreSubm
 	        vk::BufferImageCopy{
 	                .imageSubresource = {
 	                        .aspectMask = vk::ImageAspectFlagBits::ePlane0,
-	                        .baseArrayLayer = stream_idx,
+	                        .baseArrayLayer = src_layer,
 	                        .layerCount = 1,
 	                },
 	                .imageExtent = {
@@ -137,7 +137,7 @@ void wivrn::video_encoder_raw::present_image(vk::Image y_cbcr, vk::SemaphoreSubm
 	                .bufferOffset = extent.width * extent.height,
 	                .imageSubresource = {
 	                        .aspectMask = vk::ImageAspectFlagBits::ePlane1,
-	                        .baseArrayLayer = stream_idx,
+	                        .baseArrayLayer = src_layer,
 	                        .layerCount = 1,
 	                },
 	                .imageExtent = {

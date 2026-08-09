@@ -431,6 +431,16 @@ void settings_streaming(const settings_context & ctx)
 	});
 
 	list.push_back({
+	        .id = "##quad_layers",
+	        .label = _("Sharp overlay layers"),
+	        .description = _("Stream overlay panels such as WayVR windows as their own layer instead of mixing them into the game image: they come out sharper, and stay perfectly still when you move your head. Takes effect on the next connection."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.quad_layers; },
+	        .set_bool = [&ctx, &config](bool v) { config.quad_layers = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.quad_layers,
+	});
+
+	list.push_back({
 	        .id = "##comfort_vignette",
 	        .label = _("Comfort vignette on lag"),
 	        .description = _("Darken the edges of the view when the application no longer keeps up with the display, to reduce discomfort."),

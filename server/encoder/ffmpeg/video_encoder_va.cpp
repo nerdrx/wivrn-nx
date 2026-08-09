@@ -498,7 +498,7 @@ void video_encoder_va::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo, 
 	        vk::ImageCopy{
 	                .srcSubresource = {
 	                        .aspectMask = vk::ImageAspectFlagBits::ePlane0,
-	                        .baseArrayLayer = stream_idx,
+	                        .baseArrayLayer = src_layer,
 	                        .layerCount = 1,
 	                },
 	                .dstSubresource = {
@@ -519,7 +519,7 @@ void video_encoder_va::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo, 
 	        vk::ImageCopy{
 	                .srcSubresource = {
 	                        .aspectMask = vk::ImageAspectFlagBits::ePlane1,
-	                        .baseArrayLayer = stream_idx,
+	                        .baseArrayLayer = src_layer,
 	                        .layerCount = 1,
 	                },
 	                .dstSubresource = {

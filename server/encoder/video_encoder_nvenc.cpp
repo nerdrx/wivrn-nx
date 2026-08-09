@@ -461,7 +461,7 @@ void video_encoder_nvenc::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInf
 	                        .bufferRowLength = extent.width,
 	                        .imageSubresource = {
 	                                .aspectMask = vk::ImageAspectFlagBits::ePlane0,
-	                                .baseArrayLayer = stream_idx,
+	                                .baseArrayLayer = src_layer,
 	                                .layerCount = 1,
 	                        },
 	                        .imageExtent = {
@@ -474,7 +474,7 @@ void video_encoder_nvenc::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInf
 	                        .bufferRowLength = uint32_t(extent.width / 2),
 	                        .imageSubresource = {
 	                                .aspectMask = vk::ImageAspectFlagBits::ePlane1,
-	                                .baseArrayLayer = stream_idx,
+	                                .baseArrayLayer = src_layer,
 	                                .layerCount = 1,
 	                        },
 	                        .imageExtent = {

@@ -34,8 +34,15 @@ struct encoder_settings
 {
 	uint16_t width;
 	uint16_t height;
-	video_codec codec; // left, right, alpha
+	video_codec codec; // left, right, alpha, quad
 	float fps;
+	// False when the stream is not used at all this session, in which case no
+	// encoder is created for it and it takes no share of the bitrate. Only the
+	// quad layer stream is ever disabled, when the headset did not ask for it.
+	bool enabled = true;
+	// Array layer of the compositor image this stream is encoded from. Streams
+	// 0 to 2 read the shared eye image, the quad stream has an image of its own.
+	uint32_t src_layer = 0;
 	// encoder identifier, such as nvenc, vaapi or x264
 	std::string encoder_name;
 	uint64_t bitrate;                           // bit/s
@@ -48,8 +55,13 @@ struct encoder_settings
 	std::optional<std::string> device;
 };
 
-std::array<encoder_settings, 3> get_encoder_settings(wivrn::vk_bundle &, wivrn_session &);
+// Number of video streams: left, right, alpha, quad
+inline constexpr size_t num_streams = 4;
+// Stream carrying the promoted quad layer
+inline constexpr uint8_t quad_stream_idx = 3;
 
-void print_encoders(const std::array<wivrn::encoder_settings, 3> & encoders);
+std::array<encoder_settings, num_streams> get_encoder_settings(wivrn::vk_bundle &, wivrn_session &);
+
+void print_encoders(const std::array<wivrn::encoder_settings, num_streams> & encoders);
 
 } // namespace wivrn

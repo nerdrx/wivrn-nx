@@ -55,6 +55,9 @@ class layer_squasher
 public:
 	layer_squasher(vk_bundle &, vk::Extent3D target_size);
 
+	// skip_layer, when not -1, is the index of a layer that is streamed on its own
+	// and must be left out of the composited image entirely: it is neither sampled
+	// nor allowed to widen the encoded field of view.
 	std::tuple<std::array<xrt_pose, 2>,
 	           std::array<xrt_fov, 2>,
 	           std::array<xrt_rect, 2>>
@@ -65,7 +68,8 @@ public:
 	        uint64_t frame_interval_ns,
 	        const comp_frame &,
 	        const comp_layer_accum &,
-	        const xrt_rect & min_size);
+	        const xrt_rect & min_size,
+	        int skip_layer = -1);
 
 	std::array<vk::ImageView, 2> get_views();
 	vk::Image get_image()

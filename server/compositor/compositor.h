@@ -29,6 +29,7 @@
 #include "layer_squasher.h"
 #include "motion_estimator.h"
 #include "pacer.h"
+#include "quad_converter.h"
 #include "utils/wivrn_vk_bundle.h"
 #include "wivrn_config.h"
 
@@ -37,6 +38,7 @@
 #include <array>
 #include <atomic>
 #include <memory>
+#include <optional>
 #include <thread>
 
 namespace wivrn
@@ -56,6 +58,10 @@ public:
 		vk::raii::ImageView view_y;
 		vk::raii::ImageView view_cbcr;
 		to_headset::video_stream_data_shard::view_info_t view_info{};
+		// Set when a quad layer was pulled out of this frame's layer stack and
+		// converted into the quad stream's own image; the stream is silent on
+		// every frame this is empty.
+		std::optional<to_headset::video_stream_data_shard::view_info_t::quad_info_t> quad_info;
 		uint64_t frame_index;
 	};
 
@@ -87,7 +93,7 @@ private:
 	vk::raii::CommandPool cmd_pool;
 	vk::raii::QueryPool query_pool;
 
-	std::array<encoder_settings, 3> settings;
+	std::array<encoder_settings, num_streams> settings;
 
 	std::array<image, 2> images;
 	vk::raii::CommandBuffer cmd;
@@ -122,7 +128,17 @@ private:
 	uint64_t motion_frame_index = 0;
 	XrTime motion_span = 0;
 
-	std::array<std::unique_ptr<video_encoder>, 3> encoders;
+	std::array<std::unique_ptr<video_encoder>, num_streams> encoders;
+
+	// Separate streaming of one overlay quad layer. Null unless the headset asked
+	// for it when the session was set up, in which case the layer is picked afresh
+	// on every commit and the stream stays silent on the commits that pick none.
+	std::unique_ptr<wivrn::quad_converter> quad;
+	// Read once: constructing a configuration reads the file from disk.
+	bool quad_allow_blended = false;
+	// Swapchain the promoted layer came from on the previous commit. Only used to
+	// keep the choice from flapping between two layers of similar size.
+	const void * quad_last_swapchain = nullptr;
 
 #if WIVRN_USE_PIPEWIRE
 	// Desktop mirror, null unless enabled in the configuration
@@ -189,6 +205,26 @@ private:
 	}
 
 	int acquire_image();
+
+	// One quad layer of the current layer stack, chosen to be streamed on its own
+	// instead of being composited into the eye images.
+	struct promoted_quad
+	{
+		// Index in layer_accum, the layer the squasher must leave out
+		int layer_index;
+		vk::ImageView view;
+		xrt_normalized_rect src_rect;
+		uint32_t src_width;
+		uint32_t src_height;
+		// Width over height of the quad in meters
+		float aspect;
+		const void * swapchain;
+		to_headset::video_stream_data_shard::view_info_t::quad_info_t info;
+	};
+
+	// Picks the layer to promote for this commit, or nothing at all, in which case
+	// everything behaves exactly as it did before the feature existed.
+	std::optional<promoted_quad> select_quad_layer(int64_t display_time_ns);
 
 	// Detects whether this commit carries a new application frame and, if motion
 	// smoothing is wanted and worthwhile, records the estimation work into cmd.

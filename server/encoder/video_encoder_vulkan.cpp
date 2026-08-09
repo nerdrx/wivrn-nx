@@ -475,7 +475,7 @@ void wivrn::video_encoder_vulkan::init(const vk::VideoCapabilitiesKHR & video_ca
 	        .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor,
 	                             .baseMipLevel = 0,
 	                             .levelCount = 1,
-	                             .baseArrayLayer = stream_idx,
+	                             .baseArrayLayer = src_layer,
 	                             .layerCount = 1},
 	};
 
@@ -677,7 +677,7 @@ void wivrn::video_encoder_vulkan::present_image(vk::Image y_cbcr, vk::SemaphoreS
 			        .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor,
 			                             .baseMipLevel = 0,
 			                             .levelCount = 1,
-			                             .baseArrayLayer = stream_idx,
+			                             .baseArrayLayer = src_layer,
 			                             .layerCount = 1},
 			});
 		}
@@ -709,7 +709,7 @@ void wivrn::video_encoder_vulkan::present_image(vk::Image y_cbcr, vk::SemaphoreS
 		                vk::ImageCopy{
 		                        .srcSubresource = {
 		                                .aspectMask = vk::ImageAspectFlagBits::ePlane0,
-		                                .baseArrayLayer = stream_idx,
+		                                .baseArrayLayer = src_layer,
 		                                .layerCount = 1,
 		                        },
 		                        .dstSubresource = {
@@ -726,7 +726,7 @@ void wivrn::video_encoder_vulkan::present_image(vk::Image y_cbcr, vk::SemaphoreS
 		                vk::ImageCopy{
 		                        .srcSubresource = {
 		                                .aspectMask = vk::ImageAspectFlagBits::ePlane1,
-		                                .baseArrayLayer = stream_idx,
+		                                .baseArrayLayer = src_layer,
 		                                .layerCount = 1,
 		                        },
 		                        .dstSubresource = {
@@ -782,7 +782,7 @@ void wivrn::video_encoder_vulkan::present_image(vk::Image y_cbcr, vk::SemaphoreS
 		        .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor,
 		                             .baseMipLevel = 0,
 		                             .levelCount = 1,
-		                             .baseArrayLayer = stream_idx,
+		                             .baseArrayLayer = src_layer,
 		                             .layerCount = 1},
 		};
 		if (barrier.oldLayout != barrier.newLayout or barrier.srcQueueFamilyIndex != barrier.dstQueueFamilyIndex)

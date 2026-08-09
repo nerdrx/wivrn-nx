@@ -269,6 +269,7 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 		info.settings.bitrate_auto = config.bitrate_auto;
 		info.settings.sharp_text = config.sharp_text;
 		info.settings.motion_smoothing = config.motion_smoothing;
+		info.settings.quad_layers = config.quad_layers;
 		info.settings.mirror_gamepad = config.forward_gamepad;
 		info.settings.enabled_body_parts = config.body_part_mask;
 
@@ -659,7 +660,7 @@ bool scenes::stream::accumulator_images::empty() const
 	return true;
 }
 
-std::array<std::shared_ptr<shard_accumulator::blit_handle>, 3> scenes::stream::common_frame(XrTime display_time)
+std::array<std::shared_ptr<shard_accumulator::blit_handle>, scenes::stream::decoder_count> scenes::stream::common_frame(XrTime display_time)
 {
 	if (decoders.empty())
 		return {};
@@ -708,12 +709,22 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, 3> scenes::stream::c
 			if (alpha or i < view_count)
 				result[i] = decoder.frame(frame_index);
 		}
+
+		// The quad layer stream runs in lockstep with the eyes when it runs at
+		// all, but it is silent on every frame that promotes no layer, so it is
+		// looked up by exact frame index and simply left out when it is not
+		// there. It never takes part in the join above: the eyes must never wait
+		// on it.
+		if (decoders[quad_stream_idx].decoder)
+			result[quad_stream_idx] = decoders[quad_stream_idx].frame(frame_index);
 	}
 	else
 	{
 		spdlog::warn("Failed to find a common frame for all decoders, dumping available frames per decoder");
 		for (const auto & decoder: decoders)
 		{
+			if (not decoder.decoder)
+				continue;
 			std::string frames;
 			for (const auto & frame: decoder.latest_frames)
 			{
@@ -990,6 +1001,39 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		}
 	}
 
+	// Promoted quad layer, if one came in for this frame. It is deliberately outside
+	// the loop above: it takes no part in the eye join, and the frames it is missing
+	// from are the normal case, not a fault.
+	std::optional<wivrn::to_headset::video_stream_data_shard::view_info_t::quad_info_t> quad_info;
+	if (const auto & handle = current_blit_handles[quad_stream_idx];
+	    handle and handle->view_info.quad and decoders[quad_stream_idx].decoder)
+	{
+		handle->feedback.blitted = instance.now();
+		++handle->feedback.times_displayed;
+		handle->feedback.displayed = frame_state.predictedDisplayTime;
+
+		if (handle->current_layout == vk::ImageLayout::eUndefined)
+		{
+			vk::ImageMemoryBarrier barrier{
+			        .srcAccessMask = vk::AccessFlagBits::eNone,
+			        .dstAccessMask = vk::AccessFlagBits::eMemoryRead,
+			        .oldLayout = vk::ImageLayout::eUndefined,
+			        .newLayout = vk::ImageLayout::eGeneral,
+			        .image = handle->image,
+			        .subresourceRange = {
+			                .aspectMask = vk::ImageAspectFlagBits::eColor,
+			                .levelCount = 1,
+			                .layerCount = 1,
+			        },
+			};
+
+			command_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eAllCommands, {}, {}, {}, barrier);
+			handle->current_layout = vk::ImageLayout::eGeneral;
+		}
+
+		quad_info = handle->view_info.quad;
+	}
+
 	{
 		// Estimate how often the application produces a frame: a blit handle that is
 		// displayed for the first time means a new frame made it all the way through.
@@ -1146,6 +1190,44 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			                      image_index);
 		}
 
+		// Promoted quad layer: straight into the swapchain the runtime is handed as
+		// a quad layer, at the resolution the server encoded it at.
+		int quad_image_index = -1;
+		if (quad_info)
+		{
+			const auto & handle = current_blit_handles[quad_stream_idx];
+			const auto & rect = quad_info->source;
+			try
+			{
+				setup_quad_swapchain(decoders[quad_stream_idx].decoder->sampler());
+
+				quad_image_index = quad_swapchain.acquire();
+				quad_swapchain.wait();
+
+				quad_blitter->blit(
+				        command_buffer,
+				        handle->image_view,
+				        handle->current_layout,
+				        vk::Rect2D{
+				                .offset = {rect.offset.x, rect.offset.y},
+				                .extent = {uint32_t(rect.extent.width), uint32_t(rect.extent.height)},
+				        },
+				        handle->extent,
+				        vk::Extent2D{uint32_t(rect.extent.width), uint32_t(rect.extent.height)},
+				        quad_image_index);
+			}
+			catch (std::exception & e)
+			{
+				spdlog::warn("Failed to compose the streamed quad layer: {}", e.what());
+				if (quad_image_index >= 0)
+					quad_swapchain.release();
+				quad_image_index = -1;
+				quad_info.reset();
+				quad_blitter.reset();
+				quad_swapchain = xr::swapchain{};
+			}
+		}
+
 		command_buffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *query_pool, 1);
 
 		command_buffer.end();
@@ -1179,6 +1261,8 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		renderdoc_end(*vk_instance);
 #endif
 		swapchain.release();
+		if (quad_image_index >= 0)
+			quad_swapchain.release();
 
 		if (use_alpha)
 			session.enable_passthrough(system);
@@ -1215,6 +1299,38 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		if (const configuration::openxr_post_processing_settings openxr_post_processing = application::get_config().openxr_post_processing;
 		    (openxr_post_processing.sharpening | openxr_post_processing.super_sampling) > 0)
 			set_layer_settings(openxr_post_processing.sharpening | openxr_post_processing.super_sampling);
+
+		// The promoted overlay panel, on top of the world and below the GUI. The
+		// pose is the one the server took the layer out of the stack with, in the
+		// same space the eye poses above are in, or in the view space for a layer
+		// the application asked to be head locked: from here on it is the runtime
+		// that holds the panel still, at display rate, which is the whole point.
+		if (quad_image_index >= 0)
+		{
+			add_quad_layer(
+			        0,
+			        application::space(quad_info->head_locked ? xr::spaces::view : xr::spaces::world),
+			        XR_EYE_VISIBILITY_BOTH,
+			        XrSwapchainSubImage{
+			                .swapchain = quad_swapchain,
+			                // Only the corner of the image the panel was rendered
+			                // into: the swapchain is the size of the encode image,
+			                // the panel is whatever fraction of it keeps its aspect
+			                // ratio.
+			                .imageRect = {
+			                        .offset = {0, 0},
+			                        .extent = {quad_info->source.extent.width, quad_info->source.extent.height},
+			                },
+			                .imageArrayIndex = 0,
+			        },
+			        quad_info->pose,
+			        quad_info->size);
+
+			// The eye images are dimmed by the defoveation pass while the GUI
+			// is up; the panel is no longer in them, so it is dimmed here.
+			if (composition_layer_color_scale_bias_supported and dimming > 0)
+				set_color_scale_bias({scale, scale, scale, 1}, {bias, bias, bias, 0});
+		}
 
 		accumulate_metrics(frame_state.predictedDisplayTime, current_blit_handles, timestamps);
 
@@ -1312,6 +1428,16 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 
 	for (const auto & [stream_index, item]: utils::enumerate(decoders))
 	{
+		// The quad layer stream only exists when the server is actually promoting
+		// layers; it announces that by giving it a size. Nothing else in the
+		// client may assume the decoder is there.
+		auto [width, height] = description.stream_size(stream_index);
+		if (width == 0 or height == 0)
+		{
+			item = accumulator_images{};
+			continue;
+		}
+
 		item = accumulator_images{
 		        .decoder = std::make_unique<shard_accumulator>(device, physical_device, instance, queue_family_index, description, shared_from_this(), stream_index),
 		};
@@ -1319,6 +1445,40 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 
 	if (defoveator)
 		defoveator->reset_pipelines();
+
+	// Belongs to the decoder that has just been replaced
+	quad_blitter.reset();
+	quad_swapchain = xr::swapchain{};
+}
+
+// Swapchain and pass for the promoted quad layer, built the first time a quad comes
+// in. The swapchain is the size of the encode image, which is fixed for the session,
+// so a panel that changes size or aspect ratio just uses a different corner of it and
+// nothing is reallocated mid-stream. Only a new decoder, whose sampler the pass is
+// compiled against, rebuilds anything.
+void scenes::stream::setup_quad_swapchain(vk::Sampler sampler)
+{
+	if (quad_blitter and quad_blitter->sampler() == sampler)
+		return;
+
+	const uint32_t width = video_stream_description->quad_width;
+	const uint32_t height = video_stream_description->quad_height;
+	if (width == 0 or height == 0)
+		throw std::runtime_error("no quad layer stream");
+
+	device.waitIdle();
+	quad_blitter.reset();
+	quad_swapchain = xr::swapchain{};
+
+	spdlog::info("Creating quad layer swapchain: {}x{}", width, height);
+	quad_swapchain = xr::swapchain(instance, session, device, swapchain_format, width, height, 1, 1);
+
+	quad_blitter.emplace(
+	        device,
+	        quad_swapchain.images(),
+	        vk::Extent2D{uint32_t(quad_swapchain.width()), uint32_t(quad_swapchain.height())},
+	        quad_swapchain.format(),
+	        sampler);
 }
 
 void scenes::stream::setup_reprojection_swapchain(uint32_t swapchain_width, uint32_t swapchain_height)

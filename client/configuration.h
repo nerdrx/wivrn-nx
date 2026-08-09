@@ -71,6 +71,18 @@ public:
 	uint32_t bitrate_bps = 50'000'000;
 	// Let the server adapt the bitrate to the link quality, using bitrate_bps as the maximum
 	bool bitrate_auto = true;
+	// Which control law it should use: the original AIMD one (false) or the experimental
+	// bandwidth estimating one (true). Empty until the user picks one of the two adaptive
+	// entries in the bitrate selector, and while it is empty the server's own configuration
+	// decides — a server set up for one law keeps it for everyone who never chose.
+	std::optional<bool> bitrate_bbr;
+	// What goes on the wire for the above
+	std::optional<wivrn::bitrate_mode> bitrate_control() const
+	{
+		if (not bitrate_bbr)
+			return std::nullopt;
+		return *bitrate_bbr ? wivrn::bitrate_mode::bbr : wivrn::bitrate_mode::aimd;
+	}
 	// Report the Wi-Fi radio state (~1 Hz) so that the automatic bitrate can step down on a
 	// falling signal, before the packet loss it is about to cause. Needs bitrate_auto.
 	bool radio_aware = true;

@@ -21,6 +21,7 @@
 #include "util/u_logging.h"
 
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 namespace wivrn
@@ -29,15 +30,21 @@ namespace wivrn
 namespace
 {
 constexpr double to_mbits = 1e-6;
-}
 
-void bitrate_controller::configure(const config & c, uint32_t ceiling_bps, bool client_enabled_, bool radio_aware_)
+const char * mode_name(bitrate_controller::mode m)
+{
+	return m == bitrate_controller::mode::bbr ? "bandwidth estimation (v2)" : "AIMD (v1)";
+}
+} // namespace
+
+void bitrate_controller::configure(const config & c, uint32_t ceiling_bps, bool client_enabled_, bool radio_aware_, std::optional<mode> client_mode_)
 {
 	std::lock_guard lock(mutex);
 
 	conf = c;
 	client_enabled = client_enabled_;
 	radio_aware = radio_aware_;
+	client_mode = client_mode_;
 	ceiling = ceiling_bps;
 	auto eff = effective_ceiling();
 	// A client asking for less than the configured minimum wins: the ceiling is always honoured.
@@ -48,11 +55,14 @@ void bitrate_controller::configure(const config & c, uint32_t ceiling_bps, bool 
 	first_recovery_step = true;
 	frames = {};
 	has_frames = false;
+	stale_before = 0;
 	flush();
 	flush_radio();
+	flush_estimator();
 
 	if (conf.enabled and client_enabled and eff)
-		U_LOG_I("Automatic bitrate enabled, ceiling %.1f Mbit/s, floor %.1f Mbit/s, radio trend %s",
+		U_LOG_I("Automatic bitrate enabled, %s, ceiling %.1f Mbit/s, floor %.1f Mbit/s, radio trend %s",
+		        mode_name(mode_locked()),
 		        eff * to_mbits,
 		        min_bitrate * to_mbits,
 		        radio_aware ? "on" : "off");
@@ -71,6 +81,46 @@ bool bitrate_controller::enabled() const
 {
 	std::lock_guard lock(mutex);
 	return conf.enabled and client_enabled;
+}
+
+bitrate_controller::mode bitrate_controller::mode_locked() const
+{
+	// The headset's selector wins whenever it expressed one; the configuration key is the
+	// default for a headset that never touched it.
+	return client_mode.value_or(conf.control);
+}
+
+bitrate_controller::mode bitrate_controller::active_mode() const
+{
+	std::lock_guard lock(mutex);
+	return mode_locked();
+}
+
+std::optional<uint32_t> bitrate_controller::set_client_mode(std::optional<mode> m)
+{
+	std::lock_guard lock(mutex);
+
+	if (m == client_mode)
+		return {};
+
+	const mode before = mode_locked();
+	client_mode = m;
+	const mode after = mode_locked();
+
+	if (before == after)
+		return {};
+
+	U_LOG_I("Automatic bitrate: control law is now %s", mode_name(after));
+
+	// The two laws do not measure the same thing: a utilisation window says nothing about a
+	// bandwidth estimate and the other way round. Start over, from the ceiling, both ways.
+	return reset_locked();
+}
+
+void bitrate_controller::set_pacing_window(float window)
+{
+	std::lock_guard lock(mutex);
+	pacing_window = std::clamp(window, 0.f, 1.f);
 }
 
 std::optional<uint32_t> bitrate_controller::set_client_enabled(bool enabled_)
@@ -121,6 +171,14 @@ void bitrate_controller::flush()
 	window.clear();
 	healthy_since.reset();
 	last_evaluation = {};
+
+	// Every caller of this is a bitrate that just changed. Emptying the window is not enough
+	// on its own: the frames already in flight were sent at the old bitrate and would refill
+	// it with exactly the samples that were just thrown away, which is how a drain after a
+	// probe reads the probe's own frames as congestion. Their delivery rates are still honest
+	// measurements of the link and are kept, only their utilisation is misattributed.
+	if (has_frames)
+		stale_before = newest_frame + 1;
 }
 
 void bitrate_controller::flush_radio()
@@ -130,6 +188,36 @@ void bitrate_controller::flush_radio()
 	last_radio_sample = {};
 	last_radio_step = {};
 	radio_hold = false;
+}
+
+void bitrate_controller::flush_estimator()
+{
+	bandwidth.reset();
+	bandwidth_samples = 0;
+	last_bandwidth_sample = {};
+	bbr_st = bbr_state::startup;
+	startup_mark = 0;
+	startup_stalled = 0;
+	round_started = {};
+	last_probe = {};
+	probe_until = {};
+	last_bbr_change = {};
+}
+
+int64_t bitrate_controller::min_loaded_wire_ns() const
+{
+	if (frame_period <= 0)
+		return 0;
+
+	// Relative to the paced window when the shards are paced: that window is the shortest
+	// time a frame of any size can take, so a fraction of it is the right "did this frame
+	// keep the link busy at all" line. With pacing off there is no such floor and the line
+	// is a fraction of the frame period instead.
+	const double fraction = pacing_window > 0
+	                                ? app_limited_wire_fraction * double(pacing_window)
+	                                : unpaced_wire_fraction;
+
+	return int64_t(fraction * double(frame_period));
 }
 
 std::optional<uint32_t> bitrate_controller::set_ceiling(uint32_t ceiling_bps)
@@ -185,7 +273,13 @@ std::optional<uint32_t> bitrate_controller::reset_locked()
 	first_recovery_step = true;
 	frames = {};
 	has_frames = false;
+	stale_before = 0;
 	flush();
+
+	// A bandwidth estimate is a property of the link, but every caller of this is a change
+	// that invalidates it as well: a new ceiling, a new path, a resumed session, a different
+	// control law. Starting the ramp over costs a second and cannot be wrong.
+	flush_estimator();
 
 	// The radio samples are a property of the radio, not of the bitrate, and survive a reset;
 	// the hold does not, the bitrate is back at the ceiling and probing is allowed again.
@@ -200,20 +294,74 @@ void bitrate_controller::close_frame(frame_state & frame, clock::time_point now)
 	if (frame.index == uint64_t(-1))
 		return;
 
+	const bool fresh = frame.index >= stale_before;
+
 	if (frame.lost)
 	{
-		window.push_back({.when = now, .lost = true, .late = frame.late});
+		if (fresh)
+			window.push_back({.when = now, .lost = true, .late = frame.late});
 	}
 	else if (frame.valid and frame.first and frame.last >= frame.first and frame_period > 0)
 	{
-		window.push_back({
-		        .when = now,
-		        .utilisation = float(double(frame.last - frame.first) / double(frame_period)),
-		        .late = frame.late,
-		});
+		const int64_t wire_ns = int64_t(frame.last - frame.first);
+
+		double rate = 0;
+		// Only a frame that actually loaded the link says anything about how much the
+		// link can carry. See app_limited_wire_fraction.
+		if (mode_locked() == mode::bbr and wire_ns > 0 and frame.bytes and wire_ns >= min_loaded_wire_ns())
+		{
+			rate = 8e9 * double(frame.bytes) / double(wire_ns);
+			bandwidth.update(rate, now, estimator_window);
+			++bandwidth_samples;
+			last_bandwidth_sample = now;
+		}
+
+		if (fresh)
+			window.push_back({
+			        .when = now,
+			        .utilisation = float(double(wire_ns) / double(frame_period)),
+			        .late = frame.late,
+			        .rate = rate,
+			});
 	}
 
 	frame = {};
+}
+
+void bitrate_controller::on_frame_bytes(uint64_t frame_index, uint8_t stream_index, uint32_t bytes, clock::time_point now)
+{
+	std::lock_guard lock(mutex);
+
+	// v1 never looks at the byte counts, and letting them touch the frame ring would move
+	// the instant a frame becomes a sample for no benefit at all.
+	if (mode_locked() != mode::bbr or not conf.enabled or not client_enabled or not ceiling)
+		return;
+
+	// Same streams the feedback is taken from: the promoted quad layer reports no timings
+	// here, so counting its bytes against a span measured over the eye streams only would
+	// read as bandwidth that was never measured. Leaving them out under-counts instead,
+	// which can only make the estimate conservative.
+	if (stream_index >= video_stream_count or not bytes)
+		return;
+
+	if (not has_frames or frame_index > newest_frame)
+	{
+		newest_frame = frame_index;
+		has_frames = true;
+	}
+	// The feedback for this frame has already been turned into a sample. Can happen after a
+	// stall: the send path is normally a frame or two *ahead* of the feedback.
+	else if (frame_index + frame_ring_size <= newest_frame)
+		return;
+
+	auto & frame = frames[frame_index % frames.size()];
+	if (frame.index != frame_index)
+	{
+		close_frame(frame, now);
+		frame.index = frame_index;
+	}
+
+	frame.bytes += bytes;
 }
 
 bitrate_controller::stats bitrate_controller::analyse(clock::time_point now)
@@ -224,6 +372,7 @@ bitrate_controller::stats bitrate_controller::analyse(clock::time_point now)
 	stats res{.count = window.size()};
 
 	std::vector<float> utilisations;
+	std::vector<double> rates;
 	utilisations.reserve(window.size());
 	for (const auto & s: window)
 	{
@@ -233,6 +382,8 @@ bitrate_controller::stats bitrate_controller::analyse(clock::time_point now)
 			utilisations.push_back(s.utilisation);
 		if (s.late)
 			++res.late;
+		if (s.rate > 0)
+			rates.push_back(s.rate);
 	}
 
 	if (not utilisations.empty())
@@ -241,6 +392,17 @@ bitrate_controller::stats bitrate_controller::analyse(clock::time_point now)
 		                    size_t(utilisation_percentile * utilisations.size()));
 		std::nth_element(utilisations.begin(), utilisations.begin() + n, utilisations.end());
 		res.utilisation = utilisations[n];
+	}
+
+	// Same high percentile, for the same reason: one slow frame is not the link slowing
+	// down, and it is the *best* the link has recently managed that a ten second maximum
+	// can honestly be compared against.
+	res.rate_count = rates.size();
+	if (not rates.empty())
+	{
+		size_t n = std::min(rates.size() - 1, size_t(utilisation_percentile * rates.size()));
+		std::nth_element(rates.begin(), rates.begin() + n, rates.end());
+		res.rate = rates[n];
 	}
 
 	// A frame that never arrived is at least as bad as a fully saturated one.
@@ -336,8 +498,9 @@ std::optional<uint32_t> bitrate_controller::on_wifi_state(int rssi_dbm, int link
 		return {};
 
 	// The deep drop and its rebound are a closed loop of their own; a guess from the radio
-	// on top of it would only make the two fight.
-	if (st == state::recovering)
+	// on top of it would only make the two fight. v2 has no such regime: its estimate is
+	// always in charge and the radio only changes the gain applied to it.
+	if (mode_locked() == mode::aimd and st == state::recovering)
 		return {};
 
 	// The signal is coming back: let the normal probing upwards resume at once.
@@ -368,7 +531,24 @@ std::optional<uint32_t> bitrate_controller::on_wifi_state(int rssi_dbm, int link
 		return {};
 
 	const uint32_t previous = bitrate;
-	bitrate = clamp(uint64_t(bitrate * decrease_factor));
+
+	// v2 expresses the same preemptive step as its own gain: it is the estimate that is
+	// about to be wrong, and the radio-degrading gain is what the next evaluation would
+	// apply anyway, so taking it here just brings it forward. The estimate itself is left
+	// alone — the radio is a guess about the future, not a measurement of the link.
+	if (mode_locked() == mode::bbr and bandwidth.valid())
+	{
+		bbr_st = bbr_state::steady;
+		// Never upwards, whatever the estimate says: same rule as v1.
+		const uint32_t target = clamp(uint64_t(gain_radio * bandwidth.get()));
+		if (target < bitrate)
+		{
+			bitrate = target;
+			last_bbr_change = when;
+		}
+	}
+	else
+		bitrate = clamp(uint64_t(bitrate * decrease_factor));
 
 	// Hold the probing back up until the radio says the degradation is over, whether or not
 	// the bitrate could actually move (it may already be on the floor).
@@ -469,6 +649,11 @@ std::optional<uint32_t> bitrate_controller::evaluate(clock::time_point now)
 	if (s.count < min_samples)
 		return {};
 
+	return mode_locked() == mode::bbr ? evaluate_bbr(now, s) : evaluate_aimd(now, s);
+}
+
+std::optional<uint32_t> bitrate_controller::evaluate_aimd(clock::time_point now, const stats & s)
+{
 	const bool severe = s.utilisation > utilisation_severe or
 	                    s.lost >= lost_frames_severe or
 	                    s.late >= late_frames_severe;
@@ -570,6 +755,249 @@ std::optional<uint32_t> bitrate_controller::evaluate(clock::time_point now)
 	        reason,
 	        previous * to_mbits,
 	        bitrate * to_mbits,
+	        int(utilisation_percentile * 100),
+	        s.utilisation,
+	        s.lost,
+	        s.late,
+	        s.count);
+
+	return bitrate;
+}
+
+std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, const stats & s)
+{
+	// The measurements have not caught up with the last change yet, see change_settle.
+	if (last_bbr_change != clock::time_point{} and now - last_bbr_change < change_settle)
+		return {};
+
+	// Congestion signal: the link handing the same bytes over more slowly than the best it
+	// has managed in the last ten seconds. Scale-free, offset-free, see the discussion in
+	// the header. Not applied during the startup ramp, where the bitrate is deliberately
+	// climbing faster than a two second window can follow.
+	const double slowdown = (bandwidth.valid() and s.rate > 0) ? bandwidth.get() / s.rate : 1;
+
+	// A probe is a deliberate overshoot: on a link that is already the bottleneck it stretches
+	// the frames past a frame period on purpose, and reading that back as congestion would
+	// turn every probe into a backoff. Frames actually lost or dropped still count.
+	const bool overshooting = bbr_st == bbr_state::probe;
+	const bool acute = s.lost >= lost_frames_decrease or
+	                   s.late >= late_frames_decrease or
+	                   (not overshooting and
+	                    (s.utilisation > utilisation_severe or
+	                     (bbr_st != bbr_state::startup and slowdown > slowdown_backoff)));
+
+	// An estimate no loaded frame has refreshed for a whole window is not a bottleneck any
+	// more: the link has been carrying everything asked of it without ever filling up. Forget
+	// it rather than hold a bitrate down against a limit that stopped existing.
+	if (bandwidth_samples and now - last_bandwidth_sample > estimator_window)
+	{
+		bandwidth.reset();
+		bandwidth_samples = 0;
+		U_LOG_I("Automatic bitrate v2: no loaded frame for %d ms, dropping the bandwidth estimate",
+		        int(estimator_window.count()));
+	}
+
+	if (bandwidth_samples < estimator_min_samples)
+	{
+		// Nothing measured. On a link with capacity to spare every frame is over before
+		// it loaded anything (see the app-limited rule) and there is simply nothing to
+		// estimate. There is still one thing worth doing: if the link measures healthy
+		// and the bitrate is below the ceiling, walk it back up. No bottleneck was ever
+		// found, so the only defensible target is the bitrate that was asked for — and
+		// with no estimate to size a step from, v1's blind additive probe is exactly the
+		// right fallback, hold and all.
+		if (not acute)
+		{
+			const bool healthy = s.utilisation < utilisation_increase and s.lost == 0 and s.late == 0;
+			if (not healthy or radio_hold)
+			{
+				healthy_since.reset();
+				return {};
+			}
+
+			if (not healthy_since)
+				healthy_since = now;
+
+			if (now - *healthy_since < increase_hold or bitrate >= effective_ceiling())
+				return {};
+
+			const uint32_t before = bitrate;
+			const uint32_t step = std::max<uint32_t>(increase_step_min, uint32_t(effective_ceiling() * increase_step_ratio));
+			bitrate = clamp(uint64_t(bitrate) + step);
+			flush();
+
+			if (bitrate == before)
+				return {};
+
+			U_LOG_I("Automatic bitrate v2: no bottleneck measured, %.1f -> %.1f Mbit/s (p%d utilisation %.2f over %zu frames)",
+			        before * to_mbits,
+			        bitrate * to_mbits,
+			        int(utilisation_percentile * 100),
+			        s.utilisation,
+			        s.count);
+			return bitrate;
+		}
+
+		// ... unless the link just failed, which is a measurement of its own: whatever is
+		// being sent is more than it can carry. Seed the filter with it so that the
+		// backoff below has something to work from, and so that there is an estimate from
+		// here on.
+		bandwidth.reset();
+		bandwidth.update(double(bitrate), now, estimator_window);
+		bandwidth_samples = estimator_min_samples;
+		last_bandwidth_sample = now;
+	}
+
+	const double bw = bandwidth.get();
+	const uint32_t previous = bitrate;
+	const char * reason = nullptr;
+	double gain = gain_steady;
+	// A state change the bitrate has to follow at once, whatever the steady rate limiting
+	// would otherwise say
+	bool forced = false;
+
+	if (acute)
+	{
+		if (now - last_decrease < decrease_cooldown)
+			return {};
+		last_decrease = now;
+
+		// A maximum filter remembers for ten seconds, and an acute failure is proof that
+		// what it remembers was never really deliverable. Replace it by what the link is
+		// measurably doing right now, or, when every recent frame was app-limited and
+		// there is no such measurement, simply take a bite out of it.
+		bandwidth.cap(s.rate > 0 ? s.rate : backoff_factor * bw);
+
+		bbr_st = bbr_state::steady;
+		startup_stalled = startup_stall_rounds;
+		last_probe = now;
+		last_bbr_change = now;
+		probe_until = {};
+
+		bitrate = clamp(uint64_t(backoff_factor * bandwidth.get()));
+		gain = backoff_factor;
+		reason = "backing off";
+
+		// Samples taken at the old bitrate say nothing about the new one, same as v1.
+		flush();
+	}
+	else
+	{
+		// The radio is the only leading indicator there is: it says the estimate is about
+		// to be too optimistic. Leave the ramp and the probing alone until it recovers.
+		if (radio_hold and bbr_st != bbr_state::steady)
+		{
+			bbr_st = bbr_state::steady;
+			probe_until = {};
+			last_probe = now;
+		}
+
+		switch (bbr_st)
+		{
+			case bbr_state::startup: {
+				if (round_started == clock::time_point{})
+				{
+					round_started = now;
+					startup_mark = bw;
+				}
+				else if (now - round_started >= round_duration)
+				{
+					startup_stalled = bw > startup_growth * startup_mark ? 0 : startup_stalled + 1;
+					startup_mark = bw;
+					round_started = now;
+				}
+
+				if (startup_stalled >= startup_stall_rounds)
+				{
+					bbr_st = bbr_state::steady;
+					last_probe = now;
+					U_LOG_I("Automatic bitrate v2: startup done, bandwidth plateaued at %.1f Mbit/s after %zu flat rounds",
+					        bw * to_mbits,
+					        startup_stalled);
+				}
+				break;
+			}
+
+			case bbr_state::probe:
+				if (now >= probe_until)
+				{
+					bbr_st = bbr_state::steady;
+					last_probe = now;
+					// The samples in the window were taken at the raised
+					// gain; the drain back to the steady one must not wait
+					// for them to age out, nor for the steady interval.
+					flush();
+					forced = true;
+				}
+				break;
+
+			case bbr_state::steady:
+				// One probe every probe_interval, to rediscover capacity that came
+				// back. Never into a falling radio: that is walking into the wall v1
+				// used to walk into with its blind additive increase.
+				if (not radio_hold and now - last_probe >= probe_interval and bitrate < effective_ceiling())
+				{
+					bbr_st = bbr_state::probe;
+					probe_until = now + probe_duration;
+					U_LOG_I("Automatic bitrate v2: probing at gain %.2f, estimate %.1f Mbit/s",
+					        gain_probe,
+					        bw * to_mbits);
+				}
+				break;
+		}
+
+		switch (bbr_st)
+		{
+			case bbr_state::startup:
+				gain = gain_startup;
+				reason = "startup";
+				break;
+			case bbr_state::probe:
+				gain = gain_probe;
+				reason = "probing";
+				break;
+			case bbr_state::steady:
+				gain = radio_hold ? gain_radio : gain_steady;
+				reason = radio_hold ? "steady, radio degrading" : "steady";
+				break;
+		}
+
+		const uint32_t target = clamp(uint64_t(gain * bw));
+
+		// Do not chase the few percent the estimate wobbles by, and do not re-encode at a
+		// new bitrate more often than once a second, once out of the startup ramp.
+		if (bbr_st != bbr_state::startup and not forced)
+		{
+			if (now - last_bbr_change < steady_interval)
+				return {};
+
+			const double delta = std::abs(double(target) - double(bitrate));
+			if (bitrate and delta < steady_change_threshold * double(bitrate))
+				return {};
+		}
+
+		bitrate = target;
+		last_bbr_change = now;
+
+		// Samples taken at the old bitrate say nothing about the new one, same as v1. The
+		// bandwidth filter is deliberately not flushed: it is the one thing that has to
+		// survive a change of bitrate.
+		if (bitrate != previous)
+			flush();
+	}
+
+	if (bitrate == previous)
+		return {};
+
+	U_LOG_I("Automatic bitrate v2: %s, %.1f -> %.1f Mbit/s (estimate %.1f Mbit/s, gain %.2f, recent %.1f Mbit/s over %zu samples, slowdown x%.2f, p%d utilisation %.2f, %zu lost, %zu late over %zu frames)",
+	        reason,
+	        previous * to_mbits,
+	        bitrate * to_mbits,
+	        bandwidth.get() * to_mbits,
+	        gain,
+	        s.rate * to_mbits,
+	        s.rate_count,
+	        slowdown,
 	        int(utilisation_percentile * 100),
 	        s.utilisation,
 	        s.lost,

@@ -64,10 +64,114 @@ namespace wivrn
 // Only the trend is used: absolute dBm says nothing portable, a fall of several dB over a few
 // seconds says the user is walking away from the access point. Radio input can only ever *lower*
 // the bitrate; it never raises one, and it never runs while the deep-drop recovery is in charge.
+//
+// ======================================================================================
+// Control law v2: delivered-bandwidth estimation (bitrate_mode::bbr)
+// ======================================================================================
+//
+// Everything above is a *congestion* controller: it reacts to the link being full. It never
+// learns how big the link is, so after a decrease it has to walk back up blind, one additive
+// step every five seconds, and after a deep drop it rebounds towards a number it remembered
+// rather than one it measured. v2 measures the link instead, the way BBR does, and derives the
+// bitrate from that estimate. It is selected per session and runs inside this same object: the
+// ceilings, the floor, the two switches, the frame ring that joins the per-stream feedback into
+// one frame, the acute lost/late detection and the radio trend are all shared and all still
+// apply — only the function that turns a window of samples into a bitrate differs.
+//
+// --- The delivery rate sample ---------------------------------------------------------
+// The headset says, per frame, when the first and the last packet of that frame arrived. The
+// server knows how many bytes it put on the wire for that frame (see on_frame_bytes: the
+// encoder reports them from its send path, parity shards included, which is exactly the unit
+// set_bitrate is expressed in). One frame therefore yields
+//
+//     delivery_rate = 8 * frame_bytes / (received_last - received_first)
+//
+// which is a *lower bound* on the capacity of the bottleneck: those bytes really did get
+// through in that time. Both timestamps are in the client clock, so no clock offset is needed.
+//
+// --- App-limited samples --------------------------------------------------------------
+// A lower bound is only useful if the sender was actually trying. BBR calls a sample
+// "app-limited" when the application had nothing more to send, and refuses to let such a
+// sample lower its estimate. Here the analogous case is a frame that is small compared to what
+// the link could have carried in that window: a nearly static scene produces a 5 kB P-frame
+// that goes out in one micro-burst and lands in a few hundred microseconds, and 5 kB over
+// 300 us reads as 130 Mbit/s of "capacity" that is really one Wi-Fi TXOP measured with a
+// stopwatch. Feeding that to a *maximum* filter is worse than useless, so a sample is only
+// admitted when the frame occupied the link for a meaningful stretch of the frame period:
+// see app_limited_wire_fraction. Frames below it are still used for utilisation, loss and
+// lateness — they just say nothing about capacity.
+//
+// Packet pacing (see shard_pacer) is the other half of the same story, and the reason the
+// threshold is expressed relative to the *paced* window rather than to a frame period. Pacing
+// deliberately spreads a frame over ~40% of a frame period whatever its size, so with pacing on
+// the measured delivery rate saturates at about bitrate / window: the sender, not the link, is
+// what limits it. That is a genuine app-limited regime and it is handled the way BBR handles
+// its own: the sample is still a valid lower bound, the estimate climbs to it, and the
+// controller keeps raising the bitrate until something else stops it — a ceiling, or the link
+// actually filling up, at which point the receive span stretches past the paced window and the
+// samples become real capacity measurements again. Pacing therefore costs v2 the ability to
+// measure headroom it is not using, which is precisely what pacing is for.
+//
+// --- The queueing signal, and why it is not an RTT --------------------------------------
+// BBR's second state variable is min_rtt, and the ratio of the current RTT to it is how it
+// notices a queue building before anything is lost. A real RTT is not available here without
+// a clock offset: send_begin is in the server clock and received_first_packet in the client's,
+// and while the server does run a clock offset estimator, it needs seconds to converge, it is
+// reset on every path failover, and its residual error is of the same order as the queueing
+// delay that would have to be detected. Depending on it would make the controller useless
+// exactly when adaptation matters most — the first seconds of a session, and right after a
+// failover. So no absolute delay is used anywhere in v2.
+//
+// The obvious offset-free substitute is the wire span itself, received_last - received_first,
+// compared against its own windowed minimum. That is wrong, and worth spelling out: a wire
+// span is a *transmission* time, not a propagation delay. It is proportional to the number of
+// bytes in the frame, so it grows whenever the bitrate is raised or the scene gets busy, with
+// no queue anywhere — on an unpaced link the span at 50 Mbit/s is simply twice the span at
+// 25 Mbit/s. A min filter on it would read every increase as congestion.
+//
+// Dividing by the bytes removes exactly that dependency, and what is left is the delivery rate
+// the estimator already computes. So the queueing signal is
+//
+//     slowdown = windowed_max_bandwidth / (recent delivery rate)
+//
+// — the link handing over the same bytes more slowly than the best it has managed in the last
+// ten seconds. It is scale-free (a bigger frame takes proportionally longer and the ratio does
+// not move), it needs no clock offset, and it is the same quantity in both pacing regimes: with
+// pacing on both numerator and denominator sit at bitrate / window until the link becomes the
+// bottleneck, at which point only the denominator falls. Both sides are high percentiles, so a
+// single slow frame does not trigger it, and it is ignored during the startup ramp, where the
+// bitrate is deliberately climbing faster than the measurement can follow.
+//
+// --- The state machine -------------------------------------------------------------------
+// startup: gain 1.25, doubling-ish growth until the bandwidth estimate stops improving for
+//          three consecutive rounds — BBR's STARTUP and its bandwidth-plateau exit.
+// steady:  gain 0.85. The gap to 1 is the headroom that keeps the bottleneck queue empty; it
+//          is also what leaves room for the P-frame/I-frame variance a video encoder produces
+//          around its nominal bitrate.
+// probe:   once every eight seconds, one round at gain 1.10, so that capacity that came back
+//          (the user walked towards the router again) is rediscovered instead of waiting for
+//          the ten second maximum filter to age out. Skipped while the radio says the link is
+//          degrading: probing into a fall is how v1's blind additive increase used to hurt.
+//          A probe is a deliberate overshoot — on a link that is already the bottleneck it
+//          will by construction stretch the frames past a frame period — so while one is
+//          running its own overshoot is not read as congestion. Only frames actually lost or
+//          dropped are, those are never worth a probe. Returning to steady right afterwards
+//          is the drain, and it happens without waiting out the steady interval.
+// backoff: on the same acute signals v1 treats as congestion — frames that never arrived,
+//          frames decoded but never shown, utilisation at the ceiling — or on the slowdown
+//          above, the maximum filter is first capped to what the link is measurably doing
+//          right now (its ten second memory has just been proven stale by an event rather
+//          than aged out), and the bitrate goes to 0.7 times that. The state returns to
+//          steady, whose 0.85 gain brings the bitrate back up one second later: the
+//          undershoot is BBR's DRAIN, there to empty the queue that built up, not a new
+//          operating point.
+// A degrading radio trend forces steady with gain 0.75 and blocks probing, reusing the same
+// radio_hold flag v1 uses to block its additive increase.
 class bitrate_controller
 {
 public:
 	using clock = std::chrono::steady_clock;
+	using mode = wivrn::bitrate_mode;
 
 	struct config
 	{
@@ -75,6 +179,9 @@ public:
 		bool enabled = true;
 		// Never go below this, whatever the measurements say
 		uint32_t min_bitrate_bps = 10'000'000;
+		// Control law used when the headset expresses no preference of its own. The
+		// headset's selector always wins over this.
+		mode control = mode::aimd;
 	};
 
 	// --- Measurement window -------------------------------------------------------------
@@ -173,14 +280,81 @@ public:
 	// preemptive step put on the normal probing-upwards path.
 	static constexpr double radio_rise_db = 3.0;
 
+	// --- v2: delivered-bandwidth estimator ----------------------------------------------
+	// Memory of the maximum filter on the delivery rate. BBR uses ten round trips for its
+	// bandwidth filter and a ten second window for min_rtt; ten seconds is long enough to
+	// cover a few probe cycles and short enough that capacity lost for good (a wall between
+	// the headset and the access point) is forgotten while the user is still in the room.
+	static constexpr std::chrono::milliseconds estimator_window{10000};
+	// A delivery rate sample only counts towards the maximum filter when the frame kept the
+	// link busy for at least this fraction of the *paced* window. Below it the frame is one
+	// micro-burst and the measurement is quantisation noise on a stopwatch, not a capacity.
+	// See the app-limited discussion above.
+	static constexpr double app_limited_wire_fraction = 0.30;
+	// The same idea with pacing switched off, where there is no window to be a fraction of:
+	// a frame must have occupied at least this much of a frame period.
+	static constexpr double unpaced_wire_fraction = 0.10;
+	// No bitrate is derived from the estimate before this many delivery rate samples have
+	// been admitted, i.e. not before a couple hundred milliseconds of loaded video. A
+	// maximum filter is exactly the wrong thing to trust after one noisy sample.
+	static constexpr size_t estimator_min_samples = 12;
+
+	// Gains applied to the bandwidth estimate, one per state.
+	static constexpr double gain_startup = 1.25;
+	static constexpr double gain_steady = 0.85;
+	static constexpr double gain_probe = 1.10;
+	// Steady gain while the radio trend says the link is on its way down. Lower than
+	// gain_steady on purpose: the estimate is about to be wrong and in the optimistic
+	// direction, and the radio is the only thing that knows it yet.
+	static constexpr double gain_radio = 0.75;
+	// Acute congestion: the maximum filter is first capped to what the link is measured to
+	// be delivering right now, and the bitrate goes to this times that. Below gain_steady on
+	// purpose — the gap between the two is a drain, not a new operating point, and the next
+	// steady evaluation a second later takes the bitrate back up to the steady gain.
+	static constexpr double backoff_factor = 0.70;
+
+	// One "round" of the startup ramp. Not a round trip — there is no RTT here — but the
+	// interval over which the estimate is asked whether it is still growing.
+	static constexpr std::chrono::milliseconds round_duration{500};
+	// Growth below this factor over a round counts as no growth at all.
+	static constexpr double startup_growth = 1.25;
+	// Consecutive rounds without growth that end the startup ramp. Three is BBR's number:
+	// one flat round is noise, three in a row is a plateau.
+	static constexpr size_t startup_stall_rounds = 3;
+
+	// Time between two probes, and how long one lasts. One round is enough to see whether
+	// the frames sent at the raised gain came back faster; longer only spends more time
+	// overshooting a link that is already the bottleneck.
+	static constexpr std::chrono::milliseconds probe_interval{8000};
+	static constexpr std::chrono::milliseconds probe_duration{500};
+
+	// In steady state the bitrate is not allowed to move more often than this, nor at all
+	// unless the new target differs from the current bitrate by more than the threshold.
+	// Re-encoding at a new bitrate is not free and the estimate wobbles by a few percent
+	// frame to frame; without both of these the controller would chase that wobble.
+	static constexpr std::chrono::milliseconds steady_interval{1000};
+	static constexpr double steady_change_threshold = 0.05;
+	// Nothing is evaluated for this long after a change of bitrate. The frames that were
+	// already in flight when it happened are dropped outright (see flush), but the encoder
+	// still needs a frame or two to actually reach the new rate, and the short window has to
+	// refill before a percentile over it means anything.
+	static constexpr std::chrono::milliseconds change_settle{250};
+
+	// How much slower than the ten second maximum the link has to be handing frames over
+	// before that counts as congestion rather than as noise. Both sides of the ratio are high
+	// percentiles, so this is not one unlucky frame; a third of the capacity gone is a real
+	// change in the link.
+	static constexpr double slowdown_backoff = 1.60;
+
 	bitrate_controller() = default;
 
 	// Set the configuration and the initial ceiling. The ceiling is the bitrate the client asked
 	// for; the controller never goes above it. client_enabled is the headset side switch: the
 	// control only runs when both it and the server configuration are enabled. radio_aware is
 	// the headset side switch for the preemptive radio trend, which additionally requires the
-	// automatic bitrate to be on at all.
-	void configure(const config &, uint32_t ceiling_bps, bool client_enabled, bool radio_aware);
+	// automatic bitrate to be on at all. client_mode is the control law the headset asked for,
+	// empty when it asked for none and config::control decides.
+	void configure(const config &, uint32_t ceiling_bps, bool client_enabled, bool radio_aware, std::optional<mode> client_mode = {});
 
 	bool enabled() const;
 	uint32_t current() const;
@@ -194,6 +368,27 @@ public:
 	// switching off only stops the preemptive steps and releases any hold they left, the
 	// normal AIMD takes it from there.
 	void set_radio_aware(bool);
+
+	// The control law the headset asked for, empty when it expresses no preference and the
+	// server configuration decides. Measurements taken under the other law say nothing about
+	// this one — the two do not even measure the same quantity — so a change starts over,
+	// exactly like the headset switch. Returns the bitrate to apply, if any.
+	std::optional<uint32_t> set_client_mode(std::optional<mode>);
+
+	// Control law actually in force.
+	mode active_mode() const;
+
+	// The pacing window currently in force, as a fraction of a frame period, or 0 when the
+	// video shards are not paced. Only the v2 estimator uses it, to tell a frame that filled
+	// its paced window from one that was over in a single micro-burst.
+	void set_pacing_window(float window);
+
+	// Bytes the server put on the wire for one video frame of one stream, parity shards
+	// included: the unit the bitrate itself is expressed in. Called from the encoder's send
+	// path, i.e. from a different thread than on_feedback and usually a frame or two ahead
+	// of it; the frame ring joins the two. Allocation-free, and a no-op unless the v2
+	// estimator is the one running.
+	void on_frame_bytes(uint64_t frame_index, uint8_t stream_index, uint32_t bytes, clock::time_point now = clock::now());
 
 	// A new ceiling was requested (client settings, or a manual change from the dashboard).
 	// Resets the controller to it. Returns the bitrate to apply.
@@ -232,6 +427,9 @@ private:
 		bool valid = false;
 		bool lost = false; // at least one stream never arrived completely
 		bool late = false; // decoded but dropped before being displayed
+		// Bytes put on the wire for this frame, summed over the video streams. Filled in
+		// from the encoder's send path, v2 only.
+		uint64_t bytes = 0;
 	};
 
 	struct sample
@@ -240,6 +438,94 @@ private:
 		float utilisation = 0;
 		bool lost = false;
 		bool late = false;
+		// Delivery rate this frame measured, bits per second, or 0 when it says nothing
+		// about the capacity (v1, a lost frame, an app-limited one)
+		double rate = 0;
+	};
+
+	// Windowed maximum of a scalar, Kathleen Nichols' three-sample filter, the same one BBR
+	// uses for its bandwidth estimate. Keeps the running maximum plus the best of the last
+	// third and the last sixth of the window, so that when the oldest one ages out there is
+	// already a valid replacement covering the recent past. O(1) per sample, no allocation,
+	// three entries whatever the frame rate.
+	class max_filter
+	{
+	public:
+		bool valid() const
+		{
+			return count != 0;
+		}
+		// Meaningless when not valid()
+		double get() const
+		{
+			return s[0].value;
+		}
+
+		void reset()
+		{
+			count = 0;
+			s = {};
+		}
+
+		void update(double value, clock::time_point now, clock::duration window)
+		{
+			++count;
+
+			// First sample, a new extremum, or everything on record is stale.
+			if (count == 1 or better(value, s[0].value) or now - s[2].when > window)
+			{
+				s[0] = s[1] = s[2] = {now, value};
+				return;
+			}
+
+			if (better(value, s[1].value))
+				s[1] = s[2] = {now, value};
+			else if (better(value, s[2].value))
+				s[2] = {now, value};
+
+			if (now - s[0].when > window)
+			{
+				// The running extremum aged out: promote the two sub-window ones.
+				s[0] = s[1];
+				s[1] = s[2];
+				s[2] = {now, value};
+				if (now - s[0].when > window)
+				{
+					s[0] = s[1];
+					s[1] = s[2];
+				}
+			}
+			else if (s[1].when == s[0].when and now - s[1].when > window / 4)
+				s[1] = s[2] = {now, value};
+			else if (s[2].when == s[1].when and now - s[2].when > window / 2)
+				s[2] = {now, value};
+		}
+
+		// Force the maximum down to at most `value`: what the filter remembers has just
+		// been proven wrong by an event rather than aged out.
+		void cap(double value)
+		{
+			for (auto & e: s)
+			{
+				if (better(e.value, value))
+					e.value = value;
+			}
+		}
+
+	private:
+		struct entry
+		{
+			clock::time_point when{};
+			double value = 0;
+		};
+
+		static bool better(double a, double b)
+		{
+			return a >= b;
+		}
+
+		std::array<entry, 3> s{};
+		size_t count = 0;
 	};
 
 	// One Wi-Fi report, after the sentinel filtering.
@@ -271,12 +557,25 @@ private:
 		recovering,
 	};
 
+	// v2 only, see the state machine described at the top of this file.
+	enum class bbr_state
+	{
+		startup,
+		steady,
+		probe,
+	};
+
 	struct stats
 	{
 		double utilisation = 0; // high percentile over the window
 		size_t lost = 0;
 		size_t late = 0;
 		size_t count = 0;
+		// High percentile of the delivery rates in the window, and how many there were.
+		// The best the link has recently been seen doing, against which the ten second
+		// maximum is compared; v2 only.
+		double rate = 0;
+		size_t rate_count = 0;
 	};
 
 	mutable std::mutex mutex;
@@ -284,6 +583,8 @@ private:
 	config conf;
 	// Headset side switch, ANDed with conf.enabled
 	bool client_enabled = true;
+	// Control law the headset asked for; conf.control when it asked for none
+	std::optional<mode> client_mode;
 	// Headset side switch for the radio trend, ANDed with the two above
 	bool radio_aware = true;
 	// Ceiling requested by the client
@@ -300,8 +601,30 @@ private:
 	std::array<frame_state, frame_ring_size> frames;
 	uint64_t newest_frame = 0;
 	bool has_frames = false;
+	// Frames older than this were sent at a bitrate that is no longer in force, and say
+	// nothing about the one that is. Moved past everything in flight by every flush()
+	uint64_t stale_before = 0;
 	// Current video frame period in ns, from the pacer
 	int64_t frame_period = 0;
+	// Fraction of a frame period the video shards are spread over, 0 when not paced
+	float pacing_window = 0;
+
+	// --- v2 estimator state -------------------------------------------------------------
+	bbr_state bbr_st = bbr_state::startup;
+	// Bottleneck bandwidth estimate, bits per second, maximum over estimator_window
+	max_filter bandwidth;
+	// Delivery rate samples admitted into it, and when the last one was: an estimate no
+	// loaded frame has refreshed for a whole window is not evidence of a bottleneck any more
+	size_t bandwidth_samples = 0;
+	clock::time_point last_bandwidth_sample{};
+	// Value the bandwidth estimate had at the start of the current startup round, and how
+	// many consecutive rounds it has failed to grow
+	double startup_mark = 0;
+	size_t startup_stalled = 0;
+	clock::time_point round_started{};
+	clock::time_point last_probe{};
+	clock::time_point probe_until{};
+	clock::time_point last_bbr_change{};
 
 	std::deque<sample> window;
 	std::optional<clock::time_point> healthy_since;
@@ -320,15 +643,23 @@ private:
 
 	// Ceiling actually in force: the client's, clamped by the current path's
 	uint32_t effective_ceiling() const;
+	// active_mode(), with the mutex already held
+	mode mode_locked() const;
 	// reset(), with the mutex already held
 	std::optional<uint32_t> reset_locked();
 	void close_frame(frame_state &, clock::time_point now);
 	void flush();
 	// Forget the radio trend and release the hold
 	void flush_radio();
+	// Forget everything the v2 estimator learned
+	void flush_estimator();
+	// Shortest wire span, in ns, that is not an app-limited measurement
+	int64_t min_loaded_wire_ns() const;
 	stats analyse(clock::time_point now);
 	radio_trend analyse_radio(clock::time_point now);
 	std::optional<uint32_t> evaluate(clock::time_point now);
+	std::optional<uint32_t> evaluate_aimd(clock::time_point now, const stats &);
+	std::optional<uint32_t> evaluate_bbr(clock::time_point now, const stats &);
 	uint32_t clamp(uint64_t value) const;
 };
 

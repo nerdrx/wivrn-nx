@@ -462,6 +462,10 @@ void video_encoder::send_parity()
 	if (not parity)
 		return;
 
+	// Parity is on the link like everything else, and the bitrate the controller decides is
+	// a budget for the link (see apply_bitrate), so it counts.
+	frame_bytes += uint32_t(parity->payload.size());
+
 	try
 	{
 		cnx->send_stream(std::move(*parity));
@@ -482,6 +486,7 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		cnx->dump_time("send_begin", shard.frame_idx, os_monotonic_get_ns(), stream_idx);
 		timing_info.send_begin = clock.to_headset(os_monotonic_get_ns());
 		fec_group.reset(stream_idx, shard.frame_idx);
+		frame_bytes = 0;
 	}
 	if (end_of_frame)
 	{
@@ -518,6 +523,7 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 			}
 		}
 		shard.payload = {begin, next};
+		frame_bytes += uint32_t(next - begin);
 		try
 		{
 			if (control)
@@ -571,6 +577,12 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 	{
 		cnx->dump_time("send_end", shard.frame_idx, os_monotonic_get_ns(), stream_idx);
 		wivrn::trace::cpu_end(wivrn::trace::cpu_track::network, stream_idx, shard.frame_idx, "SendData");
+
+		// The bandwidth estimating bitrate control law divides these bytes by the time
+		// the headset says it spent receiving the frame. Shard headers are not counted:
+		// a few tens of bytes on a 1.4 kB datagram, consistently, and the control law
+		// only ever uses the estimate through a gain.
+		cnx->on_frame_sent(shard.frame_idx, stream_idx, frame_bytes);
 	}
 }
 

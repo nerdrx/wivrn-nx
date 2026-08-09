@@ -248,6 +248,21 @@ struct audio_data
 	static constexpr size_t max_payload_size = 1200;
 };
 
+// Which control law the automatic bitrate runs, when it runs at all (bitrate_auto).
+//
+// aimd is the original one: a sliding window of per-frame link utilisation drives a
+// multiplicative decrease and an additive probe upwards, with a deep drop and a fast
+// rebound on an acute lag spike.
+//
+// bbr estimates the delivered bandwidth directly (frame bytes over the time the headset
+// spent receiving that frame) and sets the bitrate to a gain times a windowed maximum of
+// it, the way BBR sets a pacing rate from its bottleneck bandwidth estimate. Experimental.
+enum class bitrate_mode : uint8_t
+{
+	aimd = 0,
+	bbr = 1,
+};
+
 namespace from_headset
 {
 struct crypto_handshake
@@ -342,6 +357,12 @@ struct settings_changed
 	// Whether the headset lets the server adapt the bitrate to the link quality, with
 	// bitrate_bps as the ceiling. The server also has its own switch, both must be enabled.
 	bool bitrate_auto = true;
+	// Which control law that adaptation uses. Empty means the headset expresses no
+	// preference and the server's own `bitrate-auto`/`mode` configuration key decides; a
+	// value set here always wins over it. The headset only fills it in once the user has
+	// actually picked one of the adaptive entries in its bitrate selector, so a server
+	// configured for one law keeps it for every headset that never touched the setting.
+	std::optional<bitrate_mode> bitrate_control;
 	// Whether the headset reports its Wi-Fi radio state (see from_headset::wifi_state) and
 	// the server may step the bitrate down on a falling signal, before the loss it is about
 	// to cause shows up in the frame timings. Only meaningful with bitrate_auto on.

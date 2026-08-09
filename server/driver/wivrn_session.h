@@ -241,6 +241,11 @@ public:
 
 	void dump_time(const std::string & event, uint64_t frame, int64_t time, uint8_t stream = -1, const char * extra = "");
 
+	// One video frame of one stream finished going out, with the number of bytes it put on
+	// the wire (parity shards included). Called from the encoder's send path; only the
+	// bandwidth estimating bitrate control law uses it, and it takes no lock of its own.
+	void on_frame_sent(uint64_t frame_index, uint8_t stream_index, uint32_t bytes);
+
 private:
 	void run_net(std::stop_token stop);
 	void run_worker(std::stop_token stop);
@@ -251,6 +256,9 @@ private:
 
 	// Forwards a bitrate decided by the automatic controller to the encoders
 	void apply_auto_bitrate(std::optional<uint32_t>);
+	// Push the packet pacing switch down to the encoders and the resulting window to the
+	// bitrate controller, which reads it as the shortest a frame can possibly take
+	void set_pacing(bool client_enabled);
 
 	// The path carrying video and control changed (multipath failover). Called
 	// from the network thread.

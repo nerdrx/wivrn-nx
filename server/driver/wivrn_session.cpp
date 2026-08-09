@@ -25,6 +25,7 @@
 #include "configuration.h"
 #include "driver/app_pacer.h"
 #include "driver/xrt_cast.h"
+#include "encoder/shard_pacer.h"
 #include "server/ipc_server.h"
 #include "utils/load_icon.h"
 #include "utils/method.h"
@@ -138,11 +139,11 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 	auto conf = configuration();
 
 	// Both switches must be on: the server configuration and the one in the headset settings
-	bitrate_ctl.configure(conf.bitrate_auto, get_info().settings.bitrate_bps, get_info().settings.bitrate_auto, get_info().settings.radio_aware);
+	bitrate_ctl.configure(conf.bitrate_auto, get_info().settings.bitrate_bps, get_info().settings.bitrate_auto, get_info().settings.radio_aware, get_info().settings.bitrate_control);
 
 	// Same story for packet pacing and for the QoS marks
 	pacing_conf = conf.pacing;
-	compositor.set_pacing(pacing_conf.enabled and get_info().settings.smooth_pacing, pacing_conf.window);
+	set_pacing(get_info().settings.smooth_pacing);
 	connection->set_qos(get_info().settings.wifi_qos);
 	// No server configuration key: the group size is a constant and the overhead is
 	// paid out of the bitrate the headset already chose, so the headset toggle is
@@ -527,18 +528,20 @@ void wivrn_session::operator()(const from_headset::settings_changed & settings)
 	{
 		// The bitrate the client asks for is the ceiling of the automatic controller
 		bitrate_ctl.set_client_enabled(settings.bitrate_auto);
+		bitrate_ctl.set_client_mode(settings.bitrate_control);
 		bitrate_ctl.set_ceiling(settings.bitrate_bps);
 		compositor.set_bitrate(settings.bitrate_bps);
 	}
 	else
 	{
-		// Only the automatic bitrate switch changed; turning it off restores the full
-		// bitrate the headset asked for
+		// Only the automatic bitrate switch or the control law changed; turning the
+		// former off restores the full bitrate the headset asked for
 		apply_auto_bitrate(bitrate_ctl.set_client_enabled(settings.bitrate_auto));
+		apply_auto_bitrate(bitrate_ctl.set_client_mode(settings.bitrate_control));
 	}
 
 	// Both switches must be on, same as the automatic bitrate
-	compositor.set_pacing(pacing_conf.enabled and settings.smooth_pacing, pacing_conf.window);
+	set_pacing(settings.smooth_pacing);
 	connection->set_qos(settings.wifi_qos);
 	compositor.set_fec(settings.fec);
 	compositor.set_encoder_failover(encoder_failover_conf and settings.encoder_failover);
@@ -871,6 +874,22 @@ void wivrn_session::apply_auto_bitrate(std::optional<uint32_t> bitrate)
 {
 	if (bitrate)
 		compositor.set_bitrate(*bitrate);
+}
+
+void wivrn_session::set_pacing(bool client_enabled)
+{
+	// Both switches must be on, same as the automatic bitrate
+	const bool enabled = pacing_conf.enabled and client_enabled;
+	compositor.set_pacing(enabled, pacing_conf.window);
+	// The bandwidth estimator needs the window to tell a frame that filled it from one that
+	// was over in a single micro-burst; the compositor clamps it the same way.
+	bitrate_ctl.set_pacing_window(enabled ? std::min(pacing_conf.window, shard_pacer::max_window) : 0.f);
+}
+
+void wivrn_session::on_frame_sent(uint64_t frame_index, uint8_t stream_index, uint32_t bytes)
+{
+	// Called from the encoder's send thread; the controller has its own mutex.
+	bitrate_ctl.on_frame_bytes(frame_index, stream_index, bytes);
 }
 
 void wivrn_session::operator()(from_headset::feedback && feedback)

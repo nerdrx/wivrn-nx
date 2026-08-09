@@ -395,6 +395,7 @@ static void send_settings_changed_packet(xr::session & session, wivrn_session * 
 	                .fps_divider = config.fps_divider,
 	                .bitrate_bps = config.bitrate_bps,
 	                .bitrate_auto = config.bitrate_auto,
+	                .bitrate_control = config.bitrate_control(),
 	                .radio_aware = config.radio_aware,
 	                .smooth_pacing = config.smooth_pacing,
 	                .fec = config.fec,

@@ -23,13 +23,22 @@ headset WiVRn supports.
 
 ## Adaptive streaming
 
-- **Automatic bitrate** — the server measures, from the per-frame feedback the headset already
-  sends, how much of each frame period was spent receiving that frame, plus frames that never
-  arrived, and adapts the bitrate itself. Gradual signal decay gets a gentle decrease with slow
-  probing back up; an acute lag spike gets a deep drop (which drains whatever queue wedged)
-  followed by a fast slow-start rebound to the pre-drop level, with ssthresh-style backoff.
-  The bitrate set on the headset is always the ceiling. Toggles: headset (*Automatic bitrate*)
-  and dashboard; config key `bitrate-auto` (`min-bitrate` floor, default 10 Mbit/s).
+- **Automatic bitrate** — the server adapts the bitrate itself, from the per-frame feedback the
+  headset already sends, and there are **two control laws to pick between, live, from the
+  headset**. *Adaptive* measures how much of each frame period was spent receiving that frame,
+  plus frames that never arrived: gradual signal decay gets a gentle decrease with slow probing
+  back up, an acute lag spike gets a deep drop (which drains whatever queue wedged) followed by a
+  fast slow-start rebound to the pre-drop level, with ssthresh-style backoff. *Adaptive v2*
+  (experimental) instead **measures the link**: frame bytes over the time the headset spent
+  receiving them is a delivered bandwidth, a ten second running maximum of that is the capacity
+  estimate, and the bitrate is a gain on it — 1.25 while it is still growing, 0.85 once it
+  settles, 1.10 for a short probe every eight seconds, 0.7 to drain after loss. It converges on
+  0.85 of the real link and comes back to it in a second or two instead of climbing blind, and it
+  ignores frames too small to have loaded the link the way BBR ignores application-limited
+  samples. The bitrate set on the headset is always the ceiling either way. Selector: headset
+  (*Bitrate control*: Manual / Adaptive / Adaptive v2), plus the dashboard toggle; config key
+  `bitrate-auto` (`min-bitrate` floor default 10 Mbit/s, `mode` server-side default control law —
+  the headset selector wins over it).
 - **Radio-aware bitrate** *(toggle, default on)* — frame timings are a *lagging* indicator: by
   the time the utilisation rises the packets are already late. The headset reports its Wi-Fi
   RSSI and PHY rate once a second, and the server steps the bitrate down **before** the loss
@@ -132,8 +141,8 @@ identity everywhere: application ID `org.meumeu.wivrn.nx`, app name "WiVRn NX", 
 
 ## Roadmap (in active development)
 
-Reed-Solomon parity (burst-tolerant, on the same groups as the XOR above) · BBR-style bitrate
-control v2 · an in-headset transport HUD.
+Reed-Solomon parity (burst-tolerant, on the same groups as the XOR above) · an in-headset
+transport HUD.
 Design documents live in
 [docs/](docs/): [multipath](docs/multipath.md), [frame extrapolation](docs/frame-extrapolation.md),
 [quad layers](docs/quad-layers.md).

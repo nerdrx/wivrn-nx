@@ -267,6 +267,7 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 
 		info.settings.bitrate_bps = config.bitrate_bps;
 		info.settings.bitrate_auto = config.bitrate_auto;
+		info.settings.bitrate_control = config.bitrate_control();
 		info.settings.radio_aware = config.radio_aware;
 		info.settings.smooth_pacing = config.smooth_pacing;
 		info.settings.fec = config.fec;

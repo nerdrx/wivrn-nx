@@ -149,6 +149,13 @@ private:
 	to_headset::video_stream_data_shard::timing_info_t timing_info;
 	clock_offset clock;
 
+	// Payload bytes this frame has put on the wire so far, parity shards included: the unit
+	// the bitrate is expressed in, and what the bandwidth estimating bitrate control law
+	// measures its delivery rate from. Reset at the first shard of a frame, reported to the
+	// session at the last one. One SendData call per NAL, so it has to be a member rather
+	// than a local. Only touched under `mutex`.
+	uint32_t frame_bytes = 0;
+
 	std::ofstream video_dump;
 
 	std::shared_ptr<sender> shared_sender;

@@ -318,6 +318,7 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("resolution_scale", &configuration::resolution_scale),
 	        scalar("bitrate_bps", &configuration::bitrate_bps),
 	        scalar("bitrate_auto", &configuration::bitrate_auto),
+	        scalar("bitrate_bbr", &configuration::bitrate_bbr),
 	        scalar("radio_aware", &configuration::radio_aware),
 	        scalar("sharp_text", &configuration::sharp_text),
 	        scalar("multipath_usb", &configuration::multipath_usb),

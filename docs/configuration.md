@@ -29,9 +29,10 @@ the frames that never arrived, and lowers the bitrate when the link is saturated
 measures healthy again it climbs back up towards the ceiling. Every change is logged at info level
 with its reason.
 
-The headset has its own *Automatic bitrate* toggle, next to the bitrate slider in its streaming
-settings. Both switches must be enabled for the automatic control to run: turning either of them off
-always uses the bitrate configured on the headset. Switching the headset toggle off while streaming
+The headset has a *Bitrate control* selector next to the bitrate slider in its streaming settings,
+with three entries: *Manual*, *Adaptive* and *Adaptive v2 (experimental)*. Both switches must be
+enabled for the automatic control to run: *Manual* on the headset, or `false` here, always uses the
+bitrate configured on the headset. Switching the headset selector to *Manual* while streaming
 restores that bitrate immediately.
 
 Can be a boolean, or an object:
@@ -39,13 +40,45 @@ Can be a boolean, or an object:
 ### `enabled`
 Default value: `true`
 
-Set to `false` to always use the bitrate configured on the headset, whatever the headset toggle says.
+Set to `false` to always use the bitrate configured on the headset, whatever the headset selector
+says.
 
 ### `min-bitrate`
 Default value: `10000000` (10 Mbit/s)
 
 Lower bound in bits per second, the automatic control never goes below it. If the headset asks for
 less than this, the value requested by the headset is used instead.
+
+### `mode`
+Default value: `"aimd"`
+
+Which control law the automatic bitrate runs. Two are available:
+
+* `"aimd"` — the original one, described above: a sliding window of per-frame link utilisation
+  drives a multiplicative decrease and a slow additive probe back up, with a deep drop and a fast
+  rebound on an acute lag spike. It never learns how big the link is, so it has to walk back up
+  blind after every decrease.
+* `"bbr"` — **experimental.** Estimates the delivered bandwidth directly, dividing the bytes the
+  server put on the wire for a frame by the time the headset says it spent receiving it, and keeps a
+  ten second running maximum of that. The bitrate is a gain times that estimate: 1.25 while the
+  estimate is still growing, 0.85 once it settles, 1.10 for one short probe every eight seconds, and
+  0.7 for one interval after loss. It converges on 0.85 of the measured link and gets back there in
+  a second or two after an interruption instead of climbing blind. Frames too small to have loaded
+  the link are ignored, the way BBR ignores application-limited samples, so a static scene cannot
+  talk the estimate up.
+
+**Precedence: the headset wins.** This key is only the default for a headset that has never chosen.
+Picking either *Adaptive* or *Adaptive v2* in the headset settings pins the control law for that
+headset and overrides this key; a headset that has only ever used *Manual*, or has never touched the
+selector at all, follows whatever is configured here. So setting `"mode": "bbr"` on the server is
+enough to try v2 without touching any headset — but a headset that once selected *Adaptive* keeps
+AIMD until it selects something else. Note that such a headset still *displays* *Adaptive*: the
+entry it shows is derived from what it last chose, not from what the server is running.
+
+Changing the control law mid-session (either end) resets the controller to the full ceiling and
+starts over: the two laws do not measure the same quantity, and measurements taken under one say
+nothing about the other. Every decision either law takes is logged at info level with its reason,
+its estimate and its state.
 
 ### Examples
 ```json
@@ -64,6 +97,16 @@ Disable automatic bitrate, always use the bitrate configured on the headset.
 }
 ```
 Enable automatic bitrate, but never go below 25 Mbit/s.
+
+```json
+{
+	"bitrate-auto": {
+		"mode": "bbr"
+	}
+}
+```
+Default every headset that has not chosen for itself to the experimental bandwidth estimating
+control law.
 
 ## `pacing`
 Default value: `true`

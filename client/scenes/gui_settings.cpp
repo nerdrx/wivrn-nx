@@ -386,14 +386,36 @@ void settings_streaming(const settings_context & ctx)
 		});
 	}
 
+	// Manual / Adaptive / Adaptive v2. bitrate_auto stays the switch it always was — the
+	// dashboard and the server both still read it — and bitrate_bbr only says which control
+	// law the adaptive entries mean. Leaving bitrate_bbr empty (nobody ever touched this)
+	// hands the choice to the server's own configuration, which is why picking "Adaptive"
+	// explicitly is not the same as never having picked anything.
+	const auto bitrate_control_index = [](const configuration & c) {
+		if (not c.bitrate_auto)
+			return 0;
+		return c.bitrate_bbr.value_or(false) ? 2 : 1;
+	};
+
 	list.push_back({
-	        .id = "##bitrate_auto",
-	        .label = _("Automatic bitrate"),
-	        .description = _("Adapt the bitrate to the connection. The bitrate below becomes the maximum."),
-	        .ui = ui_kind::toggle,
-	        .get_bool = [&config] { return config.bitrate_auto; },
-	        .set_bool = [&ctx, &config](bool v) { config.bitrate_auto = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
-	        .default_bool = default_config.bitrate_auto,
+	        .id = "##bitrate_control",
+	        .label = _C("setting name", "Bitrate control"),
+	        .description = _("Manual keeps the bitrate below exactly where you set it. Adaptive lets the server lower it when the connection cannot keep up, using that bitrate as the maximum. Adaptive v2 is experimental: instead of reacting to congestion it measures how fast frames are actually being delivered and aims just under that."),
+	        .ui = ui_kind::combo,
+	        .get_int = [&config, bitrate_control_index] { return bitrate_control_index(config); },
+	        .set_int = [&ctx, &config](int v) {
+		        config.bitrate_auto = v != 0;
+		        if (v != 0)
+			        config.bitrate_bbr = v == 2;
+		        config.save();
+		        if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .options = [] { return std::vector<std::string>{
+		                        _C("Bitrate control", "Manual"),
+		                        _C("Bitrate control", "Adaptive"),
+		                        _C("Bitrate control", "Adaptive v2 (experimental)"),
+		                }; },
+	        .title = _C("setting name", "Bitrate control"),
+	        .default_int = bitrate_control_index(default_config),
 	});
 
 	list.push_back({

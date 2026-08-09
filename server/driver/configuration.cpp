@@ -198,7 +198,8 @@ configuration::configuration()
 				throw std::runtime_error("invalid quad-layers value, expected a boolean or an object");
 		}
 
-		// "bitrate-auto": true/false, or an object {"enabled": bool, "min-bitrate": bits/s}
+		// "bitrate-auto": true/false, or an object
+		// {"enabled": bool, "min-bitrate": bits/s, "mode": "aimd"|"bbr"}
 		if (auto it = json.find("bitrate-auto"); it != json.end())
 		{
 			if (it->is_boolean())
@@ -209,6 +210,18 @@ configuration::configuration()
 					bitrate_auto.enabled = *enabled;
 				if (auto min = it->find("min-bitrate"); min != it->end())
 					bitrate_auto.min_bitrate_bps = *min;
+				// Only the default: a headset that expresses a control law of its
+				// own always wins over this.
+				if (auto m = it->find("mode"); m != it->end())
+				{
+					const std::string name = *m;
+					if (name == "aimd")
+						bitrate_auto.control = bitrate_mode::aimd;
+					else if (name == "bbr")
+						bitrate_auto.control = bitrate_mode::bbr;
+					else
+						throw std::runtime_error("invalid bitrate-auto mode, expected \"aimd\" or \"bbr\"");
+				}
 			}
 			else
 				throw std::runtime_error("invalid bitrate-auto value, expected a boolean or an object");

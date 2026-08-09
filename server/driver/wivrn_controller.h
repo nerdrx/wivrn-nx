@@ -24,7 +24,10 @@
 
 #include "hand_joints_list.h"
 #include "pose_list.h"
+#include "pose_sanitize.h"
 
+#include <array>
+#include <cstdint>
 #include <mutex>
 #include <vector>
 
@@ -46,6 +49,12 @@ class wivrn_controller : public xrt_device
 	std::vector<xrt_input> inputs_staging;
 	std::vector<xrt_input> inputs_array;
 	std::vector<xrt_output> outputs_array;
+
+	// One per pose kind, in the order of the switch in get_tracked_pose():
+	// aim, grip, palm, pinch, poke. The application must never see a NaN.
+	std::array<relation_sanitizer, 5> pose_sanitizers;
+	uint64_t sanitized_poses = 0;
+	rate_limiter sanitize_warn;
 
 	wivrn::wivrn_session * cnx;
 

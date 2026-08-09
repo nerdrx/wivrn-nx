@@ -20,11 +20,13 @@
 #pragma once
 
 #include "polynomial_interpolator.h"
+#include "pose_sanitize.h"
 #include "utils/csv_logger.h"
 #include "wivrn_packets.h"
 #include "xrt/xrt_defines.h"
 
 #include <atomic>
+#include <cstdint>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -63,6 +65,11 @@ class pose_list
 	tracked_state position_state;
 	tracked_state orientation_state;
 
+	// Samples dropped on ingest because the headset sent a non-finite float.
+	// Protected by mutex.
+	uint64_t rejected_samples = 0;
+	rate_limiter reject_warn;
+
 	struct debug_data
 	{
 		bool in; // true: received data, false: data request
@@ -84,6 +91,10 @@ public:
 
 	static xrt_space_relation interpolate(const xrt_space_relation & a, const xrt_space_relation & b, float t);
 	static xrt_space_relation extrapolate(const xrt_space_relation & a, const xrt_space_relation & b, int64_t ta, int64_t tb, int64_t t);
+
+	// True if every float the flags claim to be valid is finite and the
+	// orientation, if claimed valid, can be normalised.
+	static bool is_sane(const from_headset::tracking::pose & pose);
 
 	pose_list(wivrn::device_id id);
 

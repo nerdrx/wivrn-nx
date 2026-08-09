@@ -198,7 +198,9 @@ void app_pacer::info(int64_t predicted_display_time_ns,
                      int64_t extra_ns)
 {
 	compositor_display_time = predicted_display_time_ns;
-	period = predicted_display_period_ns;
+	// predict() divides by the period and steps last_display_time by it: a zero or
+	// negative one is a SIGFPE followed by an infinite loop.
+	period = std::max<int64_t>(1'000'000, predicted_display_period_ns);
 	compositor_time = std::max<int64_t>(0, extra_ns);
 }
 

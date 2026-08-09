@@ -103,8 +103,15 @@ public:
 
 		if (before and after)
 		{
-			float t = float(after->at_timestamp_ns - at_timestamp_ns) /
-			          (after->at_timestamp_ns - before->at_timestamp_ns);
+			// before->at < at <= after->at, so the span is at least 1 ns; the
+			// guard is here so that a future change to the selection above
+			// cannot silently turn this into a division by zero.
+			const XrDuration span = after->at_timestamp_ns - before->at_timestamp_ns;
+			if (span <= 0)
+				return {produced, *after};
+
+			float t = float(after->at_timestamp_ns - at_timestamp_ns) / float(span);
+			t = std::clamp(t, 0.f, 1.f);
 			return {produced, static_cast<Derived *>(this)->interpolate(*before, *after, t)};
 		}
 

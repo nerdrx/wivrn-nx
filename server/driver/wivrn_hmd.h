@@ -54,6 +54,17 @@ class wivrn_hmd : public xrt_device
 	};
 
 	view_list views;
+
+	// Last line of defence: whatever happens upstream, the application must never
+	// be handed a NaN. get_tracked_pose() and get_view_poses() are called from the
+	// application's frame thread, one at a time per xrt_device, but they are
+	// distinct entry points so each keeps its own cache.
+	relation_sanitizer head_relation_sanitizer;
+	relation_sanitizer view_relation_sanitizer;
+	std::array<pose_sanitizer, 2> view_pose_sanitizers;
+	uint64_t sanitized_poses = 0;
+	rate_limiter sanitize_warn;
+
 	thread_safe<from_headset::battery> battery{};
 
 	thread_safe<wivrn_hmd_presence_data> presence;
@@ -62,6 +73,9 @@ class wivrn_hmd : public xrt_device
 	wivrn::wivrn_session * cnx;
 
 	xrt_result_t get_visibility_mask(xrt_visibility_mask_type, uint32_t view_index, xrt_visibility_mask **);
+
+	// Counts and rate limits the "we had to replace a pose" warnings.
+	void warn_sanitized(int64_t now, const char * what);
 
 public:
 	using base_t = xrt_device;

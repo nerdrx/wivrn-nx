@@ -36,7 +36,13 @@
 #include <ranges>
 
 #include "openxr/openxr.h"
+#include "pose_sanitize.h"
 #include "wivrn_config.h"
+
+// A sample further than this from the requested time is not usable: at the default
+// window its weight is already 3e-5, and keeping it in the fit is what turns a
+// tracking freeze into a NaN (see the comment on abs_Δt in get_at).
+static constexpr XrDuration max_sample_age_ns = 1'000'000'000;
 
 template <int N, bool quaternion = false, int polynomial_order = 2, int stored_samples = 30>
 class polynomial_interpolator
@@ -72,8 +78,10 @@ public:
 		sample * oldest = nullptr;
 		for (auto & i: data)
 		{
-			// Avoid samples too close to each other
-			if (std::abs(i.timestamp - s.timestamp) < 2'000'000)
+			// Avoid samples too close to each other.
+			// Unused slots hold XrTime::lowest(), the subtraction would overflow.
+			if (i.timestamp != std::numeric_limits<XrTime>::lowest() and
+			    std::abs(i.timestamp - s.timestamp) < 2'000'000)
 			{
 				if (i.production_timestamp < s.production_timestamp)
 					i = s;
@@ -142,9 +150,29 @@ public:
 			if (not sample.y)
 				continue;
 
-			int abs_Δt = std::abs(sample.timestamp - timestamp);
+			// This used to be an int. XrTime is nanoseconds, so any sample more than
+			// 2.15 s (2^31 ns) from the requested time truncated to an arbitrary,
+			// often negative, value: a stale sample could come out with a *negative*
+			// weight, with full weight (any multiple of 2^32 ns), or, at
+			// 2^32 - window ns, with 1 / (1 + (-1)^3) = +inf. An infinite row makes
+			// AᵀA infinite and the LDLT solve below returns NaN for every coefficient.
+			//
+			// The buffer normally only holds samples from the last few hundred ms, so
+			// this was unreachable until pose_list started dropping valid-but-untracked
+			// samples: during a tracking freeze the buffer is no longer refreshed, and
+			// when tracking resumes it holds samples as old as the freeze lasted.
+			const int64_t abs_Δt = std::abs(sample.timestamp - timestamp);
 
-			float weight = 1. / (1. + std::pow(abs_Δt / float(window), 3.));
+			// Too old to carry any weight, and keeping it in the fit is a liability.
+			if (abs_Δt > max_sample_age_ns)
+				continue;
+
+			// abs_Δt >= 0 and window > 0, so the denominator is >= 1 and the weight
+			// is in (0, 1]: it can neither be negative nor blow up.
+			const float ratio = float(abs_Δt) / float(std::max<XrDuration>(1, window));
+			float weight = 1.f / (1.f + ratio * ratio * ratio);
+			if (not wivrn::is_finite(weight))
+				continue;
 
 			float Δt = (sample.timestamp - timestamp) * 1.e-9;
 			float Δtⁱ = 1;
@@ -197,6 +225,18 @@ public:
 			sol = Eigen::ColPivHouseholderQR<decltype(Aprime)>{Aprime}.solve(bprime).transpose();
 		else
 			sol = (Aprime.transpose() * Aprime).ldlt().solve(Aprime.transpose() * bprime).transpose();
+
+		// A rank deficient system makes LDLT return infinities or NaN. Nothing below
+		// us checks, so a bad solve would be reported to the application as a valid
+		// pose: fall back to the raw sample instead.
+		for (int i = 0; i < N; ++i)
+		{
+			for (int j = 0; j <= polynomial_order; ++j)
+			{
+				if (not wivrn::is_finite(sol(i, j)))
+					return *closest;
+			}
+		}
 
 		return sample{
 		        .production_timestamp = production_timestamp,

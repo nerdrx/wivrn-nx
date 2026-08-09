@@ -158,8 +158,21 @@ xrt_result_t wivrn_hmd::get_tracked_pose(xrt_input_name name, int64_t at_timesta
 	auto target_ns = std::min(now + max_extrapolation_ns, at_timestamp_ns);
 	auto [production_timestamp, view] = views.get_at(target_ns);
 	*res = view.relation;
+
+	if (not head_relation_sanitizer.sanitize(*res))
+		warn_sanitized(now, "head relation");
+
 	cnx->add_tracking_request(device_id::HEAD, at_timestamp_ns, production_timestamp, now);
 	return XRT_SUCCESS;
+}
+
+void wivrn_hmd::warn_sanitized(int64_t now, const char * what)
+{
+	++sanitized_poses;
+	if (sanitize_warn(now))
+		U_LOG_W("HEAD: replaced a non-finite %s with the last known good one (%lu so far)",
+		        what,
+		        (unsigned long)sanitized_poses);
 }
 
 void wivrn_hmd::update_tracking(const from_headset::tracking & tracking, const clock_offset & offset)
@@ -203,13 +216,28 @@ xrt_result_t wivrn_hmd::get_view_poses(const xrt_vec3 * default_eye_relation,
 	view.relation.relation_flags = (xrt_space_relation_flags)flags;
 	*out_head_relation = view.relation;
 
+	// The runtime composes this with the per eye poses and hands the result to the
+	// application, which submits it back to xrEndFrame(): a single non-finite float
+	// here is XR_ERROR_POSE_INVALID and, for most engines, a crash. Never let one
+	// through, whatever went wrong upstream.
+	if (not view_relation_sanitizer.sanitize(*out_head_relation))
+		warn_sanitized(now, "head relation");
+
 	assert((out_head_relation->relation_flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT) == 0 or math_quat_ensure_normalized(&out_head_relation->pose.orientation));
 
 	assert(view_count == 2);
 	for (size_t eye = 0; eye < 2; ++eye)
 	{
-		out_fovs[eye] = view.fovs[eye];
-		out_poses[eye] = view.poses[eye];
+		// m_relation_chain_push_pose_if_not_identity() pushes these with every
+		// valid bit set, so an unusable one is multiplied straight into the view
+		// matrix.
+		xrt_pose pose = view.poses[eye];
+		if (not view_pose_sanitizers[eye].sanitize(pose))
+			warn_sanitized(now, "view pose");
+		out_poses[eye] = pose;
+
+		// Fall back to the fov the headset announced at connection time.
+		out_fovs[eye] = is_finite(view.fovs[eye]) ? view.fovs[eye] : hmd->distortion.fov[eye];
 	}
 	return XRT_SUCCESS;
 }

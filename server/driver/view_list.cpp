@@ -18,6 +18,9 @@
  */
 
 #include "view_list.h"
+#include "os/os_time.h"
+#include "pose_sanitize.h"
+#include "util/u_logging.h"
 #include "xrt_cast.h"
 
 namespace wivrn
@@ -33,8 +36,26 @@ void view_list::update_tracking(const from_headset::tracking & tracking, const c
 
 	for (size_t eye = 0; eye < 2; ++eye)
 	{
-		poses[eye] = xrt_cast(tracking.views[eye].pose);
-		fovs[eye] = xrt_cast(tracking.views[eye].fov);
+		const auto & view = tracking.views[eye];
+
+		// A runtime that reports the views as invalid usually leaves the array
+		// untouched, and the client zeroes it before every locate_views(): the
+		// pose then arrives here as a zero quaternion, which the runtime happily
+		// multiplies into the view matrix and hands to the application.
+		xrt_pose pose = xrt_cast(view.pose);
+		if (not pose_sanitizers[eye].sanitize(pose))
+		{
+			++rejected_views;
+			if (reject_warn(os_monotonic_get_ns()))
+				U_LOG_W("HEAD: dropped an unusable view pose for eye %zu (%lu so far)",
+				        eye,
+				        (unsigned long)rejected_views);
+		}
+		poses[eye] = pose;
+
+		// A non-finite fov turns into a non-finite projection matrix.
+		if (is_finite(view.fov))
+			fovs[eye] = xrt_cast(view.fov);
 	}
 
 	head_poses.update_tracking(tracking, offset);

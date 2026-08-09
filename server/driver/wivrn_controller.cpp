@@ -796,29 +796,52 @@ xrt_result_t wivrn_controller::get_tracked_pose(xrt_input_name name, int64_t at_
 	device_id device;
 	XrTime now = os_monotonic_get_ns();
 	auto target_ns = std::min(at_timestamp_ns, now + max_extrapolation_ns);
+	size_t sanitizer = 0;
 	switch (name)
 	{
 		case XRT_INPUT_TOUCH_AIM_POSE:
 		case XRT_INPUT_HAND_AIM_POSE:
 			std::tie(production_timestamp, *res, device) = aim.get_pose_at(target_ns);
+			sanitizer = 0;
 			break;
 		case XRT_INPUT_TOUCH_GRIP_POSE:
 		case XRT_INPUT_HAND_GRIP_POSE:
 			std::tie(production_timestamp, *res, device) = grip.get_pose_at(target_ns);
+			sanitizer = 1;
 			break;
 		case XRT_INPUT_GENERIC_PALM_POSE:
 			std::tie(production_timestamp, *res, device) = palm.get_pose_at(target_ns);
+			sanitizer = 2;
 			break;
 		case XRT_INPUT_HAND_PINCH_POSE:
 			std::tie(production_timestamp, *res, device) = pinch_ext.get_pose_at(target_ns);
+			sanitizer = 3;
 			break;
 		case XRT_INPUT_HAND_POKE_POSE:
 			std::tie(production_timestamp, *res, device) = poke_ext.get_pose_at(target_ns);
+			sanitizer = 4;
 			break;
 		default:
 			U_LOG_XDEV_UNSUPPORTED_INPUT(this, u_log_get_global_level(), name);
 			return XRT_ERROR_INPUT_UNSUPPORTED;
 	}
+
+	// Same contract as the HMD: a non-finite relation reaches the application and
+	// comes back as XR_ERROR_POSE_INVALID. Replace it with the last good one and
+	// stop claiming the pose is tracked.
+	if (not pose_sanitizers[sanitizer].sanitize(*res))
+	{
+		++sanitized_poses;
+		if (sanitize_warn(now))
+		{
+			const auto dev = magic_enum::enum_name(device);
+			U_LOG_W("%.*s: replaced a non-finite pose with the last known good one (%lu so far)",
+			        (int)dev.size(),
+			        dev.data(),
+			        (unsigned long)sanitized_poses);
+		}
+	}
+
 	cnx->add_tracking_request(device, at_timestamp_ns, production_timestamp, now);
 	return XRT_SUCCESS;
 }

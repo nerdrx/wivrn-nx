@@ -20,14 +20,17 @@
 #include "pose_list.h"
 #include "driver/clock_offset.h"
 #include "driver/polynomial_interpolator.h"
+#include "driver/pose_sanitize.h"
 #include "math/m_api.h"
 #include "math/m_eigen_interop.hpp"
 #include "math/m_space.h"
 #include "math/m_vec3.h"
 #include "os/os_time.h"
+#include "util/u_logging.h"
 #include "xrt/xrt_defines.h"
 #include <Eigen/Core>
 #include <Eigen/Geometry>
+#include <algorithm>
 #include <iostream>
 #include <magic_enum.hpp>
 
@@ -41,55 +44,123 @@ xrt_space_relation pose_list::interpolate(const xrt_space_relation & a, const xr
 	xrt_space_relation result;
 	xrt_space_relation_flags flags = xrt_space_relation_flags(a.relation_flags & b.relation_flags);
 
-	if (math_quat_dot(&a.pose.orientation, &b.pose.orientation) > 0)
+	// m_space_relation_interpolate() goes through math_quat_slerp(), i.e. acos():
+	// a zero quaternion (the usual shape of "the runtime never filled this in") or
+	// a non-finite one comes back as NaN, and the flags would still claim the
+	// orientation is valid. Keep whichever side is usable instead of blending.
+	const xrt_space_relation * pa = &a;
+	const xrt_space_relation * pb = &b;
+
+	if (flags & XRT_SPACE_RELATION_ORIENTATION_VALID_BIT)
 	{
-		m_space_relation_interpolate(const_cast<xrt_space_relation *>(&a), const_cast<xrt_space_relation *>(&b), t, flags, &result);
+		const bool a_ok = is_valid_orientation(a.pose.orientation);
+		const bool b_ok = is_valid_orientation(b.pose.orientation);
+
+		if (not a_ok and not b_ok)
+			flags = xrt_space_relation_flags(flags & ~(XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT));
+		else if (not a_ok)
+			pa = pb;
+		else if (not b_ok)
+			pb = pa;
+	}
+
+	// A NaN or out of range interpolation parameter poisons everything downstream.
+	if (not is_finite(t))
+		t = 0;
+	t = std::clamp(t, 0.f, 1.f);
+
+	if (math_quat_dot(&pa->pose.orientation, &pb->pose.orientation) > 0)
+	{
+		m_space_relation_interpolate(const_cast<xrt_space_relation *>(pa), const_cast<xrt_space_relation *>(pb), t, flags, &result);
 	}
 	else
 	{
 		xrt_space_relation b2{
-		        .relation_flags = b.relation_flags,
+		        .relation_flags = pb->relation_flags,
 		        .pose = {
 		                .orientation = {
-		                        .x = -b.pose.orientation.x,
-		                        .y = -b.pose.orientation.y,
-		                        .z = -b.pose.orientation.z,
-		                        .w = -b.pose.orientation.w,
+		                        .x = -pb->pose.orientation.x,
+		                        .y = -pb->pose.orientation.y,
+		                        .z = -pb->pose.orientation.z,
+		                        .w = -pb->pose.orientation.w,
 		                },
-		                .position = b.pose.position,
+		                .position = pb->pose.position,
 		        },
-		        .linear_velocity = b.linear_velocity,
-		        .angular_velocity = b.angular_velocity,
+		        .linear_velocity = pb->linear_velocity,
+		        .angular_velocity = pb->angular_velocity,
 		};
 
-		m_space_relation_interpolate(const_cast<xrt_space_relation *>(&a), &b2, t, flags, &result);
+		m_space_relation_interpolate(const_cast<xrt_space_relation *>(pa), &b2, t, flags, &result);
 	}
+
+	// Belt and braces: slerp of two usable quaternions is usable, but the caller
+	// gets a relation, not a promise.
+	if (not is_usable(result))
+	{
+		result = *pb;
+		result.relation_flags = xrt_space_relation_flags(flags & ~(XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT | XRT_SPACE_RELATION_POSITION_TRACKED_BIT));
+	}
+
 	return result;
 }
 
 xrt_space_relation pose_list::extrapolate(const xrt_space_relation & a, const xrt_space_relation & b, int64_t ta, int64_t tb, int64_t t)
 {
-	float h = (tb - ta) / 1.e9;
-
 	xrt_space_relation res = t < ta ? a : b;
+
+	// Two samples at the same timestamp make h zero, and the finite difference
+	// below divides by it: +-inf velocities, then a NaN position. Nothing can be
+	// extrapolated from a zero time span, return the newer sample unchanged.
+	if (tb == ta)
+		return b;
+
+	float h = (tb - ta) / 1.e9;
 
 	xrt_vec3 lin_vel = res.relation_flags & XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT ? res.linear_velocity : (b.pose.position - a.pose.position) / h;
 
 	float dt = (t - tb) / 1.e9;
 
+	if (not is_finite(lin_vel) or not is_finite(dt))
+		return b;
+
 	float dt2_over_2 = dt * dt / 2;
 	res.pose.position = res.pose.position + lin_vel * dt;
 
-	if (res.relation_flags & XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT)
+	if ((res.relation_flags & XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT) and
+	    is_finite(res.angular_velocity) and
+	    is_valid_orientation(res.pose.orientation))
 	{
 		xrt_vec3 dtheta = res.angular_velocity * dt;
 		xrt_quat dq;
 		math_quat_exp(&dtheta, &dq);
 
-		map_quat(res.pose.orientation) = map_quat(res.pose.orientation) * map_quat(dq);
+		if (is_valid_orientation(dq))
+			map_quat(res.pose.orientation) = map_quat(res.pose.orientation) * map_quat(dq);
 	}
 
+	if (not is_usable(res))
+		return b;
+
 	return res;
+}
+
+bool pose_list::is_sane(const from_headset::tracking::pose & pose)
+{
+	using flags = from_headset::pose_flags;
+
+	if ((pose.flags & flags::orientation_valid) and not is_valid_orientation(pose.pose.orientation))
+		return false;
+
+	if ((pose.flags & flags::position_valid) and not is_finite(pose.pose.position))
+		return false;
+
+	if ((pose.flags & flags::linear_velocity_valid) and not is_finite(pose.linear_velocity))
+		return false;
+
+	if ((pose.flags & flags::angular_velocity_valid) and not is_finite(pose.angular_velocity))
+		return false;
+
+	return true;
 }
 
 pose_list::pose_list(wivrn::device_id id) : device(id)
@@ -198,6 +269,25 @@ void pose_list::add_sample(XrTime production_timestamp, XrTime timestamp, const 
 	production_timestamp = offset.from_headset(production_timestamp);
 	timestamp = offset.from_headset(timestamp);
 
+	// Nothing between the headset runtime and here validates the floats: a NaN in
+	// the packet would be stored, fitted, and handed to the application as a valid
+	// pose. Drop the whole sample instead; the tracked state is left untouched so
+	// the freeze machinery keeps the last good pose.
+	if (not is_sane(pose))
+	{
+		std::lock_guard lock(mutex);
+		++rejected_samples;
+		if (reject_warn(os_monotonic_get_ns()))
+		{
+			const auto name = magic_enum::enum_name(device);
+			U_LOG_W("%.*s: dropped a tracking sample with a non-finite pose (%lu so far)",
+			        (int)name.size(),
+			        name.data(),
+			        (unsigned long)rejected_samples);
+		}
+		return;
+	}
+
 	polynomial_interpolator<3>::sample position{production_timestamp, timestamp};
 	if (pose.flags & from_headset::pose_flags::position_valid)
 		position.y.emplace(
@@ -297,7 +387,11 @@ std::pair<XrTime, xrt_space_relation> pose_list::get_at(XrTime at_timestamp_ns)
 	auto position = positions.get_at(position_tracked ? at_timestamp_ns : std::min(at_timestamp_ns, position_state.last_tracked_timestamp));
 	auto orientation = orientations.get_at(orientation_tracked ? at_timestamp_ns : std::min(at_timestamp_ns, orientation_state.last_tracked_timestamp));
 
-	if (position.y)
+	// Every branch below is gated on the value being finite: the interpolator solves
+	// a least squares system, and a rank deficient one comes back as infinity or
+	// NaN. A flag that says VALID is a promise to the application, do not make it
+	// for a value we have not looked at.
+	if (position.y and is_finite(position.y->x()) and is_finite(position.y->y()) and is_finite(position.y->z()))
 	{
 		flags(XRT_SPACE_RELATION_POSITION_VALID_BIT);
 		if (position_tracked)
@@ -308,7 +402,8 @@ std::pair<XrTime, xrt_space_relation> pose_list::get_at(XrTime at_timestamp_ns)
 		        position.y->z()};
 	}
 
-	if (position.dy and position_tracked)
+	if (position.dy and position_tracked and
+	    is_finite(position.dy->x()) and is_finite(position.dy->y()) and is_finite(position.dy->z()))
 	{
 		flags(XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT);
 		ret.linear_velocity = {
@@ -317,22 +412,29 @@ std::pair<XrTime, xrt_space_relation> pose_list::get_at(XrTime at_timestamp_ns)
 		        position.dy->z()};
 	}
 
-	if (orientation.y)
+	// norm2 > 0.1 alone is not enough: it is *true* for an infinite norm, and
+	// normalize() then divides infinity by infinity and stores NaN in a quaternion
+	// flagged ORIENTATION_VALID. That is the shape the application crashes on.
+	const bool orientation_usable =
+	        orientation.y and
+	        is_finite((*orientation.y)[0]) and is_finite((*orientation.y)[1]) and
+	        is_finite((*orientation.y)[2]) and is_finite((*orientation.y)[3]) and
+	        is_finite(orientation.y->squaredNorm()) and
+	        orientation.y->squaredNorm() > 0.1f;
+
+	if (orientation_usable)
 	{
-		if (auto norm2 = orientation.y->squaredNorm(); norm2 > 0.1)
-		{
-			flags(XRT_SPACE_RELATION_ORIENTATION_VALID_BIT);
-			if (orientation_tracked)
-				flags(XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT);
+		flags(XRT_SPACE_RELATION_ORIENTATION_VALID_BIT);
+		if (orientation_tracked)
+			flags(XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT);
 
-			orientation.y->normalize();
+		orientation.y->normalize();
 
-			ret.pose.orientation = {
-			        .x = (*orientation.y)[1],
-			        .y = (*orientation.y)[2],
-			        .z = (*orientation.y)[3],
-			        .w = (*orientation.y)[0]};
-		}
+		ret.pose.orientation = {
+		        .x = (*orientation.y)[1],
+		        .y = (*orientation.y)[2],
+		        .z = (*orientation.y)[3],
+		        .w = (*orientation.y)[0]};
 
 		if (orientation.dy and orientation_tracked)
 		{
@@ -348,12 +450,17 @@ std::pair<XrTime, xrt_space_relation> pose_list::get_at(XrTime at_timestamp_ns)
 			        (*orientation.dy)[3]};
 			Eigen::Quaternionf half_ω = dq * q;
 
-			flags(XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT);
-			ret.angular_velocity = {
+			const xrt_vec3 ω{
 			        2 * half_ω.x(),
 			        2 * half_ω.y(),
 			        2 * half_ω.z(),
 			};
+
+			if (is_finite(ω))
+			{
+				flags(XRT_SPACE_RELATION_ANGULAR_VELOCITY_VALID_BIT);
+				ret.angular_velocity = ω;
+			}
 		}
 	}
 

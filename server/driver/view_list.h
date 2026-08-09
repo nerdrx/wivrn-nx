@@ -20,8 +20,10 @@
 #pragma once
 
 #include "pose_list.h"
+#include "pose_sanitize.h"
 
 #include <array>
+#include <cstdint>
 #include <mutex>
 #include <openxr/openxr.h>
 
@@ -41,8 +43,21 @@ class view_list
 	pose_list head_poses{device_id::HEAD};
 	std::mutex mutex;
 	XrViewStateFlags flags{};
-	std::array<xrt_pose, 2> poses;
-	std::array<xrt_fov, 2> fovs;
+
+	// Identity rather than indeterminate: get_at() can be called by the runtime
+	// before the first tracking packet arrives, and a zero quaternion is as fatal
+	// to the application as a NaN one.
+	std::array<xrt_pose, 2> poses{
+	        xrt_pose{.orientation = {0, 0, 0, 1}, .position = {0, 0, 0}},
+	        xrt_pose{.orientation = {0, 0, 0, 1}, .position = {0, 0, 0}},
+	};
+	std::array<xrt_fov, 2> fovs{};
+
+	// The per eye poses are forwarded verbatim to the runtime, which pushes them
+	// into the relation chain with every valid bit set. They must be checked.
+	std::array<pose_sanitizer, 2> pose_sanitizers;
+	uint64_t rejected_views = 0;
+	rate_limiter reject_warn;
 
 public:
 	void update_tracking(const from_headset::tracking & tracking, const clock_offset & offset);

@@ -130,9 +130,12 @@ log every attach/flip with reasons and RTT.
   allows). Takes effect on the next connection.
 - **Comfort vignette** *(toggle, default on)* — a soft peripheral fade that eases in when the
   app framerate craters and lifts when it recovers; peripheral judder is what triggers nausea.
-- **Sharp overlay layers** *(in development)* — OpenXR quad layers (wlx-overlay-s / WayVR
-  panels) promoted out of the lossy world video into their own stream, composited on the
-  headset with 90 Hz pose stability.
+- **Sharp overlay layers** *(toggle, default on)* — one opaque OpenXR quad layer
+  (wlx-overlay-s / WayVR panels) is promoted out of the lossy world video into its own
+  stream and composited on the headset as a real quad layer: pixel-stable under head motion,
+  untouched by foveation or eye-image scaling. Falls back to server-side baking in every
+  uncertain case (blended quads need `quad-layers.allow-blended`). Promoting also restores
+  the compositor's single-projection fast path.
 
 ## Desktop mirror
 

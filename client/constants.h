@@ -102,8 +102,8 @@ constexpr float recenter_action_distance = 0.3;
 // Default distance between the headset and the GUI, when the GUI is first shown, when the session state changes, when the lobby is refocused
 constexpr float initial_gui_distance = 0.5;
 
-// Skybox color
-constexpr XrColor4f sky_color = {0, 0.25, 0.5, 1};
+// Skybox color, matches the deep space background of the default environment
+constexpr XrColor4f sky_color = {0.005, 0, 0.015, 1};
 
 // Z-indices of composition layers
 constexpr int zindex_passthrough = -2;

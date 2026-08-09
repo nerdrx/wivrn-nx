@@ -25,7 +25,9 @@
 #include "vk/allocation.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cinttypes>
 #include <condition_variable>
 #include <cstring>
 #include <format>
@@ -44,6 +46,8 @@ namespace
 const uint32_t bytes_per_pixel = 4;
 const char * node_name = "wivrn-headset-view";
 const char * node_description = "WiVRn Headset View";
+//! Period of the delivery counter log
+const int64_t delivery_log_interval_ns = int64_t(5) * U_TIME_1S_IN_NS;
 
 struct deleter
 {
@@ -206,6 +210,7 @@ class mirror_impl : public wivrn::pipewire_mirror
 	        .version = PW_VERSION_STREAM_EVENTS,
 	        .state_changed = &mirror_impl::on_state_changed,
 	        .param_changed = &mirror_impl::on_param_changed,
+	        .process = &mirror_impl::on_process,
 	};
 	std::atomic<std::underlying_type_t<pw_stream_state>> stream_state{PW_STREAM_STATE_UNCONNECTED};
 	std::atomic<bool> negotiated{false};
@@ -219,13 +224,39 @@ class mirror_impl : public wivrn::pipewire_mirror
 	vk::Semaphore sem;
 	uint64_t sem_value = 0;
 
+	/*!
+	 * Latest captured frame: written by the reader thread, read by the PipeWire
+	 * loop thread in process().
+	 *
+	 * Two slots so that the reader thread can fill one while the loop thread
+	 * copies the other out; frame_mutex only protects the slot indices and is
+	 * held by the loop thread for the duration of its copy, so that the reader
+	 * thread cannot start overwriting the slot being read. The reader thread
+	 * writes frame_slots[frame_write] without the mutex: it is the only writer,
+	 * and frame_write is never the slot process() reads.
+	 */
+	std::mutex frame_mutex;
+	std::array<std::vector<uint8_t>, 2> frame_slots;
+	int frame_write = 0;   // slot the reader thread may write to
+	int frame_latest = -1; // slot holding the most recent frame, -1 if none yet
+	int64_t frame_pts = 0;
+	uint64_t frame_seq = 0;
+
+	// PipeWire loop thread only
+	uint64_t delivered = 0;    // buffers queued with a frame in them
+	uint64_t empty_cycles = 0; // graph cycles with no frame to deliver
+	int64_t next_log_ns = 0;   // next delivery counter log
+	bool warned_short_buffer = false;
+
 	std::thread reader;
 
 	static void on_state_changed(void * self_v, pw_stream_state old, pw_stream_state state, const char * error);
 	static void on_param_changed(void * self_v, uint32_t id, const spa_pod * param);
+	static void on_process(void * self_v);
 
 	void read_frames();
-	void push_frame();
+	void store_frame();
+	void process();
 
 public:
 	mirror_impl(wivrn::vk_bundle & vk, vk::Extent2D size, int fps);
@@ -302,6 +333,9 @@ mirror_impl::mirror_impl(wivrn::vk_bundle & vk, vk::Extent2D size, int fps) :
 	// Keep it mapped for the whole lifetime
 	readback.map();
 
+	for (auto & slot: frame_slots)
+		slot.resize(size_t(stride) * height);
+
 	// The descriptor set only changes on binding 0, binding 1 is written once
 	vk::DescriptorImageInfo dest_info{
 	        .imageView = *dest_view,
@@ -362,13 +396,15 @@ mirror_impl::mirror_impl(wivrn::vk_bundle & vk, vk::Extent2D size, int fps) :
 	const spa_pod * params[1];
 	params[0] = spa_format_video_raw_build(&b, SPA_PARAM_EnumFormat, &video_info);
 
-	// DRIVER: nothing else paces this node, frames are produced by the compositor,
-	// so the graph is triggered once a frame has been pushed.
+	// No PW_STREAM_FLAG_DRIVER: this node behaves like a camera, the graph drives
+	// it and process() hands out whatever the compositor last captured. Driving the
+	// graph ourselves depends on what the session manager picks as the driver, and
+	// in the topology this ends up in, buffers never reach the peer.
 	if (pw_stream_connect(
 	            stream.get(),
 	            PW_DIRECTION_OUTPUT,
 	            PW_ID_ANY,
-	            pw_stream_flags(PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_DRIVER),
+	            pw_stream_flags(PW_STREAM_FLAG_MAP_BUFFERS),
 	            params,
 	            1) < 0)
 		throw std::runtime_error("failed to connect mirror stream");
@@ -402,6 +438,15 @@ void mirror_impl::on_state_changed(void * self_v, pw_stream_state old, pw_stream
 	self->stream_state = state;
 	if (state == PW_STREAM_STATE_UNCONNECTED or state == PW_STREAM_STATE_ERROR)
 		self->negotiated = false;
+
+	// Counters are per streaming session, they are only touched from this thread
+	if (state == PW_STREAM_STATE_STREAMING)
+	{
+		self->delivered = 0;
+		self->empty_cycles = 0;
+		self->next_log_ns = os_monotonic_get_ns() + delivery_log_interval_ns;
+		self->warned_short_buffer = false;
+	}
 
 	if (error)
 		U_LOG_I("Mirror stream state changed from %s to %s (error: %s)",
@@ -444,7 +489,7 @@ void mirror_impl::on_param_changed(void * self_v, uint32_t id, const spa_pod * p
 	std::vector<uint8_t> buffer(1024);
 	spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer.data(), uint32_t(buffer.size()));
 
-	const spa_pod * params[1];
+	const spa_pod * params[2];
 	params[0] = (const spa_pod *)spa_pod_builder_add_object(
 	        &b,
 	        SPA_TYPE_OBJECT_ParamBuffers,
@@ -459,8 +504,17 @@ void mirror_impl::on_param_changed(void * self_v, uint32_t id, const spa_pod * p
 	        SPA_POD_Int(int(self->stride)),
 	        SPA_PARAM_BUFFERS_dataType,
 	        SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
+	// Optional: process() timestamps the buffers when the peer allocates it
+	params[1] = (const spa_pod *)spa_pod_builder_add_object(
+	        &b,
+	        SPA_TYPE_OBJECT_ParamMeta,
+	        SPA_PARAM_Meta,
+	        SPA_PARAM_META_type,
+	        SPA_POD_Id(SPA_META_Header),
+	        SPA_PARAM_META_size,
+	        SPA_POD_Int(int(sizeof(spa_meta_header))));
 
-	pw_stream_update_params(self->stream.get(), params, 1);
+	pw_stream_update_params(self->stream.get(), params, 2);
 	self->negotiated = true;
 }
 
@@ -641,7 +695,7 @@ void mirror_impl::read_frames()
 		{
 			if (not readback_coherent)
 				vmaInvalidateAllocation(vk_allocator::instance(), readback, 0, VK_WHOLE_SIZE);
-			push_frame();
+			store_frame();
 		}
 
 		lock.lock();
@@ -650,32 +704,106 @@ void mirror_impl::read_frames()
 	}
 }
 
-void mirror_impl::push_frame()
+void mirror_impl::store_frame()
 {
-	pw_thread_loop_lock(loop.get());
+	// Only the reader thread writes this slot, and process() never reads it
+	std::vector<uint8_t> & slot = frame_slots[frame_write];
+	memcpy(slot.data(), readback.data(), slot.size());
+	const int64_t pts = os_monotonic_get_ns();
 
-	if (pw_stream_get_state(stream.get(), nullptr) == PW_STREAM_STATE_STREAMING)
 	{
-		if (pw_buffer * buffer = pw_stream_dequeue_buffer(stream.get()))
-		{
-			if (buffer->buffer->n_datas > 0 and buffer->buffer->datas[0].data)
-			{
-				spa_data & data = buffer->buffer->datas[0];
-				size_t size = std::min<size_t>(data.maxsize, size_t(stride) * height);
-				memcpy(data.data, readback.data(), size);
-				data.chunk->offset = 0;
-				data.chunk->stride = stride;
-				data.chunk->size = size;
-				data.chunk->flags = 0;
-			}
-			pw_stream_queue_buffer(stream.get(), buffer);
-
-			if (pw_stream_is_driving(stream.get()))
-				pw_stream_trigger_process(stream.get());
-		}
+		// Swapping the indices is all that has to be serialised with process()
+		std::lock_guard lock(frame_mutex);
+		frame_latest = frame_write;
+		frame_write ^= 1;
+		frame_pts = pts;
+		++frame_seq;
 	}
 
+	// The graph normally drives this node and picks the frame up on its next
+	// cycle. Nudging is only meaningful, and only allowed, when the session
+	// manager did make us the driver; frame_mutex must be released first, as
+	// process() takes it while holding the loop lock.
+	pw_thread_loop_lock(loop.get());
+	if (pw_stream_get_state(stream.get(), nullptr) == PW_STREAM_STATE_STREAMING and
+	    pw_stream_is_driving(stream.get()))
+		pw_stream_trigger_process(stream.get());
 	pw_thread_loop_unlock(loop.get());
+}
+
+void mirror_impl::on_process(void * self_v)
+{
+	((mirror_impl *)self_v)->process();
+}
+
+void mirror_impl::process()
+{
+	pw_buffer * buffer = pw_stream_dequeue_buffer(stream.get());
+	if (not buffer)
+		return;
+
+	spa_buffer * buf = buffer->buffer;
+	const size_t frame_size = size_t(stride) * height;
+
+	bool filled = false;
+	int64_t pts = 0;
+	uint64_t seq = 0;
+
+	if (buf->n_datas > 0 and buf->datas[0].data and buf->datas[0].chunk)
+	{
+		spa_data & data = buf->datas[0];
+
+		if (data.maxsize >= frame_size)
+		{
+			// Held for the copy so that the reader thread cannot flip this
+			// slot back into its write position while it is being read
+			std::lock_guard lock(frame_mutex);
+			if (frame_latest >= 0)
+			{
+				memcpy(data.data, frame_slots[frame_latest].data(), frame_size);
+				pts = frame_pts;
+				seq = frame_seq;
+				filled = true;
+			}
+		}
+		else if (not warned_short_buffer)
+		{
+			warned_short_buffer = true;
+			U_LOG_W("Mirror: buffer of %u bytes is too small for %ux%u",
+			        data.maxsize,
+			        width,
+			        height);
+		}
+
+		data.chunk->offset = 0;
+		data.chunk->stride = int32_t(stride);
+		data.chunk->size = filled ? uint32_t(frame_size) : 0;
+		data.chunk->flags = filled ? SPA_CHUNK_FLAG_NONE : SPA_CHUNK_FLAG_EMPTY;
+	}
+
+	if (auto * header = (spa_meta_header *)spa_buffer_find_meta_data(buf, SPA_META_Header, sizeof(spa_meta_header)))
+	{
+		header->pts = filled ? pts : -1;
+		header->dts_offset = 0;
+		header->seq = seq;
+		header->flags = 0;
+	}
+
+	pw_stream_queue_buffer(stream.get(), buffer);
+
+	// The graph may cycle faster than the capture rate; repeating the last frame
+	// is expected, only count what actually carried pixels.
+	if (filled)
+		++delivered;
+	else
+		++empty_cycles;
+
+	const int64_t now = os_monotonic_get_ns();
+	if (now >= next_log_ns)
+	{
+		next_log_ns = now + delivery_log_interval_ns;
+		U_LOG_I("Mirror: delivered %" PRIu64 " frames (%" PRIu64 " empty cycles)", delivered, empty_cycles);
+	}
 }
 
 } // namespace

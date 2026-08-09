@@ -1,15 +1,109 @@
 <h1 align="center"> WiVRn NX </h1>
+<p align="center"><b>A hot-rodded fork of <a href="https://github.com/WiVRn/WiVRn">WiVRn</a>: self-healing streaming, adaptive everything, OLED-violet everything else.</b></p>
 
-> [!NOTE]
-> **This is WiVRn NX, a fork of [WiVRn](https://github.com/WiVRn/WiVRn)** (based on master, which already includes the per-part virtual body tracker selection missing from the v26.6.2 release). Changes on the `nx-patches` branch:
->
-> - **Controller standby fix** — upstream drops the OpenXR *tracked* flags on the server (`pose_list.cpp`, the old `TODO keep the tracked flag`), so a controller going into standby (e.g. Pico controllers, whose auto-sleep cannot be disabled) teleports to an arbitrary pose in-game. NX keeps per-component tracked state: when a device reports valid-but-untracked poses, its pose is frozen at the last tracked pose, reported valid with the TRACKED bits cleared and velocities zeroed. Devices whose runtime never sets tracked bits (e.g. estimated body joints) keep upstream behaviour exactly, so full body tracking is unaffected.
-> - **NX look** — the headset UI defaults to the true-black OLED preset with a `#7700FF` "NX" accent, and the default lobby is a space environment (emissive starfield with violet nebula haze).
-> - **Automatic bitrate** — the server watches, in the per-frame feedback the headset already sends, how much of each frame period was spent receiving that frame, plus the frames that never arrived, and adapts the bitrate on its own instead of leaving it to be dialled in by hand. Walking away from the router now costs image quality rather than the connection; a sudden lag spike triggers a deep drop that clears it, followed by a fast climb back. The bitrate set on the headset stays the ceiling. Enabled by default, tunable with the `bitrate-auto` config key and with an *Automatic bitrate* toggle next to the bitrate slider in the headset settings — both must be enabled for it to run. This adds a field to the protocol, so the NX client and the NX server have to be used together; pairing either with stock WiVRn is refused as an incompatible protocol version.
-> - **Desktop mirror** — the server can publish what the user sees as a PipeWire video source node, *WiVRn Headset View*, so the headset view can be watched or recorded on the desktop with OBS, `gst-launch-1.0 pipewiresrc`, or any other PipeWire client, without a second capture path. The frames are taken in the compositor, from the left eye, after layer composition but before foveation, so the mirror is the clean undistorted view rather than the foveated image sent to the headset. Off by default since it costs a resample and a readback per frame, enabled with the `mirror` config key, which also sets the capture rate (30 fps) and resolution (half the per-eye render resolution); nothing is captured while no consumer is connected to the node.
-> - **Side-by-side install** — application ID `org.meumeu.wivrn.nx`, app name "WiVRn NX", and an NX-badged violet night-sky icon, so the APK installs alongside stock WiVRn without conflict.
->
-> Client and server must be built from the same tree (the protocol version is a hash of the packet definitions). Everything below is the upstream documentation.
+WiVRn NX is a fork of WiVRn (master, `nx-patches` branch) focused on making the stream
+survive the real world — flaky Wi-Fi, slow games, sleeping controllers — and on looking good
+while doing it. Every feature that affects what the headset experiences has a toggle in the
+headset settings UI. The NX client and NX server must be used together (several features add
+protocol fields; mismatched pairings are refused cleanly at handshake as an incompatible
+version), and both must be built from the same tree.
+
+Primary target and test hardware: **Pico 4** (regular, XR2 Gen 1: H.264 + HEVC decode, no AV1)
+with Pico Motion Trackers, on Linux. Everything except the Pico-specific fixes applies to any
+headset WiVRn supports.
+
+## Fixes over upstream
+
+| | |
+|---|---|
+| **Controller standby teleport** | Upstream discards the OpenXR *tracked* flags server-side (the old `TODO keep the tracked flag` in `pose_list.cpp`), so a Pico controller entering its non-disableable auto-sleep jumps to a garbage pose in-game. NX freezes the device at its last tracked pose — reported valid, TRACKED cleared, velocities zeroed. Devices whose runtime never sets tracked bits (estimated body joints) keep upstream behaviour exactly, so full body tracking is unaffected. |
+| **Transport robustness** | A malformed, short, or oversized datagram is dropped and counted instead of tearing the session down; oversized datagrams are detected (`MSG_TRUNC`) instead of being silently truncated; a stalled TCP write can no longer block UDP video (per-socket bounded send queues). |
+| **Honest labels** | The upstream "Application SpaceWarp" setting performs no frame synthesis — it only halves the stream rate. NX names it "Half framerate mode" and describes what it does. |
+
+## Adaptive streaming
+
+- **Automatic bitrate** — the server measures, from the per-frame feedback the headset already
+  sends, how much of each frame period was spent receiving that frame, plus frames that never
+  arrived, and adapts the bitrate itself. Gradual signal decay gets a gentle decrease with slow
+  probing back up; an acute lag spike gets a deep drop (which drains whatever queue wedged)
+  followed by a fast slow-start rebound to the pre-drop level, with ssthresh-style backoff.
+  The bitrate set on the headset is always the ceiling. Toggles: headset (*Automatic bitrate*)
+  and dashboard; config key `bitrate-auto` (`min-bitrate` floor, default 10 Mbit/s).
+- **Motion smoothing** *(toggle, default off)* — when the game runs far below the display rate
+  (a CPU-bound VRChat instance at 10 fps), the server computes a coarse motion field between
+  real application frames (a compositor compute pass — works with **every** encoder, unlike
+  encoder-MV approaches) and the headset warps the last frame along t-scaled vectors on the
+  refreshes the game produced nothing for. Rotation was already smooth; this smooths position,
+  animation and hands too. Frames are never dropped or held to a fixed cadence in the first
+  place — NX free-runs the app and takes every real frame it can produce.
+
+## Multipath: USB backup with seamless failover
+
+Plug a USB-C cable into the headset at any point during a session and a **second network path
+attaches automatically** (the dashboard keeps an `adb reverse` tunnel armed; the headset probes
+it every 5 s). Tracking and battery are duplicated across both paths immediately. If the Wi-Fi
+path then dies — silence for 400 ms, or hard send errors — video and control **flip to the
+cable in under half a second** with a forced IDR, the bitrate controller gets a USB ceiling
+(`multipath.usb-max-bitrate`, default 100 Mbit/s), and the clock estimator resets. When Wi-Fi
+is healthy again for 5 s, everything flips back. Each secondary path gets its own encryption
+keys. Toggles: headset (*USB backup connection*), dashboard (*USB backup tunnel*). Both ends
+log every attach/flip with reasons and RTT.
+
+## Image quality and comfort
+
+- **Contrast-adaptive sharpening** *(toggle + strength slider, default off)* — AMD CAS folded
+  into the existing defoveation pass, restoring the edge contrast the video codec removes.
+  The single biggest lever for small-text legibility.
+- **Text clarity mode** *(toggle, default off)* — biases the encoders for fine-detail
+  retention (deblocking offsets, adaptive quantization, DCT decimation off where each API
+  allows). Takes effect on the next connection.
+- **Comfort vignette** *(toggle, default on)* — a soft peripheral fade that eases in when the
+  app framerate craters and lifts when it recovers; peripheral judder is what triggers nausea.
+- **Sharp overlay layers** *(in development)* — OpenXR quad layers (wlx-overlay-s / WayVR
+  panels) promoted out of the lossy world video into their own stream, composited on the
+  headset with 90 Hz pose stability.
+
+## Desktop mirror
+
+The server can publish the headset view (left eye, post-composition, pre-foveation — the clean
+undistorted image) as a PipeWire video source node named **WiVRn Headset View**: watch or
+record with OBS ("PipeWire Camera" source), `gst-launch-1.0 pipewiresrc
+target-object=wivrn-headset-view ! videoconvert ! autovideosink`, or any PipeWire client.
+Config key `mirror` (`enabled`, `fps` default 30, `scale` default 0.5); off by default; zero
+cost while no consumer is attached.
+
+## The NX look
+
+True-black OLED theme with a `#7700FF` accent by default, a space lobby (emissive starfield,
+violet nebulae, a ringed gas giant, a grid deck), an NX-badged night-sky icon — and a distinct
+identity everywhere: application ID `org.meumeu.wivrn.nx`, app name "WiVRn NX", desktop entry
+`io.github.wivrn.wivrn.nx`, so everything installs **alongside** stock WiVRn without conflict.
+
+## Roadmap (in active development)
+
+Packet pacing + Wi-Fi QoS (DSCP/WMM) tagging · radio-aware bitrate (RSSI as a leading
+indicator) · forward error correction (parity shards — lost packets reconstruct client-side)
+· audio on the loss-tolerant path with concealment · hardware-encoder failover to x264 ·
+BBR-style bitrate control v2 · an in-headset transport HUD. Design documents live in
+[docs/](docs/): [multipath](docs/multipath.md), [frame extrapolation](docs/frame-extrapolation.md),
+[quad layers](docs/quad-layers.md).
+
+## Building
+
+Client and server must come from the same tree. Server: CMake/Ninja as upstream
+([docs/building.md](docs/building.md)); the dashboard additionally wants Qt6 + KF6 + ECM.
+APK: Android SDK (platform 34, build-tools 34, NDK 29.0.14206865, **the SDK's own
+CMake 3.31.5** — stock Kitware CMake lacks Google's `AndroidNdkModules`), the host `ktx` tool
+on the Gradle daemon's PATH, then:
+
+```
+./gradlew assembleRelease -Psuffix= -Pwivrn_version=<version>
+```
+
+Config reference: [docs/configuration.md](docs/configuration.md). Everything below this line
+is the upstream documentation.
+
+---
 
 <div align="center">
   

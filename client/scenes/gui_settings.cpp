@@ -653,6 +653,20 @@ void settings_audio(const settings_context & ctx)
 	        .disabled_tooltip = disconnect_tip,
 	});
 
+	list.push_back({
+	        .id = "##low_latency_audio",
+	        .label = _C("setting name", "Low-latency audio path"),
+	        .description = _("Send audio on the same loss-tolerant path as the video. A dropped packet is concealed instead of stalling the sound while it is resent."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.low_latency_audio; },
+	        .set_bool = [&config, &ctx](bool v) {
+		        config.low_latency_audio = v;
+		        config.save();
+		        if (ctx.on_audio_path_changed)
+			        ctx.on_audio_path_changed(); },
+	        .default_bool = default_config.low_latency_audio,
+	});
+
 	ui::page_header(_cS("page header title", "Audio"), _cS("page header subtitle", "Microphone streamed to the PC."));
 	render_settings(ctx, "##audio", list);
 }

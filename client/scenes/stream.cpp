@@ -274,6 +274,7 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 		info.settings.sharp_text = config.sharp_text;
 		info.settings.motion_smoothing = config.motion_smoothing;
 		info.settings.quad_layers = config.quad_layers;
+		info.settings.low_latency_audio = config.low_latency_audio;
 		info.settings.mirror_gamepad = config.forward_gamepad;
 		info.settings.enabled_body_parts = config.body_part_mask;
 

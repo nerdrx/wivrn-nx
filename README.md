@@ -65,6 +65,20 @@ headset WiVRn supports.
   is never stuck behind a 200 kB frame in the same hardware queue. IPv6 sockets are marked through
   `IPV6_TCLASS` as well as `IP_TOS`, since a v4-mapped peer takes the mark from the latter. A few
   networks mangle or drop marked traffic, hence the toggle; the marks are applied and cleared live.
+- **Low-latency audio path** *(toggle, default on)* — audio used to share the control socket with
+  tracking, settings and everything else, so one dropped packet stalled *every* later audio packet
+  behind it while TCP resent it: the crackle-then-catch-up that follows a Wi-Fi hiccup is head-of-
+  line blocking, not a buffer that ran dry. NX puts both directions (PC speaker and headset
+  microphone) on the same loss-tolerant path the video rides — whatever the path selector currently
+  routes, never duplicated across paths — with a wrapping sequence number per packet. The receiver
+  plays what is in order byte for byte, drops what is late or repeated, and *conceals* what is
+  missing: the last packet repeated under a linear fade to silence over 60 ms, the next real packet
+  ramped back up over 5 ms, and plain silence past that, because a gap that long is a real outage
+  and not a glitch to paper over. A lost datagram costs a concealed 5 ms instead of a stutter.
+  Packets stay under 1200 B of PCM (a 5 ms stereo quantum is 960 B; a longer capture buffer is cut
+  on frame boundaries), so audio never fragments. Off restores upstream behaviour exactly, control
+  socket and all — the packet says which path it came from, so either end may be flipped mid-session.
+  No server configuration.
 - **Motion smoothing** *(toggle, default off)* — when the game runs far below the display rate
   (a CPU-bound VRChat instance at 10 fps), the server computes a coarse motion field between
   real application frames (a compositor compute pass — works with **every** encoder, unlike
@@ -117,9 +131,8 @@ identity everywhere: application ID `org.meumeu.wivrn.nx`, app name "WiVRn NX", 
 
 ## Roadmap (in active development)
 
-Reed-Solomon parity (burst-tolerant, on the same groups as the XOR above) · audio on the
-loss-tolerant path with concealment · hardware-encoder failover to x264 · BBR-style bitrate
-control v2 · an in-headset transport HUD.
+Reed-Solomon parity (burst-tolerant, on the same groups as the XOR above) · hardware-encoder
+failover to x264 · BBR-style bitrate control v2 · an in-headset transport HUD.
 Design documents live in
 [docs/](docs/): [multipath](docs/multipath.md), [frame extrapolation](docs/frame-extrapolation.md),
 [quad layers](docs/quad-layers.md).

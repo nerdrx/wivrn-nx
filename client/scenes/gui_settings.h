@@ -59,6 +59,7 @@ struct settings_context
 	std::function<void()> enter_foveation_adjust;        // thumbstick foveation sub-mode
 	std::function<void()> on_foveation_override_changed; // foveation override toggled
 	std::function<void()> on_qos_changed;                // Wi-Fi QoS toggled, headset sockets to re-mark
+	std::function<void()> on_audio_path_changed;         // low latency audio toggled, both ends to re-route
 };
 
 void settings_video(const settings_context &);

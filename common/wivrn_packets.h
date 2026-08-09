@@ -214,11 +214,38 @@ enum class stream_tab : uint8_t
 	application_launcher,
 };
 
+// One span of PCM, interleaved signed 16 bit samples in the channel count and
+// sample rate audio_stream_description named for that direction. Used both ways:
+// server -> headset is the speaker, headset -> server the microphone.
+//
+// Two transports, chosen by the headset's "low latency audio path" setting:
+//
+// - the loss-tolerant path (send_stream, i.e. the UDP stream socket, falling back
+//   to whatever the path selector currently routes video over). seq is set, and
+//   the receiver tracks it: a hole in the numbering is concealed, a late or
+//   repeated packet is dropped (common/audio_plc.h). A datagram the Wi-Fi drops
+//   then costs one concealed packet instead of stalling every later audio packet
+//   behind it in the control socket's byte stream.
+// - the control socket (send_control), which is what upstream does. seq is absent
+//   and the receiver plays exactly what it is given: ordering and delivery are
+//   TCP's problem, and so is the head-of-line blocking.
+//
+// The packet says which of the two it is, so a receiver needs no setting of its
+// own and the toggle can be flipped mid-session from either end.
 struct audio_data
 {
 	XrTime timestamp;
+	// Position of this packet in its direction's stream, incremented once per
+	// packet and wrapping. Only ever set on the loss-tolerant path.
+	std::optional<uint16_t> seq;
 	std::span<uint8_t> payload;
 	data_holder data;
+
+	// Most PCM one packet may carry. A datagram has to stay under the MTU like
+	// everything else on the stream socket, and under the 2048 byte slot the
+	// receiver reads datagrams into; a capture buffer longer than this is cut
+	// into several packets on whole frame boundaries (see audio_frames_per_packet).
+	static constexpr size_t max_payload_size = 1200;
 };
 
 namespace from_headset
@@ -347,6 +374,11 @@ struct settings_changed
 	// and its share of the bitrate), and again on every frame: turning it off while
 	// streaming immediately puts the layer back into the eye images.
 	bool quad_layers = true;
+	// Whether the audio streams should ride the same loss-tolerant path as the video
+	// instead of sharing the control socket with everything else. Each end applies it
+	// to what it sends (the server to the speaker, the headset to the microphone); a
+	// receiver needs no setting, an audio_data says which path it came from.
+	bool low_latency_audio = true;
 	// Whether the server should mirror the gamepad to a virtual uinput device;
 	// gamepad inputs are always forwarded for the OpenXR path
 	bool mirror_gamepad = false;

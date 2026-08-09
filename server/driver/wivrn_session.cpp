@@ -540,6 +540,9 @@ void wivrn_session::operator()(const from_headset::settings_changed & settings)
 	if (settings.preferred_refresh_rate != 0)
 		compositor.set_framerate(settings.preferred_refresh_rate / settings.fps_divider);
 
+	if (audio_handle)
+		audio_handle->set_low_latency(settings.low_latency_audio);
+
 	if (not settings.mirror_gamepad and uinput_handler)
 		uinput_handler->destroy_gamepad();
 

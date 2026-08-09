@@ -124,16 +124,41 @@ int32_t wivrn::android::audio::microphone_data_cb(AAudioStream * stream, void * 
 	}
 
 	size_t frame_size = AAudioStream_getChannelCount(stream) * sizeof(uint16_t);
+	const int32_t sample_rate = AAudioStream_getSampleRate(stream);
 
 	// Copy data because we encrypt in-place, we don't want to write on the input data
 	thread_local std::vector<uint8_t> data_copy;
 	data_copy.assign(audio_data, audio_data + frame_size * num_frames);
+
+	const bool lossy = self->low_latency.load(std::memory_order_relaxed);
+	// A capture buffer longer than one datagram may carry is cut on frame
+	// boundaries; at 48 kHz mono the callback is far below that, but the callback
+	// size is the runtime's to choose.
+	const size_t chunk = wivrn::audio_frames_per_packet(frame_size, wivrn::audio_data::max_payload_size) * frame_size;
+	const XrTime now = self->instance.now();
+
 	try
 	{
-		self->session.send_control(wivrn::audio_data{
-		        .timestamp = self->instance.now(),
-		        .payload = std::span(data_copy),
-		});
+		for (size_t offset = 0; offset < data_copy.size(); offset += chunk)
+		{
+			const size_t size = std::min(chunk, data_copy.size() - offset);
+			const uint16_t seq = self->mic_seq++;
+
+			wivrn::audio_data packet{
+			        .timestamp = now + (sample_rate > 0
+			                                    ? XrTime(offset / frame_size) * 1'000'000'000 / sample_rate
+			                                    : 0),
+			        .payload = std::span(data_copy.data() + offset, size),
+			};
+
+			if (lossy)
+			{
+				packet.seq = seq;
+				self->session.send_stream(std::move(packet));
+			}
+			else
+				self->session.send_control(std::move(packet));
+		}
 	}
 	catch (...)
 	{
@@ -251,6 +276,10 @@ wivrn::android::audio::audio(const wivrn::to_headset::audio_stream_description &
         session(session), instance(instance)
 {
 	std::unique_lock lock(mutex);
+	low_latency = application::get_config().low_latency_audio;
+	if (desc.speaker)
+		speaker_plc = wivrn::audio_plc(desc.speaker->sample_rate, desc.speaker->num_channels);
+
 	AAudioStreamBuilder * builder;
 	aaudio_result_t result = AAudio_createStreamBuilder(&builder);
 	if (result != AAUDIO_OK)
@@ -282,9 +311,43 @@ wivrn::android::audio::~audio()
 
 void wivrn::android::audio::operator()(wivrn::audio_data && data)
 {
+	if (data.seq)
+	{
+		auto r = speaker_plc.receive(*data.seq, data.payload);
+		if (r.drop)
+			return;
+
+		if (not r.concealment.empty())
+		{
+			// Queued as a packet of its own, ahead of the real one: the AAudio
+			// callback pulls from the same ring and cannot tell the difference,
+			// and the ring's own depth still absorbs the jitter
+			const size_t size = r.concealment.size();
+			wivrn::audio_data filler;
+			// It plays out immediately before the packet that revealed the gap
+			filler.timestamp = data.timestamp - speaker_plc.ns_for(size);
+			filler.data.c = std::make_shared_for_overwrite<uint8_t[]>(size);
+			memcpy(filler.data.c.get(), r.concealment.data(), size);
+			filler.payload = std::span(filler.data.c.get(), size);
+
+			if (output_buffer.write(std::move(filler)))
+				buffer_size_bytes.fetch_add(size);
+		}
+	}
+	else
+	{
+		// The server put the speaker back on the control path
+		speaker_plc.reset();
+	}
+
 	auto size = data.payload.size_bytes();
 	if (output_buffer.write(std::move(data)))
 		buffer_size_bytes.fetch_add(size);
+}
+
+void wivrn::android::audio::set_low_latency(bool enabled)
+{
+	low_latency.store(enabled, std::memory_order_relaxed);
 }
 
 void wivrn::android::audio::set_mic_state(bool running)

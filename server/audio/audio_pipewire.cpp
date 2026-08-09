@@ -18,10 +18,13 @@
 
 #include "audio_pipewire.h"
 
+#include "audio_plc.h"
 #include "driver/wivrn_session.h"
 #include "os/os_time.h"
 #include "util/u_logging.h"
 #include "utils/ring_buffer.h"
+#include <atomic>
+#include <cstring>
 #include <magic_enum.hpp>
 #include <memory>
 #include <pipewire/pipewire.h>
@@ -57,9 +60,20 @@ struct pipewire_device : public audio_device
 	        .process = &pipewire_device::speaker_process,
 	};
 
+	// Whether the speaker stream goes out on the loss-tolerant path. Written by the
+	// network thread when the headset's settings change, read by the pipewire
+	// speaker thread on every buffer.
+	std::atomic<bool> low_latency{true};
+	// Position of the next speaker packet in the stream, pipewire thread only. It
+	// keeps counting while audio is on the control path, so that flipping the
+	// toggle back on never looks like a gap.
+	uint16_t speaker_seq = 0;
+
 	utils::ring_buffer<audio_data, 100> mic_samples;
 	std::atomic<size_t> mic_buffer_size_bytes;
 	audio_data mic_current;
+	// Sequence tracking and concealment for the microphone, network thread only
+	audio_plc mic_plc;
 	std::unique_ptr<pw_stream, deleter> microphone;
 	std::atomic<std::underlying_type_t<pw_stream_state>> mic_state{PW_STREAM_STATE_UNCONNECTED};
 	pw_stream_events mic_events{
@@ -74,6 +88,7 @@ struct pipewire_device : public audio_device
 	static void mic_state_changed(void * self_v, pw_stream_state old, pw_stream_state state, const char * error);
 
 	void process_mic_data(wivrn::audio_data &&) override;
+	void set_low_latency(bool) override;
 	void pause() override;
 	void resume() override;
 
@@ -93,6 +108,8 @@ struct pipewire_device : public audio_device
 	{
 		int argc = 0;
 		pw_init(&argc, nullptr);
+
+		low_latency = info.settings.low_latency_audio;
 
 		pw_loop.reset(pw_main_loop_new(nullptr));
 		if (info.speaker)
@@ -181,6 +198,7 @@ struct pipewire_device : public audio_device
 			        .num_channels = info.microphone->num_channels,
 			        .sample_rate = info.microphone->sample_rate,
 			};
+			mic_plc = audio_plc(desc.microphone->sample_rate, desc.microphone->num_channels);
 
 			// Calculate quantum size: 5ms buffer for low latency while maintaining stability
 			// Smaller buffers (<5ms) risk underruns, larger ones (>10ms) add perceptible latency
@@ -389,14 +407,39 @@ void pipewire_device::speaker_process(void * self_v)
 	if (not data.data)
 		return;
 
+	const bool lossy = self->low_latency.load(std::memory_order_relaxed);
+	const size_t frame_size = std::max<size_t>(sizeof(int16_t), self->desc.speaker->num_channels * sizeof(int16_t));
+	// The graph quantum is asked to be 5 ms (960 bytes at 48 kHz stereo), but
+	// nothing guarantees it: a buffer longer than one datagram may carry is cut on
+	// frame boundaries, each piece a packet of its own.
+	const size_t chunk = audio_frames_per_packet(frame_size, audio_data::max_payload_size) * frame_size;
+
+	uint8_t * const pcm = (uint8_t *)data.data + data.chunk->offset;
+	const size_t total = data.chunk->size - data.chunk->size % frame_size;
+	const XrTime now = self->session.get_offset().to_headset(os_monotonic_get_ns());
+
 	try
 	{
-		self->session.send_control(audio_data{
-		        .timestamp = self->session.get_offset().to_headset(os_monotonic_get_ns()),
-		        .payload = std::span(
-		                (uint8_t *)data.data + data.chunk->offset,
-		                data.chunk->size),
-		});
+		for (size_t offset = 0; offset < total; offset += chunk)
+		{
+			const size_t size = std::min(chunk, total - offset);
+			const uint16_t seq = self->speaker_seq++;
+
+			audio_data packet{
+			        // The buffer is one capture instant; the pieces of it play
+			        // one after the other
+			        .timestamp = now + XrTime(offset / frame_size) * 1'000'000'000 / self->desc.speaker->sample_rate,
+			        .payload = std::span(pcm + offset, size),
+			};
+
+			if (lossy)
+			{
+				packet.seq = seq;
+				self->session.send_stream(std::move(packet));
+			}
+			else
+				self->session.send_control(std::move(packet));
+		}
 	}
 	catch (std::exception & e)
 	{
@@ -407,9 +450,44 @@ void pipewire_device::speaker_process(void * self_v)
 
 void pipewire_device::process_mic_data(wivrn::audio_data && sample)
 {
+	if (sample.seq)
+	{
+		auto r = mic_plc.receive(*sample.seq, sample.payload);
+		if (r.drop)
+			return;
+
+		if (not r.concealment.empty())
+		{
+			// Pushed as a packet of its own, ahead of the real one: the pipewire
+			// side pulls from the same ring and cannot tell the difference. Not
+			// filling the hole at all would only shorten a buffer, which is the
+			// same silence with the whole stream advanced by the lost span.
+			const size_t size = r.concealment.size();
+			audio_data filler;
+			// It plays out immediately before the packet that revealed the gap
+			filler.timestamp = sample.timestamp - mic_plc.ns_for(size);
+			filler.data.c = std::make_shared_for_overwrite<uint8_t[]>(size);
+			memcpy(filler.data.c.get(), r.concealment.data(), size);
+			filler.payload = std::span(filler.data.c.get(), size);
+
+			if (mic_samples.write(std::move(filler)))
+				mic_buffer_size_bytes += size;
+		}
+	}
+	else
+	{
+		// The headset put the microphone back on the control path
+		mic_plc.reset();
+	}
+
 	auto size = sample.payload.size_bytes();
 	if (mic_samples.write(std::move(sample)))
 		mic_buffer_size_bytes += size;
+}
+
+void pipewire_device::set_low_latency(bool enabled)
+{
+	low_latency.store(enabled, std::memory_order_relaxed);
 }
 
 void pipewire_device::pause()

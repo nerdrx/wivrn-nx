@@ -46,6 +46,8 @@ peer-pinning (kernel connect filter, single-address bind, handshake address chec
   path, giving per-path liveness (dropped after 3 s of silence) + RTT logged client side.
 - Tracking (and battery) duplicated onto the secondary; `history::add_sample` dedups by
   timestamp slot. Inputs, feedback and audio are NOT duplicated (input events must not repeat).
+  Audio, when the low-latency audio path is on, rides `send_stream` in both directions, so it
+  follows exactly the path selection video does — one path at a time, never both.
   Timesync stays pinned to the path carrying video; the estimator is reset on switch.
 
 #### Stage 1 deviations from the original plan

@@ -402,6 +402,7 @@ static void send_settings_changed_packet(xr::session & session, wivrn_session * 
 	                .sharp_text = config.sharp_text,
 	                .motion_smoothing = config.motion_smoothing,
 	                .quad_layers = config.quad_layers,
+	                .low_latency_audio = config.low_latency_audio,
 	                .mirror_gamepad = config.forward_gamepad,
 	                .enabled_body_parts = config.body_part_mask,
 	        });
@@ -435,6 +436,12 @@ void scenes::stream::gui_settings(float)
 		        }); },
 	        .on_qos_changed = [this] {
 		        network_session->set_qos(application::get_config().wifi_qos);
+		        send_settings_changed_packet(session, network_session.get(), application::get_config()); },
+	        .on_audio_path_changed = [this] {
+		        // Each end routes what it sends: the packet tells the server, the
+		        // handle tells our own microphone callback
+		        if (audio_handle)
+			        audio_handle->set_low_latency(application::get_config().low_latency_audio);
 		        send_settings_changed_packet(session, network_session.get(), application::get_config()); },
 	};
 

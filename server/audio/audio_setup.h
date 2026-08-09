@@ -35,6 +35,11 @@ struct audio_device
 
 	virtual void process_mic_data(wivrn::audio_data &&) = 0;
 
+	// Live: whether the speaker stream goes out on the loss-tolerant path rather
+	// than the control socket. Only affects what this end sends; what the headset
+	// sends is its own decision, and an audio_data says which path it came from.
+	virtual void set_low_latency(bool) {}
+
 	virtual void pause() = 0;
 	virtual void resume() = 0;
 

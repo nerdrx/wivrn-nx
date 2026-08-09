@@ -118,6 +118,13 @@ public:
 	bool passthrough_enabled = false;
 	bool mic_unprocessed_audio = false;
 
+	// Send audio on the same loss-tolerant path as the video instead of sharing the
+	// control socket with everything else, with a sequence number per packet and
+	// concealment of what is lost. A dropped datagram then costs a concealed few
+	// milliseconds instead of stalling every later audio packet behind it while TCP
+	// retransmits. Applies both ways: the headset's microphone and the PC's speaker.
+	bool low_latency_audio = true;
+
 	// Input forwarding, per device. Off by default; only effective if the server permits it.
 	bool forward_keyboard = false;
 	bool forward_mouse = false;

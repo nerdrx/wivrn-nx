@@ -19,9 +19,11 @@
 
 #pragma once
 
+#include "audio_plc.h"
 #include "utils/ring_buffer.h"
 #include "wivrn_packets.h"
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <thread>
 
@@ -54,6 +56,16 @@ class audio
 	utils::ring_buffer<wivrn::audio_data, 100> output_buffer;
 	std::atomic<size_t> buffer_size_bytes;
 
+	// Whether what we send goes out on the loss-tolerant path. Written from the
+	// settings GUI, read by the microphone callback.
+	std::atomic<bool> low_latency{true};
+	// Position of the next microphone packet, AAudio input callback only. It keeps
+	// counting while audio is on the control path, so that flipping the toggle back
+	// on never looks like a gap.
+	uint16_t mic_seq = 0;
+	// Sequence tracking and concealment for the speaker, network thread only
+	wivrn::audio_plc speaker_plc;
+
 	wivrn::audio_data speaker_tmp;
 	AAudioStreamStruct * speaker = nullptr;
 	std::atomic<bool> speaker_stop_ack = false;
@@ -79,6 +91,11 @@ public:
 	void operator()(wivrn::audio_data &&);
 
 	void set_mic_state(bool running);
+
+	// Live: whether the microphone goes out on the loss-tolerant path rather than
+	// the control socket. What the server sends is its own decision, driven by the
+	// same setting through settings_changed.
+	void set_low_latency(bool enabled);
 
 	static void get_audio_description(wivrn::from_headset::headset_info_packet & info);
 };

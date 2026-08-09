@@ -386,6 +386,16 @@ void settings_streaming(const settings_context & ctx)
 		});
 	}
 
+	list.push_back({
+	        .id = "##bitrate_auto",
+	        .label = _("Automatic bitrate"),
+	        .description = _("Adapt the bitrate to the connection. The bitrate below becomes the maximum."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.bitrate_auto; },
+	        .set_bool = [&ctx, &config](bool v) { config.bitrate_auto = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.bitrate_auto,
+	});
+
 	const int mb = 1'000'000;
 	list.push_back({
 	        .id = "##bitrate",

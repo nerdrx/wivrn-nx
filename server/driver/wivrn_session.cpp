@@ -137,7 +137,8 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 
 	auto conf = configuration();
 
-	bitrate_ctl.configure(conf.bitrate_auto, get_info().settings.bitrate_bps);
+	// Both switches must be on: the server configuration and the one in the headset settings
+	bitrate_ctl.configure(conf.bitrate_auto, get_info().settings.bitrate_bps, get_info().settings.bitrate_auto);
 
 #if WIVRN_FEATURE_STEAMVR_LIGHTHOUSE
 
@@ -503,8 +504,15 @@ void wivrn_session::operator()(const from_headset::settings_changed & settings)
 	if (settings.bitrate_bps != 0)
 	{
 		// The bitrate the client asks for is the ceiling of the automatic controller
+		bitrate_ctl.set_client_enabled(settings.bitrate_auto);
 		bitrate_ctl.set_ceiling(settings.bitrate_bps);
 		compositor.set_bitrate(settings.bitrate_bps);
+	}
+	else
+	{
+		// Only the automatic bitrate switch changed; turning it off restores the full
+		// bitrate the headset asked for
+		apply_auto_bitrate(bitrate_ctl.set_client_enabled(settings.bitrate_auto));
 	}
 
 	if (settings.preferred_refresh_rate != 0)

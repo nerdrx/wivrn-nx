@@ -31,11 +31,12 @@ namespace
 constexpr double to_mbits = 1e-6;
 }
 
-void bitrate_controller::configure(const config & c, uint32_t ceiling_bps)
+void bitrate_controller::configure(const config & c, uint32_t ceiling_bps, bool client_enabled_)
 {
 	std::lock_guard lock(mutex);
 
 	conf = c;
+	client_enabled = client_enabled_;
 	ceiling = ceiling_bps;
 	// A client asking for less than the configured minimum wins: the ceiling is always honoured.
 	min_bitrate = std::min(conf.min_bitrate_bps, ceiling ? ceiling : conf.min_bitrate_bps);
@@ -47,16 +48,34 @@ void bitrate_controller::configure(const config & c, uint32_t ceiling_bps)
 	has_frames = false;
 	flush();
 
-	if (conf.enabled and ceiling)
+	if (conf.enabled and client_enabled and ceiling)
 		U_LOG_I("Automatic bitrate enabled, ceiling %.1f Mbit/s, floor %.1f Mbit/s",
 		        ceiling * to_mbits,
 		        min_bitrate * to_mbits);
+	else if (conf.enabled and not client_enabled and ceiling)
+		U_LOG_I("Automatic bitrate disabled on the headset, using %.1f Mbit/s", ceiling * to_mbits);
 }
 
 bool bitrate_controller::enabled() const
 {
 	std::lock_guard lock(mutex);
-	return conf.enabled;
+	return conf.enabled and client_enabled;
+}
+
+std::optional<uint32_t> bitrate_controller::set_client_enabled(bool enabled_)
+{
+	std::lock_guard lock(mutex);
+
+	if (enabled_ == client_enabled)
+		return {};
+
+	client_enabled = enabled_;
+
+	U_LOG_I("Automatic bitrate %s on the headset", client_enabled ? "enabled" : "disabled");
+
+	// Measurements taken under the other setting say nothing about it now. Starting over also
+	// puts the bitrate back to the ceiling, which is what switching off must do.
+	return reset_locked();
 }
 
 uint32_t bitrate_controller::current() const
@@ -100,7 +119,11 @@ std::optional<uint32_t> bitrate_controller::set_ceiling(uint32_t ceiling_bps)
 std::optional<uint32_t> bitrate_controller::reset()
 {
 	std::lock_guard lock(mutex);
+	return reset_locked();
+}
 
+std::optional<uint32_t> bitrate_controller::reset_locked()
+{
 	if (not ceiling)
 		return {};
 
@@ -174,7 +197,7 @@ std::optional<uint32_t> bitrate_controller::on_feedback(const from_headset::feed
 {
 	std::lock_guard lock(mutex);
 
-	if (not conf.enabled or not streaming or not ceiling or period_ns <= 0)
+	if (not conf.enabled or not client_enabled or not streaming or not ceiling or period_ns <= 0)
 		return {};
 
 	// Only the video streams (one per encoder) report frame delivery timings.

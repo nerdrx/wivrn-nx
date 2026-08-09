@@ -29,12 +29,17 @@ the frames that never arrived, and lowers the bitrate when the link is saturated
 measures healthy again it climbs back up towards the ceiling. Every change is logged at info level
 with its reason.
 
+The headset has its own *Automatic bitrate* toggle, next to the bitrate slider in its streaming
+settings. Both switches must be enabled for the automatic control to run: turning either of them off
+always uses the bitrate configured on the headset. Switching the headset toggle off while streaming
+restores that bitrate immediately.
+
 Can be a boolean, or an object:
 
 ### `enabled`
 Default value: `true`
 
-Set to `false` to always use the bitrate configured on the headset.
+Set to `false` to always use the bitrate configured on the headset, whatever the headset toggle says.
 
 ### `min-bitrate`
 Default value: `10000000` (10 Mbit/s)

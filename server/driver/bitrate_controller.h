@@ -127,11 +127,17 @@ public:
 	bitrate_controller() = default;
 
 	// Set the configuration and the initial ceiling. The ceiling is the bitrate the client asked
-	// for; the controller never goes above it.
-	void configure(const config &, uint32_t ceiling_bps);
+	// for; the controller never goes above it. client_enabled is the headset side switch: the
+	// control only runs when both it and the server configuration are enabled.
+	void configure(const config &, uint32_t ceiling_bps, bool client_enabled);
 
 	bool enabled() const;
 	uint32_t current() const;
+
+	// The headset toggled its own switch. Starts over, as measurements taken under the other
+	// setting say nothing; switching off therefore restores the full ceiling. Returns the
+	// bitrate to apply, if any.
+	std::optional<uint32_t> set_client_enabled(bool);
 
 	// A new ceiling was requested (client settings, or a manual change from the dashboard).
 	// Resets the controller to it. Returns the bitrate to apply.
@@ -184,6 +190,8 @@ private:
 	mutable std::mutex mutex;
 
 	config conf;
+	// Headset side switch, ANDed with conf.enabled
+	bool client_enabled = true;
 	uint32_t ceiling = 0;
 	uint32_t bitrate = 0;
 	uint32_t min_bitrate = 0;
@@ -203,6 +211,8 @@ private:
 	std::chrono::steady_clock::time_point last_evaluation{};
 	std::chrono::steady_clock::time_point last_decrease{};
 
+	// reset(), with the mutex already held
+	std::optional<uint32_t> reset_locked();
 	void close_frame(frame_state &, std::chrono::steady_clock::time_point now);
 	void flush();
 	stats analyse(std::chrono::steady_clock::time_point now);

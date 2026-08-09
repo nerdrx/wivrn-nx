@@ -69,6 +69,8 @@ public:
 	float resolution_scale = 1.0;
 	std::optional<wivrn::video_codec> codec;
 	uint32_t bitrate_bps = 50'000'000;
+	// Let the server adapt the bitrate to the link quality, using bitrate_bps as the maximum
+	bool bitrate_auto = true;
 	uint8_t bit_depth = 10;
 
 	bool passthrough_enabled = false;

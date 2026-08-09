@@ -24,6 +24,7 @@
 #include "wivrn_sockets.h"
 #include <chrono>
 #include <poll.h>
+#include <spdlog/spdlog.h>
 
 using namespace wivrn;
 
@@ -84,7 +85,8 @@ public:
 		fds[1].events = POLLIN;
 		fds[1].fd = control.get_fd();
 
-		while (auto packet = stream.receive_pending(&bytes_received_))
+		// Malformed datagrams are dropped, only the control socket is fatal
+		while (auto packet = stream.receive_pending_lossy(&bytes_received_))
 			std::visit(std::forward<T>(visitor), std::move(*packet));
 		while (auto packet = control.receive_pending(&bytes_received_))
 			std::visit(std::forward<T>(visitor), std::move(*packet));
@@ -101,7 +103,7 @@ public:
 
 		if (fds[0].revents & POLLIN)
 		{
-			auto packet = stream.receive(&bytes_received_);
+			auto packet = stream.receive_lossy(&bytes_received_);
 			if (packet)
 			{
 				std::visit(std::forward<T>(visitor), std::move(*packet));
@@ -114,6 +116,9 @@ public:
 			if (packet)
 				std::visit(std::forward<T>(visitor), std::move(*packet));
 		}
+
+		if (uint64_t dropped = stream.take_dropped_datagrams())
+			spdlog::warn("Dropped {} invalid datagram(s) on the stream socket ({} total)", dropped, stream.dropped_datagrams());
 
 		return r;
 	}

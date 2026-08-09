@@ -24,9 +24,11 @@
 
 #include "encoder_settings.h"
 #include "os/os_time.h"
+#include "util/u_logging.h"
 #include "utils/wivrn_trace.h"
 #include "wivrn_config.h"
 
+#include <algorithm>
 #include <string>
 
 #if WIVRN_USE_NVENC
@@ -47,44 +49,77 @@
 namespace wivrn
 {
 
-video_encoder::sender::sender() :
-        thread([this](std::stop_token t) {
-	        while (not t.stop_requested())
-	        {
-		        data * d = nullptr;
-		        {
-			        std::unique_lock lock(mutex);
-			        if (pending.empty())
-				        cv.wait_for(lock, std::chrono::milliseconds(100));
-			        else
-				        d = &pending.front();
-		        }
-		        if (d and not d->span.empty())
-		        {
-			        d->encoder->SendData(d->span, true, d->prefer_control);
-			        std::unique_lock lock(mutex);
-			        pending.pop_front();
-			        cv.notify_all();
-		        }
-	        }
-	        std::unique_lock lock(mutex);
-	        pending.clear();
-	        cv.notify_all();
-        })
+video_encoder::sender::sender()
 {
+	for (queue & q: queues)
+		q.thread = std::jthread([this, &q](std::stop_token t) { run(std::move(t), q); });
+}
+
+void video_encoder::sender::run(std::stop_token t, queue & q)
+{
+	while (not t.stop_requested())
+	{
+		data d{};
+		{
+			std::unique_lock lock(mutex);
+			if (q.pending.empty())
+			{
+				cv.wait_for(lock, std::chrono::milliseconds(100));
+				continue;
+			}
+			// The frame is kept out of the queue while it is sent, so that it
+			// cannot be dropped from under us, wait_idle uses in_flight
+			d = std::move(q.pending.front());
+			q.pending.pop_front();
+			q.in_flight = d.encoder;
+		}
+
+		if (not d.span.empty())
+			d.encoder->SendData(d.span, true, d.prefer_control);
+
+		std::unique_lock lock(mutex);
+		q.in_flight = nullptr;
+		cv.notify_all();
+	}
+
+	std::unique_lock lock(mutex);
+	q.pending.clear();
+	cv.notify_all();
 }
 
 void video_encoder::sender::push(data && d)
 {
-	std::unique_lock lock(mutex);
-	pending.push_back(std::move(d));
+	queue & q = queues[d.prefer_control ? 1 : 0];
+
+	size_t dropped = 0;
+	{
+		std::unique_lock lock(mutex);
+		// Drop whole frames, oldest first: a partial frame is useless to the
+		// decoder
+		while (q.pending.size() >= max_queued_frames)
+		{
+			q.pending.pop_front();
+			++dropped;
+		}
+		q.pending.push_back(std::move(d));
+	}
 	cv.notify_all();
+
+	if (dropped)
+		U_LOG_W("Video sender queue full, dropped %zu frame(s)", dropped);
 }
 
 void video_encoder::sender::wait_idle(video_encoder * encoder)
 {
+	auto busy = [this, encoder]() {
+		return std::ranges::any_of(queues, [encoder](const queue & q) {
+			return q.in_flight == encoder or
+			       std::ranges::any_of(q.pending, [encoder](const data & d) { return d.encoder == encoder; });
+		});
+	};
+
 	std::unique_lock lock(mutex);
-	while (std::ranges::any_of(pending, [=](auto & data) { return data.encoder == encoder; }))
+	while (busy())
 		cv.wait_for(lock, std::chrono::milliseconds(100));
 }
 

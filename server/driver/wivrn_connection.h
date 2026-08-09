@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include "util/u_logging.h"
 #include "wivrn_ipc.h"
 #include "wivrn_packets.h"
 #include "wivrn_sockets.h"
@@ -129,7 +130,8 @@ public:
 		fds[2].fd = wivrn_ipc_socket_monado->get_fd();
 		fds[2].events = POLLIN;
 
-		while (auto packet = stream.receive_pending())
+		// Malformed datagrams are dropped, only the control socket is fatal
+		while (auto packet = stream.receive_pending_lossy())
 			std::visit(std::forward<T>(visitor), std::move(*packet));
 		while (auto packet = control.receive_pending())
 			std::visit(std::forward<T>(visitor), std::move(*packet));
@@ -149,7 +151,7 @@ public:
 
 		if (fds[0].revents & POLLIN)
 		{
-			auto packet = stream.receive();
+			auto packet = stream.receive_lossy();
 			if (packet)
 				std::visit(std::forward<T>(visitor), std::move(*packet));
 		}
@@ -167,6 +169,12 @@ public:
 			if (packet)
 				std::visit(std::forward<T>(visitor), std::move(*packet));
 		}
+
+		if (uint64_t dropped = stream.take_dropped_datagrams())
+			U_LOG_W("Dropped %lu invalid datagram(s) on the stream socket (%lu total)",
+			        (unsigned long)dropped,
+			        (unsigned long)stream.dropped_datagrams());
+
 		return r;
 	}
 };

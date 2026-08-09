@@ -23,6 +23,7 @@
 #include "idr_handler.h"
 #include "wivrn_packets.h"
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -30,6 +31,7 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <stop_token>
 #include <thread>
 #include <vulkan/vulkan_raii.hpp>
 
@@ -61,11 +63,27 @@ protected:
 private:
 	class sender
 	{
+		// One queue and one thread per destination socket: a stalled send on
+		// the control (TCP) socket must not delay shards on the stream (UDP)
+		// socket.
+		struct queue
+		{
+			std::deque<data> pending;
+			// encoder whose frame is currently being sent, if any
+			video_encoder * in_flight = nullptr;
+			std::jthread thread;
+		};
+
+		// Maximum number of whole frames queued per socket, oldest frames are
+		// dropped first on overflow
+		static const size_t max_queued_frames = 8;
+
 		std::mutex mutex;
 		std::condition_variable cv;
-		std::deque<data> pending;
-		std::jthread thread;
-		void run();
+		// [0]: stream socket, [1]: control socket
+		std::array<queue, 2> queues;
+
+		void run(std::stop_token, queue &);
 		sender();
 
 	public:

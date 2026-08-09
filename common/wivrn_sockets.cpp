@@ -270,7 +270,10 @@ std::pair<wivrn::deserialization_packet, sockaddr_in6> wivrn::UDP::receive_from_
 	{
 		// Not big enough for the IV: drop the packet
 		if (received < sizeof(uint64_t))
+		{
+			count_dropped_datagram();
 			return {};
+		}
 
 		std::array<uint8_t, 16> full_iv;
 		memcpy(full_iv.data(), buffer.get(), sizeof(uint64_t)); // TODO: endianness?
@@ -327,7 +330,7 @@ wivrn::deserialization_packet wivrn::UDP::receive_raw()
 		};
 	}
 
-	int received = recvmmsg(fd, mmsgs.data(), num_messages, MSG_DONTWAIT, nullptr);
+	int received = recvmmsg(fd, mmsgs.data(), num_messages, MSG_DONTWAIT | MSG_TRUNC, nullptr);
 
 	if (received < 0)
 		throw std::system_error{errno, std::generic_category()};
@@ -336,8 +339,17 @@ wivrn::deserialization_packet wivrn::UDP::receive_raw()
 
 	messages.reserve(received);
 
+	// Messages are pushed in reverse order, receive_pending pops from the back
 	for (int i = received - 1; i >= 0; --i)
 	{
+		// With MSG_TRUNC msg_len is the size of the datagram, which may be
+		// larger than the buffer: drop what we could not read entirely
+		if (mmsgs[i].msg_len > message_size)
+		{
+			count_dropped_datagram();
+			continue;
+		}
+
 		std::span<uint8_t> message{(uint8_t *)iovecs[i].iov_base, mmsgs[i].msg_len};
 		assert(message.data() != nullptr);
 
@@ -345,7 +357,10 @@ wivrn::deserialization_packet wivrn::UDP::receive_raw()
 		{
 			// Not big enough for the IV: drop the packet
 			if (message.size() < sizeof(uint64_t))
-				throw std::runtime_error("Packet too small: " + std::to_string(message.size()));
+			{
+				count_dropped_datagram();
+				continue;
+			}
 
 			std::array<uint8_t, 16> full_iv;
 			memcpy(full_iv.data(), message.data(), sizeof(uint64_t)); // TODO: endianness?
@@ -357,13 +372,25 @@ wivrn::deserialization_packet wivrn::UDP::receive_raw()
 			decrypter.decrypt_in_place(message);
 		}
 
-		if (i == 0)
-			return deserialization_packet{buffer, message};
-
 		messages.push_back(message);
 	}
 
-	__builtin_unreachable();
+	return receive_pending();
+}
+
+uint64_t wivrn::UDP::take_dropped_datagrams()
+{
+	if (dropped_datagrams_ == reported_dropped_datagrams)
+		return 0;
+
+	auto now = std::chrono::steady_clock::now();
+	if (now < next_drop_report)
+		return 0;
+	next_drop_report = now + std::chrono::seconds(1);
+
+	uint64_t dropped = dropped_datagrams_ - reported_dropped_datagrams;
+	reported_dropped_datagrams = dropped_datagrams_;
+	return dropped;
 }
 
 size_t wivrn::UDP::send_raw(serialization_packet && packet)

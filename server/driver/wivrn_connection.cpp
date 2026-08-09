@@ -138,8 +138,18 @@ void wivrn::wivrn_connection::init(std::stop_token stop_token, std::function<voi
 				auto [raw_packet, peer_addr] = stream.receive_from_raw();
 
 				// Ignore packets sent from the wrong address
-				if (memcmp(&peer_addr.sin6_addr, &client_address.sin6_addr, sizeof(peer_addr.sin6_addr)) == 0)
-					return std::make_pair(raw_packet.deserialize<from_headset::packets>(), (int)htons(peer_addr.sin6_port));
+				if (not raw_packet.empty() and memcmp(&peer_addr.sin6_addr, &client_address.sin6_addr, sizeof(peer_addr.sin6_addr)) == 0)
+				{
+					// A malformed datagram must not abort the handshake
+					try
+					{
+						return std::make_pair(raw_packet.deserialize<from_headset::packets>(), (int)htons(peer_addr.sin6_port));
+					}
+					catch (const std::exception &)
+					{
+						stream.count_dropped_datagram();
+					}
+				}
 			}
 
 			if (fds[1].revents & POLLIN)

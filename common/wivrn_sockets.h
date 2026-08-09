@@ -24,6 +24,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <exception>
 #include <fcntl.h>
 #include <memory>
@@ -108,6 +109,12 @@ class UDP : public fd_base
 	std::array<uint8_t, 16 - sizeof(iv_counter)> recv_iv_header;
 	std::array<uint8_t, 16 - sizeof(iv_counter)> send_iv_header;
 
+	// Malformed datagrams are dropped, they must not be fatal for the session.
+	// Only accessed from the thread that receives on this socket.
+	uint64_t dropped_datagrams_ = 0;
+	uint64_t reported_dropped_datagrams = 0;
+	std::chrono::steady_clock::time_point next_drop_report{};
+
 public:
 	UDP();
 	explicit UDP(int fd);
@@ -128,6 +135,22 @@ public:
 	void set_tos(int type_of_service);
 
 	void set_aes_key_and_ivs(std::span<std::uint8_t, 16> key, std::span<std::uint8_t, 8> recv_iv_header, std::span<std::uint8_t, 8> send_iv_header);
+
+	// Account for a datagram that was dropped because it could not be decoded
+	void count_dropped_datagram()
+	{
+		++dropped_datagrams_;
+	}
+
+	// Total number of datagrams dropped on this socket
+	uint64_t dropped_datagrams() const
+	{
+		return dropped_datagrams_;
+	}
+
+	// Number of datagrams dropped since the last report, rate limited to one
+	// report per second; returns 0 if there is nothing to report
+	uint64_t take_dropped_datagrams();
 };
 
 class TCP : public fd_base
@@ -233,6 +256,54 @@ public:
 			size->fetch_add(packet.wire_size());
 
 		return packet.deserialize<ReceivedType>();
+	}
+
+	// Datagram sockets only: a packet that fails to deserialize is dropped and
+	// counted instead of being reported to the caller, a single corrupt or
+	// spoofed datagram must not tear the session down.
+	std::optional<ReceivedType> receive_pending_lossy(std::atomic<uint64_t> * size = nullptr)
+	{
+		while (true)
+		{
+			deserialization_packet packet = ((Socket *)this)->receive_pending();
+			if (packet.empty())
+				return {};
+			if (size)
+				size->fetch_add(packet.wire_size());
+
+			try
+			{
+				return packet.deserialize<ReceivedType>();
+			}
+			catch (const std::exception &)
+			{
+				this->count_dropped_datagram();
+			}
+		}
+	}
+
+	// See receive_pending_lossy
+	std::optional<ReceivedType> receive_lossy(std::atomic<uint64_t> * size = nullptr)
+	{
+		deserialization_packet packet = this->receive_raw();
+		while (not packet.empty())
+		{
+			if (size)
+				size->fetch_add(packet.wire_size());
+
+			try
+			{
+				return packet.deserialize<ReceivedType>();
+			}
+			catch (const std::exception &)
+			{
+				this->count_dropped_datagram();
+			}
+
+			// Other datagrams of the same batch may still be valid
+			packet = ((Socket *)this)->receive_pending();
+		}
+		return {};
 	}
 
 	// WARNING: serialization packet keeps references to data

@@ -20,6 +20,7 @@
 #pragma once
 
 #include "crypto.h"
+#include "path_selector.h"
 #include "wivrn_packets.h"
 #include "wivrn_sockets.h"
 #include <array>
@@ -63,6 +64,22 @@ private:
 	uint64_t secondary_generation = 0;
 	std::atomic<bool> secondary_up = false;
 
+	// --- Path selector ------------------------------------------------------
+	// Mirror of the server side selector, for the headset -> server direction:
+	// tracking, inputs and feedback go over the secondary path while the primary
+	// is down. The two selectors are independent, an asymmetric state is fine.
+	// Any packet received on the primary path proves it is alive in the
+	// server -> headset direction; while the server has flipped its own output,
+	// the path_pong echo of our keepalive is the only such packet.
+	wivrn::path_selector selector;
+	uint64_t reported_stream_send_errors = 0;
+	std::chrono::steady_clock::time_point next_stream_error_report{};
+
+	void on_primary_received(bool from_control);
+	// Returns true if the failure was absorbed (a usable secondary path exists)
+	bool on_control_send_error(const std::exception &);
+	void on_stream_send_error(const std::exception &);
+
 	// Token given by the server in the handshake, needed to attach a path
 	std::array<uint8_t, 16> session_token_{};
 
@@ -80,17 +97,84 @@ public:
 	template <typename T>
 	void send_control(T && packet)
 	{
-		bytes_sent_ += control.send(std::forward<T>(packet));
+		if (selector.on_secondary() and secondary_up)
+		{
+			send_secondary(std::forward<T>(packet));
+			return;
+		}
+
+		try
+		{
+			bytes_sent_ += control.send(std::forward<T>(packet));
+		}
+		catch (const std::exception & e)
+		{
+			if (on_control_send_error(e))
+				return;
+			throw;
+		}
 	}
 
 	template <typename T>
 	void send_stream(T && packet)
 	{
-		if (stream)
-			bytes_sent_ += stream.send(std::forward<T>(packet));
-		else
-			bytes_sent_ += control.send(std::forward<T>(packet));
+		// The secondary path is TCP: the stream/control split does not exist
+		// there, everything goes over the one socket
+		if (selector.on_secondary() and secondary_up)
+		{
+			send_secondary(std::forward<T>(packet));
+			return;
+		}
+
+		try
+		{
+			if (stream)
+			{
+				bytes_sent_ += stream.send(std::forward<T>(packet));
+				selector.on_stream_send_ok();
+			}
+			else
+			{
+				bytes_sent_ += control.send(std::forward<T>(packet));
+			}
+		}
+		catch (const std::exception & e)
+		{
+			// A connected UDP socket latches at most one error (an ICMP
+			// unreachable while the access point is gone, ENETUNREACH during a
+			// Wi-Fi reassociation) and reports it to the next operation; the
+			// datagram is lost but the socket works again as soon as the link
+			// is back. Losing datagrams is what UDP does: never fatal.
+			if (stream)
+			{
+				on_stream_send_error(e);
+				return;
+			}
+
+			if (on_control_send_error(e))
+				return;
+			throw;
+		}
 	}
+
+	// Keepalive on the primary path, sent by the path manager every 250 ms so
+	// that the server keeps seeing the primary path even while we send
+	// everything else over the secondary one. Never throws.
+	void send_primary_ping();
+
+	// True while tracking and input go over the secondary path
+	bool sending_on_secondary() const
+	{
+		return selector.on_secondary();
+	}
+
+	// The primary path already goes through the loopback, i.e. through the USB
+	// tunnel: a secondary path over that same tunnel could not survive it
+	bool primary_is_loopback() const;
+
+	// Evaluate the liveness of both paths and switch if needed. Network thread
+	// only, called at the end of poll().
+	void update_paths();
 
 	const std::array<uint8_t, 16> & session_token() const
 	{
@@ -168,13 +252,36 @@ public:
 		fds[0].events = POLLIN;
 		fds[0].fd = stream.get_fd();
 		fds[1].events = POLLIN;
-		fds[1].fd = control.get_fd();
+		// A control socket that is known broken reports POLLERR on every poll:
+		// leaving it in would spin the network thread
+		fds[1].fd = selector.control_up() ? control.get_fd() : -1;
 
 		// Malformed datagrams are dropped, only the control socket is fatal
 		while (auto packet = stream.receive_pending_lossy(&bytes_received_))
+		{
+			on_primary_received(false);
 			std::visit(std::forward<T>(visitor), std::move(*packet));
-		while (auto packet = control.receive_pending(&bytes_received_))
+		}
+		while (selector.control_up())
+		{
+			std::optional<to_headset::packets> packet;
+			try
+			{
+				packet = control.receive_pending(&bytes_received_);
+			}
+			catch (const std::exception & e)
+			{
+				if (not on_control_send_error(e))
+					throw;
+				break;
+			}
+
+			if (not packet)
+				break;
+
+			on_primary_received(true);
 			std::visit(std::forward<T>(visitor), std::move(*packet));
+		}
 		poll_secondary_pending(std::forward<T>(visitor));
 
 		uint64_t secondary_gen = 0;
@@ -190,10 +297,19 @@ public:
 			throw std::system_error(errno, std::system_category());
 
 		if (fds[0].revents & (POLLHUP | POLLERR))
-			throw std::runtime_error("Error on stream socket");
+		{
+			// A connected UDP socket raises POLLERR for a latched error, most
+			// often an ICMP unreachable while the link is down. Draining it
+			// makes the socket usable again the moment the link is back, so
+			// this must never be a session teardown.
+			on_stream_send_error(std::runtime_error("poll reported an error"));
+		}
 
 		if (fds[1].revents & (POLLHUP | POLLERR))
-			throw std::runtime_error("Error on control socket");
+		{
+			if (not on_control_send_error(std::runtime_error("Error on control socket")))
+				throw std::runtime_error("Error on control socket");
+		}
 
 		if (fds[2].revents & (POLLHUP | POLLERR | POLLNVAL))
 		{
@@ -227,22 +343,48 @@ public:
 
 		if (fds[0].revents & POLLIN)
 		{
-			auto packet = stream.receive_lossy(&bytes_received_);
+			std::optional<to_headset::packets> packet;
+			try
+			{
+				packet = stream.receive_lossy(&bytes_received_);
+			}
+			catch (const std::exception & e)
+			{
+				// Same as above: recvmmsg reports the latched error
+				on_stream_send_error(e);
+			}
+
 			if (packet)
 			{
+				on_primary_received(false);
 				std::visit(std::forward<T>(visitor), std::move(*packet));
 			}
 		}
 
 		if (fds[1].revents & POLLIN)
 		{
-			auto packet = control.receive(&bytes_received_);
+			std::optional<to_headset::packets> packet;
+			try
+			{
+				packet = control.receive(&bytes_received_);
+			}
+			catch (const std::exception & e)
+			{
+				if (not on_control_send_error(e))
+					throw;
+			}
+
 			if (packet)
+			{
+				on_primary_received(true);
 				std::visit(std::forward<T>(visitor), std::move(*packet));
+			}
 		}
 
 		if (uint64_t dropped = stream.take_dropped_datagrams())
 			spdlog::warn("Dropped {} invalid datagram(s) on the stream socket ({} total)", dropped, stream.dropped_datagrams());
+
+		update_paths();
 
 		return r;
 	}

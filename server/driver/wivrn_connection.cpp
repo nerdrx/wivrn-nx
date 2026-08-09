@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <chrono>
+#include <cstring>
 #include <poll.h>
 #include <random>
 #include <regex>
@@ -71,9 +72,43 @@ static std::array<uint8_t, 16> random_session_token()
 	return token;
 }
 
-// Timeout on sends over a secondary path: a stalled USB tunnel must not block
-// the thread that duplicates tracking onto it
+// Timeout on sends over a secondary path while it only carries keepalives and
+// duplicated tracking: a stalled USB tunnel must not block the thread that
+// duplicates tracking onto it
 static const timeval secondary_send_timeout{.tv_sec = 0, .tv_usec = 50'000};
+
+// Once the secondary path carries video, 50 ms is far too tight: a whole frame
+// may legitimately take longer than that to hand to the kernel. A send that
+// times out half way through a packet loses the TCP framing and costs the path.
+static const timeval secondary_active_send_timeout{.tv_sec = 1, .tv_usec = 0};
+
+// True if both sockets are connected to the same peer address, which is how a
+// secondary path over the USB tunnel looks when the primary already goes
+// through that same tunnel (both peers are the loopback, via adb reverse)
+static bool same_peer(int a, int b)
+{
+	sockaddr_in6 addr_a{};
+	sockaddr_in6 addr_b{};
+	socklen_t len_a = sizeof(addr_a);
+	socklen_t len_b = sizeof(addr_b);
+
+	if (getpeername(a, (sockaddr *)&addr_a, &len_a) < 0)
+		return false;
+	if (getpeername(b, (sockaddr *)&addr_b, &len_b) < 0)
+		return false;
+
+	return memcmp(&addr_a.sin6_addr, &addr_b.sin6_addr, sizeof(addr_a.sin6_addr)) == 0;
+}
+
+void wivrn::wivrn_connection::drain_socket_error(int fd, const char * what)
+{
+	int error = 0;
+	socklen_t len = sizeof(error);
+
+	// Reading SO_ERROR clears it
+	if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &len) == 0 and error)
+		U_LOG_D("Cleared pending error on the %s: %s", what, strerror(error));
+}
 
 wivrn::wivrn_connection::wivrn_connection(std::stop_token stop_token, encryption_state state, std::string pin, TCP && tcp) :
         control(std::move(tcp)),
@@ -87,8 +122,9 @@ wivrn::wivrn_connection::wivrn_connection(std::stop_token stop_token, encryption
 
 void wivrn::wivrn_connection::attach_secondary(int fd, const path_secrets & secrets)
 {
-	if (secondary)
-		drop_secondary("replaced by a new path");
+	drop_secondary("replaced by a new path");
+
+	std::unique_lock lock(secondary_mutex);
 
 	try
 	{
@@ -108,7 +144,15 @@ void wivrn::wivrn_connection::attach_secondary(int fd, const path_secrets & secr
 		secondary_last_receive = std::chrono::steady_clock::now();
 		secondary_next_report = secondary_last_receive + std::chrono::seconds(5);
 
-		U_LOG_I("Secondary path %d attached%s", (int)secondary_path_id, secrets.encrypted ? "" : " (unencrypted)");
+		// A path that shares the primary's peer address rides the same link and
+		// would fail with it: it is attached (the headset asked for it) but the
+		// selector will never pick it
+		secondary_can_failover = not same_peer(secondary.get_fd(), control.get_fd());
+
+		U_LOG_I("Secondary path %d attached%s%s",
+		        (int)secondary_path_id,
+		        secrets.encrypted ? "" : " (unencrypted)",
+		        secondary_can_failover ? "" : " (same peer as the primary, not usable for failover)");
 	}
 	catch (const std::exception & e)
 	{
@@ -119,14 +163,23 @@ void wivrn::wivrn_connection::attach_secondary(int fd, const path_secrets & secr
 
 void wivrn::wivrn_connection::drop_secondary(std::string_view reason)
 {
-	if (not secondary)
-		return;
+	{
+		std::unique_lock lock(secondary_mutex);
+		if (not secondary)
+			return;
+
+		::shutdown(secondary.get_fd(), SHUT_RDWR);
+		secondary = decltype(secondary)(-1);
+		secondary_received = 0;
+	}
+
+	secondary_can_failover = false;
+
+	// Nothing left to send on, whatever the state of the primary. The switch
+	// itself is decided by update_paths, on the network thread.
+	selector.set_secondary_usable(false);
 
 	U_LOG_I("Secondary path %d detached: %.*s", (int)secondary_path_id, (int)reason.size(), reason.data());
-
-	::shutdown(secondary.get_fd(), SHUT_RDWR);
-	secondary = decltype(secondary)(-1);
-	secondary_received = 0;
 }
 
 void wivrn::wivrn_connection::on_secondary_received()
@@ -137,7 +190,7 @@ void wivrn::wivrn_connection::on_secondary_received()
 
 void wivrn::wivrn_connection::report_secondary_status()
 {
-	if (not secondary)
+	if (not has_secondary())
 		return;
 
 	auto now = std::chrono::steady_clock::now();
@@ -153,16 +206,88 @@ void wivrn::wivrn_connection::report_secondary_status()
 	if (now >= secondary_next_report)
 	{
 		secondary_next_report = now + 5s;
-		U_LOG_I("Secondary path %d alive, %lu packets received, last %ld ms ago",
+		U_LOG_I("Secondary path %d alive, %lu packets received, last %ld ms ago%s",
 		        (int)secondary_path_id,
 		        (unsigned long)secondary_received,
-		        (long)since_last.count());
+		        (long)since_last.count(),
+		        selector.on_secondary() ? ", carrying video" : "");
+	}
+}
+
+void wivrn::wivrn_connection::on_primary_received(bool from_control)
+{
+	selector.on_primary_received(from_control, std::chrono::steady_clock::now());
+}
+
+bool wivrn::wivrn_connection::on_control_send_error(const std::exception & e)
+{
+	const bool can_fail_over = has_secondary() and secondary_can_failover;
+
+	if (selector.on_control_send_error())
+		U_LOG_W("Primary control socket failed: %s%s", e.what(), can_fail_over ? ", failing over" : "");
+
+	if (not can_fail_over)
+		return false;
+
+	selector.request(true, "the primary control socket failed");
+	return true;
+}
+
+void wivrn::wivrn_connection::on_stream_send_error(const std::exception & e)
+{
+	if (selector.on_stream_send_error(std::chrono::steady_clock::now()))
+		U_LOG_D("Send error on the primary stream socket: %s", e.what());
+
+	drain_socket_error(stream.get_fd(), "stream socket");
+}
+
+void wivrn::wivrn_connection::update_paths()
+{
+	auto now = std::chrono::steady_clock::now();
+	selector.set_secondary_usable(has_secondary() and secondary_can_failover);
+
+	auto event = selector.update(now);
+	if (event)
+	{
+		U_LOG_I("Path switch: video and control now on the %s path (%s), %ld ms since the last switch",
+		        event->on_secondary ? "secondary" : "primary",
+		        event->reason.c_str(),
+		        (long)event->since_previous.count());
+
+		{
+			// The timeout that is right for keepalives is not the one that is
+			// right for video
+			std::shared_lock lock(secondary_mutex);
+			if (secondary)
+			{
+				const timeval & timeout = event->on_secondary ? secondary_active_send_timeout : secondary_send_timeout;
+				setsockopt(secondary.get_fd(), SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+			}
+		}
+
+		if (switch_callback)
+			switch_callback(event->on_secondary, event->reason);
+
+		// Back on a primary whose control socket is broken for good and with
+		// nothing left to fall back to: let the session pause and reconnect
+		if (not event->on_secondary and not selector.control_up())
+			throw std::runtime_error("Both paths are down");
+	}
+
+	if (uint64_t errors = selector.stream_send_errors(); errors != reported_stream_send_errors and now >= next_stream_error_report)
+	{
+		next_stream_error_report = now + 5s;
+		U_LOG_W("Send errors on the primary stream socket: %lu new, %lu total",
+		        (unsigned long)(errors - reported_stream_send_errors),
+		        (unsigned long)errors);
+		reported_stream_send_errors = errors;
 	}
 }
 
 void wivrn::wivrn_connection::init(std::stop_token stop_token, std::function<void()> tick)
 {
 	active = false;
+	selector.reset(std::chrono::steady_clock::now());
 
 	sockaddr_in6 server_address;
 	socklen_t len = sizeof(server_address);
@@ -377,6 +502,9 @@ void wivrn::wivrn_connection::init(std::stop_token stop_token, std::function<voi
 	control.send(to_headset::handshake{.stream_port = port, .session_token = token});
 
 	info_packet = std::get<from_headset::headset_info_packet>(receive(10s).first);
+
+	// Fresh primary path
+	selector.reset(std::chrono::steady_clock::now());
 
 	active = true;
 

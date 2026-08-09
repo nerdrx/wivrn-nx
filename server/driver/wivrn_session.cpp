@@ -140,6 +140,11 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 	// Both switches must be on: the server configuration and the one in the headset settings
 	bitrate_ctl.configure(conf.bitrate_auto, get_info().settings.bitrate_bps, get_info().settings.bitrate_auto);
 
+	multipath_usb_max_bitrate = conf.multipath.usb_max_bitrate_bps;
+	connection->set_path_switch_callback([this](bool on_secondary, std::string_view reason) {
+		on_path_switch(on_secondary, reason);
+	});
+
 #if WIVRN_FEATURE_STEAMVR_LIGHTHOUSE
 
 	auto use_steamvr_lh = conf.use_steamvr_lh || std::getenv("WIVRN_USE_STEAMVR_LH");
@@ -799,11 +804,41 @@ void wivrn_session::operator()(from_headset::timesync_response && timesync)
 
 void wivrn_session::operator()(from_headset::path_ping && ping)
 {
-	// Keepalives only exist on secondary paths, echo them back there
-	connection->send_secondary(to_headset::path_pong{
-	        .path_id = ping.path_id,
-	        .timestamp = ping.timestamp,
-	});
+	// The echo goes back on the path the ping came from, whichever path is
+	// carrying video: this is how the headset learns that a path it is not using
+	// works in both directions.
+	if (ping.path_id == 0)
+		connection->send_primary_control(to_headset::path_pong{
+		        .path_id = ping.path_id,
+		        .timestamp = ping.timestamp,
+		});
+	else
+		connection->send_secondary(to_headset::path_pong{
+		        .path_id = ping.path_id,
+		        .timestamp = ping.timestamp,
+		});
+}
+
+void wivrn_session::on_path_switch(bool on_secondary, std::string_view reason)
+{
+	// Whatever was in flight on the old path is lost, and a P-frame referencing
+	// it would be undecodable: start over from an IDR
+	compositor.request_idr();
+
+	// The regression assumes one path's latency; keeping its samples would drag
+	// the offset across the difference between the two paths
+	offset_est.reset();
+
+	// The USB tunnel has its own, much lower, budget
+	auto ceiling = on_secondary and multipath_usb_max_bitrate
+	                       ? std::optional<uint32_t>(multipath_usb_max_bitrate)
+	                       : std::nullopt;
+	apply_auto_bitrate(bitrate_ctl.set_path_ceiling(ceiling));
+
+	U_LOG_I("Failover to the %s path: %.*s, IDR forced, clock estimator reset",
+	        on_secondary ? "secondary" : "primary",
+	        (int)reason.size(),
+	        reason.data());
 }
 
 void wivrn_session::apply_auto_bitrate(std::optional<uint32_t> bitrate)

@@ -143,6 +143,13 @@ public:
 	// Resets the controller to it. Returns the bitrate to apply.
 	std::optional<uint32_t> set_ceiling(uint32_t ceiling_bps);
 
+	// Extra ceiling imposed by the path currently carrying video (multipath failover), clamped
+	// on top of the client's. Empty puts the client ceiling back. Measurements taken on the
+	// other path say nothing about this one, so the controller is re-seeded either way. Returns
+	// the bitrate to apply — including when the automatic control is off, the path budget is a
+	// property of the link and not of the AIMD.
+	std::optional<uint32_t> set_path_ceiling(std::optional<uint32_t> ceiling_bps);
+
 	// Forget all measurements and go back to the ceiling, e.g. when the session is resumed.
 	std::optional<uint32_t> reset();
 
@@ -192,7 +199,10 @@ private:
 	config conf;
 	// Headset side switch, ANDed with conf.enabled
 	bool client_enabled = true;
+	// Ceiling requested by the client
 	uint32_t ceiling = 0;
+	// Ceiling of the path carrying video, if it is more restrictive
+	std::optional<uint32_t> path_ceiling;
 	uint32_t bitrate = 0;
 	uint32_t min_bitrate = 0;
 
@@ -211,6 +221,8 @@ private:
 	std::chrono::steady_clock::time_point last_evaluation{};
 	std::chrono::steady_clock::time_point last_decrease{};
 
+	// Ceiling actually in force: the client's, clamped by the current path's
+	uint32_t effective_ceiling() const;
 	// reset(), with the mutex already held
 	std::optional<uint32_t> reset_locked();
 	void close_frame(frame_state &, std::chrono::steady_clock::time_point now);

@@ -26,6 +26,8 @@
 #include "utils/i18n.h"
 #include "wivrn_packets.h"
 #include <arpa/inet.h>
+#include <cstring>
+#include <format>
 #include <ifaddrs.h>
 #include <linux/ipv6.h>
 #include <net/if.h>
@@ -211,14 +213,34 @@ void wivrn_session::handshake(T address, bool tcp_only, crypto::key & headset_ke
 	}
 }
 
+namespace
+{
+int64_t steady_now_ns()
+{
+	return std::chrono::duration_cast<std::chrono::nanoseconds>(
+	               std::chrono::steady_clock::now().time_since_epoch())
+	        .count();
+}
+
+// While the secondary path only carries keepalives and duplicated tracking a
+// stalled send must never hold the tracking thread; once it carries everything
+// a tight timeout would cost the path on the first hiccup (a send that times out
+// half way through a packet loses the TCP framing).
+void set_send_timeout(int fd, bool active)
+{
+	timeval timeout = active
+	                          ? timeval{.tv_sec = 1, .tv_usec = 0}
+	                          : timeval{.tv_sec = 0, .tv_usec = 20'000};
+	setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+}
+} // namespace
+
 void wivrn_session::set_secondary(control_socket_t && socket)
 {
 	{
 		std::unique_lock lock(secondary_mutex);
 
-		// A stalled path must never block the tracking thread for long
-		timeval timeout{.tv_sec = 0, .tv_usec = 20'000};
-		setsockopt(socket.get_fd(), SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+		set_send_timeout(socket.get_fd(), selector.on_secondary());
 
 		secondary = std::move(socket);
 		++secondary_generation;
@@ -242,6 +264,120 @@ void wivrn_session::drop_secondary(std::string_view reason)
 	}
 
 	spdlog::info("Secondary path detached: {}", reason);
+
+	// Nothing left to send on, whatever the state of the primary. The switch
+	// itself is decided by update_paths, on the network thread.
+	selector.set_secondary_usable(false);
+}
+
+bool wivrn_session::primary_is_loopback() const
+{
+	if (auto * v4 = std::get_if<in_addr>(&address))
+		return (ntohl(v4->s_addr) >> 24) == 127;
+
+	if (auto * v6 = std::get_if<in6_addr>(&address))
+	{
+		if (IN6_IS_ADDR_LOOPBACK(v6))
+			return true;
+		if (IN6_IS_ADDR_V4MAPPED(v6))
+			return v6->s6_addr[12] == 127;
+	}
+
+	return false;
+}
+
+void wivrn_session::on_primary_received(bool from_control)
+{
+	selector.on_primary_received(from_control, std::chrono::steady_clock::now());
+}
+
+bool wivrn_session::on_control_send_error(const std::exception & e)
+{
+	const bool can_fail_over = secondary_up;
+
+	if (selector.on_control_send_error())
+		spdlog::warn("Primary control socket failed: {}{}", e.what(), can_fail_over ? ", failing over" : "");
+
+	if (not can_fail_over)
+		return false;
+
+	selector.request(true, "the primary control socket failed");
+	return true;
+}
+
+void wivrn_session::on_stream_send_error(const std::exception & e)
+{
+	if (selector.on_stream_send_error(std::chrono::steady_clock::now()))
+		spdlog::debug("Send error on the primary stream socket: {}", e.what());
+
+	// Reading SO_ERROR clears the latched error, so the socket is usable again
+	// as soon as the link is back. Recreating it is not an option: the server
+	// pinned our source port with connect() during the handshake.
+	int error = 0;
+	socklen_t len = sizeof(error);
+	if (getsockopt(stream.get_fd(), SOL_SOCKET, SO_ERROR, &error, &len) == 0 and error)
+		spdlog::debug("Cleared pending error on the stream socket: {}", strerror(error));
+}
+
+void wivrn_session::send_primary_ping()
+{
+	auto packet = from_headset::path_ping{
+	        .path_id = 0,
+	        .timestamp = steady_now_ns(),
+	};
+
+	try
+	{
+		// The stream socket is the one video comes back on, and it never blocks.
+		// It is also what makes the primary path recover: while everything else
+		// goes over the secondary, this is the only send left on it, so it is
+		// the only thing that can clear a run of send errors.
+		if (stream)
+		{
+			bytes_sent_ += stream.send(std::move(packet));
+			selector.on_stream_send_ok();
+		}
+		else
+		{
+			bytes_sent_ += control.send(std::move(packet));
+		}
+	}
+	catch (const std::exception & e)
+	{
+		if (stream)
+			on_stream_send_error(e);
+		else
+			on_control_send_error(e);
+	}
+}
+
+void wivrn_session::update_paths()
+{
+	auto now = std::chrono::steady_clock::now();
+	selector.set_secondary_usable(secondary_up);
+
+	if (auto event = selector.update(now))
+	{
+		{
+			std::shared_lock lock(secondary_mutex);
+			if (secondary_up)
+				set_send_timeout(secondary.get_fd(), event->on_secondary);
+		}
+
+		spdlog::info("Path switch: tracking and input now on the {} path ({}), {} ms since the last switch",
+		             event->on_secondary ? "secondary" : "primary",
+		             event->reason,
+		             event->since_previous.count());
+	}
+
+	if (uint64_t errors = selector.stream_send_errors(); errors != reported_stream_send_errors and now >= next_stream_error_report)
+	{
+		next_stream_error_report = now + std::chrono::seconds(5);
+		spdlog::warn("Send errors on the primary stream socket: {} new, {} total",
+		             errors - reported_stream_send_errors,
+		             errors);
+		reported_stream_send_errors = errors;
+	}
 }
 
 wivrn_session::wivrn_session(in6_addr address, int port, bool tcp_only, crypto::key & headset_keypair, std::function<std::string(int fd)> pin_enter) :
@@ -255,6 +391,8 @@ wivrn_session::wivrn_session(in6_addr address, int port, bool tcp_only, crypto::
 	{
 		throw handshake_error{e.what()};
 	}
+
+	selector.reset(std::chrono::steady_clock::now());
 }
 
 wivrn_session::wivrn_session(in_addr address, int port, bool tcp_only, crypto::key & headset_keypair, std::function<std::string(int fd)> pin_enter) :
@@ -268,4 +406,6 @@ wivrn_session::wivrn_session(in_addr address, int port, bool tcp_only, crypto::k
 	{
 		throw handshake_error{e.what()};
 	}
+
+	selector.reset(std::chrono::steady_clock::now());
 }

@@ -413,7 +413,7 @@ void settings_streaming(const settings_context & ctx)
 	list.push_back({
 	        .id = "##multipath_usb",
 	        .label = _("USB backup connection"),
-	        .description = _("Use the USB cable as a backup connection while streaming over Wi-Fi. Requires the tunnel to be armed by the WiVRn dashboard."),
+	        .description = _("Use the USB cable as a backup connection while streaming over Wi-Fi. Video and input switch to it automatically when the Wi-Fi link fails, and switch back once it has been stable again. Requires the tunnel to be armed by the WiVRn dashboard."),
 	        .ui = ui_kind::toggle,
 	        .get_bool = [&config] { return config.multipath_usb; },
 	        .set_bool = [&config](bool v) { config.multipath_usb = v; config.save(); },

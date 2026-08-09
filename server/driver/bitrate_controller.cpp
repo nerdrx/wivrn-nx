@@ -38,22 +38,30 @@ void bitrate_controller::configure(const config & c, uint32_t ceiling_bps, bool 
 	conf = c;
 	client_enabled = client_enabled_;
 	ceiling = ceiling_bps;
+	auto eff = effective_ceiling();
 	// A client asking for less than the configured minimum wins: the ceiling is always honoured.
-	min_bitrate = std::min(conf.min_bitrate_bps, ceiling ? ceiling : conf.min_bitrate_bps);
-	bitrate = ceiling;
-	recovery_target = ceiling;
+	min_bitrate = std::min(conf.min_bitrate_bps, eff ? eff : conf.min_bitrate_bps);
+	bitrate = eff;
+	recovery_target = eff;
 	st = state::steady;
 	first_recovery_step = true;
 	frames = {};
 	has_frames = false;
 	flush();
 
-	if (conf.enabled and client_enabled and ceiling)
+	if (conf.enabled and client_enabled and eff)
 		U_LOG_I("Automatic bitrate enabled, ceiling %.1f Mbit/s, floor %.1f Mbit/s",
-		        ceiling * to_mbits,
+		        eff * to_mbits,
 		        min_bitrate * to_mbits);
-	else if (conf.enabled and not client_enabled and ceiling)
-		U_LOG_I("Automatic bitrate disabled on the headset, using %.1f Mbit/s", ceiling * to_mbits);
+	else if (conf.enabled and not client_enabled and eff)
+		U_LOG_I("Automatic bitrate disabled on the headset, using %.1f Mbit/s", eff * to_mbits);
+}
+
+uint32_t bitrate_controller::effective_ceiling() const
+{
+	if (path_ceiling and ceiling)
+		return std::min(ceiling, *path_ceiling);
+	return ceiling;
 }
 
 bool bitrate_controller::enabled() const
@@ -86,7 +94,7 @@ uint32_t bitrate_controller::current() const
 
 uint32_t bitrate_controller::clamp(uint64_t value) const
 {
-	return uint32_t(std::clamp<uint64_t>(value, min_bitrate, ceiling));
+	return uint32_t(std::clamp<uint64_t>(value, min_bitrate, effective_ceiling()));
 }
 
 void bitrate_controller::flush()
@@ -104,16 +112,32 @@ std::optional<uint32_t> bitrate_controller::set_ceiling(uint32_t ceiling_bps)
 		return {};
 
 	ceiling = ceiling_bps;
-	min_bitrate = std::min(conf.min_bitrate_bps, ceiling);
-	bitrate = ceiling;
-	recovery_target = ceiling;
-	st = state::steady;
-	first_recovery_step = true;
-	frames = {};
-	has_frames = false;
-	flush();
+	min_bitrate = std::min(conf.min_bitrate_bps, effective_ceiling());
+	return reset_locked();
+}
 
-	return bitrate;
+std::optional<uint32_t> bitrate_controller::set_path_ceiling(std::optional<uint32_t> ceiling_bps)
+{
+	std::lock_guard lock(mutex);
+
+	if (ceiling_bps == path_ceiling)
+		return {};
+
+	path_ceiling = ceiling_bps;
+
+	if (not ceiling)
+		return {};
+
+	min_bitrate = std::min(conf.min_bitrate_bps, effective_ceiling());
+
+	if (path_ceiling)
+		U_LOG_I("Bitrate ceiling for the active path: %.1f Mbit/s (client asked for %.1f Mbit/s)",
+		        effective_ceiling() * to_mbits,
+		        ceiling * to_mbits);
+	else
+		U_LOG_I("Bitrate ceiling back to the client's %.1f Mbit/s", ceiling * to_mbits);
+
+	return reset_locked();
 }
 
 std::optional<uint32_t> bitrate_controller::reset()
@@ -127,8 +151,8 @@ std::optional<uint32_t> bitrate_controller::reset_locked()
 	if (not ceiling)
 		return {};
 
-	bitrate = ceiling;
-	recovery_target = ceiling;
+	bitrate = effective_ceiling();
+	recovery_target = bitrate;
 	st = state::steady;
 	first_recovery_step = true;
 	frames = {};
@@ -327,10 +351,10 @@ std::optional<uint32_t> bitrate_controller::evaluate(std::chrono::steady_clock::
 		}
 		else
 		{
-			if (held < increase_hold or bitrate >= ceiling)
+			if (held < increase_hold or bitrate >= effective_ceiling())
 				return {};
 
-			uint32_t step = std::max<uint32_t>(increase_step_min, uint32_t(ceiling * increase_step_ratio));
+			uint32_t step = std::max<uint32_t>(increase_step_min, uint32_t(effective_ceiling() * increase_step_ratio));
 			bitrate = clamp(uint64_t(bitrate) + step);
 			recovery_target = bitrate;
 			reason = "spare capacity";

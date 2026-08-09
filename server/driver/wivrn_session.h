@@ -75,6 +75,8 @@ class wivrn_session : public xrt_system_devices
 	// Adjusts the bitrate from the per-frame delivery timings reported by the client.
 	// Has its own mutex, may be used from any thread.
 	wivrn::bitrate_controller bitrate_ctl;
+	// Ceiling applied while the secondary (USB) path carries video
+	uint32_t multipath_usb_max_bitrate = 0;
 	pacing_app_factory app_pacers;
 
 	b_system & xrt_system;
@@ -236,6 +238,10 @@ private:
 
 	// Forwards a bitrate decided by the automatic controller to the encoders
 	void apply_auto_bitrate(std::optional<uint32_t>);
+
+	// The path carrying video and control changed (multipath failover). Called
+	// from the network thread.
+	void on_path_switch(bool on_secondary, std::string_view reason);
 
 	void update_client_states(bool visible, bool focused);
 	void poll_session_loss();

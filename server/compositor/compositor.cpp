@@ -875,6 +875,15 @@ void compositor::resume()
 	send_video_stream_description();
 }
 
+void compositor::request_idr()
+{
+	for (auto & encoder: encoders)
+	{
+		if (encoder)
+			encoder->reset();
+	}
+}
+
 void compositor::on_feedback(const from_headset::feedback & feedback, const clock_offset & o)
 {
 	uint8_t stream = feedback.stream_index;

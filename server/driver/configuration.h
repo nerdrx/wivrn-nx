@@ -62,9 +62,19 @@ struct configuration
 		float scale = 0.5;
 	};
 
+	// Multipath (secondary path over the USB tunnel) tuning
+	struct multipath_config
+	{
+		// Ceiling applied on top of the client's while video is carried by the
+		// secondary path. adb forward over USB 2.0 tops out well below what a
+		// good 5 GHz link does, so the AIMD needs a lower budget to converge in.
+		uint32_t usb_max_bitrate_bps = 100'000'000;
+	};
+
 	std::array<encoder, 3> encoders; // left, right, alpha
 	// Automatic bitrate control, the ceiling is always the bitrate requested by the client
 	bitrate_controller::config bitrate_auto;
+	multipath_config multipath;
 	mirror_config mirror;
 	std::optional<uint8_t> bit_depth;
 	std::optional<std::array<float, 3>> grip_surface;

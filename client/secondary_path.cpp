@@ -88,9 +88,23 @@ void secondary_path_manager::run(std::stop_token stop)
 
 	auto next_probe = std::chrono::steady_clock::now();
 
+	// A secondary path over the USB tunnel cannot back up a primary that already
+	// goes through that same tunnel: both would fail together
+	if (session.primary_is_loopback())
+	{
+		spdlog::info("No secondary path: the primary connection already goes through the loopback");
+		return;
+	}
+
 	while (not stop.stop_requested())
 	{
 		bool want = wanted();
+
+		// Keepalive on the primary path too: it is what tells the server that
+		// the primary is back after a failover, and it is the only traffic left
+		// on it once we have flipped our own output to the secondary
+		if (want)
+			session.send_primary_ping();
 
 		if (session.has_secondary())
 		{

@@ -545,8 +545,9 @@ void scenes::stream::tracking()
 				};
 				network_session->send_stream(from_headset::battery{battery});
 
-				// Duplicated on the secondary path, harmless if it arrives twice
-				if (network_session->has_secondary())
+				// Duplicated on the secondary path, harmless if it arrives twice.
+				// Not while it is the path send_stream already uses.
+				if (network_session->has_secondary() and not network_session->sending_on_secondary())
 					network_session->send_secondary(from_headset::battery{battery});
 
 				next_battery_check = now + battery_check_interval;
@@ -599,7 +600,8 @@ void scenes::stream::tracking()
 			// drops the duplicate, and if the primary lost it the pose is still
 			// there. Inputs, feedback and audio are never duplicated.
 			// The packet is serialized again because sending encrypts in place.
-			if (network_session->has_secondary())
+			// Not while it is the path send_stream already uses.
+			if (network_session->has_secondary() and not network_session->sending_on_secondary())
 				network_session->send_secondary(from_headset::tracking{tracking});
 
 			XrTime old = scheduled_derived_pose;

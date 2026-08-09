@@ -83,6 +83,8 @@ private:
 	std::optional<secondary_path_manager> path_manager;
 	std::atomic<int64_t> secondary_rtt_ns = 0;
 	std::chrono::steady_clock::time_point secondary_rtt_next_log{};
+	std::atomic<int64_t> primary_rtt_ns = 0;
+	std::chrono::steady_clock::time_point primary_rtt_next_log{};
 
 	thread_safe<to_headset::tracking_control> tracking_control{};
 	std::array<std::atomic<interaction_profile>, 3> interaction_profiles; // left hand, right hand, gamepad

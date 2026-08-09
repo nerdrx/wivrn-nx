@@ -200,6 +200,11 @@ public:
 
 	void resume();
 
+	// Force an IDR on every stream, without re-sending the stream description.
+	// Used when the path carrying video changes: whatever was in flight on the
+	// old path is lost, and a P-frame referencing it would be undecodable.
+	void request_idr();
+
 	void on_feedback(const from_headset::feedback &, const clock_offset &);
 };
 

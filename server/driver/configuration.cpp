@@ -194,6 +194,18 @@ configuration::configuration()
 				throw std::runtime_error("invalid bitrate-auto value, expected a boolean or an object");
 		}
 
+		// "multipath": {"usb-max-bitrate": bits/s}
+		if (auto it = json.find("multipath"); it != json.end())
+		{
+			if (it->is_object())
+			{
+				if (auto max = it->find("usb-max-bitrate"); max != it->end())
+					multipath.usb_max_bitrate_bps = *max;
+			}
+			else
+				throw std::runtime_error("invalid multipath value, expected an object");
+		}
+
 		// "mirror": true/false, or an object {"enabled": bool, "fps": int, "scale": float}
 		if (auto it = json.find("mirror"); it != json.end())
 		{

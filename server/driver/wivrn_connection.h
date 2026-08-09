@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include "path_selector.h"
 #include "util/u_logging.h"
 #include "wivrn_ipc.h"
 #include "wivrn_packets.h"
@@ -28,10 +29,14 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
+#include <mutex>
 #include <optional>
 #include <poll.h>
+#include <shared_mutex>
 #include <stdexcept>
 #include <stop_token>
+#include <string>
 #include <system_error>
 
 namespace wivrn
@@ -63,11 +68,33 @@ private:
 
 	// Secondary (multipath) TCP path, attached at runtime by the main loop
 	// process. It has its own liveness: an error here never affects the session.
+	//
+	// Once it carries video it is written by the encoder sender threads and by
+	// the worker thread as well as the network thread, so every use takes the
+	// mutex in shared mode; only replacing or closing the socket takes it
+	// exclusively, and a slow send can then never hold up the network thread.
+	mutable std::shared_mutex secondary_mutex;
 	typed_socket<TCP, from_headset::packets, to_headset::packets> secondary{-1};
 	uint8_t secondary_path_id = 0;
 	uint64_t secondary_received = 0;
 	std::chrono::steady_clock::time_point secondary_last_receive{};
 	std::chrono::steady_clock::time_point secondary_next_report{};
+	// False when the secondary shares the primary's peer address, i.e. both ride
+	// the same USB tunnel: attaching it is harmless but it can never be a backup
+	std::atomic<bool> secondary_can_failover = false;
+
+	// --- Path selector -----------------------------------------------------
+	// Decides where control packets and video go. Any packet received on the
+	// control or the stream socket, whatever it is, proves the primary path is
+	// alive in the headset -> server direction; the headset also sends a
+	// path_ping every 250 ms so that this stays true while it has flipped its
+	// own output to the secondary.
+	path_selector selector;
+	// Set before the threads start, read by the network thread
+	std::function<void(bool on_secondary, std::string_view reason)> switch_callback;
+
+	uint64_t reported_stream_send_errors = 0;
+	std::chrono::steady_clock::time_point next_stream_error_report{};
 
 	// Random, sent to the headset in to_headset::handshake, presented back by
 	// the headset to attach a secondary path
@@ -80,16 +107,28 @@ private:
 	template <typename T>
 	void poll_secondary_pending(T && visitor)
 	{
-		while (secondary)
+		while (true)
 		{
 			std::optional<from_headset::packets> packet;
-			try
+			std::string error;
 			{
-				packet = secondary.receive_pending();
+				std::shared_lock lock(secondary_mutex);
+				if (not secondary)
+					return;
+
+				try
+				{
+					packet = secondary.receive_pending();
+				}
+				catch (const std::exception & e)
+				{
+					error = e.what();
+				}
 			}
-			catch (const std::exception & e)
+
+			if (not error.empty())
 			{
-				drop_secondary(e.what());
+				drop_secondary(error);
 				return;
 			}
 
@@ -103,6 +142,17 @@ private:
 
 	void on_secondary_received();
 	void report_secondary_status();
+
+	// Any packet received on the primary path. from_control tells which socket it
+	// came from.
+	void on_primary_received(bool from_control);
+	// A send failed on the primary control socket. Returns true if the session
+	// survives it (there is a usable secondary path to fall back to).
+	bool on_control_send_error(const std::exception &);
+	// A send failed on the primary stream socket, always survivable
+	void on_stream_send_error(const std::exception &);
+	// Evaluate the liveness of both paths and switch if needed, network thread only
+	void update_paths();
 
 public:
 	wivrn_connection(std::stop_token stop_token, encryption_state state, std::string pin, TCP && tcp);
@@ -128,7 +178,21 @@ public:
 
 	bool has_secondary() const
 	{
+		std::shared_lock lock(secondary_mutex);
 		return bool(secondary);
+	}
+
+	// True while the secondary path carries control and video
+	bool video_on_secondary() const
+	{
+		return selector.on_secondary();
+	}
+
+	// Called on every path switch, from the network thread. Must be set before
+	// the session threads start.
+	void set_path_switch_callback(std::function<void(bool on_secondary, std::string_view reason)> cb)
+	{
+		switch_callback = std::move(cb);
 	}
 
 	// Take over a secondary connection accepted and authenticated by the main
@@ -138,33 +202,75 @@ public:
 	// Close the secondary path, the session is not affected
 	void drop_secondary(std::string_view reason);
 
-	// Never throws, a failure only drops the secondary path
+	// Read and clear a socket's pending error. A connected datagram socket keeps
+	// at most one, reports it to the next operation and is then usable again.
+	static void drain_socket_error(int fd, const char * what);
+
+	// Never throws, a failure only drops the secondary path. Returns false, with
+	// the packet untouched, when there is no secondary path at all; a failed
+	// send returns true, the packet was consumed by the serializer.
 	template <typename T>
-	void send_secondary(T && packet)
+	bool send_secondary(T && packet)
 	{
-		if (not secondary)
+		std::string error;
+		{
+			std::shared_lock lock(secondary_mutex);
+			if (not secondary)
+				return false;
+
+			try
+			{
+				secondary.send(std::forward<T>(packet));
+			}
+			catch (const std::exception & e)
+			{
+				error = e.what();
+			}
+		}
+
+		if (not error.empty())
+			drop_secondary(error);
+
+		return true;
+	}
+
+	// Send on the primary control socket whatever the selector says, never
+	// throws. Used for the keepalive echo, which must go back on the path it
+	// came from even while that path is not the one carrying video.
+	template <typename T>
+	void send_primary_control(T && packet)
+	{
+		if (not active or not control)
 			return;
 
 		try
 		{
-			secondary.send(std::forward<T>(packet));
+			control.send(std::forward<T>(packet));
 		}
 		catch (const std::exception & e)
 		{
-			drop_secondary(e.what());
+			on_control_send_error(e);
 		}
 	}
 
 	template <typename T>
 	void send_control(T && packet)
 	{
+		if (not active)
+			return;
+
+		// Falls through to the primary if the secondary path died in between
+		if (selector.on_secondary() and send_secondary(std::forward<T>(packet)))
+			return;
+
 		try
 		{
-			if (active)
-				control.send(std::forward<T>(packet));
+			control.send(std::forward<T>(packet));
 		}
-		catch (...)
+		catch (const std::exception & e)
 		{
+			if (on_control_send_error(e))
+				return;
 			active = false;
 			throw;
 		}
@@ -173,18 +279,37 @@ public:
 	template <typename T>
 	void send_stream(T && packet)
 	{
+		if (not active)
+			return;
+
+		// The secondary path is TCP: the stream/control split does not exist
+		// there, everything goes over the one socket. Falls through to the
+		// primary if that path died in between.
+		if (selector.on_secondary() and send_secondary(std::forward<T>(packet)))
+			return;
+
 		try
 		{
-			if (active)
+			if (stream)
 			{
-				if (stream)
-					stream.send(std::forward<T>(packet));
-				else
-					control.send(std::forward<T>(packet));
+				stream.send(std::forward<T>(packet));
+				selector.on_stream_send_ok();
 			}
+			else
+				control.send(std::forward<T>(packet));
 		}
-		catch (...)
+		catch (const std::exception & e)
 		{
+			// Losing a datagram is not an error worth a session teardown: the
+			// socket is usable again right after and the path liveness decides
+			if (stream)
+			{
+				on_stream_send_error(e);
+				return;
+			}
+
+			if (on_control_send_error(e))
+				return;
 			active = false;
 			throw;
 		}
@@ -204,7 +329,9 @@ public:
 		fds[0].events = POLLIN;
 		fds[0].fd = stream.get_fd();
 		fds[1].events = POLLIN;
-		fds[1].fd = control.get_fd();
+		// A control socket that is known broken reports POLLERR on every poll:
+		// leaving it in would spin the network thread
+		fds[1].fd = selector.control_up() ? control.get_fd() : -1;
 		fds[2].fd = wivrn_ipc_socket_monado->get_fd();
 		fds[2].events = POLLIN;
 		fds[3].fd = wivrn_path_socket_monado;
@@ -212,13 +339,37 @@ public:
 
 		// Malformed datagrams are dropped, only the control socket is fatal
 		while (auto packet = stream.receive_pending_lossy())
+		{
+			on_primary_received(false);
 			std::visit(std::forward<T>(visitor), std::move(*packet));
-		while (auto packet = control.receive_pending())
+		}
+		while (selector.control_up())
+		{
+			std::optional<from_headset::packets> packet;
+			try
+			{
+				packet = control.receive_pending();
+			}
+			catch (const std::exception & e)
+			{
+				if (not on_control_send_error(e))
+					throw;
+				break;
+			}
+
+			if (not packet)
+				break;
+
+			on_primary_received(true);
 			std::visit(std::forward<T>(visitor), std::move(*packet));
+		}
 		poll_secondary_pending(std::forward<T>(visitor));
 
 		// After poll_secondary_pending, the path may have been dropped
-		fds[4].fd = secondary ? secondary.get_fd() : -1;
+		{
+			std::shared_lock lock(secondary_mutex);
+			fds[4].fd = secondary ? secondary.get_fd() : -1;
+		}
 		fds[4].events = POLLIN;
 
 		int r = ::poll(fds, std::size(fds), timeout);
@@ -226,26 +377,62 @@ public:
 			throw std::system_error(errno, std::system_category());
 
 		if (fds[0].revents & (POLLHUP | POLLERR))
-			throw std::runtime_error("Error on stream socket");
+		{
+			// A connected UDP socket raises POLLERR for a latched error, most
+			// often an ICMP unreachable while the link is down. Draining it
+			// makes the socket usable again the moment the link is back, so
+			// this must never be a session teardown.
+			drain_socket_error(stream.get_fd(), "stream socket");
+			on_stream_send_error(std::runtime_error("poll reported an error"));
+		}
 
 		if (fds[1].revents & (POLLHUP | POLLERR))
-			throw std::runtime_error("Error on control socket");
+		{
+			if (not on_control_send_error(std::runtime_error("Error on control socket")))
+				throw std::runtime_error("Error on control socket");
+		}
 
 		if (fds[2].revents & (POLLHUP | POLLERR))
 			throw std::runtime_error("Error on IPC socket");
 
 		if (fds[0].revents & POLLIN)
 		{
-			auto packet = stream.receive_lossy();
+			std::optional<from_headset::packets> packet;
+			try
+			{
+				packet = stream.receive_lossy();
+			}
+			catch (const std::exception & e)
+			{
+				// Same as above: recvmmsg reports the latched error
+				on_stream_send_error(e);
+			}
+
 			if (packet)
+			{
+				on_primary_received(false);
 				std::visit(std::forward<T>(visitor), std::move(*packet));
+			}
 		}
 
 		if (fds[1].revents & POLLIN)
 		{
-			auto packet = control.receive();
+			std::optional<from_headset::packets> packet;
+			try
+			{
+				packet = control.receive();
+			}
+			catch (const std::exception & e)
+			{
+				if (not on_control_send_error(e))
+					throw;
+			}
+
 			if (packet)
+			{
+				on_primary_received(true);
 				std::visit(std::forward<T>(visitor), std::move(*packet));
+			}
 		}
 
 		if (fds[2].revents & POLLIN)
@@ -268,16 +455,29 @@ public:
 		else if (fds[4].revents & POLLIN)
 		{
 			std::optional<from_headset::packets> packet;
-			try
+			std::string error;
 			{
-				packet = secondary.receive();
-			}
-			catch (const std::exception & e)
-			{
-				drop_secondary(e.what());
+				std::shared_lock lock(secondary_mutex);
+				// The path may have been dropped by a sending thread while we
+				// were polling
+				if (secondary)
+				{
+					try
+					{
+						packet = secondary.receive();
+					}
+					catch (const std::exception & e)
+					{
+						error = e.what();
+					}
+				}
 			}
 
-			if (packet)
+			if (not error.empty())
+			{
+				drop_secondary(error);
+			}
+			else if (packet)
 			{
 				on_secondary_received();
 				std::visit(std::forward<T>(visitor), std::move(*packet));
@@ -285,6 +485,7 @@ public:
 		}
 
 		report_secondary_status();
+		update_paths();
 
 		if (uint64_t dropped = stream.take_dropped_datagrams())
 			U_LOG_W("Dropped %lu invalid datagram(s) on the stream socket (%lu total)",

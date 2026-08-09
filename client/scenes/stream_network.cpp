@@ -35,7 +35,10 @@ void scenes::stream::process_packets()
 	{
 		try
 		{
-			network_session->poll(*this, std::chrono::milliseconds(500));
+			// Short enough that the path selector, evaluated at the end of every
+			// poll, still reacts within a few hundred ms once the primary path
+			// has gone completely silent
+			network_session->poll(*this, std::chrono::milliseconds(100));
 		}
 		catch (std::exception & e)
 		{
@@ -140,6 +143,21 @@ void scenes::stream::operator()(to_headset::path_pong && pong)
 {
 	auto now = std::chrono::steady_clock::now();
 	int64_t rtt = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count() - pong.timestamp;
+
+	// The echo comes back on the path the ping went out on; the network thread
+	// has already counted it as liveness for that path
+	if (pong.path_id == 0)
+	{
+		primary_rtt_ns = rtt;
+
+		if (now >= primary_rtt_next_log)
+		{
+			primary_rtt_next_log = now + std::chrono::seconds(5);
+			spdlog::debug("Primary path RTT {:.2f} ms", rtt / 1.e6);
+		}
+		return;
+	}
+
 	secondary_rtt_ns = rtt;
 
 	if (now >= secondary_rtt_next_log)

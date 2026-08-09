@@ -395,6 +395,8 @@ static void send_settings_changed_packet(xr::session & session, wivrn_session * 
 	                .fps_divider = config.fps_divider,
 	                .bitrate_bps = config.bitrate_bps,
 	                .bitrate_auto = config.bitrate_auto,
+	                .smooth_pacing = config.smooth_pacing,
+	                .wifi_qos = config.wifi_qos,
 	                .sharp_text = config.sharp_text,
 	                .motion_smoothing = config.motion_smoothing,
 	                .quad_layers = config.quad_layers,
@@ -429,6 +431,9 @@ void scenes::stream::gui_settings(float)
 		                .pitch = override_foveation_pitch,
 		                .distance = override_foveation_distance,
 		        }); },
+	        .on_qos_changed = [this] {
+		        network_session->set_qos(application::get_config().wifi_qos);
+		        send_settings_changed_packet(session, network_session.get(), application::get_config()); },
 	};
 
 	switch (current_settings_page)

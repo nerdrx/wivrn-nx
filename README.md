@@ -29,6 +29,20 @@ headset WiVRn supports.
   followed by a fast slow-start rebound to the pre-drop level, with ssthresh-style backoff.
   The bitrate set on the headset is always the ceiling. Toggles: headset (*Automatic bitrate*)
   and dashboard; config key `bitrate-auto` (`min-bitrate` floor, default 10 Mbit/s).
+- **Smooth packet pacing** *(toggle, default on)* — a frame used to be drained into the socket as
+  fast as the kernel would take it: a few hundred kilobytes hitting the access point every 11 ms,
+  which is exactly what overflows its buffer and produces the lag-then-recover wedge the deep drop
+  above exists to clean up after. NX spreads each frame over 40% of a frame period instead, in
+  12 kB micro-bursts on absolute deadlines, sharing one window between all the video streams. It
+  never delays the control socket (IDRs and their parameter sets), never runs while the USB path
+  carries video, and gives the window back when the encoder delivers late. Config key `pacing`
+  (`window`, default 0.4).
+- **Wi-Fi QoS priority** *(toggle, default on)* — both ends mark their sockets with a DSCP class,
+  which access points map to the WMM access categories: the server's video stream gets AF41 (AC_VI),
+  every socket carrying control, tracking, inputs and feedback gets EF (AC_VO), so a tracking packet
+  is never stuck behind a 200 kB frame in the same hardware queue. IPv6 sockets are marked through
+  `IPV6_TCLASS` as well as `IP_TOS`, since a v4-mapped peer takes the mark from the latter. A few
+  networks mangle or drop marked traffic, hence the toggle; the marks are applied and cleared live.
 - **Motion smoothing** *(toggle, default off)* — when the game runs far below the display rate
   (a CPU-bound VRChat instance at 10 fps), the server computes a coarse motion field between
   real application frames (a compositor compute pass — works with **every** encoder, unlike
@@ -81,10 +95,10 @@ identity everywhere: application ID `org.meumeu.wivrn.nx`, app name "WiVRn NX", 
 
 ## Roadmap (in active development)
 
-Packet pacing + Wi-Fi QoS (DSCP/WMM) tagging · radio-aware bitrate (RSSI as a leading
-indicator) · forward error correction (parity shards — lost packets reconstruct client-side)
-· audio on the loss-tolerant path with concealment · hardware-encoder failover to x264 ·
-BBR-style bitrate control v2 · an in-headset transport HUD. Design documents live in
+Radio-aware bitrate (RSSI as a leading indicator) · forward error correction (parity shards —
+lost packets reconstruct client-side) · audio on the loss-tolerant path with concealment ·
+hardware-encoder failover to x264 · BBR-style bitrate control v2 · an in-headset transport HUD.
+Design documents live in
 [docs/](docs/): [multipath](docs/multipath.md), [frame extrapolation](docs/frame-extrapolation.md),
 [quad layers](docs/quad-layers.md).
 

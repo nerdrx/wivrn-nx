@@ -267,6 +267,8 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 
 		info.settings.bitrate_bps = config.bitrate_bps;
 		info.settings.bitrate_auto = config.bitrate_auto;
+		info.settings.smooth_pacing = config.smooth_pacing;
+		info.settings.wifi_qos = config.wifi_qos;
 		info.settings.sharp_text = config.sharp_text;
 		info.settings.motion_smoothing = config.motion_smoothing;
 		info.settings.quad_layers = config.quad_layers;

@@ -75,6 +75,9 @@ private:
 	uint64_t reported_stream_send_errors = 0;
 	std::chrono::steady_clock::time_point next_stream_error_report{};
 
+	// Current state of the QoS marks, so that set_qos only logs real changes
+	std::optional<bool> qos_enabled;
+
 	void on_primary_received(bool from_control);
 	// Returns true if the failure was absorbed (a usable secondary path exists)
 	bool on_control_send_error(const std::exception &);
@@ -161,6 +164,16 @@ public:
 	// that the server keeps seeing the primary path even while we send
 	// everything else over the secondary one. Never throws.
 	void send_primary_ping();
+
+	// Apply or clear the DSCP marks on the headset's own sockets. Live: the
+	// setting can be flipped from inside the stream. The secondary path is
+	// deliberately left alone, it rides a USB tunnel where there is no radio to
+	// prioritise anything on.
+	//
+	// Both of the headset's sockets get EF: what it sends is tracking, inputs,
+	// feedback and settings, all small and all latency critical. The bulk video
+	// only exists in the other direction, where the server marks it AF41.
+	void set_qos(bool enabled);
 
 	// True while tracking and input go over the secondary path
 	bool sending_on_secondary() const

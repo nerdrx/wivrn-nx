@@ -21,6 +21,7 @@
 
 #include "driver/clock_offset.h"
 #include "idr_handler.h"
+#include "shard_pacer.h"
 #include "wivrn_packets.h"
 
 #include <array>
@@ -72,6 +73,11 @@ private:
 			// encoder whose frame is currently being sent, if any
 			video_encoder * in_flight = nullptr;
 			std::jthread thread;
+			// Packet pacing state, shared by every stream that drains through
+			// this socket. Only the stream (UDP) queue ever uses it: the
+			// control queue carries IDRs and parameter sets and is never
+			// delayed. Touched by this queue's thread only.
+			pacing_slot pacing;
 		};
 
 		// Maximum number of whole frames queued per socket, oldest frames are
@@ -84,6 +90,9 @@ private:
 		std::array<queue, 2> queues;
 
 		void run(std::stop_token, queue &);
+		// Pacing schedule for one frame, inactive whenever pacing does not
+		// apply. `queued` is how many frames wait behind this one.
+		static shard_pacer make_pacer(queue &, const data &, size_t queued);
 		sender();
 
 	public:
@@ -131,6 +140,14 @@ private:
 
 	std::shared_ptr<sender> shared_sender;
 
+	// --- Packet pacing ------------------------------------------------------
+	// Effective state: the headset toggle and the server configuration must
+	// both allow it. Read by the sender thread, written by the network thread.
+	std::atomic<bool> pacing_enabled = false;
+	std::atomic<float> pacing_window = 0.4f;
+	// Frame period the pacing window is a fraction of, from the stream rate
+	std::atomic<int64_t> frame_period_ns = 0;
+
 protected:
 	std::atomic_uint32_t pending_bitrate;
 	std::atomic<float> pending_framerate;
@@ -158,6 +175,10 @@ public:
 	void set_bitrate(uint32_t bitrate_bps);
 	void set_framerate(float framerate);
 
+	// Spread this encoder's shards over `window` of a frame period instead of
+	// handing them to the socket as fast as the kernel takes them. Live.
+	void set_pacing(bool enabled, float window);
+
 	void encode(wivrn_session & cnx,
 	            const to_headset::video_stream_data_shard::view_info_t & view_info,
 	            uint64_t frame_index);
@@ -172,7 +193,9 @@ protected:
 	// called when command buffer finished executing
 	virtual std::optional<data> encode(uint8_t slot, uint64_t frame_index) = 0;
 
-	void SendData(std::span<uint8_t> data, bool end_of_frame, bool control = false);
+	// `pacer` is built by the sender thread for whole-frame sends on the stream
+	// socket; a default constructed one never sleeps.
+	void SendData(std::span<uint8_t> data, bool end_of_frame, bool control = false, shard_pacer pacer = {});
 };
 
 } // namespace wivrn

@@ -39,11 +39,6 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#ifndef IPTOS_DSCP_EF
-// constant is not defined in Android ip.h
-#define IPTOS_DSCP_EF 0xb8
-#endif
-
 using namespace std::chrono_literals;
 
 const char * handshake_error::what() const noexcept
@@ -250,6 +245,29 @@ void wivrn_session::set_secondary(control_socket_t && socket)
 	spdlog::info("Secondary path attached");
 }
 
+void wivrn_session::set_qos(bool enabled)
+{
+	if (qos_enabled == enabled)
+		return;
+
+	const int mark = enabled ? wivrn::tos::dscp_ef : wivrn::tos::best_effort;
+
+	bool ok = true;
+	if (stream)
+		ok = stream.set_tos(mark) and ok;
+	if (control)
+		ok = control.set_tos(mark) and ok;
+
+	if (not ok)
+	{
+		spdlog::warn("Could not {} the Wi-Fi QoS marks: {}", enabled ? "set" : "clear", strerror(errno));
+		return;
+	}
+
+	qos_enabled = enabled;
+	spdlog::info("Wi-Fi QoS marks {} (uplink EF / AC_VO)", enabled ? "enabled" : "disabled");
+}
+
 void wivrn_session::drop_secondary(std::string_view reason)
 {
 	{
@@ -392,6 +410,7 @@ wivrn_session::wivrn_session(in6_addr address, int port, bool tcp_only, crypto::
 		throw handshake_error{e.what()};
 	}
 
+	set_qos(application::get_config().wifi_qos);
 	selector.reset(std::chrono::steady_clock::now());
 }
 
@@ -407,5 +426,6 @@ wivrn_session::wivrn_session(in_addr address, int port, bool tcp_only, crypto::k
 		throw handshake_error{e.what()};
 	}
 
+	set_qos(application::get_config().wifi_qos);
 	selector.reset(std::chrono::steady_clock::now());
 }

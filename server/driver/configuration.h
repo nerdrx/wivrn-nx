@@ -85,8 +85,22 @@ struct configuration
 		bool allow_blended = false;
 	};
 
+	// Packet pacing of the video shards, the server side switch for a feature
+	// the headset also has a toggle for
+	struct pacing_config
+	{
+		bool enabled = true;
+		// Fraction of a frame period a frame's shards are spread over. Clamped
+		// to shard_pacer::max_window (0.5) where it is applied: the automatic
+		// bitrate reads link utilisation as the fraction of a frame period a
+		// frame took to arrive, and a window near its 0.60 probe-up threshold
+		// would stop it ever raising the bitrate again.
+		float window = 0.4f;
+	};
+
 	std::array<encoder, 4> encoders; // left, right, alpha, quad
 	quad_layer_config quad_layers;
+	pacing_config pacing;
 	// Automatic bitrate control, the ceiling is always the bitrate requested by the client
 	bitrate_controller::config bitrate_auto;
 	multipath_config multipath;

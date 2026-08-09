@@ -517,6 +517,37 @@ void wivrn::wivrn_connection::init(std::stop_token stop_token, std::function<voi
 		wivrn::update_last_connection_timestamp(clean_key(headset_key.public_key()));
 }
 
+void wivrn::wivrn_connection::set_qos(bool enabled)
+{
+	qos_wanted = enabled;
+	apply_qos();
+}
+
+void wivrn::wivrn_connection::apply_qos()
+{
+	if (qos_applied == qos_wanted)
+		return;
+
+	// Video is the bulk traffic and goes to the video access category; the
+	// control socket carries the small latency-critical things (stream
+	// description, IDRs and their parameter sets, audio) and gets the voice one
+	// so that it is never stuck behind a frame.
+	bool ok = true;
+	if (stream)
+		ok = stream.set_tos(qos_wanted ? tos::dscp_af41 : tos::best_effort) and ok;
+	if (control)
+		ok = control.set_tos(qos_wanted ? tos::dscp_ef : tos::best_effort) and ok;
+
+	if (not ok)
+	{
+		U_LOG_W("Could not %s the Wi-Fi QoS marks: %s", qos_wanted ? "set" : "clear", strerror(errno));
+		return;
+	}
+
+	qos_applied = qos_wanted;
+	U_LOG_I("Wi-Fi QoS marks %s (video AF41 / AC_VI, control EF / AC_VO)", qos_wanted ? "enabled" : "disabled");
+}
+
 void wivrn::wivrn_connection::reset(std::stop_token stop, TCP && tcp, std::function<void()> tick)
 {
 	if (stream)
@@ -527,6 +558,10 @@ void wivrn::wivrn_connection::reset(std::stop_token stop, TCP && tcp, std::funct
 
 	control = std::move(tcp);
 	init(stop, tick);
+
+	// Fresh sockets, they carry no mark yet
+	qos_applied.reset();
+	apply_qos();
 }
 
 void wivrn::wivrn_connection::shutdown()

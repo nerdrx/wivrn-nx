@@ -145,15 +145,6 @@ void wivrn::UDP::set_send_buffer_size(int size)
 	setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
 }
 
-void wivrn::UDP::set_tos(int tos)
-{
-	int err = setsockopt(fd, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
-	if (err == -1)
-	{
-		throw std::system_error{errno, std::generic_category()};
-	}
-}
-
 void wivrn::TCP::init()
 {
 	int nodelay = 1;

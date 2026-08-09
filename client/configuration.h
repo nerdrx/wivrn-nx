@@ -79,6 +79,15 @@ public:
 	// backup for the wireless link
 	bool multipath_usb = true;
 
+	// Ask the server to spread each video frame's packets over a fraction of the
+	// frame period instead of bursting them out, so that the access point's
+	// buffer is never asked to swallow a whole frame at once
+	bool smooth_pacing = true;
+
+	// Mark both ends' sockets with a DSCP class, which access points map to the
+	// WMM access categories. Off is for the networks that mangle marked traffic.
+	bool wifi_qos = true;
+
 	// Darken the periphery of the streamed image when the application frame rate collapses
 	bool comfort_vignette = true;
 

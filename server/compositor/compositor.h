@@ -138,6 +138,11 @@ private:
 
 	std::array<std::unique_ptr<video_encoder>, num_streams> encoders;
 
+	// Packet pacing, mirrored here only so that set_pacing can tell a real
+	// change from the repeated calls a settings_changed packet produces
+	bool pacing_enabled = false;
+	float pacing_window = 0;
+
 	// Separate streaming of one overlay quad layer. Null unless the headset asked
 	// for it when the session was set up, in which case the layer is picked afresh
 	// on every commit and the stream stays silent on the commits that pick none.
@@ -275,6 +280,10 @@ public:
 	void set_framerate(float hz);
 
 	void set_bitrate(uint32_t);
+
+	// Packet pacing: spread each frame's shards over `window` of a frame period
+	// instead of handing them to the socket in one burst. Logs state changes.
+	void set_pacing(bool enabled, float window);
 	void update_tracking(const from_headset::tracking &);
 	void update_foveation_center_override(const from_headset::override_foveation_center &);
 

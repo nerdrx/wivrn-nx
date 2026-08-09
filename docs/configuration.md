@@ -65,6 +65,58 @@ Disable automatic bitrate, always use the bitrate configured on the headset.
 ```
 Enable automatic bitrate, but never go below 25 Mbit/s.
 
+## `pacing`
+Default value: `true`
+
+Spreads each video frame's packets evenly over part of a frame period instead of handing them to the
+socket as fast as the kernel accepts them.
+
+Without it, a frame is a single burst: at 150 Mbit/s and 90 fps that is a few hundred kilobytes
+arriving at the access point every 11 ms, which is what overflows its buffer and produces the lag
+spike it then takes seconds to recover from. Pacing costs nothing in latency as long as the window
+stays small, and keeps that buffer shallow. Packets are sent in micro-bursts of about 12 kB, so the
+wakeup rate stays low and Wi-Fi frame aggregation is unaffected.
+
+Pacing is skipped for whatever does not ride the UDP stream socket: the control socket, which carries
+the IDRs and their parameter sets, is never delayed, and neither is video while the multipath
+failover has it on the USB path.
+
+The headset has its own *Smooth packet pacing* toggle in its streaming settings. Both switches must
+be enabled. Every change is logged at info level.
+
+Can be a boolean, or an object:
+
+### `enabled`
+Default value: `true`
+
+Set to `false` to never pace, whatever the headset toggle says.
+
+### `window`
+Default value: `0.4`
+
+Fraction of a frame period a frame's packets are spread over. Clamped to `0.5`: the automatic bitrate
+reads link utilisation as the fraction of a frame period a frame took to arrive, so a window near its
+`0.60` probe-up threshold would stop it ever raising the bitrate again. A frame never takes longer
+than its window, and when the encoder delivers late the window shrinks by the overrun so that
+completion is never pushed into the next frame.
+
+### Examples
+```json
+{
+	"pacing": false
+}
+```
+Never pace, send each frame as one burst.
+
+```json
+{
+	"pacing": {
+		"window": 0.25
+	}
+}
+```
+Pace, but over a quarter of a frame period rather than the default 40%.
+
 ## `encoder`
 The encoder to use, either a single string or object applied to all streams, or a list of string or objects with values for left, right and alpha.
 When a string it is used, it is equivalent to the `encoder` item of the object.

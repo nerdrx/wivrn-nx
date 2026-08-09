@@ -20,6 +20,7 @@
 #pragma once
 
 #include "crypto.h"
+#include "socket_tos.h"
 #include "wivrn_serialization.h"
 
 #include <atomic>
@@ -83,6 +84,13 @@ public:
 		return fd;
 	}
 
+	// See set_socket_tos. Both socket kinds are marked: the split between the
+	// video and the control class is per socket, see namespace tos.
+	bool set_tos(int type_of_service) const
+	{
+		return fd != -1 and set_socket_tos(fd, type_of_service);
+	}
+
 	operator bool() const
 	{
 		return fd != -1;
@@ -132,7 +140,6 @@ public:
 	void unsubscribe_multicast(in6_addr address);
 	void set_receive_buffer_size(int size);
 	void set_send_buffer_size(int size);
-	void set_tos(int type_of_service);
 
 	void set_aes_key_and_ivs(std::span<std::uint8_t, 16> key, std::span<std::uint8_t, 8> recv_iv_header, std::span<std::uint8_t, 8> send_iv_header);
 

@@ -1278,6 +1278,28 @@ void compositor::set_bitrate(uint32_t bitrate)
 	}
 }
 
+void compositor::set_pacing(bool enabled, float window)
+{
+	window = std::clamp(window, 0.f, shard_pacer::max_window);
+
+	if (pacing_enabled == enabled and pacing_window == window)
+		return;
+
+	pacing_enabled = enabled;
+	pacing_window = window;
+
+	if (enabled)
+		U_LOG_I("Packet pacing enabled, spreading each frame over %.0f%% of a frame period", window * 100);
+	else
+		U_LOG_I("Packet pacing disabled");
+
+	for (auto & encoder: encoders)
+	{
+		if (encoder)
+			encoder->set_pacing(enabled, window);
+	}
+}
+
 void compositor::set_framerate(float hz)
 {
 	if (frame_rate.exchange(hz) == hz)

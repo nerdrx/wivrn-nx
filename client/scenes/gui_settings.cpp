@@ -411,6 +411,26 @@ void settings_streaming(const settings_context & ctx)
 	});
 
 	list.push_back({
+	        .id = "##smooth_pacing",
+	        .label = _("Smooth packet pacing"),
+	        .description = _("Spread each video frame's packets evenly over part of a frame period instead of sending them in one burst. The burst is what overflows a Wi-Fi access point's buffer and causes the lag spikes it then takes seconds to recover from."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.smooth_pacing; },
+	        .set_bool = [&ctx, &config](bool v) { config.smooth_pacing = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.smooth_pacing,
+	});
+
+	list.push_back({
+	        .id = "##wifi_qos",
+	        .label = _("Wi-Fi QoS priority"),
+	        .description = _("Tag the streaming traffic so that the access point puts it in its high priority queues ahead of everything else on the network. A few networks mangle or drop tagged traffic instead; turn this off if the connection is worse with it on."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.wifi_qos; },
+	        .set_bool = [&ctx, &config](bool v) { config.wifi_qos = v; config.save(); if (ctx.on_qos_changed) ctx.on_qos_changed(); },
+	        .default_bool = default_config.wifi_qos,
+	});
+
+	list.push_back({
 	        .id = "##multipath_usb",
 	        .label = _("USB backup connection"),
 	        .description = _("Use the USB cable as a backup connection while streaming over Wi-Fi. Video and input switch to it automatically when the Wi-Fi link fails, and switch back once it has been stable again. Requires the tunnel to be armed by the WiVRn dashboard."),

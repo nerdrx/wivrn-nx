@@ -96,6 +96,13 @@ private:
 	uint64_t reported_stream_send_errors = 0;
 	std::chrono::steady_clock::time_point next_stream_error_report{};
 
+	// Wi-Fi QoS marks: what the headset asked for, and what the current sockets
+	// actually carry (the sockets are replaced on reconnect, the setting is not)
+	bool qos_wanted = false;
+	std::optional<bool> qos_applied;
+
+	void apply_qos();
+
 	// Random, sent to the headset in to_headset::handshake, presented back by
 	// the headset to attach a secondary path
 	std::array<uint8_t, 16> token;
@@ -187,6 +194,12 @@ public:
 	{
 		return selector.on_secondary();
 	}
+
+	// Apply or clear the DSCP marks on this end's sockets. Live, and idempotent:
+	// the headset sends its whole settings block on every change. The secondary
+	// path is deliberately left alone, it rides a USB tunnel through the
+	// loopback where there is no radio to prioritise anything on.
+	void set_qos(bool enabled);
 
 	// Called on every path switch, from the network thread. Must be set before
 	// the session threads start.

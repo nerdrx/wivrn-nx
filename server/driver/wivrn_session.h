@@ -23,6 +23,7 @@
 #include "bitrate_controller.h"
 #include "clock_offset.h"
 #include "compositor/compositor.h"
+#include "configuration.h"
 #include "inplace_vector.hpp"
 #include "tracking_control.h"
 #include "utils/thread_safe.h"
@@ -77,6 +78,8 @@ class wivrn_session : public xrt_system_devices
 	wivrn::bitrate_controller bitrate_ctl;
 	// Ceiling applied while the secondary (USB) path carries video
 	uint32_t multipath_usb_max_bitrate = 0;
+	// Server side half of the packet pacing switch, read from the configuration once
+	configuration::pacing_config pacing_conf;
 	pacing_app_factory app_pacers;
 
 	b_system & xrt_system;
@@ -209,6 +212,13 @@ public:
 	bool has_stream()
 	{
 		return connection->has_stream();
+	}
+
+	// True while video rides the secondary (TCP) path, in which case there is
+	// nothing for the shard pacer to do
+	bool video_on_secondary() const
+	{
+		return connection->video_on_secondary();
 	}
 	template <typename T>
 	void send_stream(T && packet)

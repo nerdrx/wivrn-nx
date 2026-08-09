@@ -320,6 +320,8 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("bitrate_auto", &configuration::bitrate_auto),
 	        scalar("sharp_text", &configuration::sharp_text),
 	        scalar("multipath_usb", &configuration::multipath_usb),
+	        scalar("smooth_pacing", &configuration::smooth_pacing),
+	        scalar("wifi_qos", &configuration::wifi_qos),
 	        scalar("comfort_vignette", &configuration::comfort_vignette),
 	        scalar("motion_smoothing", &configuration::motion_smoothing),
 	        scalar("quad_layers", &configuration::quad_layers),

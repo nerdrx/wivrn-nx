@@ -214,6 +214,24 @@ configuration::configuration()
 				throw std::runtime_error("invalid bitrate-auto value, expected a boolean or an object");
 		}
 
+		// "pacing": true/false, or an object {"enabled": bool, "window": fraction of a frame period}
+		if (auto it = json.find("pacing"); it != json.end())
+		{
+			if (it->is_boolean())
+				pacing.enabled = *it;
+			else if (it->is_object())
+			{
+				if (auto enabled = it->find("enabled"); enabled != it->end())
+					pacing.enabled = *enabled;
+				if (auto window = it->find("window"); window != it->end())
+					pacing.window = *window;
+			}
+			else
+				throw std::runtime_error("invalid pacing value, expected a boolean or an object");
+
+			pacing.window = std::clamp(pacing.window, 0.f, 1.f);
+		}
+
 		// "multipath": {"usb-max-bitrate": bits/s}
 		if (auto it = json.find("multipath"); it != json.end())
 		{

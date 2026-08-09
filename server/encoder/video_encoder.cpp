@@ -29,6 +29,8 @@
 #include "wivrn_config.h"
 
 #include <algorithm>
+#include <cerrno>
+#include <ctime>
 #include <string>
 
 #if WIVRN_USE_NVENC
@@ -46,6 +48,23 @@
 #endif
 #include "video_encoder_raw.h"
 
+namespace
+{
+// Absolute deadline sleep on the clock os_monotonic_get_ns reads (CLOCK_MONOTONIC).
+// Absolute rather than relative so that the schedule cannot drift: every wakeup
+// is measured against the frame's own start time, not against the previous one.
+void sleep_until_ns(int64_t deadline_ns)
+{
+	timespec ts{
+	        .tv_sec = time_t(deadline_ns / 1'000'000'000),
+	        .tv_nsec = long(deadline_ns % 1'000'000'000),
+	};
+
+	while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr) == EINTR)
+		;
+}
+} // namespace
+
 namespace wivrn
 {
 
@@ -60,6 +79,7 @@ void video_encoder::sender::run(std::stop_token t, queue & q)
 	while (not t.stop_requested())
 	{
 		data d{};
+		size_t queued = 0;
 		{
 			std::unique_lock lock(mutex);
 			if (q.pending.empty())
@@ -72,10 +92,13 @@ void video_encoder::sender::run(std::stop_token t, queue & q)
 			d = std::move(q.pending.front());
 			q.pending.pop_front();
 			q.in_flight = d.encoder;
+			// Frames of the other streams that were encoded at the same time
+			// and belong to the same slot: they share the pacing window
+			queued = q.pending.size();
 		}
 
 		if (not d.span.empty())
-			d.encoder->SendData(d.span, true, d.prefer_control);
+			d.encoder->SendData(d.span, true, d.prefer_control, make_pacer(q, d, queued));
 
 		std::unique_lock lock(mutex);
 		q.in_flight = nullptr;
@@ -85,6 +108,30 @@ void video_encoder::sender::run(std::stop_token t, queue & q)
 	std::unique_lock lock(mutex);
 	q.pending.clear();
 	cv.notify_all();
+}
+
+shard_pacer video_encoder::sender::make_pacer(queue & q, const data & d, size_t queued)
+{
+	video_encoder * encoder = d.encoder;
+
+	// The control queue carries the IDRs and the parameter sets: never delayed.
+	if (d.prefer_control or not encoder->pacing_enabled)
+		return {};
+
+	// Nothing to pace unless the shards actually ride the UDP stream socket.
+	// Over the secondary (TCP) path the kernel's congestion control already
+	// decides when bytes go out and spacing them on top only adds latency; with
+	// no stream socket at all everything is TCP, same story.
+	if (not encoder->cnx or not encoder->cnx->has_stream() or encoder->cnx->video_on_secondary())
+	{
+		q.pacing.reset();
+		return {};
+	}
+
+	const int64_t now = os_monotonic_get_ns();
+	const int64_t budget = q.pacing.begin_frame(now, encoder->frame_period_ns, encoder->pacing_window, queued);
+
+	return shard_pacer(now, budget, d.span.size());
 }
 
 void video_encoder::sender::push(data && d)
@@ -240,6 +287,12 @@ video_encoder::video_encoder(vk_bundle & vk,
         }
 {
 	assert(this->idr);
+	// So that pacing has a frame period from the very first frame, before the
+	// headset has had a chance to change the refresh rate. Deliberately not
+	// set_framerate: that would also queue a rate control reconfiguration for
+	// the framerate the encoder was just created with.
+	if (settings.fps > 0)
+		frame_period_ns = int64_t(1'000'000'000.f / settings.fps);
 }
 
 video_encoder::~video_encoder()
@@ -267,6 +320,14 @@ void video_encoder::set_bitrate(uint32_t bitrate_bps)
 void video_encoder::set_framerate(float framerate)
 {
 	pending_framerate = framerate;
+	if (framerate > 0)
+		frame_period_ns = int64_t(1'000'000'000.f / framerate);
+}
+
+void video_encoder::set_pacing(bool enabled, float window)
+{
+	pacing_window = std::clamp(window, 0.f, shard_pacer::max_window);
+	pacing_enabled = enabled;
 }
 
 void video_encoder::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo info, uint64_t frame_index)
@@ -333,7 +394,7 @@ void video_encoder::encode(wivrn_session & cnx,
 	}
 }
 
-void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool control)
+void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool control, shard_pacer pacer)
 {
 	std::lock_guard lock(mutex);
 	if (shard.shard_idx == 0)
@@ -363,7 +424,13 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		if (next == end)
 		{
 			if (end_of_frame)
+			{
+				// Take the timestamp here rather than before the loop: pacing
+				// spreads the frame over several milliseconds and the headset
+				// would otherwise be told the frame left all at once.
+				timing_info.send_end = clock.to_headset(os_monotonic_get_ns());
 				shard.timing_info = timing_info;
+			}
 		}
 		shard.payload = {begin, next};
 		try
@@ -380,6 +447,13 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		++shard.shard_idx;
 		shard.view_info.reset();
 		begin = next;
+
+		// Leaky bucket: hold the next micro-burst back until the frame's
+		// schedule says it may go out. Never past the frame's budget, and the
+		// budget is a fraction of a frame period, so this can never push the
+		// end of the frame into the next one.
+		if (auto at = pacer.wait_until(size_t(begin - data.begin()), os_monotonic_get_ns()))
+			sleep_until_ns(*at);
 	}
 	if (end_of_frame)
 	{

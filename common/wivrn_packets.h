@@ -315,6 +315,15 @@ struct settings_changed
 	// Whether the headset lets the server adapt the bitrate to the link quality, with
 	// bitrate_bps as the ceiling. The server also has its own switch, both must be enabled.
 	bool bitrate_auto = true;
+	// Whether the video shards of a frame should be spread over a fraction of the frame
+	// period instead of being handed to the socket as fast as it takes them. The burst is
+	// what overflows an access point's buffer; the server also has its own switch, and the
+	// fraction is a server configuration key.
+	bool smooth_pacing = true;
+	// Whether both ends should mark their sockets with a DSCP class, which maps to the WMM
+	// access categories on Wi-Fi. Each end applies it to its own sockets; some networks
+	// mangle or drop marked traffic, hence the switch.
+	bool wifi_qos = true;
 	// Whether the encoders should be biased towards keeping fine detail (text, UI) rather
 	// than a smooth image. Taken into account when the encoders are created.
 	bool sharp_text = false;

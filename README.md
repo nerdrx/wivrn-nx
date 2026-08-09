@@ -18,6 +18,7 @@ headset WiVRn supports.
 |---|---|
 | **Controller standby teleport** | Upstream discards the OpenXR *tracked* flags server-side (the old `TODO keep the tracked flag` in `pose_list.cpp`), so a Pico controller entering its non-disableable auto-sleep jumps to a garbage pose in-game. NX freezes the device at its last tracked pose — reported valid, TRACKED cleared, velocities zeroed. Devices whose runtime never sets tracked bits (estimated body joints) keep upstream behaviour exactly, so full body tracking is unaffected. |
 | **Transport robustness** | A malformed, short, or oversized datagram is dropped and counted instead of tearing the session down; oversized datagrams are detected (`MSG_TRUNC`) instead of being silently truncated; a stalled TCP write can no longer block UDP video (per-socket bounded send queues). |
+| **Encoder failover** *(toggle, default on)* | A hardware encode session that dies or stops answering mid-stream — a driver reset, a suspend, a GPU reset under another application — used to freeze that eye for the rest of the session and log one error per frame, because nothing treated an encode failure as more than a dropped frame. NX watches every stream (one hard error, or three half-second windows with frames in and no picture out) and hands it to x264 with the same resolution, framerate and bitrate, starting on a keyframe: the picture is back within a frame or two, on a stream the headset's decoder cannot tell apart. The other eyes are untouched, and the failed encoder is never retried during the session. Within one codec only — the headset's decoder cannot be changed without a reconnect — so H.264 recovers and H.265/AV1 gets one explanatory line telling you to reconnect. Toggle: headset (*Encoder failover*); config key `encoder-failover`. |
 | **Honest labels** | The upstream "Application SpaceWarp" setting performs no frame synthesis — it only halves the stream rate. NX names it "Half framerate mode" and describes what it does. |
 
 ## Adaptive streaming
@@ -131,8 +132,8 @@ identity everywhere: application ID `org.meumeu.wivrn.nx`, app name "WiVRn NX", 
 
 ## Roadmap (in active development)
 
-Reed-Solomon parity (burst-tolerant, on the same groups as the XOR above) · hardware-encoder
-failover to x264 · BBR-style bitrate control v2 · an in-headset transport HUD.
+Reed-Solomon parity (burst-tolerant, on the same groups as the XOR above) · BBR-style bitrate
+control v2 · an in-headset transport HUD.
 Design documents live in
 [docs/](docs/): [multipath](docs/multipath.md), [frame extrapolation](docs/frame-extrapolation.md),
 [quad layers](docs/quad-layers.md).

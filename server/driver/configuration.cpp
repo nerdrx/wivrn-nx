@@ -232,6 +232,15 @@ configuration::configuration()
 			pacing.window = std::clamp(pacing.window, 0.f, 1.f);
 		}
 
+		// "encoder-failover": true/false
+		if (auto it = json.find("encoder-failover"); it != json.end())
+		{
+			if (it->is_boolean())
+				encoder_failover = *it;
+			else
+				throw std::runtime_error("invalid encoder-failover value, expected a boolean");
+		}
+
 		// "multipath": {"usb-max-bitrate": bits/s}
 		if (auto it = json.find("multipath"); it != json.end())
 		{

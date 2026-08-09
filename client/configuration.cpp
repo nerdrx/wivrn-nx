@@ -324,6 +324,7 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("smooth_pacing", &configuration::smooth_pacing),
 	        scalar("fec", &configuration::fec),
 	        scalar("wifi_qos", &configuration::wifi_qos),
+	        scalar("encoder_failover", &configuration::encoder_failover),
 	        scalar("comfort_vignette", &configuration::comfort_vignette),
 	        scalar("motion_smoothing", &configuration::motion_smoothing),
 	        scalar("quad_layers", &configuration::quad_layers),

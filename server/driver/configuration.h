@@ -105,6 +105,9 @@ struct configuration
 	bitrate_controller::config bitrate_auto;
 	multipath_config multipath;
 	mirror_config mirror;
+	// Server side half of the hardware encoder failover switch, for a feature the
+	// headset also has a toggle for. Both must be on.
+	bool encoder_failover = true;
 	std::optional<uint8_t> bit_depth;
 	std::optional<std::array<float, 3>> grip_surface;
 	std::vector<std::string> application;

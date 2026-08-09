@@ -149,6 +149,11 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 	// the only thing worth having.
 	compositor.set_fec(get_info().settings.fec);
 
+	// Both switches again: a stream whose hardware encoder dies mid-session is handed
+	// to the software one instead of freezing
+	encoder_failover_conf = conf.encoder_failover;
+	compositor.set_encoder_failover(encoder_failover_conf and get_info().settings.encoder_failover);
+
 	multipath_usb_max_bitrate = conf.multipath.usb_max_bitrate_bps;
 	connection->set_path_switch_callback([this](bool on_secondary, std::string_view reason) {
 		on_path_switch(on_secondary, reason);
@@ -536,6 +541,7 @@ void wivrn_session::operator()(const from_headset::settings_changed & settings)
 	compositor.set_pacing(pacing_conf.enabled and settings.smooth_pacing, pacing_conf.window);
 	connection->set_qos(settings.wifi_qos);
 	compositor.set_fec(settings.fec);
+	compositor.set_encoder_failover(encoder_failover_conf and settings.encoder_failover);
 
 	if (settings.preferred_refresh_rate != 0)
 		compositor.set_framerate(settings.preferred_refresh_rate / settings.fps_divider);

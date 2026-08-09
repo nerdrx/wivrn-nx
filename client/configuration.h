@@ -97,6 +97,11 @@ public:
 	// WMM access categories. Off is for the networks that mangle marked traffic.
 	bool wifi_qos = true;
 
+	// Let the server hand a stream to its software encoder when the graphics
+	// driver's encoder dies or stops answering, instead of that eye freezing for
+	// the rest of the session. Costs CPU on the PC while it lasts.
+	bool encoder_failover = true;
+
 	// Darken the periphery of the streamed image when the application frame rate collapses
 	bool comfort_vignette = true;
 

@@ -80,6 +80,8 @@ class wivrn_session : public xrt_system_devices
 	uint32_t multipath_usb_max_bitrate = 0;
 	// Server side half of the packet pacing switch, read from the configuration once
 	configuration::pacing_config pacing_conf;
+	// Same story for the hardware encoder failover
+	bool encoder_failover_conf = true;
 	pacing_app_factory app_pacers;
 
 	b_system & xrt_system;

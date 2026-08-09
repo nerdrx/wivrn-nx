@@ -400,6 +400,7 @@ static void send_settings_changed_packet(xr::session & session, wivrn_session * 
 	                .fec = config.fec,
 	                .wifi_qos = config.wifi_qos,
 	                .sharp_text = config.sharp_text,
+	                .encoder_failover = config.encoder_failover,
 	                .motion_smoothing = config.motion_smoothing,
 	                .quad_layers = config.quad_layers,
 	                .low_latency_audio = config.low_latency_audio,

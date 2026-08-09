@@ -20,6 +20,7 @@
 #pragma once
 
 #include "driver/clock_offset.h"
+#include "encoder_watchdog.h"
 #include "fec.h"
 #include "idr_handler.h"
 #include "shard_pacer.h"
@@ -117,6 +118,11 @@ public:
 	static const uint8_t num_slots = 2;
 	const double bitrate_multiplier;
 
+	// Health of this encoder and the decision to give up on it. Fed by whichever
+	// thread runs the encoder, polled by the compositor's present path — which is
+	// the one still running when the encoder thread is wedged inside a driver.
+	encoder_watchdog watchdog;
+
 private:
 	using state_t = std::atomic_unsigned_lock_free::value_type;
 	static const state_t idle = 0;
@@ -125,6 +131,12 @@ private:
 	std::array<std::atomic_unsigned_lock_free, num_slots> state = {idle, idle};
 	uint8_t present_slot = 0;
 	uint8_t encode_slot = 0;
+	// Images presented into this encoder that have not been encoded yet. Normally
+	// one, since present and encode are called in lockstep by the compositor —
+	// but an encoder that replaces a failed one is handed the stream mid-cycle and
+	// must not encode a slot nothing was ever put into. Without this the two slot
+	// cursors would also stay one apart for the rest of the session.
+	std::atomic_int pending_presents = 0;
 
 	std::mutex mutex;
 
@@ -191,6 +203,14 @@ public:
 	// the encoder bitrate will be scaled accordingly
 	void set_bitrate(uint32_t bitrate_bps);
 	void set_framerate(float framerate);
+
+	// Whole-stream bitrate the controller last asked for, so that an encoder that
+	// replaces this one starts where the controller had got to rather than back at
+	// the value the session was configured with.
+	uint32_t get_bitrate() const
+	{
+		return requested_bitrate;
+	}
 
 	// Spread this encoder's shards over `window` of a frame period instead of
 	// handing them to the socket as fast as the kernel takes them. Live.

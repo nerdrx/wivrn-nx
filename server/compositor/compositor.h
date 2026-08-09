@@ -38,8 +38,10 @@
 #include <array>
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <thread>
+#include <vector>
 
 namespace wivrn
 {
@@ -136,7 +138,31 @@ private:
 	uint64_t motion_frame_index = 0;
 	XrTime motion_span = 0;
 
-	std::array<std::unique_ptr<video_encoder>, num_streams> encoders;
+	// Read from three threads (the one that presents, the one that encodes, and the
+	// network thread that pushes settings down), and written when an encoder is
+	// failed over. Shared rather than unique so that a reader that took its copy
+	// before a swap can finish the call it is in — including a call wedged inside a
+	// driver — on an object that cannot be pulled out from under it.
+	mutable std::mutex encoders_mutex;
+	std::array<std::shared_ptr<video_encoder>, num_streams> encoders;
+
+	// Encoders that were failed over. Deliberately kept alive, and never destroyed
+	// before the compositor is: the reason one is here is that its driver misbehaved
+	// or stopped answering, and tearing down a wedged encode session (waiting on its
+	// fences, destroying command buffers a submission may still be using) is exactly
+	// how a recoverable stall turns into a hung process.
+	std::vector<std::shared_ptr<video_encoder>> retired_encoders;
+
+	// Hardware encoder failover: both switches, ANDed by wivrn_session, mirrored
+	// here so that set_encoder_failover can tell a real change from the repeated
+	// calls a settings_changed packet produces. Atomic because unlike the other
+	// mirrors it is read on the present path, once per frame.
+	std::atomic<bool> failover_enabled = true;
+	// A stream is running on the software encoder. Sticky for the session: the
+	// hardware is not trusted again before a reconnect. Read by the session (and
+	// whatever displays state in the headset), and exported to the debug GUI.
+	std::atomic<bool> software_fallback = false;
+	bool software_fallback_var = false;
 
 	// Packet pacing, mirrored here only so that set_pacing can tell a real
 	// change from the repeated calls a settings_changed packet produces
@@ -256,6 +282,19 @@ private:
 
 	void encoder_work(std::stop_token);
 
+	// Copy of the encoder slots, taken once per use so that a swap can never land
+	// in the middle of a loop over them.
+	std::array<std::shared_ptr<video_encoder>, num_streams> get_encoders() const;
+
+	// Ask every encoder's watchdog whether it has given up, and act on it. Called
+	// from the present path: the encoder thread is the one that may be stuck in the
+	// driver, so it cannot be the one to notice.
+	void check_encoder_health();
+
+	// Replace stream `idx`'s encoder with a software one carrying the same live
+	// state. Returns whether it worked; logs either way.
+	bool fail_over_encoder(size_t idx, const std::string & reason);
+
 	void send_video_stream_description();
 
 public:
@@ -290,6 +329,17 @@ public:
 	// Forward error correction: add a parity shard per group of video shards so
 	// that the headset rebuilds a lost one. Logs state changes.
 	void set_fec(bool enabled);
+
+	// Hardware encoder failover: hand a stream whose hardware encoder died or went
+	// quiet to the software encoder rather than letting it freeze. Logs state
+	// changes; turning it off never undoes a swap that already happened.
+	void set_encoder_failover(bool enabled);
+
+	// Whether any stream is running on the software encoder after a failover
+	bool on_software_encoder() const
+	{
+		return software_fallback;
+	}
 	void update_tracking(const from_headset::tracking &);
 	void update_foveation_center_override(const from_headset::override_foveation_center &);
 

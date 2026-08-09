@@ -363,6 +363,11 @@ struct settings_changed
 	// Whether the encoders should be biased towards keeping fine detail (text, UI) rather
 	// than a smooth image. Taken into account when the encoders are created.
 	bool sharp_text = false;
+	// Whether a stream whose hardware encoder dies or stops answering mid-session should
+	// be handed to the software encoder instead of freezing for the rest of the session.
+	// Only possible within one codec (the headset's decoder cannot be changed without a
+	// reconnect), so it applies to H.264 streams. The server also has its own switch.
+	bool encoder_failover = true;
 	// Whether the server should estimate a motion field between consecutive application
 	// frames so that the headset can warp the last decoded frame on repeat refreshes.
 	// The server only does the work while the application is actually below the stream

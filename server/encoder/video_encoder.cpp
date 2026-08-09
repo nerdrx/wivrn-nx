@@ -287,6 +287,12 @@ video_encoder::video_encoder(vk_bundle & vk,
         }
 {
 	assert(this->idr);
+
+	// Only a hardware encoder has somewhere to fall to. The software one is the
+	// floor, and the raw "encoder" is a debugging tool whose whole point is that it
+	// does not compress.
+	watchdog.set_eligible(settings.encoder_name != encoder_x264 and settings.encoder_name != encoder_raw);
+
 	// So that pacing has a frame period from the very first frame, before the
 	// headset has had a chance to change the refresh rate. Deliberately not
 	// set_framerate: that would also queue a rate control reconfiguration for
@@ -362,9 +368,11 @@ void video_encoder::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo info
 	if (idr->should_skip(frame_index))
 	{
 		state[present_slot] = skip;
+		++pending_presents;
 		return;
 	}
 	state[present_slot] = busy;
+	++pending_presents;
 	return present_image(y_cbcr, info, present_slot, frame_index);
 }
 
@@ -372,6 +380,14 @@ void video_encoder::encode(wivrn_session & cnx,
                            const to_headset::video_stream_data_shard::view_info_t & view_info,
                            uint64_t frame_index)
 {
+	// Nothing was ever presented into this encoder: it took over from a failed one
+	// after that frame's present had already gone into the encoder it replaced.
+	// Encoding here would emit whatever the freshly allocated buffers hold, and
+	// would leave the two slot cursors one apart for good.
+	if (pending_presents.load() <= 0)
+		return;
+	--pending_presents;
+
 	encode_slot = (encode_slot + 1) % num_slots;
 
 	struct idle_setter
@@ -406,7 +422,30 @@ void video_encoder::encode(wivrn_session & cnx,
 	shard.view_info = view_info;
 	shard.timing_info.reset();
 
-	auto data = encode(encode_slot, frame_index);
+	// The watchdog only ever sees frames that really reach the backend: a frame the
+	// IDR handler skipped, or one for a stream that is silent by design, took the
+	// early returns above and says nothing about the encoder's health.
+	watchdog.encode_begin(encode_begin);
+	std::optional<data> data;
+	try
+	{
+		data = encode(encode_slot, frame_index);
+	}
+	catch (const std::exception & e)
+	{
+		watchdog.encode_error(os_monotonic_get_ns(), e.what());
+		throw;
+	}
+	catch (...)
+	{
+		watchdog.encode_error(os_monotonic_get_ns(), "unknown error");
+		throw;
+	}
+	// An encoder that sends synchronously (x264) hands its NALs to SendData from
+	// inside the encode call and returns nothing by design, so for those "no data"
+	// is what success looks like.
+	watchdog.encode_end(os_monotonic_get_ns(), data.has_value() or not shared_sender);
+
 	cnx.dump_time("encode_begin", frame_index, encode_begin, stream_idx);
 	cnx.dump_time("encode_end", frame_index, os_monotonic_get_ns(), stream_idx);
 	if (data)

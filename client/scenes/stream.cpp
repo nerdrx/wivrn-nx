@@ -272,6 +272,7 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 		info.settings.fec = config.fec;
 		info.settings.wifi_qos = config.wifi_qos;
 		info.settings.sharp_text = config.sharp_text;
+		info.settings.encoder_failover = config.encoder_failover;
 		info.settings.motion_smoothing = config.motion_smoothing;
 		info.settings.quad_layers = config.quad_layers;
 		info.settings.low_latency_audio = config.low_latency_audio;

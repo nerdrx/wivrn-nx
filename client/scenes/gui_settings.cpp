@@ -453,6 +453,16 @@ void settings_streaming(const settings_context & ctx)
 	});
 
 	list.push_back({
+	        .id = "##encoder_failover",
+	        .label = _("Encoder failover"),
+	        .description = _("If the graphics card's video encoder stops working in the middle of a session, let the computer carry on encoding that eye in software instead of leaving it frozen until you reconnect. Costs CPU on the computer while it lasts, and only works for H.264."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.encoder_failover; },
+	        .set_bool = [&ctx, &config](bool v) { config.encoder_failover = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.encoder_failover,
+	});
+
+	list.push_back({
 	        .id = "##multipath_usb",
 	        .label = _("USB backup connection"),
 	        .description = _("Use the USB cable as a backup connection while streaming over Wi-Fi. Video and input switch to it automatically when the Wi-Fi link fails, and switch back once it has been stable again. Requires the tunnel to be armed by the WiVRn dashboard."),

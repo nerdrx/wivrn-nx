@@ -117,6 +117,47 @@ Never pace, send each frame as one burst.
 ```
 Pace, but over a quarter of a frame period rather than the default 40%.
 
+## `encoder-failover`
+Default value: `true`
+
+Hands a video stream to the software encoder when its hardware encoder dies or stops answering in
+the middle of a session, instead of leaving that stream frozen until the headset reconnects.
+
+Encoder sessions do fail while streaming: a driver reset, a suspend/resume, a GPU that was reset
+under another application, or simply a bug. Until now such a stream stopped producing pictures for
+good — one eye frozen, one line in the log per frame — because nothing on the server treated an
+encode error as anything but a frame to drop. The server now watches each stream: one hard error, or
+three half-second windows in which frames went in and no picture came out, and that stream is written
+off. A software (x264) encoder is built with the same resolution, framerate, bitrate and text clarity
+setting, swapped in, and starts on a keyframe, so the picture is back within a frame or two. The
+other streams are untouched — a failure on one eye never moves the other.
+
+The swap is only possible **within one codec**, and therefore only for H.264 streams. The headset's
+decoder is created once, from the codec in the stream description, and there is no way to change it
+that does not tear down every decoder on the headset — something that only happens on a reconnect.
+A stream that was encoding H.265 or AV1 is therefore written off with one explanatory line in the log
+and stays down until the headset reconnects, which also rebuilds every encoder. The same applies to a
+10-bit session: the software encoder only reads 8-bit images. If having the fallback available
+matters more than the compression H.265 buys, set the `codec` of the [`encoder`](#encoder) key to
+`h264`.
+
+The hardware encoder is never tried again during the session: a driver that has just failed an encode
+is not to be trusted with the next one. Expect a noticeably higher CPU load while a stream is on
+x264; the bitrate is left exactly where the automatic control had walked it to, since the problem is
+CPU, not bandwidth. The resolution is not lowered.
+
+The headset has its own *Encoder failover* toggle in its streaming settings. Both switches must be
+enabled. Turning either off stops the server acting on a failure; it never undoes a swap that already
+happened.
+
+### Example
+```json
+{
+	"encoder-failover": false
+}
+```
+Never fall back to software encoding: a failing hardware encoder freezes its stream, as it did before.
+
 ## `encoder`
 The encoder to use, either a single string or object applied to all streams, or a list of string or objects with values for left, right and alpha.
 When a string it is used, it is equivalent to the `encoder` item of the object.

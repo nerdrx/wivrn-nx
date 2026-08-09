@@ -39,6 +39,9 @@
 #include "utils/method.h"
 #include "utils/wivrn_trace.h"
 
+#include <cinttypes>
+#include <magic_enum.hpp>
+
 #if WIVRN_USE_PIPEWIRE
 #include "pipewire_mirror.h"
 #endif
@@ -376,8 +379,136 @@ xrt_result_t compositor::mark_frame(int64_t frame_id,
 	return XRT_ERROR_VULKAN;
 }
 
+std::array<std::shared_ptr<wivrn::video_encoder>, num_streams> compositor::get_encoders() const
+{
+	std::lock_guard lock(encoders_mutex);
+	return encoders;
+}
+
+void compositor::check_encoder_health()
+{
+	if (not failover_enabled)
+		return;
+
+	const int64_t now = os_monotonic_get_ns();
+	auto snapshot = get_encoders();
+	for (auto [i, encoder]: std::ranges::enumerate_view(snapshot))
+	{
+		if (not encoder)
+			continue;
+
+		// Reported exactly once per encoder, so a stream that cannot be saved
+		// costs one line in the log rather than one per frame.
+		auto verdict = encoder->watchdog.poll(now);
+		if (verdict)
+			fail_over_encoder(i, verdict->reason);
+	}
+}
+
+bool compositor::fail_over_encoder(size_t idx, const std::string & reason)
+{
+	auto conf = settings[idx];
+
+	U_LOG_E("Stream %zu: %s encoder (%s) written off — %s",
+	        idx,
+	        conf.encoder_name.c_str(),
+	        std::string(magic_enum::enum_name(conf.codec)).c_str(),
+	        reason.c_str());
+
+	// The headset's decoder was created once, from the codec in the stream
+	// description, and there is no way to change it that does not tear down every
+	// decoder on the headset — a path that today only ever runs after a reconnect,
+	// and that leaves the stream black unless the encoders are reset with it. So
+	// the swap is only ever within one codec: a hardware H.264 stream becomes an
+	// x264 stream and the decoder never notices, because the new encoder starts on
+	// an IDR carrying its own parameter sets and nothing on the wire says which
+	// encoder produced a shard.
+	if (conf.codec != video_codec::h264)
+	{
+		U_LOG_E("Stream %zu stays down: the headset decodes %s on this stream and the software encoder "
+		        "only produces H.264. Changing codec needs the headset to build new decoders, which only "
+		        "happens on a reconnect — reconnect the headset to recover, or configure the H.264 codec "
+		        "to have the software fallback available.",
+		        idx,
+		        std::string(magic_enum::enum_name(conf.codec)).c_str());
+		return false;
+	}
+	// Same story one level down: the compositor's images are 16 bit per sample in a
+	// 10-bit session and the software encoder only reads 8.
+	if (conf.bit_depth != 8)
+	{
+		U_LOG_E("Stream %zu stays down: the session is %d-bit and the software encoder only does 8-bit. "
+		        "Reconnect the headset to recover.",
+		        idx,
+		        conf.bit_depth);
+		return false;
+	}
+
+	conf.encoder_name = encoder_x264;
+
+	std::shared_ptr<video_encoder> replacement;
+	const int64_t begin = os_monotonic_get_ns();
+	try
+	{
+		replacement = video_encoder::create(vk, conf, idx);
+	}
+	catch (std::exception & e)
+	{
+		U_LOG_E("Stream %zu stays down: the software encoder could not be created either: %s", idx, e.what());
+		return false;
+	}
+
+	// Carry the live state over. The bitrate is the one the controller has walked
+	// to, not the one the session started with, and it is left exactly where it
+	// was: x264 at full eye resolution is expensive in CPU, not in bandwidth, and
+	// dropping the bitrate on top of losing the hardware encoder would make the
+	// picture worse for no reason.
+	uint64_t encoder_bitrate = conf.bitrate;
+	if (auto & old = encoders[idx]; old)
+	{
+		if (auto bitrate = old->get_bitrate())
+		{
+			replacement->set_bitrate(bitrate);
+			encoder_bitrate = bitrate * conf.bitrate_multiplier;
+		}
+	}
+	replacement->set_framerate(frame_rate);
+	replacement->set_pacing(pacing_enabled, pacing_window);
+	replacement->set_fec(fec_enabled);
+	replacement->watchdog.set_enabled(failover_enabled);
+	// A fresh IDR handler already asks for a keyframe on its first frame; say so
+	// rather than leaving it implicit. The headset needs it: everything it holds
+	// for this stream was produced by an encoder that no longer exists, and a P
+	// frame against those references would be undecodable.
+	replacement->reset();
+
+	{
+		std::lock_guard lock(encoders_mutex);
+		retired_encoders.push_back(std::move(encoders[idx]));
+		encoders[idx] = replacement;
+	}
+	// Only ever read by this thread once the session is up (print_encoders runs in
+	// the constructor), and the codec is unchanged, so the stream description the
+	// headset already has stays correct.
+	settings[idx] = conf;
+	software_fallback = true;
+	software_fallback_var = true;
+
+	U_LOG_W("Stream %zu is now on the software encoder (x264, %ux%u, %.1f Mbit/s), built in %" PRId64 " ms. "
+	        "It starts on a keyframe, so the picture comes back within a frame or two. Expect a heavier CPU "
+	        "load; the hardware encoder is not tried again before the headset reconnects.",
+	        idx,
+	        conf.width,
+	        conf.height,
+	        encoder_bitrate / 1e6,
+	        (os_monotonic_get_ns() - begin) / 1'000'000);
+
+	return true;
+}
+
 std::optional<compositor::promoted_quad> compositor::select_quad_layer(int64_t display_time_ns)
 {
+	// Read without the lock: only this thread ever replaces an encoder.
 	// No encoder for it (the headset did not ask when the session was set up), or
 	// the headset has since turned the feature off: everything stays in the squash.
 	if (not quad or not encoders[quad_stream_idx] or not session.get_settings()->quad_layers)
@@ -466,6 +597,12 @@ std::optional<compositor::promoted_quad> compositor::select_quad_layer(int64_t d
 xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 {
 	u_graphics_sync_unref(&sync_handle);
+
+	// Before anything is handed to an encoder: an encoder that has been written off
+	// is replaced here, so that everything below — the ownership transfer barriers,
+	// the presents — already sees the new one, and a wedged encoder thread is never
+	// the one asked to notice its own problem.
+	check_encoder_health();
 
 	// Move waited frame to rendering frame, clear waited.
 	comp_frame_move_and_clear_locked(&frame.rendering, &frame.waited);
@@ -1034,13 +1171,19 @@ void compositor::encoder_work(std::stop_token tok)
 
 		wivrn::trace::scope trace_iter(wivrn::trace::cpu_track::compositor, 0, image.frame_index, "encoder_work iter");
 
-		try
+		// One copy for the whole frame: an encoder replaced from the present
+		// thread half way through this loop must not change which object the
+		// rest of it talks to, and the one it replaced stays alive as long as
+		// this copy does.
+		for (auto & encoder: get_encoders())
 		{
-			for (auto & encoder: encoders)
-			{
-				if (not encoder)
-					continue;
+			if (not encoder)
+				continue;
 
+			// Per encoder rather than around the loop: one stream's driver
+			// giving up must not cost the other eyes their frame as well.
+			try
+			{
 				if (encoder->stream_idx == quad_stream_idx)
 				{
 					if (not image.quad_info)
@@ -1057,10 +1200,12 @@ void compositor::encoder_work(std::stop_token tok)
 				else if (encoder->stream_idx < 2 or image.view_info.alpha)
 					encoder->encode(session, image.view_info, image.frame_index);
 			}
-		}
-		catch (std::exception & e)
-		{
-			U_LOG_W("encode error: %s", e.what());
+			catch (std::exception & e)
+			{
+				// The watchdog has the same news, and it is the one that
+				// decides what to do about it.
+				U_LOG_W("encode error on stream %d: %s", encoder->stream_idx, e.what());
+			}
 		}
 		image.busy = false;
 	}
@@ -1224,6 +1369,7 @@ compositor::compositor(wivrn_session & session) :
 #endif
 
 	u_var_add_root(this, "Compositor", false);
+	u_var_add_bool(this, &software_fallback_var, "software encoder fallback");
 	u_var_add_f32_timing(this, &squasher_times.var, "layers processing");
 	u_var_add_f32_timing(this, &foveation_times.var, "foveation");
 	u_var_add_f32_timing(this, &motion_times.var, "motion estimation");
@@ -1271,7 +1417,7 @@ xrt_system_compositor_info compositor::sys_info() const
 
 void compositor::set_bitrate(uint32_t bitrate)
 {
-	for (auto & encoder: encoders)
+	for (auto & encoder: get_encoders())
 	{
 		if (encoder)
 			encoder->set_bitrate(bitrate);
@@ -1293,7 +1439,7 @@ void compositor::set_pacing(bool enabled, float window)
 	else
 		U_LOG_I("Packet pacing disabled");
 
-	for (auto & encoder: encoders)
+	for (auto & encoder: get_encoders())
 	{
 		if (encoder)
 			encoder->set_pacing(enabled, window);
@@ -1312,10 +1458,29 @@ void compositor::set_fec(bool enabled)
 	else
 		U_LOG_I("Forward error correction disabled");
 
-	for (auto & encoder: encoders)
+	for (auto & encoder: get_encoders())
 	{
 		if (encoder)
 			encoder->set_fec(enabled);
+	}
+}
+
+void compositor::set_encoder_failover(bool enabled)
+{
+	if (failover_enabled == enabled)
+		return;
+
+	failover_enabled = enabled;
+
+	if (enabled)
+		U_LOG_I("Hardware encoder failover enabled");
+	else
+		U_LOG_I("Hardware encoder failover disabled, a failing encoder now freezes its stream");
+
+	for (auto & encoder: get_encoders())
+	{
+		if (encoder)
+			encoder->watchdog.set_enabled(enabled);
 	}
 }
 
@@ -1325,7 +1490,7 @@ void compositor::set_framerate(float hz)
 		return;
 	U_LOG_IFL_D(log_level, "Framerate change from %.0f to %.0f", frame_rate.load(), hz);
 	pacer.set_frame_duration(U_TIME_1S_IN_NS / hz);
-	for (auto & encoder: encoders)
+	for (auto & encoder: get_encoders())
 	{
 		if (encoder)
 			encoder->set_framerate(hz);
@@ -1344,7 +1509,7 @@ void compositor::update_foveation_center_override(const from_headset::override_f
 
 void compositor::resume()
 {
-	for (auto & encoder: encoders)
+	for (auto & encoder: get_encoders())
 	{
 		if (encoder)
 			encoder->reset();
@@ -1359,7 +1524,7 @@ void compositor::resume()
 
 void compositor::request_idr()
 {
-	for (auto & encoder: encoders)
+	for (auto & encoder: get_encoders())
 	{
 		if (encoder)
 			encoder->reset();
@@ -1369,9 +1534,10 @@ void compositor::request_idr()
 void compositor::on_feedback(const from_headset::feedback & feedback, const clock_offset & o)
 {
 	uint8_t stream = feedback.stream_index;
-	if (stream >= encoders.size() or not encoders[stream])
+	auto snapshot = get_encoders();
+	if (stream >= snapshot.size() or not snapshot[stream])
 		return;
-	encoders[stream]->on_feedback(feedback);
+	snapshot[stream]->on_feedback(feedback);
 	if (not o)
 		return;
 	pacer.on_feedback(feedback, o);

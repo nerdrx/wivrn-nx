@@ -20,6 +20,7 @@
 #pragma once
 
 #include "app_pacer.h"
+#include "bitrate_controller.h"
 #include "clock_offset.h"
 #include "compositor/compositor.h"
 #include "inplace_vector.hpp"
@@ -71,6 +72,9 @@ class wivrn_session : public xrt_system_devices
 	thread_safe<from_headset::settings_changed> settings;
 
 	wivrn::compositor compositor;
+	// Adjusts the bitrate from the per-frame delivery timings reported by the client.
+	// Has its own mutex, may be used from any thread.
+	wivrn::bitrate_controller bitrate_ctl;
 	pacing_app_factory app_pacers;
 
 	b_system & xrt_system;
@@ -226,6 +230,9 @@ private:
 
 	void pause_session();
 	void resume_session();
+
+	// Forwards a bitrate decided by the automatic controller to the encoders
+	void apply_auto_bitrate(std::optional<uint32_t>);
 
 	void update_client_states(bool visible, bool focused);
 	void poll_session_loss();

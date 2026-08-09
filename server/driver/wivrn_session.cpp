@@ -137,6 +137,8 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 
 	auto conf = configuration();
 
+	bitrate_ctl.configure(conf.bitrate_auto, get_info().settings.bitrate_bps);
+
 #if WIVRN_FEATURE_STEAMVR_LIGHTHOUSE
 
 	auto use_steamvr_lh = conf.use_steamvr_lh || std::getenv("WIVRN_USE_STEAMVR_LH");
@@ -445,6 +447,9 @@ void wivrn_session::resume_session()
 
 	compositor.resume();
 
+	// Measurements from before the interruption say nothing about the link now
+	apply_auto_bitrate(bitrate_ctl.reset());
+
 	(*this)(from_headset::get_application_list{
 	        .language = get_info().language,
 	        .country = get_info().country,
@@ -496,7 +501,11 @@ void wivrn_session::operator()(const from_headset::settings_changed & settings)
 	*this->settings.lock() = settings;
 
 	if (settings.bitrate_bps != 0)
+	{
+		// The bitrate the client asks for is the ceiling of the automatic controller
+		bitrate_ctl.set_ceiling(settings.bitrate_bps);
 		compositor.set_bitrate(settings.bitrate_bps);
+	}
 
 	if (settings.preferred_refresh_rate != 0)
 		compositor.set_framerate(settings.preferred_refresh_rate / settings.fps_divider);
@@ -780,8 +789,18 @@ void wivrn_session::operator()(from_headset::timesync_response && timesync)
 	offset_est.add_sample(timesync);
 }
 
+void wivrn_session::apply_auto_bitrate(std::optional<uint32_t> bitrate)
+{
+	if (bitrate)
+		compositor.set_bitrate(*bitrate);
+}
+
 void wivrn_session::operator()(from_headset::feedback && feedback)
 {
+	// Frame delivery timings are in the headset clock on both ends, so the automatic bitrate
+	// needs no clock offset and can run before the estimator has converged
+	apply_auto_bitrate(bitrate_ctl.on_feedback(feedback, compositor.get_frame_duration(), connection->is_active()));
+
 	clock_offset o = offset_est.get_offset();
 	if (not o)
 		return;
@@ -1003,6 +1022,8 @@ void wivrn_session::operator()(to_monado::disconnect &&)
 
 void wivrn_session::operator()(to_monado::set_bitrate && data)
 {
+	// A manual change (dashboard / D-Bus) becomes the new ceiling, and resets the controller to it
+	bitrate_ctl.set_ceiling(data.bitrate_bps);
 	compositor.set_bitrate(data.bitrate_bps);
 }
 

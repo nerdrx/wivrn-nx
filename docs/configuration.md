@@ -17,6 +17,49 @@ Default value: `8` (bits)
 
 Bit depth of the video. 8-bit is supported by all encoders. 10-bit is supported by `vaapi` and `nvenc` encoders using `h265` or `av1`.
 
+## `bitrate-auto`
+Default value: `true`
+
+Automatically adapts the video bitrate to the quality of the wireless link, so that walking away
+from the router degrades image quality instead of the connection.
+
+The bitrate configured on the headset is used as the ceiling, the server never goes above it. The
+server measures, for every frame, how much of a frame period the headset spent receiving it, plus
+the frames that never arrived, and lowers the bitrate when the link is saturated. Once the link
+measures healthy again it climbs back up towards the ceiling. Every change is logged at info level
+with its reason.
+
+Can be a boolean, or an object:
+
+### `enabled`
+Default value: `true`
+
+Set to `false` to always use the bitrate configured on the headset.
+
+### `min-bitrate`
+Default value: `10000000` (10 Mbit/s)
+
+Lower bound in bits per second, the automatic control never goes below it. If the headset asks for
+less than this, the value requested by the headset is used instead.
+
+### Examples
+```json
+{
+	"bitrate-auto": false
+}
+```
+Disable automatic bitrate, always use the bitrate configured on the headset.
+
+```json
+{
+	"bitrate-auto": {
+		"enabled": true,
+		"min-bitrate": 25000000
+	}
+}
+```
+Enable automatic bitrate, but never go below 25 Mbit/s.
+
 ## `encoder`
 The encoder to use, either a single string or object applied to all streams, or a list of string or objects with values for left, right and alpha.
 When a string it is used, it is equivalent to the `encoder` item of the object.

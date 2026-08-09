@@ -178,6 +178,22 @@ configuration::configuration()
 			}
 		}
 
+		// "bitrate-auto": true/false, or an object {"enabled": bool, "min-bitrate": bits/s}
+		if (auto it = json.find("bitrate-auto"); it != json.end())
+		{
+			if (it->is_boolean())
+				bitrate_auto.enabled = *it;
+			else if (it->is_object())
+			{
+				if (auto enabled = it->find("enabled"); enabled != it->end())
+					bitrate_auto.enabled = *enabled;
+				if (auto min = it->find("min-bitrate"); min != it->end())
+					bitrate_auto.min_bitrate_bps = *min;
+			}
+			else
+				throw std::runtime_error("invalid bitrate-auto value, expected a boolean or an object");
+		}
+
 		if (auto it = json.find("application"); it != json.end())
 		{
 			if (it->is_string())

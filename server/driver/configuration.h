@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include "bitrate_controller.h"
 #include "hostname.h"
 #include "wivrn_config.h"
 #include <array>
@@ -52,6 +53,8 @@ struct configuration
 	};
 
 	std::array<encoder, 3> encoders; // left, right, alpha
+	// Automatic bitrate control, the ceiling is always the bitrate requested by the client
+	bitrate_controller::config bitrate_auto;
 	std::optional<uint8_t> bit_depth;
 	std::optional<std::array<float, 3>> grip_surface;
 	std::vector<std::string> application;

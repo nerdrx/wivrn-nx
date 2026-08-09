@@ -30,9 +30,10 @@ client-side optical flow (Adreno budget), and any change to the video bitstream 
    ME-only mode — the single working API — would gate the feature to NVIDIA *and* still
    requires an explicit N-vs-N-9 pass, because at low app fps the encoder sees duplicate
    frames and its in-encode vectors are ~zero.
-2. **Transport: a new `to_headset` packet** on the stream socket, keyed by frame index. The
-   protocol hash bumps — fine for this fork. A dropped packet degrades to "no smoothing this
-   interval". Riding inside `view_info` would shrink shard 0's video payload — rejected.
+2. **Transport: a new `to_headset` packet** on the stream socket, keyed by frame index, cut
+   into datagram-sized chunks. The protocol hash bumps — fine for this fork. A dropped chunk
+   degrades to "no smoothing this interval". Riding inside `view_info` would shrink shard 0's
+   video payload — rejected.
 3. **Warp insertion: extend the defoveation pass.** The client submits its layer with the
    server's render pose and lets the runtime timewarp; the warp happens in image space
    underneath that. The decoded image is an external-format YCbCr texture (sample-only), so
@@ -123,11 +124,11 @@ synchronisation. The field is quantized against its own longest vector and sent 
 compositor thread with `send_stream`; a failure is logged and dropped.
 
 Sending from the compositor thread is a deliberate trade: it avoids a queue and a second
-wait, and the payload is a few kilobytes at application rate — at most a few tens of packets
-per second, and typically ten. It is a datagram on the stream socket in the normal case. In
-TCP-only mode it shares the control socket, where a full send buffer would stall the
-compositor; if that ever shows up in practice, hand the readback to the encoder thread
-instead.
+wait, and the payload is a few kilobytes at application rate, split into four to six chunks —
+at most a few hundred packets per second, and typically fifty. They are datagrams on the
+stream socket in the normal case. In TCP-only mode it shares the control socket, where a
+full send buffer would stall the compositor; if that ever shows up in practice, hand the
+readback to the encoder thread instead.
 
 ## Protocol
 
@@ -135,17 +136,31 @@ instead.
     {
         uint64_t frame_idx;         // video frame the field starts from
         XrTime   span_ns;           // interval it spans, headset time, > 0
-        uint16_t width, height;     // cells per eye
+        uint16_t width, height;     // cells per eye, of the whole field
         float    scale;             // longest vector, as a fraction of the eye image
-        std::vector<int8_t> vectors; // (x, y) per cell, row major, left eye then right
+        uint8_t  view;              // eye this chunk belongs to
+        uint16_t row_offset;        // first grid row of that eye carried here
+        uint16_t row_count;         // rows carried here
+        std::vector<int8_t> vectors; // (x, y) per cell, row major, this chunk's rows only
     };
 
 Cell (i, j) is centred at ((i+0.5)/width, (j+0.5)/height) in normalized coordinates of the
 *defoveated* eye image. A cell value v means a displacement of (v/127)·scale: what is now at p
-was at p − (v/127)·scale, span_ns ago. Index = ((view·height + j)·width + i)·2.
+was at p − (v/127)·scale, span_ns ago. In the reassembled field the index is
+((view·height + j)·width + i)·2; within a chunk it is ((j − row_offset)·width + i)·2.
 
-At 27x29 cells that is 3.1 kB of vectors plus a small header, once per application frame —
-about 250 kbit/s at 10 fps, 2.8 Mbit/s in the worst case where the feature is active at 90 Hz.
+A whole field at 27x29 cells is 3.1 kB of vectors, and 32x35 cells gives 4.5 kB — more than
+one datagram may carry, and well past the 2048 byte slots the headset reads datagrams into
+(anything larger is dropped outright). So a field goes out as several chunks of whole grid
+rows of one eye, at most `max_chunk_bytes` (1024) of vectors each, which keeps a packet
+comfortably under any MTU worth worrying about. Every chunk repeats the whole header, so
+chunks are self-describing and may arrive in any order; the headset gathers them per frame
+index, drops a partial assembly as soon as a chunk of a newer frame arrives, and only warps
+along a field it holds every row of. Four packets per application frame at 27x29, six at
+32x35.
+
+Bandwidth is unchanged by the chunking beyond the repeated headers: about 250 kbit/s at
+10 fps, 2.8 Mbit/s in the worst case where the feature is active at 90 Hz.
 
 ## Client
 
@@ -188,13 +203,21 @@ exactly as before.
   clamped to a quarter of the image, and the search itself cannot report more than ±96 render
   pixels.
 - **Lost field packet.** The client ignores any field that does not name the frame it is
-  displaying, so a lost, late or duplicated packet simply means no smoothing until the next
-  application frame.
+  displaying, and an incomplete one just as much, so a lost, late or duplicated chunk simply
+  means no smoothing until the next application frame.
 - **IDR, resolution change, reconnect.** Same mechanism: the frame index stops matching.
   `compositor::resume()` also drops the previous pyramid so the first field after a pause is
   never computed across the gap.
 - **Application catches up.** The ratio crosses 0.9, the estimator is destroyed and its
   memory freed. Nothing on the client changes: fields simply stop arriving.
+- **Estimator creation fails.** Out of memory, a missing shader, anything: it is logged once
+  and the feature is held off for the rest of the session. Nothing about it would fix itself
+  on the next commit, and the filtered ratio climbs back over the threshold within a fraction
+  of a second, so retrying would mean the same warning several times per second forever.
+- **Compositor timeout.** The submission may still be executing the estimator's pipelines
+  against its pyramids, so until a later semaphore wait succeeds nothing is recorded into the
+  estimator and, above all, it is not destroyed. One frame without an estimate, no device
+  wait on the hot path.
 - **Toggle off.** No packets, no estimator, no client-side texture sampling. The pass is
   byte-identical to what it was before this feature.
 

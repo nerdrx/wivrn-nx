@@ -402,7 +402,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 	ensure_vertices(std::max(required_vertices(foveation[0]), required_vertices(foveation[1])));
 
 	// Motion field: keep whatever is already in the texture unless a new one came in
-	const wivrn::to_headset::motion_field * field = motion.field;
+	const wivrn::motion_field_data * field = motion.field;
 	if (field and (field->width == 0 or field->height == 0 or
 	               field->vectors.size() != size_t(field->width) * field->height * view_count * 2))
 		field = nullptr;

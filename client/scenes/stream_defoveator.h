@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include "motion_field.h"
 #include "vk/allocation.h"
 #include "wivrn_packets.h"
 #include <vulkan/vulkan_raii.hpp>
@@ -35,6 +36,15 @@ class stream_defoveator
 	vk::raii::Device & device;
 	vk::raii::PhysicalDevice & physical_device;
 
+	// Motion smoothing: the field the server measured between the last two
+	// application frames, as a small two layer texture the fragment shader
+	// displaces its texture coordinates with.
+	//
+	// Declared before the pipelines: the descriptor set layouts embed this sampler
+	// through pImmutableSamplers, so it has to outlive them and members are
+	// destroyed in reverse declaration order.
+	vk::raii::Sampler motion_sampler = nullptr;
+
 	// Graphic pipeline
 	vk::raii::RenderPass renderpass = nullptr;
 	vk::raii::DescriptorPool ds_pool = nullptr;
@@ -48,10 +58,7 @@ class stream_defoveator
 	pipeline_t pipeline_rgb[view_count];
 	pipeline_t pipeline_a[view_count];
 
-	// Motion smoothing: the field the server measured between the last two
-	// application frames, as a small two layer texture the fragment shader
-	// displaces its texture coordinates with.
-	vk::raii::Sampler motion_sampler = nullptr;
+	// Motion smoothing texture the sampler above is bound with
 	image_allocation motion_image;
 	std::vector<vk::raii::ImageView> motion_views;
 	buffer_allocation motion_staging;
@@ -104,7 +111,7 @@ public:
 	struct motion_warp
 	{
 		// Field to warp along, uploaded on the first pass that uses it
-		const wivrn::to_headset::motion_field * field = nullptr;
+		const wivrn::motion_field_data * field = nullptr;
 		// How far along the field to move, in units of the interval the field
 		// spans. 0 reproduces the decoded frame.
 		float step = 0;

@@ -82,11 +82,10 @@ void scenes::stream::operator()(to_headset::video_stream_data_shard && shard)
 	decoders[idx].decoder->push_shard(std::move(shard));
 }
 
-void scenes::stream::operator()(to_headset::motion_field && field)
+void scenes::stream::operator()(to_headset::motion_field && chunk)
 {
-	// Only the newest field is worth anything: it names the newest frame, and the
-	// render thread drops it as soon as it is displaying anything else.
-	*motion_field.lock() = std::move(field);
+	// A field arrives as several chunks; only a complete one is ever warped along.
+	motion_field.lock()->add(chunk);
 }
 
 void scenes::stream::operator()(to_headset::feature_control && control)

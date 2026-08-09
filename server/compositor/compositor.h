@@ -121,6 +121,14 @@ private:
 	// Hysteresis on that ratio: whether the application is far enough behind for
 	// smoothing to be worth its cost
 	bool app_behind = false;
+	// The estimator could not be created. Sticky for the session: without it the
+	// filtered ratio climbs back over the enter threshold within a fraction of a
+	// second and the failing creation is retried several times per second.
+	bool motion_failed = false;
+	// A submission that may still hold estimator work timed out. Nothing may be
+	// recorded into the estimator, and above all it may not be destroyed, until a
+	// later wait succeeds.
+	bool motion_unsafe = false;
 	// Headset time of the frame the current pyramid was built from
 	XrTime motion_previous_display_time = 0;
 	// A field was computed into the submission being waited on

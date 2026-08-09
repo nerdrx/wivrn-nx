@@ -20,6 +20,7 @@
 
 #include "shaders/motion_constants.glsl.inc"
 
+#include "motion_field.h"
 #include "vk/allocation.h"
 #include "wivrn_packets.h"
 #include "xrt/xrt_defines.h"
@@ -50,15 +51,9 @@ class motion_estimator
 public:
 	static constexpr size_t view_count = 2;
 
-	struct field
-	{
-		uint16_t width = 0;
-		uint16_t height = 0;
-		// Longest displacement in the field, as a fraction of the eye image
-		float scale = 0;
-		// Two int8 components per cell, left eye then right eye
-		std::vector<int8_t> vectors;
-	};
+	// The frame identity of a field is the caller's business; read_back() only
+	// fills the geometry and the vectors.
+	using field = motion_field_data;
 
 	// eye_size is the size of one composited eye view, in pixels
 	motion_estimator(vk_bundle &, vk::Extent2D eye_size);

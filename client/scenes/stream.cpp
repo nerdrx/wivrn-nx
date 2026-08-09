@@ -1069,9 +1069,9 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	if (application::get_config().motion_smoothing and current_blit_handles[0])
 	{
 		auto lock = motion_field.lock();
-		motion_available = *lock and
-		                   (*lock)->frame_idx == current_blit_handles[0]->feedback.frame_index and
-		                   (*lock)->span_ns > 0;
+		motion_available = lock->complete() and
+		                   lock->field().frame_idx == current_blit_handles[0]->feedback.frame_index and
+		                   lock->field().span_ns > 0;
 	}
 
 	// Allow the headset to time warp if we are redisplaying a frame
@@ -1165,12 +1165,12 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			auto motion_lock = motion_field.lock();
 			stream_defoveator::motion_warp motion;
 
-			if (config.motion_smoothing and *motion_lock and current_blit_handles[0])
+			if (config.motion_smoothing and motion_lock->complete() and current_blit_handles[0])
 			{
-				const auto & field = **motion_lock;
+				const auto & field = motion_lock->field();
 				const auto & handle = *current_blit_handles[0];
 				// A field that does not name the frame on screen is stale: a lost
-				// packet, a dropped frame or an IDR. Nothing to warp along then.
+				// chunk, a dropped frame or an IDR. Nothing to warp along then.
 				if (field.frame_idx == handle.feedback.frame_index and field.span_ns > 0)
 				{
 					double steps = double(frame_state.predictedDisplayTime - handle.view_info.display_time) /

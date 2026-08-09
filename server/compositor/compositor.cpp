@@ -803,9 +803,16 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	                             U_TIME_1S_IN_NS) == vk::Result::eTimeout)
 	{
 		U_LOG_IFL_W(log_level, "compositor timeout");
+		// The submission may still be running, and it may hold estimator work.
+		// Freeing the estimator, or recording more work into it, would be a use
+		// after free; update_motion_field leaves it alone while this is set.
+		motion_unsafe = true;
+		motion_pending = false;
 	}
 	else
 	{
+		motion_unsafe = false;
+
 		auto [res, ts] = query_pool.getResults<uint64_t>(
 		        0,
 		        4,
@@ -851,7 +858,13 @@ void compositor::update_motion_field(
 	else if (app_frame_ratio > motion_leave_ratio)
 		app_behind = false;
 
-	if (not(session.get_settings()->motion_smoothing and app_behind))
+	// A previous submission timed out and may still be executing the estimator's
+	// pipelines against its pyramids. Record nothing into it and, above all, do not
+	// destroy it, until a wait has succeeded again.
+	if (motion_unsafe)
+		return;
+
+	if (not(session.get_settings()->motion_smoothing and app_behind and not motion_failed))
 	{
 		if (motion)
 		{
@@ -880,11 +893,11 @@ void compositor::update_motion_field(
 		}
 		catch (std::exception & e)
 		{
-			U_LOG_W("Motion estimator creation failed, motion smoothing disabled: %s", e.what());
-			// Retrying on the next commit would flood the log; hold the feature
-			// off until the application catches up and falls behind again.
-			app_behind = false;
-			app_frame_ratio = 1;
+			U_LOG_IFL_W(log_level, "Motion estimator creation failed, motion smoothing disabled: %s", e.what());
+			// Whatever made the creation fail will not fix itself, and retrying
+			// on the next commit would flood the log: hold the feature off for
+			// the rest of the session.
+			motion_failed = true;
 			return;
 		}
 		motion_previous_display_time = 0;
@@ -915,14 +928,13 @@ void compositor::send_motion_field()
 	try
 	{
 		auto field = motion->read_back();
-		session.send_stream(to_headset::motion_field{
-		        .frame_idx = motion_frame_index,
-		        .span_ns = motion_span,
-		        .width = field.width,
-		        .height = field.height,
-		        .scale = field.scale,
-		        .vectors = std::move(field.vectors),
-		});
+		field.frame_idx = motion_frame_index;
+		field.span_ns = motion_span;
+
+		// A whole field is larger than a datagram, so it goes out as several
+		// chunks, each carrying the full header.
+		for (auto & chunk: split_motion_field(field))
+			session.send_stream(std::move(chunk));
 	}
 	catch (std::exception & e)
 	{

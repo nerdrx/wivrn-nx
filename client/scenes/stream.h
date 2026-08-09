@@ -182,10 +182,12 @@ private:
 	bool comfort_vignette_active = false;
 	float comfort_vignette_fade = 0;
 
-	// Motion smoothing: the last field the server sent, replaced whenever a new one
-	// arrives. It is only used for the frame it names, so a lost or late packet just
-	// means no smoothing until the next application frame.
-	thread_safe<std::optional<wivrn::to_headset::motion_field>> motion_field;
+	// Motion smoothing: the last field the server sent. A field is larger than a
+	// datagram, so it arrives as several chunks that are gathered here; only a field
+	// every chunk of which has arrived is usable. It is only used for the frame it
+	// names, so a lost or late chunk just means no smoothing until the next
+	// application frame.
+	thread_safe<wivrn::motion_field_assembler> motion_field;
 
 	// Tab currently being displayed
 	stream_tab gui_status = stream_tab::hidden;

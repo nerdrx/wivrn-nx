@@ -458,17 +458,11 @@ bool motion_estimator::estimate(
 
 	initialized[destination] = true;
 
-	if (not have_previous)
-	{
-		// Nothing to match against yet, the pyramid just built becomes the
-		// previous frame for the next call.
-		current = destination;
-		have_previous = true;
-		return false;
-	}
-
-	current = destination;
-
+	// The estimate pass below samples the pyramid that was just written, and so does
+	// the next call, whichever of the two runs first. Make those writes visible
+	// unconditionally: on the first call after a (re)start there is nothing to match
+	// against yet and the function returns early, but the pyramid it just built is
+	// exactly what the next call reads.
 	vk::ImageMemoryBarrier2 to_read{
 	        .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
 	        .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
@@ -476,7 +470,7 @@ bool motion_estimator::estimate(
 	        .dstAccessMask = vk::AccessFlagBits2::eShaderSampledRead,
 	        .oldLayout = vk::ImageLayout::eGeneral,
 	        .newLayout = vk::ImageLayout::eGeneral,
-	        .image = pyramids[current].image,
+	        .image = pyramids[destination].image,
 	        .subresourceRange = {
 	                .aspectMask = vk::ImageAspectFlagBits::eColor,
 	                .levelCount = MOTION_LEVELS,
@@ -487,6 +481,16 @@ bool motion_estimator::estimate(
 	        .imageMemoryBarrierCount = 1,
 	        .pImageMemoryBarriers = &to_read,
 	});
+
+	current = destination;
+
+	if (not have_previous)
+	{
+		// Nothing to match against yet, the pyramid just built becomes the
+		// previous frame for the next call.
+		have_previous = true;
+		return false;
+	}
 
 	std::array match_images{
 	        vk::DescriptorImageInfo{

@@ -975,8 +975,14 @@ public:
 // to warp the last decoded frame on the refreshes for which the application has not
 // produced anything new.
 //
-// Losing one of these packets simply means no smoothing until the next application
-// frame: the headset ignores a field that does not name the frame it is displaying.
+// A whole field is a few kilobytes, more than a datagram may carry, so it is cut
+// into chunks of whole grid rows of one eye. Every chunk repeats the whole header,
+// so chunks are independent and may arrive in any order; the headset only warps
+// along a field it has received every chunk of.
+//
+// Losing a chunk simply means no smoothing until the next application frame: the
+// headset ignores a field that does not name the frame it is displaying, and an
+// incomplete one just as much.
 struct motion_field
 {
 	// Video frame the field starts from. The field describes where the content of
@@ -998,9 +1004,31 @@ struct motion_field
 	// coordinates: what is now at p was at p - (v / 127) * scale, span_ns ago.
 	float scale;
 
-	// Two components (x, y) per cell, row major, left eye then right eye:
-	// index = ((view * height + j) * width + i) * 2. Values are in [-127, 127].
+	// Which eye, and which rows of its grid, this chunk carries. Rows [row_offset,
+	// row_offset + row_count) of eye view; a complete field is every row of both
+	// eyes.
+	uint8_t view;
+	uint16_t row_offset;
+	uint16_t row_count;
+
+	// Two components (x, y) per cell, row major, for this chunk's rows only:
+	// index = ((j - row_offset) * width + i) * 2, so the size is row_count * width
+	// * 2. Values are in [-127, 127].
 	std::vector<int8_t> vectors;
+
+	// Most vector bytes in one chunk. Small enough that a chunk, header and stream
+	// framing included, stays well under any MTU worth worrying about and under the
+	// receive buffer the headset reads datagrams into.
+	static constexpr size_t max_chunk_bytes = 1024;
+
+	// Rows of one eye that fit in a single chunk, never zero
+	static constexpr uint16_t rows_per_chunk(uint16_t width)
+	{
+		const size_t row_bytes = size_t(width) * 2;
+		if (row_bytes == 0 or row_bytes >= max_chunk_bytes)
+			return 1;
+		return uint16_t(max_chunk_bytes / row_bytes);
+	}
 };
 
 struct haptics

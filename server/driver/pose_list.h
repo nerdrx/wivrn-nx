@@ -25,6 +25,7 @@
 #include "xrt/xrt_defines.h"
 
 #include <atomic>
+#include <limits>
 #include <mutex>
 #include <optional>
 
@@ -42,6 +43,26 @@ class pose_list
 	polynomial_interpolator<3> positions;
 	polynomial_interpolator<4, true> orientations;
 
+	// Tracking state of one component (position or orientation) of the pose.
+	// Some runtimes report poses as valid but not tracked when the device goes to
+	// standby, the last known pose must then be kept instead of being extrapolated.
+	// Protected by mutex.
+	struct tracked_state
+	{
+		// true if the tracked flag was set at least once, if it never was the runtime
+		// probably does not report it at all and the flag is assumed to be set
+		bool ever_tracked = false;
+		bool currently_tracked = false;
+		// timestamp of the last sample that had the tracked flag set
+		XrTime last_tracked_timestamp = std::numeric_limits<XrTime>::lowest();
+		// production timestamp of the sample that last updated this state,
+		// so that out of order samples don't change it back
+		XrTime production_timestamp = std::numeric_limits<XrTime>::lowest();
+	};
+
+	tracked_state position_state;
+	tracked_state orientation_state;
+
 	struct debug_data
 	{
 		bool in; // true: received data, false: data request
@@ -52,6 +73,8 @@ class pose_list
 		std::array<float, 3> dposition;
 		std::array<float, 4> orientation;
 		std::array<float, 4> dorientation;
+		bool position_tracked;
+		bool orientation_tracked;
 	};
 
 	std::optional<csv_logger<debug_data>> dumper;
@@ -76,5 +99,9 @@ public:
 
 private:
 	void add_sample(XrTime production_timestamp, XrTime timestamp, const from_headset::tracking::pose & pose, const clock_offset & offset);
+
+	// Update the tracking state of one component, returns true if the sample must be
+	// given to the interpolator. Must be called with mutex held.
+	static bool update_tracked_state(tracked_state & state, XrTime production_timestamp, XrTime timestamp, bool valid, bool tracked);
 };
 } // namespace wivrn

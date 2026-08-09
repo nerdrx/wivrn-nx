@@ -156,14 +156,47 @@ void pose_list::reset()
 	std::lock_guard lock(mutex);
 	positions.reset();
 	orientations.reset();
+	position_state = {};
+	orientation_state = {};
+}
+
+bool pose_list::update_tracked_state(tracked_state & state, XrTime production_timestamp, XrTime timestamp, bool valid, bool tracked)
+{
+	// Samples without valid data are forwarded as-is, they invalidate the pose
+	if (not valid)
+		return true;
+
+	// Ignore out of order samples for the state, they must not undo a newer one
+	const bool up_to_date = production_timestamp >= state.production_timestamp;
+
+	if (tracked)
+	{
+		state.ever_tracked = true;
+		if (up_to_date)
+		{
+			state.currently_tracked = true;
+			state.production_timestamp = production_timestamp;
+		}
+		state.last_tracked_timestamp = std::max(state.last_tracked_timestamp, timestamp);
+		return true;
+	}
+
+	if (up_to_date)
+	{
+		state.currently_tracked = false;
+		state.production_timestamp = production_timestamp;
+	}
+
+	// Runtimes that never report the tracked flag (estimated poses, body joints...)
+	// keep the previous behaviour, for the others the sample is dropped so that the
+	// interpolation is frozen on the last tracked data
+	return not state.ever_tracked;
 }
 
 void pose_list::add_sample(XrTime production_timestamp, XrTime timestamp, const from_headset::tracking::pose & pose, const clock_offset & offset)
 {
 	production_timestamp = offset.from_headset(production_timestamp);
 	timestamp = offset.from_headset(timestamp);
-
-	// TODO keep the tracked flag
 
 	polynomial_interpolator<3>::sample position{production_timestamp, timestamp};
 	if (pose.flags & from_headset::pose_flags::position_valid)
@@ -205,8 +238,25 @@ void pose_list::add_sample(XrTime production_timestamp, XrTime timestamp, const 
 	}
 
 	std::lock_guard lock(mutex);
-	positions.add_sample(position);
-	orientations.add_sample(orientation);
+
+	const bool keep_position = update_tracked_state(
+	        position_state,
+	        production_timestamp,
+	        timestamp,
+	        pose.flags & from_headset::pose_flags::position_valid,
+	        pose.flags & from_headset::pose_flags::position_tracked);
+
+	const bool keep_orientation = update_tracked_state(
+	        orientation_state,
+	        production_timestamp,
+	        timestamp,
+	        pose.flags & from_headset::pose_flags::orientation_valid,
+	        pose.flags & from_headset::pose_flags::orientation_tracked);
+
+	if (keep_position)
+		positions.add_sample(position);
+	if (keep_orientation)
+		orientations.add_sample(orientation);
 
 	if (dumper)
 	{
@@ -215,6 +265,8 @@ void pose_list::add_sample(XrTime production_timestamp, XrTime timestamp, const 
 		        .production_timestamp = production_timestamp,
 		        .timestamp = timestamp,
 		        .now = os_monotonic_get_ns(),
+		        .position_tracked = bool(pose.flags & from_headset::pose_flags::position_tracked),
+		        .orientation_tracked = bool(pose.flags & from_headset::pose_flags::orientation_tracked),
 		};
 		if (position.y)
 			Eigen::Map<Eigen::Vector<float, 3>>(item.position.data()) = *position.y;
@@ -237,19 +289,26 @@ std::pair<XrTime, xrt_space_relation> pose_list::get_at(XrTime at_timestamp_ns)
 		ret.relation_flags = xrt_space_relation_flags(int(ret.relation_flags) | f);
 	};
 
-	auto position = positions.get_at(at_timestamp_ns);
-	auto orientation = orientations.get_at(at_timestamp_ns);
+	// A component that was never reported as tracked is assumed to always be, else
+	// the pose is frozen on the last tracked sample
+	const bool position_tracked = position_state.currently_tracked or not position_state.ever_tracked;
+	const bool orientation_tracked = orientation_state.currently_tracked or not orientation_state.ever_tracked;
+
+	auto position = positions.get_at(position_tracked ? at_timestamp_ns : std::min(at_timestamp_ns, position_state.last_tracked_timestamp));
+	auto orientation = orientations.get_at(orientation_tracked ? at_timestamp_ns : std::min(at_timestamp_ns, orientation_state.last_tracked_timestamp));
 
 	if (position.y)
 	{
-		flags(XRT_SPACE_RELATION_POSITION_VALID_BIT | XRT_SPACE_RELATION_POSITION_TRACKED_BIT);
+		flags(XRT_SPACE_RELATION_POSITION_VALID_BIT);
+		if (position_tracked)
+			flags(XRT_SPACE_RELATION_POSITION_TRACKED_BIT);
 		ret.pose.position = {
 		        position.y->x(),
 		        position.y->y(),
 		        position.y->z()};
 	}
 
-	if (position.dy)
+	if (position.dy and position_tracked)
 	{
 		flags(XRT_SPACE_RELATION_LINEAR_VELOCITY_VALID_BIT);
 		ret.linear_velocity = {
@@ -262,7 +321,9 @@ std::pair<XrTime, xrt_space_relation> pose_list::get_at(XrTime at_timestamp_ns)
 	{
 		if (auto norm2 = orientation.y->squaredNorm(); norm2 > 0.1)
 		{
-			flags(XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT);
+			flags(XRT_SPACE_RELATION_ORIENTATION_VALID_BIT);
+			if (orientation_tracked)
+				flags(XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT);
 
 			orientation.y->normalize();
 
@@ -273,7 +334,7 @@ std::pair<XrTime, xrt_space_relation> pose_list::get_at(XrTime at_timestamp_ns)
 			        .w = (*orientation.y)[0]};
 		}
 
-		if (orientation.dy)
+		if (orientation.dy and orientation_tracked)
 		{
 			Eigen::Quaternionf q{
 			        (*orientation.y)[0],
@@ -303,6 +364,8 @@ std::pair<XrTime, xrt_space_relation> pose_list::get_at(XrTime at_timestamp_ns)
 		        .production_timestamp = position.production_timestamp,
 		        .timestamp = at_timestamp_ns,
 		        .now = os_monotonic_get_ns(),
+		        .position_tracked = position_tracked,
+		        .orientation_tracked = orientation_tracked,
 		};
 		if (position.y)
 			Eigen::Map<Eigen::Vector<float, 3>>(item.position.data()) = *position.y;

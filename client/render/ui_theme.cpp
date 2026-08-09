@@ -108,7 +108,7 @@ static theme oled()
 	t.control = rgb(22, 24, 28);
 	t.control_hovered = rgb(30, 32, 38);
 	t.control_active = rgb(40, 43, 50);
-	t.border = rgb(26, 28, 33);
+	t.border = rgb(34, 24, 48); // faint violet cast, to sit with the NX accent
 	return t;
 }
 
@@ -157,6 +157,7 @@ std::vector<theme> presets()
 std::vector<accent_swatch> accent_swatches()
 {
 	return {
+	        {"NX", rgb(119, 0, 255), rgb(143, 43, 255), rgb(102, 0, 219)},
 	        {"Blue", rgb(30, 115, 255), rgb(64, 140, 255), rgb(18, 95, 228)},
 	        {"Violet", rgb(132, 72, 255), rgb(152, 98, 255), rgb(112, 52, 232)},
 	        {"Emerald", rgb(0, 200, 132), rgb(28, 214, 150), rgb(0, 172, 112)},

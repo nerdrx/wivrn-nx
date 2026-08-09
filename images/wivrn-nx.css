@@ -1,0 +1,66 @@
+/*
+ * WiVRn NX icon stylesheet.
+ *
+ * Applied at build time with `rsvg-convert --stylesheet=` (see build.gradle's
+ * GeneratePngsTask and cmake/*.cmake wivrn_rasterize_svg / WIVRN_CSS).
+ *
+ * Two things happen here:
+ *  - the #night-sky layer (hidden by default in wivrn.svg) is turned on, for
+ *    the "space" look shared with the local/nightly icons;
+ *  - the icon's accent hue is shifted from teal to the NX violet #7700FF.
+ *
+ * Everything is done with `!important` overrides on ids that really exist in
+ * images/wivrn.svg, because the SVG carries its colours in inline `style`
+ * attributes, which otherwise win over a stylesheet. The warm orange parts of
+ * the wyvern are left alone: orange against violet is a stronger contrast pair
+ * than orange against teal.
+ */
+
+/* Space background layer (stars + moon), hidden in the plain SVG. */
+#night-sky
+{
+	display: inline !important;
+}
+
+/* Night sky backdrop (linearGradient5 -> linearGradient4): navy -> violet-black. */
+#stop4
+{
+	stop-color: #1a0538 !important;
+}
+
+#stop5
+{
+	stop-color: #050008 !important;
+}
+
+/* Wyvern body: teal #009898 -> NX violet #7700ff, with a darker shading tone. */
+#path1
+{
+	fill: #7700ff !important;
+}
+
+#path19
+{
+	fill: #5a00c4 !important;
+}
+
+/* Headset visor glass (radialGradient14 -> linearGradient13) and its shine. */
+#stop14
+{
+	stop-color: #3a0a86 !important;
+}
+
+#stop13
+{
+	stop-color: #1b0350 !important;
+}
+
+#path9
+{
+	fill: #2d0166 !important;
+}
+
+#nx-badge
+{
+	display: inline !important
+}

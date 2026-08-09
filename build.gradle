@@ -88,7 +88,7 @@ tasks.register("generatePngs", GeneratePngsTask) {
     if (project.hasProperty("wivrn_css")) {
         css.set(layout.projectDirectory.file(project.wivrn_css))
     } else {
-        css.set(layout.projectDirectory.file("images/wivrn-local.css"))
+        css.set(layout.projectDirectory.file("images/wivrn-nx.css"))
     }
 }
 
@@ -103,7 +103,10 @@ android {
     }
 
     defaultConfig {
-        applicationId "org.meumeu.wivrn"
+        // NX fork: distinct from upstream's "org.meumeu.wivrn" so both APKs can
+        // be installed side by side. `namespace` above is deliberately left
+        // alone, it only drives the R class / manifest merging.
+        applicationId "org.meumeu.wivrn.nx"
         // for Vulkan, need at least 24
         // for AImage_getHardwareBuffer, API 26
         minSdkVersion 29
@@ -118,7 +121,7 @@ android {
         def fetchcontentBaseDir = project.hasProperty('fetchcontent_base_dir') ? ['-DFETCHCONTENT_BASE_DIR=' + fetchcontent_base_dir] : []
 
         externalNativeBuild {
-            def css = project.hasProperty('wivrn_css') ? project.wivrn_css: "images/wivrn-local.css"
+            def css = project.hasProperty('wivrn_css') ? project.wivrn_css: "images/wivrn-nx.css"
 
             cmake {
                 arguments  = ['-DANDROID_TOOLCHAIN=clang',
@@ -141,7 +144,7 @@ android {
                           '-DWIVRN_CSS=' + css,
                           '-DWIVRN_COMPRESS_GLB=' + compressGlb] +
                           fetchcontentBaseDir
-                resValue "string", "app_name", project.hasProperty('wivrn_app_name') ? project.wivrn_app_name : "WiVRn Local"
+                resValue "string", "app_name", project.hasProperty('wivrn_app_name') ? project.wivrn_app_name : "WiVRn NX"
                 abiFilters 'arm64-v8a'//, 'x86_64'
             }
 

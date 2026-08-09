@@ -1,11 +1,20 @@
-<h1 align="center"> WiVRn </h1>
+<h1 align="center"> WiVRn NX </h1>
+
+> [!NOTE]
+> **This is WiVRn NX, a fork of [WiVRn](https://github.com/WiVRn/WiVRn)** (based on master, which already includes the per-part virtual body tracker selection missing from the v26.6.2 release). Changes on the `nx-patches` branch:
+>
+> - **Controller standby fix** — upstream drops the OpenXR *tracked* flags on the server (`pose_list.cpp`, the old `TODO keep the tracked flag`), so a controller going into standby (e.g. Pico controllers, whose auto-sleep cannot be disabled) teleports to an arbitrary pose in-game. NX keeps per-component tracked state: when a device reports valid-but-untracked poses, its pose is frozen at the last tracked pose, reported valid with the TRACKED bits cleared and velocities zeroed. Devices whose runtime never sets tracked bits (e.g. estimated body joints) keep upstream behaviour exactly, so full body tracking is unaffected.
+> - **NX look** — the headset UI defaults to the true-black OLED preset with a `#7700FF` "NX" accent, and the default lobby is a space environment (emissive starfield with violet nebula haze).
+> - **Side-by-side install** — application ID `org.meumeu.wivrn.nx`, app name "WiVRn NX", and an NX-badged violet night-sky icon, so the APK installs alongside stock WiVRn without conflict.
+>
+> Client and server must be built from the same tree (the protocol version is a hash of the packet definitions). Everything below is the upstream documentation.
 
 <div align="center">
   
 [![License: GPL v3](images/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0) ![CI](https://github.com/WiVRn/WiVRn/workflows/Build/badge.svg) ![Format](https://github.com/WiVRn/WiVRn/workflows/Format/badge.svg)
   
 </div>
-<p align="center"><img src="images/wivrn.svg" width="180"></p>
+<p align="center"><img src="images/wivrn-nx.png" width="180"></p>
 <h3 align="center">Fully FOSS PCVR streamer</h3>
 
 # About

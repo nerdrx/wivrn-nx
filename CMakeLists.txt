@@ -74,7 +74,7 @@ option(WIVRN_FEATURE_RENDERDOC "Support renderdoc" OFF)
 option(WIVRN_FEATURE_SOLARXR "Enable SolarXR driver" ON)
 option(WIVRN_FEATURE_STEAMVR_LIGHTHOUSE "Enable SteamVR Lighthouse driver" ON)
 
-set(WIVRN_CSS "${CMAKE_SOURCE_DIR}/images/wivrn-local.css" CACHE STRING "Stylesheet to use to render SVGs" )
+set(WIVRN_CSS "${CMAKE_SOURCE_DIR}/images/wivrn-nx.css" CACHE STRING "Stylesheet to use to render SVGs" )
 
 option(WIVRN_SHOW_IMGUI_DEMO_WINDOW "Show the Dear ImGui demo window in the client" OFF)
 option(WIVRN_CLIENT_DEBUG_MENU "Enable the debug menu in the client" OFF)

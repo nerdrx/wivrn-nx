@@ -1222,7 +1222,12 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 	}
 
 	if (defoveator)
+	{
+		// The last submitted frame may still use the descriptor sets released by reset_pipelines
+		if (device.waitForFences(*fence, VK_TRUE, UINT64_MAX) == vk::Result::eTimeout)
+			throw std::runtime_error("Vulkan fence timeout");
 		defoveator->reset_pipelines();
+	}
 }
 
 void scenes::stream::setup_reprojection_swapchain(uint32_t swapchain_width, uint32_t swapchain_height)

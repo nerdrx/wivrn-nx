@@ -161,7 +161,10 @@ wivrn::TCP::TCP(int fd)
 {
 	this->fd = fd;
 
-	init();
+	// fd == -1 is the "empty socket" sentinel (e.g. an unattached secondary
+	// path): there is nothing to configure and setsockopt would fail EBADF.
+	if (fd != -1)
+		init();
 }
 
 wivrn::TCP::TCP(in6_addr address, int port)

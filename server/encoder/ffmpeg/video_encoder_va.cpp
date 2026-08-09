@@ -262,6 +262,14 @@ video_encoder_va::video_encoder_va(wivrn::vk_bundle & vk,
 		case video_codec::raw:
 			throw std::runtime_error("raw codec not supported");
 	}
+	if (settings.sharp_text)
+	{
+		// The FFmpeg VAAPI encoders hardcode the loop filter parameters in the slice
+		// headers and expose no adaptive quantisation control, so there is nothing to
+		// tune here. Encoder specific options from the configuration file still apply.
+		U_LOG_I("vaapi: text clarity mode has no effect, the VAAPI encoders expose no detail retention setting");
+	}
+
 	for (auto option: settings.options)
 	{
 		av_dict_set(&opts, option.first.c_str(), option.second.c_str(), 0);

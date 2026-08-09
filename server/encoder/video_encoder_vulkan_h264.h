@@ -32,6 +32,10 @@ class video_encoder_vulkan_h264 : public video_encoder_vulkan
 	StdVideoH264SequenceParameterSet sps;
 	StdVideoH264PictureParameterSet pps;
 
+	// Deblocking filter offsets put in every slice header, in units of 2. Negative values
+	// weaken the in-loop filter and keep more of the fine detail, see text clarity mode.
+	int8_t deblocking_offset_div2 = 0;
+
 	StdVideoEncodeH264SliceHeader slice_header;
 	vk::VideoEncodeH264NaluSliceInfoKHR nalu_slice_info;
 

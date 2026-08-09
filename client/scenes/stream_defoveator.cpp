@@ -45,6 +45,7 @@ struct vert_pc
 	glm::ivec4 a_rect;
 	std::array<float, 4> scale;
 	std::array<float, 4> bias;
+	std::array<float, 4> post;
 };
 
 void stream_defoveator::ensure_vertices(size_t num_vertices)
@@ -308,6 +309,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
                                   const std::array<input, 2> & inputs,
                                   std::array<float, 4> scale,
                                   std::array<float, 4> bias,
+                                  const post_processing & post,
                                   int destination)
 {
 	if (destination < 0 || destination >= (int)output_images.size())
@@ -430,6 +432,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		                             input.rect_a.extent.height),
 		        .scale = scale,
 		        .bias = bias,
+		        .post = {post.sharpness, post.vignette, post.vignette_inner, post.vignette_outer},
 		};
 
 		device.updateDescriptorSets(descriptor_writes, {});

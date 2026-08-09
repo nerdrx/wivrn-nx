@@ -161,6 +161,28 @@ video_encoder_x264::video_encoder_x264(
 	param.rc.i_vbv_max_bitrate = param.rc.i_bitrate;
 	param.rc.i_vbv_buffer_size = param.rc.i_bitrate / settings.fps * 1.1;
 
+	if (settings.sharp_text)
+	{
+		// Text clarity mode: keep fine detail rather than a smooth image.
+		// The ultrafast preset already turns the deblocking filter off, set the weakest
+		// offsets anyway so this stays correct if the preset ever changes.
+		param.i_deblocking_filter_alphac0 = -2;
+		param.i_deblocking_filter_beta = -2;
+		// Small DCT coefficients carry the thin strokes of text, do not throw them away
+		param.analyse.b_dct_decimate = 0;
+		// Adaptive quantisation with a low strength: keep the quantiser fairly uniform
+		// instead of moving bits away from the high contrast areas where text lives
+		param.rc.i_aq_mode = X264_AQ_VARIANCE;
+		param.rc.f_aq_strength = 0.6;
+		// Coloured text aliases badly when chroma is quantised harder than luma
+		param.analyse.i_chroma_qp_offset = -2;
+		// Psychovisual RDO trades a higher error for a more detailed image. It is only
+		// used from subpel refinement 6 upwards, which the ultrafast preset does not
+		// reach, so this only matters if the preset is raised.
+		param.analyse.f_psy_rd = 1.0;
+		param.analyse.f_psy_trellis = 0.15;
+	}
+
 	x264_param_apply_profile(&param, "main");
 
 	enc = x264_encoder_open(&param);

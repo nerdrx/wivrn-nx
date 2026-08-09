@@ -126,6 +126,19 @@ constexpr ImVec4 urgent_border_color = {8.f, .6f, 0.f, .8f};
 constexpr float dimming_scale = 0.4;
 constexpr float dimming_bias = 0.01;
 
+// Comfort vignette, shown when the application no longer produces a new frame for every
+// displayed frame. The cadence is measured as the ratio of newly decoded frames to
+// displayed frames, low pass filtered over vignette_average_time seconds.
+constexpr float vignette_average_time = 0.5;
+constexpr float vignette_enter_ratio = 0.45; // ratio below which the vignette appears
+constexpr float vignette_leave_ratio = 0.6;  // ratio above which it disappears again
+constexpr float vignette_fade_duration = 0.3;
+// Radii in normalized view coordinates, 0 at the center of the eye and 1 at the edge
+constexpr float vignette_inner_radius = 0.4;
+constexpr float vignette_outer_radius = 1.15;
+// How much the periphery is darkened once the vignette is fully faded in
+constexpr float vignette_strength = 0.8;
+
 constexpr float gui_max_foveation_speed = 2; // Maximum speed (@ 1m) when changing the foveation distance with the thumbstick
 constexpr float gui_min_foveation_distance = 0.5;
 constexpr float gui_max_foveation_distance = 100;

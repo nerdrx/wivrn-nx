@@ -42,6 +42,9 @@ struct encoder_settings
 	double bitrate_multiplier;                  // encoder bitrate / global bitrate
 	std::map<std::string, std::string> options; // additional encoder-specific configuration
 	int bit_depth;
+	// Bias the encoder towards keeping fine detail (text, user interfaces) rather than a
+	// smooth image, requested by the headset. Only read when the encoder is created.
+	bool sharp_text = false;
 	std::optional<std::string> device;
 };
 

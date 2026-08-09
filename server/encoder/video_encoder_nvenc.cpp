@@ -221,6 +221,13 @@ video_encoder_nvenc::video_encoder_nvenc(
 	config.rcParams.enableAQ = 1;
 	config.rcParams.enableNonRefP = 1;
 
+	if (settings.sharp_text)
+	{
+		// Text clarity mode: spatial AQ moves bits from the detailed areas towards the
+		// flat ones, keep it enabled but at the lowest strength so that text keeps its bits
+		config.rcParams.aqStrength = 1;
+	}
+
 	config.gopLength = NVENC_INFINITE_GOPLENGTH;
 	config.frameIntervalP = 1;
 
@@ -278,6 +285,11 @@ video_encoder_nvenc::video_encoder_nvenc(
 			config.encodeCodecConfig.h264Config.idrPeriod = NVENC_INFINITE_GOPLENGTH;
 			set_intra_refresh(config.encodeCodecConfig.h264Config);
 
+			if (settings.sharp_text)
+				// The in-loop deblocking filter is the main source of blur on text,
+				// nvenc only exposes it as on or off
+				config.encodeCodecConfig.h264Config.disableDeblockingFilterIDC = 1;
+
 			break;
 		case video_codec::h265:
 			if (bitDepth == NV_ENC_BIT_DEPTH_10)
@@ -295,6 +307,9 @@ video_encoder_nvenc::video_encoder_nvenc(
 			config.encodeCodecConfig.hevcConfig.idrPeriod = NVENC_INFINITE_GOPLENGTH;
 			set_intra_refresh(config.encodeCodecConfig.hevcConfig);
 
+			if (settings.sharp_text)
+				config.encodeCodecConfig.hevcConfig.disableDeblockingFilterIDC = 1;
+
 			break;
 		case video_codec::av1:
 			if (bitDepth == NV_ENC_BIT_DEPTH_10)
@@ -310,6 +325,9 @@ video_encoder_nvenc::video_encoder_nvenc(
 			config.encodeCodecConfig.av1Config.maxNumRefFramesInDPB = 0;
 			config.encodeCodecConfig.av1Config.idrPeriod = NVENC_INFINITE_GOPLENGTH;
 			set_intra_refresh(config.encodeCodecConfig.av1Config);
+
+			if (settings.sharp_text)
+				U_LOG_I("nvenc: AV1 exposes no loop filter control, text clarity mode only tunes adaptive quantisation");
 
 			break;
 		case video_codec::raw:

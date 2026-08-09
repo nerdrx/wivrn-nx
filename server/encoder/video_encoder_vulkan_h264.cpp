@@ -146,6 +146,13 @@ wivrn::video_encoder_vulkan_h264::video_encoder_vulkan_h264(
         }
 {
 	sps.level_idc = compute_level(sps, settings.fps, num_dpb_slots, settings.bitrate);
+	if (settings.sharp_text)
+	{
+		// The slice headers can only carry deblocking parameters if the picture
+		// parameter set says so
+		pps.flags.deblocking_filter_control_present_flag = 1;
+		deblocking_offset_div2 = -1;
+	}
 	if (not std::ranges::any_of(vk.device_extensions, [](std::string_view ext) { return ext == VK_KHR_VIDEO_ENCODE_H264_EXTENSION_NAME; }))
 	{
 		throw std::runtime_error("Vulkan video encode H264 extension not available");
@@ -297,8 +304,8 @@ void * wivrn::video_encoder_vulkan_h264::encode_info_next(uint32_t frame_num, si
 	        .first_mb_in_slice = 0,
 	        .slice_type = ref_slot ? STD_VIDEO_H264_SLICE_TYPE_P
 	                               : STD_VIDEO_H264_SLICE_TYPE_I,
-	        .slice_alpha_c0_offset_div2 = 0,
-	        .slice_beta_offset_div2 = 0,
+	        .slice_alpha_c0_offset_div2 = deblocking_offset_div2,
+	        .slice_beta_offset_div2 = deblocking_offset_div2,
 	        .slice_qp_delta = 0,
 	        .reserved1 = 0,
 	        .cabac_init_idc = STD_VIDEO_H264_CABAC_INIT_IDC_0,

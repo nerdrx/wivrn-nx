@@ -410,6 +410,26 @@ void settings_streaming(const settings_context & ctx)
 	        .default_int = int(default_config.bitrate_bps / mb),
 	});
 
+	list.push_back({
+	        .id = "##sharp_text",
+	        .label = _("Text clarity mode"),
+	        .description = _("Optimise the encoder for fine detail such as text and user interfaces, at the expense of a slightly noisier image. Takes effect on the next connection."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.sharp_text; },
+	        .set_bool = [&ctx, &config](bool v) { config.sharp_text = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.sharp_text,
+	});
+
+	list.push_back({
+	        .id = "##comfort_vignette",
+	        .label = _("Comfort vignette on lag"),
+	        .description = _("Darken the edges of the view when the application no longer keeps up with the display, to reduce discomfort."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.comfort_vignette; },
+	        .set_bool = [&config](bool v) { config.comfort_vignette = v; config.save(); },
+	        .default_bool = default_config.comfort_vignette,
+	});
+
 	// in-stream: steer where foveation focuses quality
 	if (ctx.in_game)
 	{
@@ -500,6 +520,31 @@ void settings_post_processing(const settings_context & ctx)
 		flag_combo("##supersampling", _("Supersampling"), _("Reduce flicker for high contrast edges. Useful when the input resolution is high compared to the headset display."), {0, XR_COMPOSITION_LAYER_SETTINGS_NORMAL_SUPER_SAMPLING_BIT_FB, XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SUPER_SAMPLING_BIT_FB}, &configuration::openxr_post_processing_settings::super_sampling);
 		flag_combo("##sharpening", _("Sharpening"), _("Improve clarity of high contrast edges and counteract blur. Useful when the input resolution is low compared to the headset display."), {0, XR_COMPOSITION_LAYER_SETTINGS_NORMAL_SHARPENING_BIT_FB, XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SHARPENING_BIT_FB}, &configuration::openxr_post_processing_settings::sharpening);
 	}
+
+	list.push_back({
+	        .id = "##cas_sharpening",
+	        .label = _("Contrast adaptive sharpening"),
+	        .description = _("Sharpen the decoded video, more where the image is flat and less where it already has contrast."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.cas_sharpening; },
+	        .set_bool = [&config](bool v) { config.cas_sharpening = v; config.save(); },
+	        .default_bool = default_config.cas_sharpening,
+	});
+
+	list.push_back({
+	        .id = "##cas_sharpness",
+	        .label = _C("setting name", "Sharpening strength"),
+	        .description = _("How much the contrast adaptive sharpening filter sharpens the image."),
+	        .ui = ui_kind::slider,
+	        .get_int = [&config] { return int(std::lround(config.cas_sharpness * 100)); },
+	        .set_int = [&config](int v) { config.cas_sharpness = v * 0.01f; config.save(); },
+	        .v_min = 0,
+	        .v_max = 100,
+	        .fmt = "%d%%",
+	        .default_int = int(std::lround(default_config.cas_sharpness * 100)),
+	        .enabled = [&config] { return config.cas_sharpening; },
+	        .disabled_tooltip = _("Enable contrast adaptive sharpening to change this setting."),
+	});
 
 	ui::page_header(_S("Post-processing"), _cS("page header subtitle", "OpenXR layer supersampling and sharpening."));
 	render_settings(ctx, "##post_processing", list);

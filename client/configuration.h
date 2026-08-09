@@ -72,6 +72,15 @@ public:
 	// Let the server adapt the bitrate to the link quality, using bitrate_bps as the maximum
 	bool bitrate_auto = true;
 	uint8_t bit_depth = 10;
+	// Ask the server to bias the encoders for fine detail instead of a smooth image
+	bool sharp_text = false;
+
+	// Darken the periphery of the streamed image when the application frame rate collapses
+	bool comfort_vignette = true;
+
+	// Contrast adaptive sharpening, applied to the decoded image by the reprojection pass
+	bool cas_sharpening = false;
+	float cas_sharpness = 0.5;
 
 	bool passthrough_enabled = false;
 	bool mic_unprocessed_audio = false;

@@ -156,6 +156,12 @@ private:
 	};
 	settings_page current_settings_page = settings_page::video;
 
+	// Application frame cadence, used by the comfort vignette: low pass filtered ratio of
+	// newly decoded frames to displayed frames, 1 when the application keeps up
+	float app_frame_ratio = 1;
+	bool comfort_vignette_active = false;
+	float comfort_vignette_fade = 0;
+
 	// Tab currently being displayed
 	stream_tab gui_status = stream_tab::hidden;
 	// Tab that we will switch to if button is pressed

@@ -295,6 +295,9 @@ struct settings_changed
 	// Whether the headset lets the server adapt the bitrate to the link quality, with
 	// bitrate_bps as the ceiling. The server also has its own switch, both must be enabled.
 	bool bitrate_auto = true;
+	// Whether the encoders should be biased towards keeping fine detail (text, UI) rather
+	// than a smooth image. Taken into account when the encoders are created.
+	bool sharp_text = false;
 	// Whether the server should mirror the gamepad to a virtual uinput device;
 	// gamepad inputs are always forwarded for the OpenXR path
 	bool mirror_gamepad = false;

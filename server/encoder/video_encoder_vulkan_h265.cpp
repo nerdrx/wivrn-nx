@@ -207,6 +207,14 @@ wivrn::video_encoder_vulkan_h265::video_encoder_vulkan_h265(
 	{
 		throw std::runtime_error("Vulkan video encode H265 extension not available");
 	}
+
+	if (settings.sharp_text)
+	{
+		// Text clarity mode: weaken the in-loop deblocking filter, it is the main source
+		// of blur on text. The picture parameter set already announces the offsets.
+		pps.pps_beta_offset_div2 = -1;
+		pps.pps_tc_offset_div2 = -1;
+	}
 }
 
 std::vector<void *> wivrn::video_encoder_vulkan_h265::setup_slot_info(size_t dpb_size)

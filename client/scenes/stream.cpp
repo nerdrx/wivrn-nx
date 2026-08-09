@@ -267,6 +267,7 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 
 		info.settings.bitrate_bps = config.bitrate_bps;
 		info.settings.bitrate_auto = config.bitrate_auto;
+		info.settings.sharp_text = config.sharp_text;
 		info.settings.mirror_gamepad = config.forward_gamepad;
 		info.settings.enabled_body_parts = config.body_part_mask;
 
@@ -977,6 +978,33 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		}
 	}
 
+	{
+		// Estimate how often the application produces a frame: a blit handle that is
+		// displayed for the first time means a new frame made it all the way through.
+		// With space warp the stream runs at a fraction of the display rate by design,
+		// so the ratio is scaled back up before it is compared to the thresholds.
+		const auto & config = application::get_config();
+		const float dt = std::min<float>(frame_state.predictedDisplayPeriod / 1e9, 0.1);
+		const bool new_frame = current_blit_handles[0] and current_blit_handles[0]->feedback.times_displayed == 1;
+
+		app_frame_ratio = std::lerp(app_frame_ratio,
+		                            new_frame ? 1.f : 0.f,
+		                            std::min<float>(1, dt / constants::stream::vignette_average_time));
+
+		const float ratio = app_frame_ratio * std::max<uint32_t>(1, config.fps_divider);
+		if (not config.comfort_vignette)
+			comfort_vignette_active = false;
+		else if (ratio < constants::stream::vignette_enter_ratio)
+			comfort_vignette_active = true;
+		else if (ratio > constants::stream::vignette_leave_ratio)
+			comfort_vignette_active = false;
+
+		comfort_vignette_fade = std::clamp<float>(
+		        comfort_vignette_fade + (comfort_vignette_active ? dt : -dt) / constants::stream::vignette_fade_duration,
+		        0,
+		        1);
+	}
+
 	// Allow the headset to time warp if we are redisplaying a frame
 	if ((not application::get_hmd_traits().discard_frame) or
 	    std::ranges::any_of(current_blit_handles, [](const auto & h) { return h and h->feedback.times_displayed < 2; }) or
@@ -1044,11 +1072,22 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		const float scale = std::lerp(1, constants::stream::dimming_scale, x);
 		const float bias = std::lerp(0, constants::stream::dimming_bias, x);
 
+		const auto & config = application::get_config();
+		const float v = comfort_vignette_fade * comfort_vignette_fade * (3 - 2 * comfort_vignette_fade); // Easing function
+
+		stream_defoveator::post_processing post{
+		        .sharpness = config.cas_sharpening ? std::clamp<float>(config.cas_sharpness, 0, 1) : 0.f,
+		        .vignette = v * constants::stream::vignette_strength,
+		        .vignette_inner = constants::stream::vignette_inner_radius,
+		        .vignette_outer = constants::stream::vignette_outer_radius,
+		};
+
 		defoveator->defoveate(command_buffer,
 		                      foveation,
 		                      images,
 		                      {scale, scale, scale, 1.},
 		                      {bias, bias, bias, 0.},
+		                      post,
 		                      image_index);
 
 		command_buffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *query_pool, 1);

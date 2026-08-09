@@ -395,6 +395,7 @@ static void send_settings_changed_packet(xr::session & session, wivrn_session * 
 	                .fps_divider = config.fps_divider,
 	                .bitrate_bps = config.bitrate_bps,
 	                .bitrate_auto = config.bitrate_auto,
+	                .sharp_text = config.sharp_text,
 	                .mirror_gamepad = config.forward_gamepad,
 	                .enabled_body_parts = config.body_part_mask,
 	        });

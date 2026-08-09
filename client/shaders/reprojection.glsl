@@ -24,6 +24,10 @@ layout(push_constant) uniform pc
 	ivec4 a_rect;
 	vec4 scale;
 	vec4 bias;
+	// x: contrast adaptive sharpening strength, 0 disables it
+	// y: comfort vignette amount, 0 disables it
+	// z, w: normalized radii where the vignette starts and reaches its full amount
+	vec4 post;
 };
 
 #ifdef VERT_SHADER
@@ -32,10 +36,12 @@ layout (location = 0) in vec2 vPosition;
 layout (location = 1) in uvec2 vUV;
 
 layout(location = 0) out vec4 outUV;
+layout(location = 1) out vec2 outPosition;
 
 void main()
 {
 	gl_Position = vec4(vPosition, 0.0, 1.0);
+	outPosition = vPosition;
 	vec2 uv = vUV;
 	outUV.xy = (uv + rgb_rect.xy) / rgb_rect.zw;
 	outUV.zw = (uv + a_rect.xy) / a_rect.zw;
@@ -50,8 +56,48 @@ layout(constant_id = 1) const bool do_srgb = false;
 layout(set = 0, binding = 0) uniform sampler2D rgb[alpha + 1];
 
 layout(location = 0) in vec4 inUV;
+layout(location = 1) in vec2 inPosition;
 
 layout(location = 0) out vec4 outColor;
+
+// AMD FidelityFX Contrast Adaptive Sharpening, single pass, no scaling, with the
+// "better diagonals" soft min/max. The kernel works on the decoded image as it comes out
+// of the sampler, which is still gamma encoded, that is the perceptual space CAS expects.
+vec3 contrast_adaptive_sharpen(vec2 uv, float sharpness)
+{
+	vec2 texel = 1.0 / vec2(rgb_rect.zw);
+
+	// a b c
+	// d e f
+	// g h i
+	vec3 a = texture(rgb[0], uv + vec2(-1, -1) * texel).rgb;
+	vec3 b = texture(rgb[0], uv + vec2(0, -1) * texel).rgb;
+	vec3 c = texture(rgb[0], uv + vec2(1, -1) * texel).rgb;
+	vec3 d = texture(rgb[0], uv + vec2(-1, 0) * texel).rgb;
+	vec3 e = texture(rgb[0], uv).rgb;
+	vec3 f = texture(rgb[0], uv + vec2(1, 0) * texel).rgb;
+	vec3 g = texture(rgb[0], uv + vec2(-1, 1) * texel).rgb;
+	vec3 h = texture(rgb[0], uv + vec2(0, 1) * texel).rgb;
+	vec3 i = texture(rgb[0], uv + vec2(1, 1) * texel).rgb;
+
+	// Soft min and max, the cross counts once and the whole 3x3 once, so both are in [0, 2]
+	vec3 mn = min(min(min(d, e), min(f, b)), h);
+	mn += min(min(min(mn, a), min(c, g)), i);
+
+	vec3 mx = max(max(max(d, e), max(f, b)), h);
+	mx += max(max(max(mx, a), max(c, g)), i);
+
+	// Smooth distance to the signal limit divided by the smooth maximum
+	vec3 amplitude = clamp(min(mn, 2.0 - mx) / max(mx, 1e-4), 0.0, 1.0);
+	amplitude = sqrt(amplitude);
+
+	// Filter shape, w is negative:
+	// 0 w 0
+	// w 1 w
+	// 0 w 0
+	vec3 w = amplitude * (-1.0 / mix(8.0, 5.0, clamp(sharpness, 0.0, 1.0)));
+	return clamp(((b + d + f + h) * w + e) / (1.0 + 4.0 * w), 0.0, 1.0);
+}
 
 float sRGB_to_linear(float x)
 {
@@ -71,6 +117,10 @@ vec4 sRGB_to_linear_rgba(vec4 x)
 
 void main()
 {
+	vec4 colour = texture(rgb[0], inUV.xy);
+	if (post.x > 0.0)
+		colour.rgb = contrast_adaptive_sharpen(inUV.xy, post.x);
+
 	if (alpha == 1)
 	{
 		// Avoid sampling between the eyes
@@ -78,10 +128,10 @@ void main()
 		float d = a.x - 0.5;
 		if (abs(d) *a_rect.z < 1)
 			a.x += (d > 0 ? 1 : -1)  / float(a_rect.z);
-		outColor = vec4(texture(rgb[0], inUV.xy).rgb, texture(rgb[1], a).r);
+		outColor = vec4(colour.rgb, texture(rgb[1], a).r);
 	}
 	else
-		outColor = texture(rgb[0], inUV.xy).rgba;
+		outColor = colour;
 
 	if (do_srgb)
 	{
@@ -101,6 +151,12 @@ void main()
 		outColor.rgb /= outColor.a;
 		outColor = outColor * scale + bias;
 		outColor.rgb *= outColor.a;
+	}
+
+	if (post.y > 0.0)
+	{
+		// Soft peripheral darkening, the center of the view is left untouched
+		outColor.rgb *= 1.0 - post.y * smoothstep(post.z, post.w, length(inPosition));
 	}
 }
 

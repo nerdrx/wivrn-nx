@@ -72,6 +72,18 @@ public:
 		vk::ImageLayout layout_a;
 	};
 
+	// Post-processing folded into the defoveation pass, all values are neutral by default
+	struct post_processing
+	{
+		// Contrast adaptive sharpening strength, 0 disables the filter
+		float sharpness = 0;
+		// Peripheral darkening, 0 disables it
+		float vignette = 0;
+		// Normalized radii, 0 at the center of the eye and 1 at the edge of the image
+		float vignette_inner = 0;
+		float vignette_outer = 1;
+	};
+
 	stream_defoveator(
 	        vk::raii::Device & device,
 	        vk::raii::PhysicalDevice & physical_device,
@@ -89,6 +101,7 @@ public:
 	        const std::array<input, 2> & inputs,
 	        std::array<float, 4> scale,
 	        std::array<float, 4> bias,
+	        const post_processing & post,
 	        int destination);
 
 	static XrExtent2Di defoveated_size(const wivrn::to_headset::foveation_parameter &);

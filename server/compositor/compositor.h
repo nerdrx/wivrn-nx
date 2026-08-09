@@ -29,6 +29,7 @@
 #include "layer_squasher.h"
 #include "pacer.h"
 #include "utils/wivrn_vk_bundle.h"
+#include "wivrn_config.h"
 
 #include "main/comp_compositor.h"
 
@@ -42,6 +43,7 @@ namespace wivrn
 
 class wivrn_session;
 class video_encoder;
+class pipewire_mirror;
 
 class compositor : public comp_base
 {
@@ -98,6 +100,11 @@ private:
 	wivrn::foveation foveation;
 
 	std::array<std::unique_ptr<video_encoder>, 3> encoders;
+
+#if WIVRN_USE_PIPEWIRE
+	// Desktop mirror, null unless enabled in the configuration
+	std::unique_ptr<pipewire_mirror> mirror;
+#endif
 
 #ifdef __cpp_lib_atomic_lock_free_type_aliases
 	using status_type = std::atomic_signed_lock_free;

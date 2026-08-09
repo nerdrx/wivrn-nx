@@ -31,11 +31,16 @@
 #include "util/u_time.h"
 #include "vk/vk_helpers.h"
 
+#include "driver/configuration.h"
 #include "driver/wivrn_session.h"
 #include "encoder/video_encoder.h"
 #include "inplace_vector.hpp"
 #include "utils/method.h"
 #include "utils/wivrn_trace.h"
+
+#if WIVRN_USE_PIPEWIRE
+#include "pipewire_mirror.h"
+#endif
 
 #include "xrt/xrt_config_build.h" // IWYU pragma: keep
 #ifdef XRT_FEATURE_RENDERDOC
@@ -460,6 +465,24 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	});
 	cmd.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *query_pool, 2);
 
+	bool mirrored = false;
+#if WIVRN_USE_PIPEWIRE
+	// Desktop mirror: resample the left eye, as it is just before foveation, into
+	// a readback buffer. src[0] is still in eShaderReadOnlyOptimal and stays valid
+	// until this submission completes, which is waited on below.
+	if (mirror)
+		mirrored = mirror->capture(
+		        cmd,
+		        {
+		                .view = src[0],
+		                .x = src_rect[0].offset.w,
+		                .y = src_rect[0].offset.h,
+		                .width = src_rect[0].extent.w,
+		                .height = src_rect[0].extent.h,
+		                .flip_y = flip_y,
+		        });
+#endif
+
 	cmd.end();
 
 	const vk::SemaphoreSubmitInfo sem_info{
@@ -480,6 +503,14 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 		        .pSignalSemaphoreInfos = &sem_info,
 		});
 	}
+
+#if WIVRN_USE_PIPEWIRE
+	// Hand the capture to the mirror reader thread, it waits on the semaphore
+	if (mirrored)
+		mirror->submitted(*sem, sem_info.value);
+#else
+	(void)mirrored;
+#endif
 
 	pacer.mark_timing_point(COMP_TARGET_TIMING_POINT_SUBMIT_END, frame.rendering.id, os_monotonic_get_ns());
 	auto info = pacer.present_to_info(frame.rendering.desired_present_time_ns);
@@ -751,6 +782,20 @@ compositor::compositor(wivrn_session & session) :
 	for (auto [i, settings]: std::ranges::enumerate_view(settings))
 		encoders[i] = video_encoder::create(vk, settings, i);
 	send_video_stream_description();
+
+#if WIVRN_USE_PIPEWIRE
+	// Desktop mirror, the configuration is only read here: toggling it requires
+	// reconnecting the headset.
+	if (auto conf = configuration().mirror; conf.enabled)
+	{
+		const auto extent = render_extent(session.get_info());
+		vk::Extent2D mirror_size{
+		        std::max<uint32_t>(2, uint32_t(extent.width * conf.scale) & ~1u),
+		        std::max<uint32_t>(2, uint32_t(extent.height * conf.scale) & ~1u),
+		};
+		mirror = pipewire_mirror::create(vk, mirror_size, conf.fps);
+	}
+#endif
 
 	u_var_add_root(this, "Compositor", false);
 	u_var_add_f32_timing(this, &squasher_times.var, "layers processing");

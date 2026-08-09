@@ -137,6 +137,75 @@ Default value: unset
 
 Json object of additional options to pass directly to ffmpeg `avcodec_open2`'s `option` parameter.
 
+## `mirror`
+Default value: `false`
+
+Only available when built with `WIVRN_USE_PIPEWIRE`.
+
+Publishes a desktop mirror of the headset view as a PipeWire video source node, named
+`wivrn-headset-view` and described as *WiVRn Headset View*, with media class `Video/Source`, so
+that it can be displayed or recorded by any PipeWire consumer.
+
+The frames are taken in the compositor, from the left eye, after the layers have been composited
+but before foveation and before encoding: what is published is the clean undistorted view, not
+the foveated image that is sent to the headset.
+
+**Disabled by default, because it is not free**: every captured frame costs a compute resample of
+the eye view, a copy back to system memory and a copy into a PipeWire buffer. Nothing at all is
+recorded when no consumer is connected to the node, so the cost is only paid while something is
+actually watching. Frames are captured at most at the configured rate, and a frame is skipped
+rather than waited on if the previous capture has not been read yet.
+
+The node exists for the duration of a headset session: it appears when a headset connects and
+disappears when it disconnects. The configuration is read when the session starts, so changing it
+requires reconnecting the headset.
+
+Can be a boolean, or an object:
+
+### `enabled`
+Default value: `false`
+
+Whether the mirror node is published.
+
+### `fps`
+Default value: `30`
+
+Rate at which frames are captured, in frames per second. Capped to the compositor frame rate: the
+mirror never captures more than once per composited frame.
+
+### `scale`
+Default value: `0.5`
+
+Resolution of the published video, as a fraction of the per-eye render resolution. Halving it
+divides the readback and copy cost by four, which is why it is the default.
+
+### Example
+```json
+{
+	"mirror": true
+}
+```
+Publish the mirror at half the per-eye resolution, 30 fps.
+
+```json
+{
+	"mirror": {
+		"enabled": true,
+		"fps": 60,
+		"scale": 1.0
+	}
+}
+```
+Publish the mirror at the full per-eye resolution, 60 fps.
+
+### Viewing it
+```sh
+gst-launch-1.0 pipewiresrc target-object=wivrn-headset-view ! videoconvert ! autovideosink
+```
+In OBS, add a *PipeWire Camera* source (OBS 30 or later) and pick *WiVRn Headset View*. Any other
+PipeWire client works too, `pw-cat`, `qpwgraph` and Wireplumber's `wpctl status` list the node
+under *Video/Source*.
+
 ## `application`
 Default value: unset
 

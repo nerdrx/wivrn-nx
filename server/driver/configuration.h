@@ -52,9 +52,20 @@ struct configuration
 		std::optional<std::string> device;
 	};
 
+	// Desktop mirror of the headset view, published as a PipeWire video source.
+	// Disabled by default: it costs a resample and a readback per captured frame.
+	struct mirror_config
+	{
+		bool enabled = false;
+		int fps = 30;
+		// Fraction of the per-eye render resolution used for the published video
+		float scale = 0.5;
+	};
+
 	std::array<encoder, 3> encoders; // left, right, alpha
 	// Automatic bitrate control, the ceiling is always the bitrate requested by the client
 	bitrate_controller::config bitrate_auto;
+	mirror_config mirror;
 	std::optional<uint8_t> bit_depth;
 	std::optional<std::array<float, 3>> grip_surface;
 	std::vector<std::string> application;

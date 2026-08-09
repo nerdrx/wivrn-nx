@@ -1,0 +1,78 @@
+/*
+ * WiVRn VR streaming
+ * Copyright (C) 2026  Patrick Nicolas <patricknicolas@laposte.net>
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+// Desktop mirror: resample one eye of the composited view into an RGBA image
+// that is read back and published on PipeWire. The source is sampled exactly
+// like foveation.comp does, so the mirror matches what is encoded for the
+// headset, minus the foveation.
+
+#version 460
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D source;
+layout(set = 0, binding = 1, rgba8) uniform writeonly restrict image2D dest;
+
+layout(push_constant) uniform Params
+{
+	// Region of source to copy, in texels, extents may be negative to mirror
+	ivec2 src_offset;
+	ivec2 src_extent;
+	ivec2 dst_size;
+}
+params;
+
+float from_linear_to_srgb_channel(float value)
+{
+	if (value < 0.0031308) {
+		return 12.92 * value;
+	} else {
+		return 1.055 * pow(value, 1.0 / 2.4) - 0.055;
+	}
+}
+
+vec3 from_linear_to_srgb(vec3 linear_rgb)
+{
+	return vec3(
+		from_linear_to_srgb_channel(linear_rgb.r),
+		from_linear_to_srgb_channel(linear_rgb.g),
+		from_linear_to_srgb_channel(linear_rgb.b)
+	);
+}
+
+void main()
+{
+	ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+	if (coord.x >= params.dst_size.x || coord.y >= params.dst_size.y)
+		return;
+
+	vec2 tex_size = vec2(textureSize(source, 0));
+	// Size, in source texels, of one destination pixel
+	vec2 step = vec2(params.src_extent) / vec2(params.dst_size);
+	vec2 base = vec2(params.src_offset) + vec2(coord) * step;
+
+	// 2x2 supersample of the destination pixel footprint, the mirror is
+	// usually a downscale of the eye view
+	vec3 colour =
+		texture(source, (base + step * vec2(0.25, 0.25)) / tex_size).rgb +
+		texture(source, (base + step * vec2(0.75, 0.25)) / tex_size).rgb +
+		texture(source, (base + step * vec2(0.25, 0.75)) / tex_size).rgb +
+		texture(source, (base + step * vec2(0.75, 0.75)) / tex_size).rgb;
+
+	imageStore(dest, coord, vec4(from_linear_to_srgb(colour * 0.25), 1.0));
+}

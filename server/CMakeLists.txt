@@ -212,6 +212,7 @@ if (WIVRN_BUILD_SERVER)
 		target_sources(
 			wivrn-server
 			PRIVATE audio/audio_pipewire.cpp
+				compositor/pipewire_mirror.cpp
 			)
 		target_link_libraries(wivrn-server PRIVATE PkgConfig::libpipewire)
 	endif()
@@ -271,6 +272,7 @@ if (WIVRN_BUILD_SERVER)
 		SHADERS
 			"${_monado_src}/src/xrt/auxiliary/render/shaders/layer.comp"
 			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/foveation.comp"
+			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/mirror.comp"
 		)
 
 	target_compile_definitions(wivrn-server PRIVATE JSON_DIAGNOSTICS=1)

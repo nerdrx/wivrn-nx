@@ -194,6 +194,27 @@ configuration::configuration()
 				throw std::runtime_error("invalid bitrate-auto value, expected a boolean or an object");
 		}
 
+		// "mirror": true/false, or an object {"enabled": bool, "fps": int, "scale": float}
+		if (auto it = json.find("mirror"); it != json.end())
+		{
+			if (it->is_boolean())
+				mirror.enabled = *it;
+			else if (it->is_object())
+			{
+				if (auto enabled = it->find("enabled"); enabled != it->end())
+					mirror.enabled = *enabled;
+				if (auto fps = it->find("fps"); fps != it->end())
+					mirror.fps = *fps;
+				if (auto scale = it->find("scale"); scale != it->end())
+					mirror.scale = *scale;
+			}
+			else
+				throw std::runtime_error("invalid mirror value, expected a boolean or an object");
+
+			mirror.fps = std::clamp(mirror.fps, 1, 240);
+			mirror.scale = std::clamp(mirror.scale, 0.1f, 1.0f);
+		}
+
 		if (auto it = json.find("application"); it != json.end())
 		{
 			if (it->is_string())

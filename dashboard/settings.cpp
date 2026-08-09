@@ -117,6 +117,7 @@ void Settings::emitAllChanged()
 	codecChanged();
 	tenbitChanged();
 	bitrateAutoChanged();
+	mirrorChanged();
 	tcpOnlyChanged();
 	applicationChanged();
 	openvrChanged();
@@ -414,6 +415,35 @@ void Settings::set_bitrateAuto(const bool & value)
 		bitrateAutoChanged();
 }
 
+bool Settings::mirror() const
+{
+	// "mirror" can be a boolean or an object {"enabled": bool, "fps": int, "scale": float}
+	auto it = m_jsonSettings.find("mirror");
+	if (it != m_jsonSettings.end())
+	{
+		if (it->is_boolean())
+			return *it;
+		if (it->is_object())
+		{
+			if (auto enabled = it->find("enabled"); enabled != it->end() and enabled->is_boolean())
+				return *enabled;
+		}
+	}
+	return false;
+}
+
+void Settings::set_mirror(const bool & value)
+{
+	auto old = mirror();
+	// Keep the object form (and its fps/scale) if the user configured one by hand
+	if (auto it = m_jsonSettings.find("mirror"); it != m_jsonSettings.end() and it->is_object())
+		(*it)["enabled"] = value;
+	else
+		m_jsonSettings["mirror"] = value;
+	if (old != value)
+		mirrorChanged();
+}
+
 bool Settings::debugGui() const
 {
 	// Advanced options (debug window, steamvr_lh)
@@ -584,6 +614,7 @@ void Settings::restore_defaults()
 	m_jsonSettings.erase("encoder");
 	m_jsonSettings.erase("application");
 	m_jsonSettings.erase("hid-forwarding");
+	m_jsonSettings.erase("mirror");
 	m_jsonSettings.erase("debug-gui");
 	m_jsonSettings.erase("use-steamvr-lh");
 	m_jsonSettings.erase("lh-stick-deadzone");

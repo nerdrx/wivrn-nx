@@ -27,6 +27,7 @@ add_executable(wivrn-dashboard
     apk_installer.cpp
     firewall.cpp
     vulkan_info.cpp
+    mirror_view.cpp
 )
 
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../dbus/io.github.wivrn.Server.xml PROPERTIES INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/wivrn_qdbus_types.h")
@@ -42,6 +43,9 @@ set_source_files_properties(qml/DashboardSettings.qml PROPERTIES
 
 qt_add_qml_module(wivrn-dashboard
     URI io.github.wivrn.wivrn
+    # MirrorView exposes a QVideoSink property and MirrorPage uses VideoOutput
+    DEPENDENCIES
+        "QtMultimedia auto"
     QML_FILES
         qml/Main.qml
         qml/About.qml
@@ -50,6 +54,7 @@ qt_add_qml_module(wivrn-dashboard
         qml/SettingsPage.qml
         qml/HeadsetsPage.qml
         qml/HeadsetStatsPage.qml
+        qml/MirrorPage.qml
         qml/WizardPage.qml
         qml/WizardStep.qml
         qml/DeviceCard.qml
@@ -75,6 +80,7 @@ target_link_libraries(wivrn-dashboard
     Qt6::Qml
     Qt6::Gui
     Qt6::QuickControls2
+    Qt6::Multimedia
     Qt6::Widgets
     KF6::CoreAddons
     KF6::I18n
@@ -88,6 +94,10 @@ target_link_libraries(wivrn-dashboard
     wivrn-common-server
     wivrn-external
 )
+
+if (WIVRN_USE_PIPEWIRE)
+    target_link_libraries(wivrn-dashboard PRIVATE PkgConfig::libpipewire)
+endif()
 
 install(TARGETS wivrn-dashboard ${KDE_INSTALL_TARGETS_DEFAULT_ARGS})
 

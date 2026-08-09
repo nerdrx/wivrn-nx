@@ -114,6 +114,16 @@ Kirigami.ScrollablePage {
                 }
             }
 
+            RowLayout {
+                Controls.CheckBox {
+                    id: desktop_mirror
+                    text: i18n("Desktop mirror")
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("Publish the headset view as a PipeWire video source, so that it can be shown on the Mirror page or captured by any other application. It costs a resample and a readback per captured frame. Applies from the next connection.")
+                }
+            }
+
             Kirigami.Separator {
                 Kirigami.FormData.isSection: true
             }
@@ -328,6 +338,7 @@ Kirigami.ScrollablePage {
         DashboardSettings.show_system_checks = show_system_checks.checked;
 
         Settings.bitrateAuto = bitrate_auto.checked;
+        Settings.mirror = desktop_mirror.checked;
         Settings.debugGui = debug_gui.checked;
         Settings.steamVrLh = steamvr_lh.checked;
         Settings.lhStickDeadzone = lh_stick_deadzone.value;
@@ -340,6 +351,7 @@ Kirigami.ScrollablePage {
     function load() {
         select_game.load();
         bitrate_auto.checked = Settings.bitrateAuto;
+        desktop_mirror.checked = Settings.mirror;
         debug_gui.checked = Settings.debugGui;
         steamvr_lh.checked = Settings.steamVrLh;
         lh_stick_deadzone.value = Settings.lhStickDeadzone;

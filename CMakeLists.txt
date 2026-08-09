@@ -160,7 +160,12 @@ if (WIVRN_BUILD_DASHBOARD OR WIVRN_BUILD_SERVER)
 endif()
 
 if (WIVRN_BUILD_DASHBOARD)
-    find_package(Qt6 REQUIRED COMPONENTS Core Quick Test Gui QuickControls2 Widgets Network)
+    find_package(Qt6 REQUIRED COMPONENTS Core Quick Test Gui QuickControls2 Widgets Network Multimedia)
+
+    # Desktop mirror page: consumes the server's PipeWire node
+    if (WIVRN_USE_PIPEWIRE AND NOT TARGET PkgConfig::libpipewire)
+        pkg_check_modules(libpipewire REQUIRED IMPORTED_TARGET libpipewire-0.3)
+    endif()
 
     if(Qt6_VERSION VERSION_GREATER_EQUAL 6.10.0)
         # QtCoro needs this for Qt 6.10 and (currently) doesn't do this by itself

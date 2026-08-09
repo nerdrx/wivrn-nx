@@ -455,6 +455,12 @@ Kirigami.ApplicationWindow {
                 enabled: root.server_started
             },
             Kirigami.Action {
+                text: i18nc("live view of what the headset displays", "Mirror")
+                icon.name: "video-display-symbolic"
+                onTriggered: root.pageStack.push(Qt.createComponent("MirrorPage.qml").createObject())
+                enabled: root.server_started
+            },
+            Kirigami.Action {
                 text: i18n("Settings")
                 icon.name: "settings-configure-symbolic"
                 onTriggered: root.pageStack.push(Qt.createComponent("SettingsPage.qml").createObject())

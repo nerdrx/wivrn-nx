@@ -89,13 +89,18 @@ headset WiVRn supports.
   on frame boundaries), so audio never fragments. Off restores upstream behaviour exactly, control
   socket and all — the packet says which path it came from, so either end may be flipped mid-session.
   No server configuration.
-- **Motion smoothing** *(toggle, default off)* — when the game runs far below the display rate
-  (a CPU-bound VRChat instance at 10 fps), the server computes a coarse motion field between
-  real application frames (a compositor compute pass — works with **every** encoder, unlike
-  encoder-MV approaches) and the headset warps the last frame along t-scaled vectors on the
-  refreshes the game produced nothing for. Rotation was already smooth; this smooths position,
-  animation and hands too. Frames are never dropped or held to a fixed cadence in the first
-  place — NX free-runs the app and takes every real frame it can produce.
+- **Motion smoothing** *(Off / Headset / Server, default off)* — when the game runs far below
+  the display rate (a CPU-bound VRChat instance at 10 fps), the server computes a coarse motion
+  field between real application frames (a compositor compute pass — works with **every**
+  encoder, unlike encoder-MV approaches) and the last frame is warped along t-scaled vectors on
+  the refreshes the game produced nothing for. Rotation was already smooth; this smooths
+  position, animation and hands too. Frames are never dropped or held to a fixed cadence in the
+  first place — NX free-runs the app and takes every real frame it can produce.
+  **Headset** sends the field beside the video and warps on the headset: the duplicate frames on
+  the wire stay nearly free, so the whole bitrate goes on the real ones. **Server**
+  *(experimental)* warps on the PC and encodes the result, which asks nothing at all of the
+  headset but spends bitrate on the synthesized frames. Same field, same warp, different end —
+  pick whichever of the two your link and your headset can better afford.
 - **Transport page** — a page in the in-headset overlay, next to *Statistics*, showing the whole
   stack above live: which path is carrying video and the round trip time of each, Wi-Fi signal
   with a trend arrow and whether the QoS marks are on, the bitrate the server is actually

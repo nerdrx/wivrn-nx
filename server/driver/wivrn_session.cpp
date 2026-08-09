@@ -1030,6 +1030,7 @@ void wivrn_session::send_transport_status()
 	        // socket, so the switch being on is not the same as pacing happening.
 	        .pacing_active = compositor.pacing_active() and connection->has_stream() and not on_secondary,
 	        .fec_active = compositor.fec_active(),
+	        .server_warping = compositor.motion_server_active(),
 	        .software_encoders = compositor.software_encoders(),
 	});
 }

@@ -524,14 +524,34 @@ void settings_streaming(const settings_context & ctx)
 	        .default_bool = default_config.comfort_vignette,
 	});
 
+	// Off / Headset / Server. motion_smoothing stays the switch it always was, and
+	// motion_smoothing_server only says which end does the warping when it is on —
+	// the same shape as bitrate_auto and bitrate_bbr above.
+	const auto motion_smoothing_index = [](const configuration & c) {
+		if (not c.motion_smoothing)
+			return 0;
+		return c.motion_smoothing_server ? 2 : 1;
+	};
+
 	list.push_back({
 	        .id = "##motion_smoothing",
 	        .label = _("Motion smoothing"),
-	        .description = _("When the application runs below the display rate, shift the last image along the motion the server measured between application frames instead of repeating it unchanged. Smooths out judder at the cost of some smearing around moving edges. Only active while the application is actually behind."),
-	        .ui = ui_kind::toggle,
-	        .get_bool = [&config] { return config.motion_smoothing; },
-	        .set_bool = [&ctx, &config](bool v) { config.motion_smoothing = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
-	        .default_bool = default_config.motion_smoothing,
+	        .description = _("When the application runs below the display rate, shift the last image along the motion the server measured between application frames instead of repeating it unchanged. Smooths out judder at the cost of some smearing around moving edges. Only active while the application is actually behind.\n\nHeadset does the shifting here, and costs no extra bandwidth. Server (experimental): the PC warps frames before encoding. Spends bitrate on synthesized frames; slightly less exact timing than headset mode."),
+	        .ui = ui_kind::combo,
+	        .get_int = [&config, motion_smoothing_index] { return motion_smoothing_index(config); },
+	        .set_int = [&ctx, &config](int v) {
+		        config.motion_smoothing = v != 0;
+		        if (v != 0)
+			        config.motion_smoothing_server = v == 2;
+		        config.save();
+		        if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .options = [] { return std::vector<std::string>{
+		                        _C("Motion smoothing", "Off"),
+		                        _C("Motion smoothing", "Headset"),
+		                        _C("Motion smoothing", "Server (experimental)"),
+		                }; },
+	        .title = _("Motion smoothing"),
+	        .default_int = motion_smoothing_index(default_config),
 	});
 
 	// in-stream: steer where foveation focuses quality

@@ -275,6 +275,7 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 		info.settings.sharp_text = config.sharp_text;
 		info.settings.encoder_failover = config.encoder_failover;
 		info.settings.motion_smoothing = config.motion_smoothing;
+		info.settings.motion_smoothing_mode = config.motion_mode();
 		info.settings.quad_layers = config.quad_layers;
 		info.settings.low_latency_audio = config.low_latency_audio;
 		info.settings.mirror_gamepad = config.forward_gamepad;
@@ -1072,9 +1073,10 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	// Motion smoothing only does anything on the refreshes that redisplay a frame, so
 	// on a headset that normally discards those the pass has to be re-enabled for
 	// them. That submission is the cost the toggle buys; without a field for the
-	// frame on screen nothing changes.
+	// frame on screen nothing changes. Server mode never gets here: the PC sends a
+	// genuinely new frame for every refresh, so there is nothing to redisplay.
 	bool motion_available = false;
-	if (application::get_config().motion_smoothing and current_blit_handles[0])
+	if (application::get_config().motion_mode() == wivrn::motion_mode::headset and current_blit_handles[0])
 	{
 		auto lock = motion_field.lock();
 		motion_available = lock->complete() and
@@ -1174,7 +1176,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			auto motion_lock = motion_field.lock();
 			stream_defoveator::motion_warp motion;
 
-			if (config.motion_smoothing and motion_lock->complete() and current_blit_handles[0])
+			if (config.motion_mode() == wivrn::motion_mode::headset and motion_lock->complete() and current_blit_handles[0])
 			{
 				const auto & field = motion_lock->field();
 				const auto & handle = *current_blit_handles[0];
@@ -1182,10 +1184,12 @@ void scenes::stream::render(const XrFrameState & frame_state)
 				// chunk, a dropped frame or an IDR. Nothing to warp along then.
 				if (field.frame_idx == handle.feedback.frame_index and field.span_ns > 0)
 				{
-					double steps = double(frame_state.predictedDisplayTime - handle.view_info.display_time) /
-					               double(field.span_ns);
 					motion.field = &field;
-					motion.step = std::clamp<double>(steps, 0, constants::stream::motion_max_steps);
+					motion.step = motion_warp_step(
+					        frame_state.predictedDisplayTime,
+					        handle.view_info.display_time,
+					        field.span_ns,
+					        constants::stream::motion_max_steps);
 				}
 			}
 

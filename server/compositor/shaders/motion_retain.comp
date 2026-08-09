@@ -1,0 +1,89 @@
+/*
+ * WiVRn VR streaming
+ * Copyright (C) 2026  Patrick Nicolas <patricknicolas@laposte.net>
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+// Server side motion smoothing, first half: keep the composited eye views of the
+// application frame that was just produced, so that the duplicate commits that
+// follow have something to warp.
+//
+// The source region and its orientation are given exactly the way foveation.comp and
+// motion_downsample.comp get them, so what lands here is the defoveated eye image in
+// the orientation the headset displays — which is also the space the motion vectors
+// are expressed in. The warp pass therefore needs no mapping of its own, and the
+// foveation pass reads the result with an identity source rectangle.
+//
+// The destination is an R8G8B8A8_SRGB image written through an UNORM view, the same
+// arrangement the layer squasher's render target uses: the sRGB encoding is done here
+// and undone by the sampler on the way out, so a reader sees the same linear values
+// it would have sampled from the composited image itself.
+
+#version 460
+#extension GL_GOOGLE_include_directive: require
+
+#include "motion_constants.glsl.inc"
+
+layout(local_size_x = MOTION_WARP_GROUP, local_size_y = MOTION_WARP_GROUP, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D source[2];
+layout(set = 0, binding = 1) uniform writeonly restrict image2DArray dest;
+
+layout(push_constant) uniform Params
+{
+	// Per view: source coordinates, in texels, of the corner of destination texel
+	// (0, 0) in xy, and the step of one destination texel in zw. The step is
+	// negative on an axis that is mirrored.
+	vec4 mapping[2];
+	// Destination dimensions, one eye
+	ivec2 size;
+}
+params;
+
+float from_linear_to_srgb_channel(float value)
+{
+	if (value < 0.0031308)
+		return 12.92 * value;
+	return 1.055 * pow(value, 1.0 / 2.4) - 0.055;
+}
+
+vec3 from_linear_to_srgb(vec3 linear_rgb)
+{
+	return vec3(
+		from_linear_to_srgb_channel(linear_rgb.r),
+		from_linear_to_srgb_channel(linear_rgb.g),
+		from_linear_to_srgb_channel(linear_rgb.b));
+}
+
+void main()
+{
+	ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+	int view = int(gl_GlobalInvocationID.z);
+
+	if (coord.x >= params.size.x || coord.y >= params.size.y)
+		return;
+
+	vec2 texture_size = vec2(textureSize(source[view], 0));
+	vec2 p = params.mapping[view].xy + (vec2(coord) + 0.5) * params.mapping[view].zw;
+
+	// One bilinear tap: the composited view is the same size as this image in every
+	// case that matters (the fast path hands over the application's eye image at the
+	// resolution the headset asked for), so there is nothing to average over.
+	vec4 colour = texture(source[view], p / texture_size);
+
+	// Alpha travels with the colour: it is the same composited pixel, and the
+	// passthrough mask has to move with whatever it is masking.
+	imageStore(dest, ivec3(coord, view), vec4(from_linear_to_srgb(colour.rgb), colour.a));
+}

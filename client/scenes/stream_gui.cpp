@@ -780,15 +780,21 @@ void scenes::stream::gui_transport()
 			ImGui::TextUnformatted(_S("Motion smoothing"));
 			ImGui::Dummy({0, 2});
 
+			const auto mode = config.motion_mode();
 			const XrTime last = motion_field_last;
 			const XrDuration age = last ? now - last : 0;
-			// Fields only arrive when the application falls behind the display, so
-			// idle is the normal state and not a fault.
-			const bool active = config.motion_smoothing and last and age < 1'000'000'000;
+			// Motion fields only arrive in headset mode, and only when the application
+			// falls behind the display, so idle is the normal state and not a fault. In
+			// server mode there are no fields at all and the server says whether it is
+			// warping; without a status packet nothing here can know.
+			const bool active = mode == wivrn::motion_mode::server
+			                            ? (status and status->server_warping)
+			                            : (mode == wivrn::motion_mode::headset and last and age < 1'000'000'000);
 
-			wivrn::ui::chip(not config.motion_smoothing ? _("off")
-			                : active                    ? _("warping")
-			                                            : _("idle"),
+			wivrn::ui::chip(mode == wivrn::motion_mode::off      ? _("off")
+			                : mode == wivrn::motion_mode::server ? (active ? _("server · warping") : _("server · idle"))
+			                : active                             ? _("warping")
+			                                                     : _("idle"),
 			                active ? wivrn::ui::chip_style::accent : wivrn::ui::chip_style::muted,
 			                true);
 			ImGui::Dummy({0, 4});
@@ -848,6 +854,7 @@ static void send_settings_changed_packet(xr::session & session, wivrn_session * 
 	                .sharp_text = config.sharp_text,
 	                .encoder_failover = config.encoder_failover,
 	                .motion_smoothing = config.motion_smoothing,
+	                .motion_smoothing_mode = config.motion_mode(),
 	                .quad_layers = config.quad_layers,
 	                .low_latency_audio = config.low_latency_audio,
 	                .mirror_gamepad = config.forward_gamepad,

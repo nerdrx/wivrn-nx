@@ -27,6 +27,7 @@
 
 #include <array>
 #include <cstdint>
+#include <utility>
 #include <vector>
 #include <vulkan/vulkan_raii.hpp>
 
@@ -34,6 +35,28 @@ namespace wivrn
 {
 
 struct vk_bundle;
+
+// Maps one axis of a source rectangle onto a destination of `destination` texels the
+// way foveation.cpp maps it onto the encoded image, mirroring included. Returns the
+// source coordinate, in texels, of the corner of destination texel 0, and the step of
+// one destination texel; the step is negative on a mirrored axis.
+//
+// Shared by the estimator's pyramid and the server-side warper's retained image so
+// that the vectors and the picture they move land in exactly the same space.
+inline std::pair<float, float> motion_axis_mapping(int32_t offset, int32_t extent, bool flip, uint32_t destination)
+{
+	if (extent < 0)
+	{
+		offset += extent;
+		extent = -extent;
+		flip = not flip;
+	}
+
+	float step = float(extent) / float(destination);
+	if (flip)
+		return {float(offset + extent), -step};
+	return {float(offset), step};
+}
 
 // Estimates a coarse motion field between two consecutive application frames, in
 // the compositor, from the composited eye views.
@@ -63,14 +86,28 @@ public:
 
 	// Records the pyramid build for the frame described by src, and, if a previous
 	// frame is available, the block matching against it. src must be readable by a
-	// compute shader for the whole submission. Returns whether a field will be
-	// available from read_back() once the submission completes.
+	// compute shader for the whole submission. Returns whether a field was computed.
+	//
+	// copy_to_host adds the copy into host visible memory that read_back() reads, and
+	// is what the headset-side mode needs. The server-side mode consumes vectors()
+	// on the GPU instead and asks for no copy; the result is the same either way.
 	bool estimate(
 	        vk::raii::Device &,
 	        vk::raii::CommandBuffer & cmd,
 	        std::array<vk::ImageView, view_count> src,
 	        std::array<xrt_rect, view_count> src_rect,
-	        bool flip_y);
+	        bool flip_y,
+	        bool copy_to_host);
+
+	// The device local buffer the matching pass writes: one vec2 per cell, left eye
+	// then right eye, index ((view * grid_height + j) * grid_width + i), each a
+	// displacement in normalized coordinates of the defoveated eye image. Valid for a
+	// compute read from any submission after the one that estimate() was recorded
+	// into; the barrier that makes it so is recorded by estimate() itself.
+	vk::Buffer vectors() const
+	{
+		return result;
+	}
 
 	// Quantizes the result of the last estimate() that returned true. Only valid
 	// once the submission it was recorded into has completed.

@@ -117,10 +117,21 @@ public:
 	// Darken the periphery of the streamed image when the application frame rate collapses
 	bool comfort_vignette = true;
 
-	// Ask the server for a motion field between application frames, and warp the last
-	// decoded frame along it on the refreshes the application did not produce anything
-	// for. Off by default: the artefacts it trades judder for depend on the content.
+	// Synthesize the frames the application does not produce, by warping the last one
+	// along the motion the server measured between application frames. Off by default:
+	// the artefacts it trades judder for depend on the content.
 	bool motion_smoothing = false;
+	// Which end does the warping when motion_smoothing is on: here (false, the original
+	// and the default) or on the PC (true, experimental). Only meaningful with
+	// motion_smoothing on, exactly like bitrate_bbr under bitrate_auto.
+	bool motion_smoothing_server = false;
+	// What goes on the wire for the two above
+	wivrn::motion_mode motion_mode() const
+	{
+		if (not motion_smoothing)
+			return wivrn::motion_mode::off;
+		return motion_smoothing_server ? wivrn::motion_mode::server : wivrn::motion_mode::headset;
+	}
 
 	// Ask the server to stream one overlay panel (wlx-overlay-s, WayVR and the like)
 	// as a layer of its own instead of baking it into the eye images, and submit it

@@ -108,6 +108,7 @@ if (WIVRN_BUILD_SERVER)
 			compositor/layer_squasher.cpp
 			compositor/foveation.cpp
 			compositor/motion_estimator.cpp
+			compositor/motion_warper.cpp
 			compositor/pacer.cpp
 			compositor/quad_converter.cpp
 
@@ -277,6 +278,8 @@ if (WIVRN_BUILD_SERVER)
 			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/mirror.comp"
 			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/motion_downsample.comp"
 			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/motion_estimate.comp"
+			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/motion_retain.comp"
+			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/motion_warp.comp"
 			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/quad_convert.comp"
 		)
 

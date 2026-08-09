@@ -68,24 +68,6 @@ vk::Extent2D grid_size(vk::Extent2D eye)
 	return {round(eye.width), round(eye.height)};
 }
 
-// Maps the source rectangle onto level 0 the way foveation.cpp maps it onto the
-// encoded image, so that the pyramid, and therefore the motion vectors, are in the
-// orientation of the image the headset displays.
-std::pair<float, float> axis_mapping(int32_t offset, int32_t extent, bool flip, uint32_t destination)
-{
-	if (extent < 0)
-	{
-		offset += extent;
-		extent = -extent;
-		flip = not flip;
-	}
-
-	float step = float(extent) / float(destination);
-	if (flip)
-		return {float(offset + extent), -step};
-	return {float(offset), step};
-}
-
 } // namespace
 
 namespace wivrn
@@ -373,7 +355,8 @@ bool motion_estimator::estimate(
         vk::raii::CommandBuffer & cmd,
         std::array<vk::ImageView, view_count> src,
         std::array<xrt_rect, view_count> src_rect,
-        bool flip_y)
+        bool flip_y,
+        bool copy_to_host)
 {
 	const size_t previous = 1 - current;
 	const size_t destination = have_previous ? previous : current;
@@ -384,8 +367,10 @@ bool motion_estimator::estimate(
 	};
 	for (size_t view = 0; view < view_count; ++view)
 	{
-		auto [base_x, step_x] = axis_mapping(src_rect[view].offset.w, src_rect[view].extent.w, false, level0.width);
-		auto [base_y, step_y] = axis_mapping(src_rect[view].offset.h, src_rect[view].extent.h, flip_y, level0.height);
+		// The pyramid, and therefore the motion vectors, land in the orientation of
+		// the image the headset displays.
+		auto [base_x, step_x] = motion_axis_mapping(src_rect[view].offset.w, src_rect[view].extent.w, false, level0.width);
+		auto [base_y, step_y] = motion_axis_mapping(src_rect[view].offset.h, src_rect[view].extent.h, flip_y, level0.height);
 		pc.mapping[view][0] = base_x;
 		pc.mapping[view][1] = base_y;
 		pc.mapping[view][2] = step_x;
@@ -539,40 +524,66 @@ bool motion_estimator::estimate(
 	        .l0_size = {int32_t(level0.width), int32_t(level0.height)},
 	};
 
-	cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *estimate_pipeline);
-	cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *estimate_layout, 0, estimate_ds, {});
-	cmd.pushConstants<estimate_push_constants>(*estimate_layout, vk::ShaderStageFlagBits::eCompute, 0, epc);
-	cmd.dispatch(grid.width, grid.height, view_count);
-
-	vk::BufferMemoryBarrier2 to_transfer{
+	// The vectors of the previous frame may still be being read: the server-side warp
+	// samples this very buffer, once per duplicate commit, until a new frame replaces
+	// what is in it. The compositor waits for each submission before recording the
+	// next, so those reads are long finished, but the dependency is what says so.
+	vk::BufferMemoryBarrier2 to_write{
 	        .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
-	        .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
-	        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
-	        .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+	        .srcAccessMask = vk::AccessFlagBits2::eShaderStorageRead,
+	        .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+	        .dstAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
 	        .buffer = result,
 	        .offset = 0,
 	        .size = vk::WholeSize,
 	};
 	cmd.pipelineBarrier2({
 	        .bufferMemoryBarrierCount = 1,
-	        .pBufferMemoryBarriers = &to_transfer,
+	        .pBufferMemoryBarriers = &to_write,
 	});
 
-	cmd.copyBuffer(result, readback, vk::BufferCopy{.size = result.info().size});
+	cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *estimate_pipeline);
+	cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *estimate_layout, 0, estimate_ds, {});
+	cmd.pushConstants<estimate_push_constants>(*estimate_layout, vk::ShaderStageFlagBits::eCompute, 0, epc);
+	cmd.dispatch(grid.width, grid.height, view_count);
 
-	vk::BufferMemoryBarrier2 to_host{
-	        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
-	        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
-	        .dstStageMask = vk::PipelineStageFlagBits2::eHost,
-	        .dstAccessMask = vk::AccessFlagBits2::eHostRead,
-	        .buffer = readback,
+	// Both consumers of the vectors in one barrier: the copy into host visible memory
+	// just below, and the compute pass that samples the buffer directly in the
+	// server-side mode. The latter runs in a *later* submission, which the second
+	// synchronisation scope covers — a barrier applies to everything after it in
+	// submission order, not only to the rest of this command buffer.
+	vk::BufferMemoryBarrier2 to_consumers{
+	        .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+	        .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
+	        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer | vk::PipelineStageFlagBits2::eComputeShader,
+	        .dstAccessMask = vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eShaderStorageRead,
+	        .buffer = result,
 	        .offset = 0,
 	        .size = vk::WholeSize,
 	};
 	cmd.pipelineBarrier2({
 	        .bufferMemoryBarrierCount = 1,
-	        .pBufferMemoryBarriers = &to_host,
+	        .pBufferMemoryBarriers = &to_consumers,
 	});
+
+	if (copy_to_host)
+	{
+		cmd.copyBuffer(result, readback, vk::BufferCopy{.size = result.info().size});
+
+		vk::BufferMemoryBarrier2 to_host{
+		        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+		        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+		        .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+		        .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+		        .buffer = readback,
+		        .offset = 0,
+		        .size = vk::WholeSize,
+		};
+		cmd.pipelineBarrier2({
+		        .bufferMemoryBarrierCount = 1,
+		        .pBufferMemoryBarriers = &to_host,
+		});
+	}
 
 	return true;
 }

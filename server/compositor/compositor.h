@@ -28,6 +28,7 @@
 #include "foveation.h"
 #include "layer_squasher.h"
 #include "motion_estimator.h"
+#include "motion_warper.h"
 #include "pacer.h"
 #include "quad_converter.h"
 #include "utils/wivrn_vk_bundle.h"
@@ -90,6 +91,7 @@ private:
 	timings squasher_times;
 	timings foveation_times;
 	timings motion_times;
+	timings motion_warp_times;
 	wivrn_session & session;
 	vk_bundle vk;
 	vk::raii::CommandPool cmd_pool;
@@ -113,6 +115,10 @@ private:
 	// and destroyed again as soon as it stops asking, so a session that never turns
 	// the feature on pays nothing at all.
 	std::unique_ptr<wivrn::motion_estimator> motion;
+	// Server-side mode only: the retained frame and the warp that moves it forward.
+	// Costs about fifty megabytes at a usual eye size, so it follows the estimator's
+	// lifetime and is dropped again the moment the mode or the gating changes.
+	std::unique_ptr<wivrn::motion_warper> motion_warp;
 	// Fingerprint of the layer stack of the previous commit. The multi client
 	// compositor replays a client's layers at display rate until it submits a new
 	// frame, so a change here, and nothing else, marks a new application frame.
@@ -127,6 +133,10 @@ private:
 	// filtered ratio climbs back over the enter threshold within a fraction of a
 	// second and the failing creation is retried several times per second.
 	bool motion_failed = false;
+	// The warper could not be created. Sticky for the session, same reasoning as
+	// motion_failed, except that the fallback is the headset-side mode rather than
+	// nothing at all.
+	bool motion_warp_failed = false;
 	// A submission that may still hold estimator work timed out. Nothing may be
 	// recorded into the estimator, and above all it may not be destroyed, until a
 	// later wait succeeds.
@@ -137,6 +147,33 @@ private:
 	bool motion_pending = false;
 	uint64_t motion_frame_index = 0;
 	XrTime motion_span = 0;
+
+	// What this commit is doing about motion smoothing, decided at the top of
+	// layer_commit by motion_begin() because the warp has to be recorded before the
+	// foveation pass that reads its output. off covers a headset that asked for
+	// nothing, an application that is keeping up, and a submission that timed out.
+	motion_mode motion_mode_now = motion_mode::off;
+	// Whether this commit carries a new application frame or replays the last one
+	bool motion_new_frame = false;
+	// Server-side mode: the warper holds a real frame, and what it was rendered for.
+	// The pose and fov travel with it because a warped commit has to describe the
+	// frame it actually carries, not the one the application would have drawn.
+	bool motion_retained = false;
+	XrTime motion_retained_display_time = 0;
+	std::array<XrPosef, 2> motion_retained_pose{};
+	std::array<XrFovf, 2> motion_retained_fov{};
+	std::array<xrt_fov, 2> motion_retained_src_fov{};
+	// Swapchain the quad layer promoted out of the retained frame came from, or null.
+	// A commit that would promote a different one must not be warped: the retained
+	// image was composited around a different set of layers.
+	const void * motion_retained_quad = nullptr;
+	// A field starting at the retained frame is in the estimator's buffer, and the
+	// interval it spans
+	bool motion_retained_field = false;
+	XrTime motion_retained_span = 0;
+	// Server-side warping is armed, for the headset's Transport page. Written on the
+	// present path, read from the thread that assembles the status packet.
+	std::atomic<bool> motion_server_warping = false;
 
 	// Read from three threads (the one that presents, the one that encodes, and the
 	// network thread that pushes settings down), and written when an encoder is
@@ -272,14 +309,36 @@ private:
 	// everything behaves exactly as it did before the feature existed.
 	std::optional<promoted_quad> select_quad_layer(int64_t display_time_ns);
 
-	// Detects whether this commit carries a new application frame and, if motion
-	// smoothing is wanted and worthwhile, records the estimation work into cmd.
+	// Detects whether this commit carries a new application frame, and decides what
+	// motion smoothing does about it: which mode is in force, and whether the
+	// estimator and the warper should exist at all. Runs before anything else on the
+	// commit reads either of them.
+	void motion_begin();
+
+	// Frees the retained frame and the images that hold it
+	void drop_retained_frame();
+
+	// Records the estimation work into cmd, on the commits that carry a new
+	// application frame and while a mode is in force.
 	void update_motion_field(
 	        XrTime display_time,
 	        uint64_t frame_index,
 	        std::array<vk::ImageView, 2> src,
 	        std::array<xrt_rect, 2> src_rect,
 	        bool flip_y);
+
+	// Server-side mode: keeps this commit's composited views if it carries a new
+	// application frame, or warps the retained ones forward if it does not. On a
+	// warped commit src, src_rect, src_fov, flip_y and view_info are rewritten to
+	// describe the frame that is actually going to be encoded; otherwise nothing
+	// downstream can tell this was called.
+	void motion_warp_commit(
+	        std::array<vk::ImageView, 2> & src,
+	        std::array<xrt_rect, 2> & src_rect,
+	        std::array<xrt_fov, 2> & src_fov,
+	        bool & flip_y,
+	        to_headset::video_stream_data_shard::view_info_t & view_info,
+	        const void * promoted_swapchain);
 
 	// Sends the field recorded by the last update_motion_field, if any. Must be
 	// called once the submission has completed.
@@ -362,6 +421,13 @@ public:
 	bool pacing_active() const
 	{
 		return pacing_enabled and pacing_window > 0;
+	}
+
+	// Whether motion smoothing is in server mode and armed, so that the frames the
+	// application did not produce are being synthesized here and encoded
+	bool motion_server_active() const
+	{
+		return motion_server_warping;
 	}
 
 	void update_tracking(const from_headset::tracking &);

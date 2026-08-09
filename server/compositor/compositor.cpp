@@ -649,8 +649,13 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	cmd_pool.reset();
 	cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
 
-	cmd.resetQueryPool(*query_pool, 0, 4);
+	cmd.resetQueryPool(*query_pool, 0, 5);
 	cmd.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, *query_pool, 0);
+
+	// Whether this commit carries a new application frame, and what motion smoothing
+	// is going to do about it. Decided here because the server-side warp has to be
+	// recorded before the foveation pass reads its output, several steps below.
+	motion_begin();
 
 	bool flip_y = false;
 	std::array<vk::ImageView, 2> src;
@@ -768,6 +773,19 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 
 	cmd.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *query_pool, 1);
 
+	// Server-side motion smoothing. The estimator below still needs the live
+	// composited views, so what it is given is kept aside before the warp rewrites
+	// them: on a warped commit src points at the warp output instead, and everything
+	// downstream — foveation, the encoders, the desktop mirror — sees the synthesized
+	// frame, which is the frame being sent.
+	const auto live_src = src;
+	const auto live_src_rect = src_rect;
+	const bool live_flip_y = flip_y;
+
+	motion_warp_commit(src, src_rect, src_fov, flip_y, view_info, promoted ? promoted->swapchain : nullptr);
+
+	cmd.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *query_pool, 2);
+
 	if (session.get_info().eye_gaze)
 	{
 		auto now = os_monotonic_get_ns();
@@ -846,12 +864,14 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	        .imageMemoryBarrierCount = uint32_t(image_barriers.size()),
 	        .pImageMemoryBarriers = image_barriers.data(),
 	});
-	cmd.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *query_pool, 2);
-
-	// Motion smoothing. src is still in eShaderReadOnlyOptimal here: the barriers
-	// above only concern the encoders' copy of the composited image.
-	update_motion_field(view_info.display_time, images[i].frame_index, src, src_rect, flip_y);
 	cmd.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *query_pool, 3);
+
+	// Motion estimation, always against the live composited views: the field
+	// describes what the application drew, never what was synthesized from it. They
+	// are still in eShaderReadOnlyOptimal here — the barriers above only concern the
+	// encoders' copy of the composited image.
+	update_motion_field(view_info.display_time, images[i].frame_index, live_src, live_src_rect, live_flip_y);
+	cmd.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *query_pool, 4);
 
 	bool mirrored = false;
 #if WIVRN_USE_PIPEWIRE
@@ -953,8 +973,8 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 
 		auto [res, ts] = query_pool.getResults<uint64_t>(
 		        0,
-		        4,
-		        4 * sizeof(uint64_t),
+		        5,
+		        5 * sizeof(uint64_t),
 		        sizeof(uint64_t),
 		        vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWait);
 
@@ -962,8 +982,9 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 		{
 			static const auto period = vk.physical_device.getProperties().limits.timestampPeriod;
 			squasher_times.add((ts[1] - ts[0]) * period / 1e3);
-			foveation_times.add((ts[2] - ts[1]) * period / 1e3);
-			motion_times.add((ts[3] - ts[2]) * period / 1e3);
+			motion_warp_times.add((ts[2] - ts[1]) * period / 1e3);
+			foveation_times.add((ts[3] - ts[2]) * period / 1e3);
+			motion_times.add((ts[4] - ts[3]) * period / 1e3);
 		}
 
 		// The estimator wrote to host visible memory, made visible by the wait
@@ -977,32 +998,41 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	return XRT_SUCCESS;
 }
 
-void compositor::update_motion_field(
-        XrTime display_time,
-        uint64_t frame_index,
-        std::array<vk::ImageView, 2> src,
-        std::array<xrt_rect, 2> src_rect,
-        bool flip_y)
+void compositor::drop_retained_frame()
 {
-	motion_pending = false;
+	motion_warp.reset();
+	motion_retained = false;
+	motion_retained_field = false;
+	motion_retained_display_time = 0;
+	motion_retained_quad = nullptr;
+}
 
+void compositor::motion_begin()
+{
 	const uint64_t fingerprint = layer_fingerprint(layer_accum);
-	const bool new_app_frame = fingerprint != last_layer_fingerprint;
+	motion_new_frame = fingerprint != last_layer_fingerprint;
 	last_layer_fingerprint = fingerprint;
 
-	app_frame_ratio += ((new_app_frame ? 1.f : 0.f) - app_frame_ratio) * motion_ratio_filter;
+	app_frame_ratio += ((motion_new_frame ? 1.f : 0.f) - app_frame_ratio) * motion_ratio_filter;
 	if (app_frame_ratio < motion_enter_ratio)
 		app_behind = true;
 	else if (app_frame_ratio > motion_leave_ratio)
 		app_behind = false;
 
+	motion_mode_now = motion_mode::off;
+	motion_server_warping = false;
+
 	// A previous submission timed out and may still be executing the estimator's
-	// pipelines against its pyramids. Record nothing into it and, above all, do not
-	// destroy it, until a wait has succeeded again.
+	// pipelines against its pyramids, or the warper's against its images. Record
+	// nothing into either and, above all, destroy neither, until a wait has succeeded
+	// again. The retained frame is left alone too: it is only read by a warp, and no
+	// warp is recorded while this is set.
 	if (motion_unsafe)
 		return;
 
-	if (not(session.get_settings()->motion_smoothing and app_behind and not motion_failed))
+	const motion_mode wanted = effective_motion_mode(*session.get_settings());
+
+	if (wanted == motion_mode::off or not app_behind or motion_failed)
 	{
 		if (motion)
 		{
@@ -1010,6 +1040,7 @@ void compositor::update_motion_field(
 			motion.reset();
 		}
 		motion_previous_display_time = 0;
+		drop_retained_frame();
 		return;
 	}
 
@@ -1036,22 +1067,145 @@ void compositor::update_motion_field(
 			// on the next commit would flood the log: hold the feature off for
 			// the rest of the session.
 			motion_failed = true;
+			drop_retained_frame();
 			return;
 		}
 		motion_previous_display_time = 0;
 	}
 
-	if (not new_app_frame)
+	motion_mode_now = motion_mode::headset;
+
+	// The warper is only worth its fifty odd megabytes in server mode and only while
+	// the application is behind, which is exactly when the estimator exists.
+	if (wanted != motion_mode::server or motion_warp_failed)
+	{
+		drop_retained_frame();
+	}
+	else if (motion_warp)
+	{
+		motion_mode_now = motion_mode::server;
+	}
+	else
+	{
+		try
+		{
+			motion_warp = std::make_unique<motion_warper>(
+			        vk,
+			        vk::Extent2D{
+			                .width = session.get_info().render_eye_width,
+			                .height = session.get_info().render_eye_height,
+			        },
+			        vk::Extent2D{motion->grid_width(), motion->grid_height()});
+			U_LOG_IFL_I(log_level,
+			            "Motion smoothing warping on the server, %zu MiB of device memory",
+			            motion_warp->device_memory() / (1024 * 1024));
+			motion_mode_now = motion_mode::server;
+		}
+		catch (std::exception & e)
+		{
+			// Same reasoning as the estimator, with a softer landing: the
+			// headset-side warp still works, so fall back to it for the session
+			// rather than losing the feature.
+			U_LOG_IFL_W(log_level,
+			            "Server side motion warping unavailable, falling back to the headset: %s",
+			            e.what());
+			motion_warp_failed = true;
+			drop_retained_frame();
+		}
+	}
+
+	motion_server_warping = motion_mode_now == motion_mode::server;
+}
+
+void compositor::motion_warp_commit(
+        std::array<vk::ImageView, 2> & src,
+        std::array<xrt_rect, 2> & src_rect,
+        std::array<xrt_fov, 2> & src_fov,
+        bool & flip_y,
+        to_headset::video_stream_data_shard::view_info_t & view_info,
+        const void * promoted_swapchain)
+{
+	if (motion_mode_now != motion_mode::server)
+		return;
+
+	if (motion_new_frame)
+	{
+		// Keep the frame as it was composited. It is encoded live, unwarped: a
+		// real frame is never anything but itself.
+		motion_warp->retain(vk.device, cmd, src, src_rect, flip_y);
+		motion_retained = true;
+		motion_retained_display_time = view_info.display_time;
+		motion_retained_pose = view_info.pose;
+		motion_retained_fov = view_info.fov;
+		motion_retained_src_fov = src_fov;
+		motion_retained_quad = promoted_swapchain;
+		// Whether a field starting at this frame exists is up to the estimator,
+		// which runs further down this same commit.
+		motion_retained_field = false;
+		return;
+	}
+
+	// Nothing to move, nothing to move it along, or a layer stack that no longer
+	// matches how the retained frame was composited — the promoted quad is not in it,
+	// so promoting a different one would make the retained image the wrong picture.
+	if (not motion_retained or not motion_retained_field or motion_retained_quad != promoted_swapchain)
+		return;
+
+	const float t = motion_warp_step(
+	        view_info.display_time,
+	        motion_retained_display_time,
+	        motion_retained_span,
+	        MOTION_MAX_STEPS);
+	if (t <= 0)
+		return;
+
+	motion_warp->warp(vk.device, cmd, motion->vectors(), t);
+
+	// From here on this commit carries the synthesized frame, and has to describe it:
+	// the picture is the retained application frame moved forward, so the pose and
+	// the field of view are the ones it was rendered with, and the runtime's timewarp
+	// on the headset takes care of the head having moved since. That is the same deal
+	// the headset-side mode makes with the frame it holds.
+	src = motion_warp->output_views();
+	src_rect = motion_warp->output_rect();
+	src_fov = motion_retained_src_fov;
+	flip_y = false;
+	view_info.pose = motion_retained_pose;
+	view_info.fov = motion_retained_fov;
+}
+
+void compositor::update_motion_field(
+        XrTime display_time,
+        uint64_t frame_index,
+        std::array<vk::ImageView, 2> src,
+        std::array<xrt_rect, 2> src_rect,
+        bool flip_y)
+{
+	motion_pending = false;
+
+	if (motion_mode_now == motion_mode::off or not motion_new_frame)
 		return;
 
 	const XrTime span = display_time - motion_previous_display_time;
 	const bool usable = motion_previous_display_time != 0 and span > 0 and span < motion_max_span;
+	// In server mode nothing goes on the wire and the vectors are consumed on the
+	// GPU, so the copy into host visible memory, and the send that follows it, are
+	// both skipped.
+	const bool send_field = motion_mode_now == motion_mode::headset;
 
-	if (motion->estimate(vk.device, cmd, src, src_rect, flip_y) and usable)
+	if (motion->estimate(vk.device, cmd, src, src_rect, flip_y, send_field) and usable)
 	{
-		motion_pending = true;
-		motion_frame_index = frame_index;
-		motion_span = span;
+		if (send_field)
+		{
+			motion_pending = true;
+			motion_frame_index = frame_index;
+			motion_span = span;
+		}
+		else
+		{
+			motion_retained_field = true;
+			motion_retained_span = span;
+		}
 	}
 
 	motion_previous_display_time = display_time;
@@ -1259,7 +1413,7 @@ compositor::compositor(wivrn_session & session) :
                             }),
         query_pool(vk.device, vk::QueryPoolCreateInfo{
                                       .queryType = vk::QueryType::eTimestamp,
-                                      .queryCount = 4,
+                                      .queryCount = 5,
                               }),
         settings(get_encoder_settings(vk, session)),
         images{make_images(vk, cmd_pool, settings)},
@@ -1372,6 +1526,7 @@ compositor::compositor(wivrn_session & session) :
 	u_var_add_root(this, "Compositor", false);
 	u_var_add_bool(this, &software_fallback_var, "software encoder fallback");
 	u_var_add_f32_timing(this, &squasher_times.var, "layers processing");
+	u_var_add_f32_timing(this, &motion_warp_times.var, "motion warp");
 	u_var_add_f32_timing(this, &foveation_times.var, "foveation");
 	u_var_add_f32_timing(this, &motion_times.var, "motion estimation");
 
@@ -1516,10 +1671,13 @@ void compositor::resume()
 			encoder->reset();
 	}
 	// The headset lost whatever it had; the pyramid of the frame before the pause
-	// has nothing to do with the one that comes next.
+	// has nothing to do with the one that comes next, and neither does the frame the
+	// warper is holding.
 	if (motion)
 		motion->reset();
 	motion_previous_display_time = 0;
+	motion_retained = false;
+	motion_retained_field = false;
 	send_video_stream_description();
 }
 

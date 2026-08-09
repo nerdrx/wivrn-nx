@@ -42,6 +42,18 @@
 // power of two.
 #define MOTION_THREADS 64
 
+// How far past the last real application frame a frame may be warped, in units of
+// the interval the field spans. At 10 fps on a 90 Hz display this turns one frame
+// into four, which is about where the smearing starts to cost more than the judder
+// it removes. The headset-side warp caps itself at the same value
+// (constants::stream::motion_max_steps); keep the two equal or the two modes stop
+// looking alike.
+#define MOTION_MAX_STEPS 3
+
+// Work group side of motion_retain.comp and motion_warp.comp. Both are trivially
+// parallel over output pixels.
+#define MOTION_WARP_GROUP 8
+
 // Largest displacement, as a fraction of the eye image, that is transmitted. A
 // vector longer than this is clamped: at the frame rates this feature targets it
 // is a matching failure rather than real motion, and letting it through would cost

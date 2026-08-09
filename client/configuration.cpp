@@ -328,6 +328,7 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("encoder_failover", &configuration::encoder_failover),
 	        scalar("comfort_vignette", &configuration::comfort_vignette),
 	        scalar("motion_smoothing", &configuration::motion_smoothing),
+	        scalar("motion_smoothing_server", &configuration::motion_smoothing_server),
 	        scalar("quad_layers", &configuration::quad_layers),
 	        scalar("cas_sharpening", &configuration::cas_sharpening),
 	        scalar("cas_sharpness", &configuration::cas_sharpness),

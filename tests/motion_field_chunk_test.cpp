@@ -11,6 +11,10 @@
 // Part C: what the network does to it. A missing chunk never completes, duplicates are
 // harmless, a newer frame throws away an incomplete older one, a straggler from an
 // older frame is ignored, and malformed chunks are refused.
+// Part D: motion_warp_step, the one piece of arithmetic both ends of the feature run —
+// the headset per repeat refresh, the server per duplicate commit.
+// Part E: the mode selector on the wire. effective_motion_mode resolves what a settings
+// packet asks for, and the packet itself survives a round trip with the mode set.
 //
 // Build (the boost include is wherever the build fetched it):
 //   g++ -std=c++23 -I common -I build-client/common -I external \
@@ -23,6 +27,7 @@
 #include "wivrn_serialization.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <random>
@@ -288,6 +293,77 @@ void test_losses_and_garbage()
 	std::printf("  losses, duplicates, stale, resized and malformed chunks all handled\n");
 }
 
+// Part D ---------------------------------------------------------------------------
+
+void test_warp_step()
+{
+	std::printf("Part D: how far along the field to move\n");
+
+	constexpr XrTime frame = 1'000'000'000;
+	constexpr XrTime span = 100'000'000; // 10 fps
+	constexpr float cap = 3;
+
+	// The moment the frame is meant for is the frame itself: nothing to extrapolate
+	CHECK(motion_warp_step(frame, frame, span, cap) == 0);
+	// One display period into it, at 90 Hz over a 10 fps application
+	CHECK(std::abs(motion_warp_step(frame + span / 9, frame, span, cap) - 1.f / 9) < 1e-5);
+	// Exactly one application interval later
+	CHECK(motion_warp_step(frame + span, frame, span, cap) == 1);
+	// Past the cap, and far past it: the same answer, which is what stops a stale
+	// frame from being stretched into abstraction
+	CHECK(motion_warp_step(frame + 3 * span, frame, span, cap) == cap);
+	CHECK(motion_warp_step(frame + 50 * span, frame, span, cap) == cap);
+	// Before the frame — a reordered or mispredicted display time — never runs the
+	// warp backwards
+	CHECK(motion_warp_step(frame - span, frame, span, cap) == 0);
+	// A field that spans nothing is not something to divide by
+	CHECK(motion_warp_step(frame + span, frame, 0, cap) == 0);
+	CHECK(motion_warp_step(frame + span, frame, -1, cap) == 0);
+}
+
+// Part E ---------------------------------------------------------------------------
+
+void test_mode_selection()
+{
+	std::printf("Part E: which end warps\n");
+
+	from_headset::settings_changed s{};
+
+	// A headset that says nothing about the mode: the plain switch decides, and it
+	// has always meant the headset-side warp
+	s.motion_smoothing = false;
+	CHECK(effective_motion_mode(s) == motion_mode::off);
+	s.motion_smoothing = true;
+	CHECK(effective_motion_mode(s) == motion_mode::headset);
+
+	// A headset that names one always wins
+	for (auto mode: {motion_mode::off, motion_mode::headset, motion_mode::server})
+	{
+		s.motion_smoothing_mode = mode;
+		CHECK(effective_motion_mode(s) == mode);
+		// The switch is kept in step with the mode by the sender, and the two
+		// disagreeing must not change the answer
+		s.motion_smoothing = not s.motion_smoothing;
+		CHECK(effective_motion_mode(s) == mode);
+	}
+
+	// The mode survives the wire, empty as well as set
+	s = {};
+	CHECK(not round_trip(s).motion_smoothing_mode.has_value());
+	s.motion_smoothing = true;
+	s.motion_smoothing_mode = motion_mode::server;
+	const auto got = round_trip(s);
+	CHECK(got.motion_smoothing);
+	CHECK(got.motion_smoothing_mode == motion_mode::server);
+
+	// And so does the server's answer to it, on the status packet the Transport page
+	// has nothing else to go by in that mode
+	to_headset::transport_status status{};
+	CHECK(not round_trip(status).server_warping);
+	status.server_warping = true;
+	CHECK(round_trip(status).server_warping);
+}
+
 } // namespace
 
 int main()
@@ -295,6 +371,8 @@ int main()
 	test_chunk_size();
 	test_round_trip();
 	test_losses_and_garbage();
+	test_warp_step();
+	test_mode_selection();
 
 	std::printf("%d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;

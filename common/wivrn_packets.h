@@ -267,6 +267,26 @@ enum class bitrate_mode : uint8_t
 	bbr = 1,
 };
 
+// Where, if anywhere, the frames the application did not produce are synthesized.
+//
+// off: nothing happens, a repeat refresh shows the last frame unchanged.
+//
+// headset: the server measures a motion field between real application frames and sends
+// it (to_headset::motion_field); the headset warps the last decoded frame along it on the
+// refreshes the application produced nothing for. The duplicate frames on the wire stay
+// near-free, so the encoder spends its whole budget on the real ones.
+//
+// server: the server keeps the last real composited frame, warps it forward along the
+// same field on every duplicate commit, and encodes the result. The headset gets a stream
+// of genuinely different frames and does nothing special with them — at the price of the
+// bitrate those synthesized frames cost. Experimental.
+enum class motion_mode : uint8_t
+{
+	off = 0,
+	headset = 1,
+	server = 2,
+};
+
 // Cadence of the transport status feed: how often the server sends
 // to_headset::transport_status while subscribed, how often the headset renews the
 // subscription, and how long the server keeps sending without a renewal.
@@ -407,7 +427,15 @@ struct settings_changed
 	// frames so that the headset can warp the last decoded frame on repeat refreshes.
 	// The server only does the work while the application is actually below the stream
 	// rate; the headset only warps while it has a field for the frame it is displaying.
+	//
+	// Kept in step with motion_smoothing_mode below — false for off, true for either of
+	// the two active modes — so that anything reading the plain switch (the dashboard,
+	// an older log) still sees whether the feature is on at all.
 	bool motion_smoothing = false;
+	// Which end synthesizes the frames the application did not produce. Empty means the
+	// headset says nothing about it, in which case motion_smoothing alone decides and
+	// the answer is the headset-side warp the switch has always meant.
+	std::optional<motion_mode> motion_smoothing_mode;
 	// Whether the server may pull an overlay quad layer out of the composited eye
 	// images and stream it on its own, for the headset to submit as a real quad
 	// layer. Read when the encoders are created (the stream needs its own encoder
@@ -425,6 +453,16 @@ struct settings_changed
 	// which virtual trackers should be enabled for body tracking
 	std::underlying_type_t<body_part_mask> enabled_body_parts;
 };
+
+// The motion smoothing mode a settings packet asks for. A headset that names one always
+// wins; one that names none is an older or simpler client for which the plain switch is
+// the whole story, and the switch has always meant the headset-side warp.
+inline motion_mode effective_motion_mode(const settings_changed & settings)
+{
+	if (settings.motion_smoothing_mode)
+		return *settings.motion_smoothing_mode;
+	return settings.motion_smoothing ? motion_mode::headset : motion_mode::off;
+}
 
 struct headset_info_packet
 {
@@ -1310,6 +1348,12 @@ struct transport_status
 	bool pacing_active;
 	// A parity shard is going out per group of video shards.
 	bool fec_active;
+
+	// Motion smoothing is in server mode and armed: the last real frame is being warped
+	// forward and encoded on the commits the application produced nothing for. The
+	// headset has no motion fields of its own to go by in that mode, so this flag is the
+	// only thing that can tell its Transport page whether anything is happening.
+	bool server_warping;
 
 	// Bit per video stream index, set when that stream failed over to the software
 	// encoder. Sticky for the session, like the failover itself. A clear bit means

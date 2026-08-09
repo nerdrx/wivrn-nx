@@ -1,8 +1,10 @@
 # Motion smoothing (WiVRn NX)
 
-Status: implemented. Headset toggle "Motion smoothing" on the streaming settings page,
-off by default. Server-side estimator, `to_headset::motion_field` packet, client-side
-warp folded into the defoveation pass.
+Status: implemented. Headset selector "Motion smoothing" on the streaming settings page,
+*Off* / *Headset* / *Server (experimental)*, off by default. One server-side estimator
+feeds both active modes; *Headset* sends the field as a `to_headset::motion_field` packet
+and the client warps in its defoveation pass, *Server* warps on the PC before encoding and
+sends nothing extra.
 
 ## Problem
 
@@ -42,6 +44,11 @@ client-side optical flow (Adreno budget), and any change to the video bitstream 
 4. **The old "Application SpaceWarp" toggle was not spacewarp** — it only sets
    `fps_divider=2`. Renamed to "Half framerate mode" and re-described honestly. The config
    field keeps its name (`fps_divider`) for compatibility.
+5. **Where the warp runs is a user choice, not a design decision.** The two ends trade
+   different things (see *Server mode* below) and which trade is better depends on the
+   headset, the link and the content, so both are shipped and the user picks. The mode is
+   `wivrn::motion_mode` on the wire, in an `std::optional` beside the original boolean; the
+   boolean is kept in step with it so anything reading the plain switch still works.
 
 ## Server
 
@@ -197,6 +204,161 @@ re-enables submission for them, which is a real added cost and is precisely what
 buys. With the toggle off, or with no field for the frame on screen, the frame is discarded
 exactly as before.
 
+## Server mode
+
+Same estimator, same field, same warp — moved to the other end of the link. On a commit the
+application produced nothing new for, the server warps the last real composited frame forward
+and encodes *that*, so what leaves the PC is a stream of genuinely different pictures and the
+headset does nothing special with any of them.
+
+Everything above about detecting a new application frame, the gating ratio and the block
+matcher is unchanged: the estimator needs pairs of real frames either way. What changes is
+what happens to the result — the field is not sent, the readback into host visible memory is
+not even recorded, and the vectors are read straight out of the device local buffer the
+matching pass wrote.
+
+### The two images
+
+`motion_warper` (`compositor/motion_warper.{h,cpp}`) owns two `R8G8B8A8_SRGB` images, each
+the size of a composited eye view with one array layer per eye:
+
+- **retained**, written on an application frame by `motion_retain.comp`, which resamples the
+  composited views through the same mapping `motion_downsample.comp` uses — the shared
+  `motion_axis_mapping()`, mirroring included. What lands in it is therefore the defoveated
+  eye image in the orientation the headset displays, which is exactly the space the motion
+  vectors live in;
+- **output**, written on a duplicate commit by `motion_warp.comp` and read by the foveation
+  pass instead of the live composited image.
+
+Both are written through an UNORM view and read through an sRGB one, the arrangement the
+layer squasher's render target already uses: the shader encodes, the sampler decodes, and a
+reader sees the same linear values it would have sampled from the composited image itself.
+Eight bits of sRGB is what the encoder is going to get anyway.
+
+    1728 · 1824 · 4 B · 2 eyes · 2 images ≈ 50 MB
+
+allocated, like the estimator's pyramids, only once the headset asks for *this* mode **and**
+the application has fallen behind, and freed again the moment either stops being true.
+
+### The warp
+
+`motion_warp.comp`, one invocation per output pixel:
+
+    p = (coord + 0.5) / size            // normalized, in the eye image
+    d = bilinear(field, p) · t
+    out(p) = retained(clamp(p - d, 0, 1))
+
+`t` is `motion_warp_step()` from `common/motion_field.h`, the same four lines the headset
+runs: how far past the retained frame's display time this commit's predicted display time
+falls, in units of the interval the field spans, clamped to `[0, MOTION_MAX_STEPS]` — the
+same 3 the client caps at, and now a constant in `motion_constants.glsl.inc` so the two
+cannot drift apart.
+
+Two things are simpler here than on the headset. The vectors are read as the floats the
+matching pass wrote, with no quantisation and no packet in between, so the whole `scale` and
+`int8` business does not exist. And the image being sampled is the retained eye view rather
+than a foveated one, so there is no foveation Jacobian to undo: field and image share one
+coordinate system. Coordinates outside the image are clamped, which fills disocclusions by
+stretching the edge — the same artefact the headset-side mode accepts.
+
+Bindings: 0 the retained image as a `sampler2DArray` (sRGB view, linear filter, clamp to
+edge), 1 the estimator's vector buffer as a read-only storage buffer, 2 the output image as
+a write-only `image2DArray` (UNORM view). Push constants: eye size, grid size, `t`.
+
+### What a warped commit says about itself
+
+The picture it carries is the *retained* application frame moved forward, so the commit
+describes that frame: `view_info.pose` and `view_info.fov` are the retained ones, and the
+foveation pass is handed the retained field of view with an identity source rectangle and
+`flip_y` false. The head having moved since is the runtime's timewarp's problem on the
+headset — which is exactly the deal the headset-side mode already makes with the frame it is
+holding.
+
+That is a real trade in the squashed path: without the warp, a duplicate commit re-squashes
+the same layers against the fresh head pose, so the server reprojects and the headset's
+timewarp has less to do. Warping hands the older pose over instead. In the single-projection
+fast path there is nothing to lose — the composited image *is* the application's eye image
+and its pose does not change between replays.
+
+The alpha (passthrough) plane travels inside the retained RGBA image and is warped with the
+colour, because it is the same composited pixel and a mask that does not follow what it masks
+is worse than one that does. The promoted quad stream is untouched: it is built from the live
+layer as usual, never warped, and a commit that would promote a *different* quad than the one
+the retained frame was composited around is simply not warped at all — the retained image was
+built with that layer taken out.
+
+An IDR landing on a synthesized frame is fine and is deliberately not special-cased. A warped
+frame is a complete picture; the decoder cannot tell, and the next real frame refreshes it a
+fraction of a second later. `request_idr()` and the encoders' own key frame logic never look
+at where the pixels came from.
+
+### Command buffer and barriers
+
+The warp joins the compositor's existing command buffer between the squash / fast path and
+the foveation pass, with its own timestamp pair (it shows up as "motion warp" in the Monado
+debug UI, next to "foveation" and "motion estimation"). The dependencies:
+
+- **retained image**: `Undefined → General` before the copy (source scope
+  `ComputeShader / ShaderSampledRead`, which is what keeps the write behind the previous
+  commit's warp), then `General → ShaderReadOnlyOptimal` after it. That release is what makes
+  the frame visible to every warp until the next retain — a barrier's second synchronisation
+  scope covers everything after it in *submission* order, not only the rest of its command
+  buffer.
+- **vector buffer**: the estimator's post-dispatch barrier now names both consumers, transfer
+  read (for the host copy, when there is one) and compute read (for the warp, in a later
+  submission). A second barrier before the matching dispatch turns the write-after-read
+  around, so a new estimate cannot overtake the warps still reading the old vectors.
+- **warp output**: `Undefined → General` before the dispatch, `General →
+  ShaderReadOnlyOptimal` after it, both inside the one command buffer the foveation pass is
+  in.
+
+The compositor's timeout flag suppresses the warp and the retained copy the same way it
+suppresses the estimator: while `motion_unsafe` is set the mode reads as `off` for the
+commit, nothing is recorded and nothing is destroyed.
+
+### The bitrate trade
+
+This is the whole reason the mode is a choice and not a replacement.
+
+In headset mode the duplicate frames on the wire are what they have always been: the same
+picture, re-encoded, which every codec turns into a handful of skip macroblocks. They cost
+almost nothing, so an application at 10 fps on a 90 Hz stream spends essentially the entire
+bitrate on its ten real frames. Those frames are as good as the link can make them, and the
+smoothing is free.
+
+In server mode every commit carries a different picture, so every commit costs bits. The same
+budget is now divided between ten real frames and eighty synthesized ones, and the real frames
+get visibly less of it. What is bought with that is a headset that does no extra work at all —
+no re-enabled submission on repeat refreshes, no field packets, no per-refresh pass on the
+Adreno — and a warp with the full float field rather than an `int8` one, applied in the eye
+image's own space rather than through a foveation Jacobian.
+
+The timing is slightly worse, too: the server warps to a *predicted* display time chosen a
+frame ahead, while the headset warps to the refresh it is actually about to scan out. The
+difference is one frame period of prediction error on the extrapolation distance, which at
+these ratios is a few percent of a step.
+
+Rule of thumb: headset mode when the link is the constraint, server mode when the headset is
+(or when the headset-side warp is unavailable — an old client, or a runtime that will not
+re-submit repeat refreshes).
+
+### Mode switches mid-session
+
+The mode is read from the live settings on every commit, so it changes with no reconnect.
+
+- **headset → server**: fields stop being sent; the client's assembler keeps whatever it had,
+  which never again names the frame on screen, so it stops warping on its own. The server
+  starts retaining on the next application frame and warping once the estimator has produced
+  a field across two real frames — two application frames, so a fifth of a second at 10 fps.
+- **server → headset**: the warper is destroyed and its 50 MB freed on the next commit, the
+  retained state is dropped, the readback and the packets resume.
+- **either → off**, **the application catching up**, or **the estimator/warper going away for
+  any other reason**: same path, everything is freed and the commits go back to being byte
+  for byte what they were before the feature existed.
+- **warper creation fails**: logged once and the mode falls back to *headset* for the rest of
+  the session, rather than losing the feature. The estimator failing is still fatal to both
+  modes, as before.
+
 ## Failure modes
 
 - **Wrong vector.** A local smear for the length of one application frame. The field is
@@ -218,8 +380,15 @@ exactly as before.
   against its pyramids, so until a later semaphore wait succeeds nothing is recorded into the
   estimator and, above all, it is not destroyed. One frame without an estimate, no device
   wait on the hot path.
-- **Toggle off.** No packets, no estimator, no client-side texture sampling. The pass is
-  byte-identical to what it was before this feature.
+- **Toggle off.** No packets, no estimator, no warper, no client-side texture sampling. The
+  pass is byte-identical to what it was before this feature.
+- **Server mode, no field yet.** The first application frame after the mode is entered, after
+  a pause or after a resolution change has nothing to be matched against, so the duplicates
+  that follow it go out unwarped — the ordinary repeat. One application interval later there
+  is a field and the warp starts.
+- **Server mode, the promoted quad changes.** The retained image was composited with that
+  layer taken out; a commit that would promote a different one is left unwarped rather than
+  shown the wrong picture.
 
 ## Testing
 
@@ -249,8 +418,16 @@ The test also checks that motion localised to one half of the image is recovered
 bounded by it rather than reported as something absurd, and that a featureless image yields
 exactly zero.
 
-Not covered offline: the downsample pass, the Vulkan plumbing, and the shared memory
-reduction — the packed key is what makes the reduction order irrelevant.
+`tests/motion_field_chunk_test.cpp` covers the rest of what can be checked without a GPU: the
+chunking and reassembly, `motion_warp_step` (both ends run it, so the caps and the sign
+conventions are checked once), and the mode selector — `effective_motion_mode` resolving a
+settings packet, and the packet and the transport status surviving a round trip with the new
+fields.
+
+Not covered offline: the downsample pass, the Vulkan plumbing, the shared memory reduction
+(the packed key is what makes the reduction order irrelevant), and the whole server-side warp
+path — the retain resample, the field sampling, and the barriers that carry the retained image
+and the vector buffer across submissions.
 
 For end-to-end testing: force an application to a low frame rate (a test OpenXR app with a
 frame limiter), watch the Monado debug UI for the "motion estimation" timing, and compare

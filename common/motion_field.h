@@ -54,6 +54,22 @@ struct motion_field_data
 	}
 };
 
+// How far along a field to move, in units of the interval it spans, to land on `now`.
+//
+// A field describes one application frame interval ending at the frame it names, so the
+// step is how far past that frame's display time the moment being drawn falls: near zero
+// on the refresh that first shows the frame, growing with every repeat, capped so that a
+// frame is never stretched further than the smearing is worth. Both ends compute it the
+// same way — the headset per refresh, the server per duplicate commit — and both work in
+// the headset time referential.
+inline float motion_warp_step(XrTime now, XrTime frame_display_time, XrTime span_ns, float max_steps)
+{
+	if (span_ns <= 0)
+		return 0;
+	const double steps = double(now - frame_display_time) / double(span_ns);
+	return float(std::clamp<double>(steps, 0, max_steps));
+}
+
 // Cuts a whole field into chunks of whole grid rows of one eye, each small enough for
 // one datagram. Every chunk repeats the header, so they are independent of each other
 // and of their order. Returns nothing for a field that has no cells.

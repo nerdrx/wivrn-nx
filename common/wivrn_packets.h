@@ -317,6 +317,11 @@ struct settings_changed
 	// Whether the encoders should be biased towards keeping fine detail (text, UI) rather
 	// than a smooth image. Taken into account when the encoders are created.
 	bool sharp_text = false;
+	// Whether the server should estimate a motion field between consecutive application
+	// frames so that the headset can warp the last decoded frame on repeat refreshes.
+	// The server only does the work while the application is actually below the stream
+	// rate; the headset only warps while it has a field for the frame it is displaying.
+	bool motion_smoothing = false;
 	// Whether the server should mirror the gamepad to a virtual uinput device;
 	// gamepad inputs are always forwarded for the OpenXR path
 	bool mirror_gamepad = false;
@@ -912,6 +917,39 @@ public:
 	data_holder data;
 };
 
+// Coarse motion field between two consecutive *distinct* application frames, sent
+// once per application frame while motion smoothing is active. The headset uses it
+// to warp the last decoded frame on the refreshes for which the application has not
+// produced anything new.
+//
+// Losing one of these packets simply means no smoothing until the next application
+// frame: the headset ignores a field that does not name the frame it is displaying.
+struct motion_field
+{
+	// Video frame the field starts from. The field describes where the content of
+	// that frame came from, span_ns earlier.
+	uint64_t frame_idx;
+	// Interval the field spans, in the headset time referential: the display time
+	// of frame_idx minus the display time of the previous distinct application
+	// frame. Always strictly positive.
+	XrTime span_ns;
+
+	// Cells per eye. The grid covers the whole eye image; cell (i, j) is centred at
+	// ((i + 0.5) / width, (j + 0.5) / height) in normalized coordinates of the
+	// defoveated (full resolution) eye image.
+	uint16_t width;
+	uint16_t height;
+
+	// Longest displacement in the field, as a fraction of the eye image. A cell
+	// value of v means a displacement of (v / 127) * scale, in normalized image
+	// coordinates: what is now at p was at p - (v / 127) * scale, span_ns ago.
+	float scale;
+
+	// Two components (x, y) per cell, row major, left eye then right eye:
+	// index = ((view * height + j) * width + i) * 2. Values are in [-127, 127].
+	std::vector<int8_t> vectors;
+};
+
 struct haptics
 {
 	device_id id;
@@ -1001,6 +1039,7 @@ using packets = std::variant<
         video_stream_description,
         audio_data,
         video_stream_data_shard,
+        motion_field,
         haptics,
         timesync_query,
         tracking_control,

@@ -46,7 +46,13 @@ struct vert_pc
 	std::array<float, 4> scale;
 	std::array<float, 4> bias;
 	std::array<float, 4> post;
+	std::array<float, 4> motion;
 };
+
+// The motion field is stored as one signed byte per axis, scaled by the longest
+// vector in the field. R8G8Snorm is one of the formats every implementation must
+// support as a linearly filtered sampled image.
+static const vk::Format motion_format = vk::Format::eR8G8Snorm;
 
 void stream_defoveator::ensure_vertices(size_t num_vertices)
 {
@@ -90,6 +96,13 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 	                .descriptorCount = uint32_t(alpha + 1),
 	                .stageFlags = vk::ShaderStageFlagBits::eFragment,
 	                .pImmutableSamplers = samplers.data(),
+	        },
+	        vk::DescriptorSetLayoutBinding{
+	                .binding = 1,
+	                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+	                .descriptorCount = 1,
+	                .stageFlags = vk::ShaderStageFlagBits::eFragment,
+	                .pImmutableSamplers = &*motion_sampler,
 	        },
 	};
 
@@ -236,13 +249,23 @@ stream_defoveator::stream_defoveator(
 
 	vk::DescriptorPoolSize pool_size{
 	        .type = vk::DescriptorType::eCombinedImageSampler,
-	        .descriptorCount = view_count * 4,
+	        // rgb, alpha and the motion field, for both pipeline variants
+	        .descriptorCount = view_count * 6,
 	};
 
 	ds_pool = device.createDescriptorPool(vk::DescriptorPoolCreateInfo{
 	        .maxSets = view_count * 2,
 	        .poolSizeCount = 1,
 	        .pPoolSizes = &pool_size,
+	});
+
+	motion_sampler = device.createSampler(vk::SamplerCreateInfo{
+	        .magFilter = vk::Filter::eLinear,
+	        .minFilter = vk::Filter::eLinear,
+	        .mipmapMode = vk::SamplerMipmapMode::eNearest,
+	        .addressModeU = vk::SamplerAddressMode::eClampToEdge,
+	        .addressModeV = vk::SamplerAddressMode::eClampToEdge,
+	        .addressModeW = vk::SamplerAddressMode::eClampToEdge,
 	});
 
 	// Create image views and framebuffers
@@ -294,6 +317,66 @@ void stream_defoveator::reset_pipelines()
 		p = {};
 }
 
+// Makes sure the motion texture exists at the requested size and is readable by the
+// fragment shader. The texture is bound by every pass, whether motion smoothing is
+// in use or not, so it must be valid even when there is no field: a 1x1 texture of
+// zeroes then, which the shader never reads because the step is zero.
+void stream_defoveator::ensure_motion_image(vk::raii::CommandBuffer & command_buffer, uint32_t width, uint32_t height)
+{
+	if (motion_image and motion_width == width and motion_height == height)
+		return;
+
+	// Nothing can still be reading it: the caller waits on the frame fence before
+	// recording anything.
+	motion_views.clear();
+	motion_image = image_allocation(
+	        device,
+	        vk::ImageCreateInfo{
+	                .imageType = vk::ImageType::e2D,
+	                .format = motion_format,
+	                .extent = {.width = width, .height = height, .depth = 1},
+	                .mipLevels = 1,
+	                .arrayLayers = view_count,
+	                .samples = vk::SampleCountFlagBits::e1,
+	                .usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst,
+	        },
+	        VmaAllocationCreateInfo{.usage = VMA_MEMORY_USAGE_AUTO});
+
+	motion_views.reserve(view_count);
+	for (uint32_t view = 0; view < view_count; ++view)
+	{
+		motion_views.emplace_back(
+		        device,
+		        vk::ImageViewCreateInfo{
+		                .image = motion_image,
+		                .viewType = vk::ImageViewType::e2D,
+		                .format = motion_format,
+		                .subresourceRange = {
+		                        .aspectMask = vk::ImageAspectFlagBits::eColor,
+		                        .levelCount = 1,
+		                        .baseArrayLayer = view,
+		                        .layerCount = 1,
+		                },
+		        });
+	}
+
+	motion_staging = buffer_allocation(
+	        device,
+	        vk::BufferCreateInfo{
+	                .size = vk::DeviceSize(width) * height * view_count * 2,
+	                .usage = vk::BufferUsageFlagBits::eTransferSrc,
+	        },
+	        VmaAllocationCreateInfo{
+	                .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+	                .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+	        });
+
+	motion_width = width;
+	motion_height = height;
+	motion_frame = uint64_t(-1);
+	motion_ready = false;
+}
+
 static size_t required_vertices(const wivrn::to_headset::foveation_parameter & p)
 {
 	// strips are constructed like this:
@@ -310,12 +393,99 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
                                   std::array<float, 4> scale,
                                   std::array<float, 4> bias,
                                   const post_processing & post,
+                                  const motion_warp & motion,
                                   int destination)
 {
 	if (destination < 0 || destination >= (int)output_images.size())
 		throw std::runtime_error("Invalid destination image index");
 
 	ensure_vertices(std::max(required_vertices(foveation[0]), required_vertices(foveation[1])));
+
+	// Motion field: keep whatever is already in the texture unless a new one came in
+	const wivrn::to_headset::motion_field * field = motion.field;
+	if (field and (field->width == 0 or field->height == 0 or
+	               field->vectors.size() != size_t(field->width) * field->height * view_count * 2))
+		field = nullptr;
+
+	float motion_step = field ? motion.step : 0.f;
+	float motion_scale = field ? field->scale : 0.f;
+
+	// Without a field the texture is left as it is rather than dropped: the shader
+	// does not read it when the step is zero, and a field usually comes back within
+	// a frame or two. Reallocating on every gap would be pointless churn.
+	ensure_motion_image(
+	        command_buffer,
+	        field ? field->width : std::max(motion_width, 1u),
+	        field ? field->height : std::max(motion_height, 1u));
+
+	if (not motion_ready or (field and field->frame_idx != motion_frame))
+	{
+		const size_t size = size_t(motion_width) * motion_height * view_count * 2;
+		if (field and size_t(field->width) * field->height * view_count * 2 == size)
+			vmaCopyMemoryToAllocation(vk_allocator::instance(), field->vectors.data(), motion_staging, 0, size);
+		else
+		{
+			std::vector<int8_t> zeroes(size, 0);
+			vmaCopyMemoryToAllocation(vk_allocator::instance(), zeroes.data(), motion_staging, 0, size);
+		}
+
+		vk::ImageMemoryBarrier to_transfer{
+		        .srcAccessMask = vk::AccessFlagBits::eNone,
+		        .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
+		        .oldLayout = vk::ImageLayout::eUndefined,
+		        .newLayout = vk::ImageLayout::eTransferDstOptimal,
+		        .image = motion_image,
+		        .subresourceRange = {
+		                .aspectMask = vk::ImageAspectFlagBits::eColor,
+		                .levelCount = 1,
+		                .layerCount = view_count,
+		        },
+		};
+		command_buffer.pipelineBarrier(
+		        vk::PipelineStageFlagBits::eTopOfPipe,
+		        vk::PipelineStageFlagBits::eTransfer,
+		        {},
+		        {},
+		        {},
+		        to_transfer);
+
+		// The two layers are consecutive in the packet, which is exactly how a
+		// multi layer copy expects them
+		command_buffer.copyBufferToImage(
+		        motion_staging,
+		        motion_image,
+		        vk::ImageLayout::eTransferDstOptimal,
+		        vk::BufferImageCopy{
+		                .imageSubresource = {
+		                        .aspectMask = vk::ImageAspectFlagBits::eColor,
+		                        .layerCount = view_count,
+		                },
+		                .imageExtent = {.width = motion_width, .height = motion_height, .depth = 1},
+		        });
+
+		vk::ImageMemoryBarrier to_read{
+		        .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+		        .dstAccessMask = vk::AccessFlagBits::eShaderRead,
+		        .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+		        .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+		        .image = motion_image,
+		        .subresourceRange = {
+		                .aspectMask = vk::ImageAspectFlagBits::eColor,
+		                .levelCount = 1,
+		                .layerCount = view_count,
+		        },
+		};
+		command_buffer.pipelineBarrier(
+		        vk::PipelineStageFlagBits::eTransfer,
+		        vk::PipelineStageFlagBits::eFragmentShader,
+		        {},
+		        {},
+		        {},
+		        to_read);
+
+		motion_ready = true;
+		motion_frame = field ? field->frame_idx : uint64_t(-1);
+	}
 
 	for (size_t view = 0; view < view_count; ++view)
 	{
@@ -411,6 +581,12 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		        },
 		};
 
+		vk::DescriptorImageInfo motion_info{
+		        .sampler = *motion_sampler,
+		        .imageView = *motion_views[view],
+		        .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+		};
+
 		std::array descriptor_writes{
 		        vk::WriteDescriptorSet{
 		                .dstSet = pipeline.ds,
@@ -418,6 +594,13 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		                .descriptorCount = input.sampler_a ? 2u : 1u,
 		                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
 		                .pImageInfo = image_info.data(),
+		        },
+		        vk::WriteDescriptorSet{
+		                .dstSet = pipeline.ds,
+		                .dstBinding = 1,
+		                .descriptorCount = 1,
+		                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+		                .pImageInfo = &motion_info,
 		        },
 		};
 
@@ -433,6 +616,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		        .scale = scale,
 		        .bias = bias,
 		        .post = {post.sharpness, post.vignette, post.vignette_inner, post.vignette_outer},
+		        .motion = {motion_step, motion_scale, 0, 0},
 		};
 
 		device.updateDescriptorSets(descriptor_writes, {});

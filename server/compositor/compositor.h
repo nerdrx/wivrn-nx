@@ -27,6 +27,7 @@
 #include "encoder/encoder_settings.h"
 #include "foveation.h"
 #include "layer_squasher.h"
+#include "motion_estimator.h"
 #include "pacer.h"
 #include "utils/wivrn_vk_bundle.h"
 #include "wivrn_config.h"
@@ -80,6 +81,7 @@ private:
 	const u_logging_level log_level;
 	timings squasher_times;
 	timings foveation_times;
+	timings motion_times;
 	wivrn_session & session;
 	vk_bundle vk;
 	vk::raii::CommandPool cmd_pool;
@@ -98,6 +100,27 @@ private:
 
 	layer_squasher squasher;
 	wivrn::foveation foveation;
+
+	// Motion smoothing. The estimator is only built once the headset asks for it,
+	// and destroyed again as soon as it stops asking, so a session that never turns
+	// the feature on pays nothing at all.
+	std::unique_ptr<wivrn::motion_estimator> motion;
+	// Fingerprint of the layer stack of the previous commit. The multi client
+	// compositor replays a client's layers at display rate until it submits a new
+	// frame, so a change here, and nothing else, marks a new application frame.
+	uint64_t last_layer_fingerprint = 0;
+	// Low pass filtered fraction of commits that carry a new application frame,
+	// which is the application frame rate over the stream frame rate
+	float app_frame_ratio = 1;
+	// Hysteresis on that ratio: whether the application is far enough behind for
+	// smoothing to be worth its cost
+	bool app_behind = false;
+	// Headset time of the frame the current pyramid was built from
+	XrTime motion_previous_display_time = 0;
+	// A field was computed into the submission being waited on
+	bool motion_pending = false;
+	uint64_t motion_frame_index = 0;
+	XrTime motion_span = 0;
 
 	std::array<std::unique_ptr<video_encoder>, 3> encoders;
 
@@ -166,6 +189,19 @@ private:
 	}
 
 	int acquire_image();
+
+	// Detects whether this commit carries a new application frame and, if motion
+	// smoothing is wanted and worthwhile, records the estimation work into cmd.
+	void update_motion_field(
+	        XrTime display_time,
+	        uint64_t frame_index,
+	        std::array<vk::ImageView, 2> src,
+	        std::array<xrt_rect, 2> src_rect,
+	        bool flip_y);
+
+	// Sends the field recorded by the last update_motion_field, if any. Must be
+	// called once the submission has completed.
+	void send_motion_field();
 
 	void encoder_work(std::stop_token);
 

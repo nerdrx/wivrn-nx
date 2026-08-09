@@ -268,6 +268,7 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 		info.settings.bitrate_bps = config.bitrate_bps;
 		info.settings.bitrate_auto = config.bitrate_auto;
 		info.settings.sharp_text = config.sharp_text;
+		info.settings.motion_smoothing = config.motion_smoothing;
 		info.settings.mirror_gamepad = config.forward_gamepad;
 		info.settings.enabled_body_parts = config.body_part_mask;
 
@@ -1016,9 +1017,23 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		        1);
 	}
 
+	// Motion smoothing only does anything on the refreshes that redisplay a frame, so
+	// on a headset that normally discards those the pass has to be re-enabled for
+	// them. That submission is the cost the toggle buys; without a field for the
+	// frame on screen nothing changes.
+	bool motion_available = false;
+	if (application::get_config().motion_smoothing and current_blit_handles[0])
+	{
+		auto lock = motion_field.lock();
+		motion_available = *lock and
+		                   (*lock)->frame_idx == current_blit_handles[0]->feedback.frame_index and
+		                   (*lock)->span_ns > 0;
+	}
+
 	// Allow the headset to time warp if we are redisplaying a frame
 	if ((not application::get_hmd_traits().discard_frame) or
 	    std::ranges::any_of(current_blit_handles, [](const auto & h) { return h and h->feedback.times_displayed < 2; }) or
+	    motion_available or
 	    is_gui_interactable())
 	{
 		XrExtent2Di extents[view_count];
@@ -1093,13 +1108,43 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		        .vignette_outer = constants::stream::vignette_outer_radius,
 		};
 
-		defoveator->defoveate(command_buffer,
-		                      foveation,
-		                      images,
-		                      {scale, scale, scale, 1.},
-		                      {bias, bias, bias, 0.},
-		                      post,
-		                      image_index);
+		{
+			// Motion smoothing. The field describes one application frame interval
+			// ending at the frame being displayed, so how far to move along it is
+			// how far past that frame this refresh lands, in units of that
+			// interval: near zero for the refresh that first shows a frame, growing
+			// with every repeat until a new frame arrives or the cap is reached.
+			//
+			// The lock is held across the pass because it is where the field data is
+			// read from; it is only ever contended by the network thread replacing
+			// it, and the pass records commands rather than waiting on anything.
+			auto motion_lock = motion_field.lock();
+			stream_defoveator::motion_warp motion;
+
+			if (config.motion_smoothing and *motion_lock and current_blit_handles[0])
+			{
+				const auto & field = **motion_lock;
+				const auto & handle = *current_blit_handles[0];
+				// A field that does not name the frame on screen is stale: a lost
+				// packet, a dropped frame or an IDR. Nothing to warp along then.
+				if (field.frame_idx == handle.feedback.frame_index and field.span_ns > 0)
+				{
+					double steps = double(frame_state.predictedDisplayTime - handle.view_info.display_time) /
+					               double(field.span_ns);
+					motion.field = &field;
+					motion.step = std::clamp<double>(steps, 0, constants::stream::motion_max_steps);
+				}
+			}
+
+			defoveator->defoveate(command_buffer,
+			                      foveation,
+			                      images,
+			                      {scale, scale, scale, 1.},
+			                      {bias, bias, bias, 0.},
+			                      post,
+			                      motion,
+			                      image_index);
+		}
 
 		command_buffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *query_pool, 1);
 

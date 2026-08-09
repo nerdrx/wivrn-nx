@@ -1,0 +1,115 @@
+/*
+ * WiVRn VR streaming
+ * Copyright (C) 2026  Patrick Nicolas <patricknicolas@laposte.net>
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+// Motion smoothing, first half: build a small luma pyramid of the composited eye
+// views. Every level is a box average of the source, computed straight from it
+// rather than by chaining 2x reductions, so the whole pyramid is produced by one
+// dispatch with no barrier in between. The extra taps are cheap: the pyramid is
+// already 16 times smaller than the source at its coarsest level, and this only
+// runs when the application produces a new frame.
+//
+// The source region and its orientation are given the same way foveation.comp gets
+// them, so the pyramid is in the orientation of the image the headset ends up
+// displaying, which is the space the motion vectors are expressed in.
+
+#version 460
+#extension GL_GOOGLE_include_directive: require
+
+#include "motion_constants.glsl.inc"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D source[2];
+layout(set = 0, binding = 1) uniform writeonly restrict image2DArray dest[MOTION_LEVELS];
+
+layout(push_constant) uniform Params
+{
+	// Per view: source coordinates, in texels, of the corner of level 0 texel
+	// (0, 0) in xy, and the step of one level 0 texel in zw. The step is negative
+	// on an axis that is mirrored.
+	vec4 mapping[2];
+	// Level 0 dimensions
+	ivec2 l0_size;
+}
+params;
+
+float from_linear_to_srgb_channel(float value)
+{
+	if (value < 0.0031308)
+		return 12.92 * value;
+	return 1.055 * pow(value, 1.0 / 2.4) - 0.055;
+}
+
+// Same luma as foveation.comp computes for the encoders: sRGB encoded, BT.709
+// weights. Matching on the gamma encoded signal keeps contrast in the dark parts
+// of the image, which is where block matching is otherwise weakest.
+float luma(vec3 linear_rgb)
+{
+	vec3 srgb = vec3(
+		from_linear_to_srgb_channel(linear_rgb.r),
+		from_linear_to_srgb_channel(linear_rgb.g),
+		from_linear_to_srgb_channel(linear_rgb.b));
+	return dot(srgb, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// Average of the source over the footprint that starts at corner and spans size,
+// both in source texels, using taps x taps bilinear samples. With size = 2 * taps
+// source texels, which is the case at every level here, this is an exact box
+// filter.
+float box(int view, vec2 texture_size, vec2 corner, vec2 size, int taps)
+{
+	vec3 sum = vec3(0);
+	for (int y = 0; y < taps; ++y)
+	{
+		for (int x = 0; x < taps; ++x)
+		{
+			vec2 p = corner + size * ((vec2(x, y) + 0.5) / float(taps));
+			sum += texture(source[view], p / texture_size).rgb;
+		}
+	}
+	return luma(sum / float(taps * taps));
+}
+
+void main()
+{
+	ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+	int view = int(gl_GlobalInvocationID.z);
+
+	if (coord.x >= params.l0_size.x || coord.y >= params.l0_size.y)
+		return;
+
+	// Number of bilinear taps for a level 0 footprint: the footprint is
+	// 1 << MOTION_L0_SHIFT source texels wide, each tap covers two of them.
+	const int taps0 = 1 << (MOTION_L0_SHIFT - 1);
+
+	vec2 texture_size = vec2(textureSize(source[view], 0));
+	vec2 step = params.mapping[view].zw;
+	vec2 corner = params.mapping[view].xy + vec2(coord) * step;
+
+	imageStore(dest[0], ivec3(coord, view), vec4(box(view, texture_size, corner, step, taps0)));
+
+	// One invocation out of 1 << level writes level `level`, from the same source.
+	// The unrolled form keeps the image array index a constant expression.
+	if (MOTION_LEVELS > 1 && (coord.x & 1) == 0 && (coord.y & 1) == 0)
+	{
+		imageStore(dest[1], ivec3(coord >> 1, view), vec4(box(view, texture_size, corner, step * 2.0, taps0 * 2)));
+
+		if (MOTION_LEVELS > 2 && (coord.x & 3) == 0 && (coord.y & 3) == 0)
+			imageStore(dest[2], ivec3(coord >> 2, view), vec4(box(view, texture_size, corner, step * 4.0, taps0 * 4)));
+	}
+}

@@ -107,6 +107,7 @@ if (WIVRN_BUILD_SERVER)
 			compositor/compositor.cpp
 			compositor/layer_squasher.cpp
 			compositor/foveation.cpp
+			compositor/motion_estimator.cpp
 			compositor/pacer.cpp
 
 			encoder/encoder_settings.cpp
@@ -273,6 +274,8 @@ if (WIVRN_BUILD_SERVER)
 			"${_monado_src}/src/xrt/auxiliary/render/shaders/layer.comp"
 			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/foveation.comp"
 			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/mirror.comp"
+			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/motion_downsample.comp"
+			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/motion_estimate.comp"
 		)
 
 	target_compile_definitions(wivrn-server PRIVATE JSON_DIAGNOSTICS=1)

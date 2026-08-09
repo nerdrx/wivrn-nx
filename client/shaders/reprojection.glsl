@@ -28,6 +28,12 @@ layout(push_constant) uniform pc
 	// y: comfort vignette amount, 0 disables it
 	// z, w: normalized radii where the vignette starts and reaches its full amount
 	vec4 post;
+	// Motion smoothing
+	// x: how far along the motion field to move, in units of the interval the field
+	//    spans; 0 disables the warp and is what every frame that has a fresh image
+	//    or no field uses
+	// y: longest vector in the field, as a fraction of the eye image
+	vec4 motion;
 };
 
 #ifdef VERT_SHADER
@@ -54,6 +60,9 @@ layout(constant_id = 0) const int alpha = 1;
 layout(constant_id = 1) const bool do_srgb = false;
 
 layout(set = 0, binding = 0) uniform sampler2D rgb[alpha + 1];
+// One cell per motion vector, covering the whole eye image, sampled with the
+// hardware bilinear filter so the warp varies smoothly across cell boundaries
+layout(set = 0, binding = 1) uniform sampler2D motion_field;
 
 layout(location = 0) in vec4 inUV;
 layout(location = 1) in vec2 inPosition;
@@ -115,16 +124,58 @@ vec4 sRGB_to_linear_rgba(vec4 x)
 	        x.a);
 }
 
+// Motion smoothing. The field is measured, and is given here, in normalized
+// coordinates of the defoveated eye image; what this pass samples is the foveated
+// image. The two are related by the vertex grid, which maps positions to texture
+// coordinates affinely inside every triangle, so the local ratio between them is
+// exactly what the screen space derivatives of the two interpolated values give.
+//
+// The vector says where the content came from over one interval, so moving forward
+// by `steps` intervals means sampling that many vectors back.
+vec2 motion_offset(vec2 uv, vec2 position)
+{
+	// Position of this pixel in the defoveated eye image, 0 to 1
+	vec2 p = position * 0.5 + 0.5;
+	vec2 v = texture(motion_field, p).rg * motion.y;
+
+	vec2 duv_dp = vec2(dFdx(uv.x) / dFdx(p.x), dFdy(uv.y) / dFdy(p.y));
+	return -motion.x * v * duv_dp;
+}
+
 void main()
 {
-	vec4 colour = texture(rgb[0], inUV.xy);
+	vec2 uv = inUV.xy;
+	vec2 uv_a = inUV.zw;
+
+	if (motion.x > 0.0)
+	{
+		vec2 texel = 0.5 / vec2(rgb_rect.zw);
+		uv = clamp(uv + motion_offset(inUV.xy, inPosition), texel, 1.0 - texel);
+
+		if (alpha == 1)
+		{
+			// Disocclusions are filled by stretching the edge of the image
+			// rather than by anything cleverer: at the rates this runs at the
+			// gap is a few pixels wide and only lasts one application frame.
+			vec2 texel_a = 0.5 / vec2(a_rect.zw);
+			uv_a = clamp(uv_a + motion_offset(inUV.zw, inPosition), texel_a, 1.0 - texel_a);
+
+			// Keep the sample on this eye's half of the alpha image
+			if (inUV.z > 0.5)
+				uv_a.x = max(uv_a.x, 0.5 + texel_a.x);
+			else
+				uv_a.x = min(uv_a.x, 0.5 - texel_a.x);
+		}
+	}
+
+	vec4 colour = texture(rgb[0], uv);
 	if (post.x > 0.0)
-		colour.rgb = contrast_adaptive_sharpen(inUV.xy, post.x);
+		colour.rgb = contrast_adaptive_sharpen(uv, post.x);
 
 	if (alpha == 1)
 	{
 		// Avoid sampling between the eyes
-		vec2 a = inUV.zw;
+		vec2 a = uv_a;
 		float d = a.x - 0.5;
 		if (abs(d) *a_rect.z < 1)
 			a.x += (d > 0 ? 1 : -1)  / float(a_rect.z);

@@ -220,6 +220,53 @@ vk::Extent3D render_extent(const wivrn::from_headset::headset_info_packet & info
 	};
 }
 
+// Motion smoothing gating. The ratio is filtered over about a second at stream
+// rate, and the two thresholds keep an application that hovers around the limit
+// from switching the estimator on and off every few frames.
+constexpr float motion_ratio_filter = 1.f / 90.f;
+constexpr float motion_enter_ratio = 0.8f; // below this the application is behind
+constexpr float motion_leave_ratio = 0.9f; // above this it has caught up again
+// Longest interval a single field may describe. Beyond it the two frames have
+// nothing to do with each other any more and extrapolating from the field would be
+// worse than showing the frame as it is.
+constexpr XrTime motion_max_span = 500'000'000;
+
+void fingerprint(uint64_t & h, const void * data, size_t size)
+{
+	// FNV-1a
+	auto bytes = static_cast<const uint8_t *>(data);
+	for (size_t i = 0; i < size; ++i)
+	{
+		h ^= bytes[i];
+		h *= 0x100000001b3;
+	}
+}
+
+// Identity of the content of a layer stack: everything an application changes when
+// it renders a new frame, and nothing the compositor changes on its own. The frame
+// id in layer_accum.data is the *native* compositor's, it increases on every commit
+// including the replayed ones, so it is deliberately left out.
+uint64_t layer_fingerprint(const comp_layer_accum & layers)
+{
+	uint64_t h = 0xcbf29ce484222325;
+	fingerprint(h, &layers.layer_count, sizeof(layers.layer_count));
+
+	for (uint32_t i = 0; i < layers.layer_count; ++i)
+	{
+		const auto & layer = layers.layers[i];
+		fingerprint(h, &layer.data, sizeof(layer.data));
+		for (size_t sc = 0; sc < std::size(layer.sc_array); ++sc)
+		{
+			// The swapchain a layer points at is part of its identity: an
+			// application that alternates between two of them reuses image
+			// index 0 in both.
+			auto ptr = reinterpret_cast<uintptr_t>(layer.sc_array[sc]);
+			fingerprint(h, &ptr, sizeof(ptr));
+		}
+	}
+	return h;
+}
+
 } // namespace
 
 namespace wivrn
@@ -318,7 +365,7 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	cmd_pool.reset();
 	cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
 
-	cmd.resetQueryPool(*query_pool, 0, 3);
+	cmd.resetQueryPool(*query_pool, 0, 4);
 	cmd.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, *query_pool, 0);
 
 	bool flip_y = false;
@@ -465,6 +512,11 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	});
 	cmd.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *query_pool, 2);
 
+	// Motion smoothing. src is still in eShaderReadOnlyOptimal here: the barriers
+	// above only concern the encoders' copy of the composited image.
+	update_motion_field(view_info.display_time, images[i].frame_index, src, src_rect, flip_y);
+	cmd.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *query_pool, 3);
+
 	bool mirrored = false;
 #if WIVRN_USE_PIPEWIRE
 	// Desktop mirror: resample the left eye, as it is just before foveation, into
@@ -549,8 +601,8 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	{
 		auto [res, ts] = query_pool.getResults<uint64_t>(
 		        0,
-		        3,
-		        3 * sizeof(uint64_t),
+		        4,
+		        4 * sizeof(uint64_t),
 		        sizeof(uint64_t),
 		        vk::QueryResultFlagBits::e64 | vk::QueryResultFlagBits::eWait);
 
@@ -559,13 +611,116 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 			static const auto period = vk.physical_device.getProperties().limits.timestampPeriod;
 			squasher_times.add((ts[1] - ts[0]) * period / 1e3);
 			foveation_times.add((ts[2] - ts[1]) * period / 1e3);
+			motion_times.add((ts[3] - ts[2]) * period / 1e3);
 		}
+
+		// The estimator wrote to host visible memory, made visible by the wait
+		// above. Sending is a few kilobytes on the stream socket.
+		send_motion_field();
 	}
 
 	// Now is a good point to garbage collect.
 	comp_swapchain_shared_garbage_collect(&cscs);
 
 	return XRT_SUCCESS;
+}
+
+void compositor::update_motion_field(
+        XrTime display_time,
+        uint64_t frame_index,
+        std::array<vk::ImageView, 2> src,
+        std::array<xrt_rect, 2> src_rect,
+        bool flip_y)
+{
+	motion_pending = false;
+
+	const uint64_t fingerprint = layer_fingerprint(layer_accum);
+	const bool new_app_frame = fingerprint != last_layer_fingerprint;
+	last_layer_fingerprint = fingerprint;
+
+	app_frame_ratio += ((new_app_frame ? 1.f : 0.f) - app_frame_ratio) * motion_ratio_filter;
+	if (app_frame_ratio < motion_enter_ratio)
+		app_behind = true;
+	else if (app_frame_ratio > motion_leave_ratio)
+		app_behind = false;
+
+	if (not(session.get_settings()->motion_smoothing and app_behind))
+	{
+		if (motion)
+		{
+			U_LOG_IFL_I(log_level, "Motion smoothing idle");
+			motion.reset();
+		}
+		motion_previous_display_time = 0;
+		return;
+	}
+
+	if (not motion)
+	{
+		try
+		{
+			motion = std::make_unique<motion_estimator>(
+			        vk,
+			        vk::Extent2D{
+			                .width = session.get_info().render_eye_width,
+			                .height = session.get_info().render_eye_height,
+			        });
+			U_LOG_IFL_I(log_level,
+			            "Motion smoothing active, %ux%u vectors per eye, %zu kiB of device memory",
+			            motion->grid_width(),
+			            motion->grid_height(),
+			            motion->device_memory() / 1024);
+		}
+		catch (std::exception & e)
+		{
+			U_LOG_W("Motion estimator creation failed, motion smoothing disabled: %s", e.what());
+			// Retrying on the next commit would flood the log; hold the feature
+			// off until the application catches up and falls behind again.
+			app_behind = false;
+			app_frame_ratio = 1;
+			return;
+		}
+		motion_previous_display_time = 0;
+	}
+
+	if (not new_app_frame)
+		return;
+
+	const XrTime span = display_time - motion_previous_display_time;
+	const bool usable = motion_previous_display_time != 0 and span > 0 and span < motion_max_span;
+
+	if (motion->estimate(vk.device, cmd, src, src_rect, flip_y) and usable)
+	{
+		motion_pending = true;
+		motion_frame_index = frame_index;
+		motion_span = span;
+	}
+
+	motion_previous_display_time = display_time;
+}
+
+void compositor::send_motion_field()
+{
+	if (not motion_pending)
+		return;
+	motion_pending = false;
+
+	try
+	{
+		auto field = motion->read_back();
+		session.send_stream(to_headset::motion_field{
+		        .frame_idx = motion_frame_index,
+		        .span_ns = motion_span,
+		        .width = field.width,
+		        .height = field.height,
+		        .scale = field.scale,
+		        .vectors = std::move(field.vectors),
+		});
+	}
+	catch (std::exception & e)
+	{
+		U_LOG_IFL_D(log_level, "Failed to send motion field: %s", e.what());
+	}
 }
 
 xrt_result_t compositor::get_display_refresh_rate(float * hz)
@@ -716,7 +871,7 @@ compositor::compositor(wivrn_session & session) :
                             }),
         query_pool(vk.device, vk::QueryPoolCreateInfo{
                                       .queryType = vk::QueryType::eTimestamp,
-                                      .queryCount = 3,
+                                      .queryCount = 4,
                               }),
         settings(get_encoder_settings(vk, session)),
         images{make_images(vk, cmd_pool, settings)},
@@ -800,6 +955,7 @@ compositor::compositor(wivrn_session & session) :
 	u_var_add_root(this, "Compositor", false);
 	u_var_add_f32_timing(this, &squasher_times.var, "layers processing");
 	u_var_add_f32_timing(this, &foveation_times.var, "foveation");
+	u_var_add_f32_timing(this, &motion_times.var, "motion estimation");
 
 	// Start the thread after everything is initialized
 	encoder_thread = std::jthread{[&](std::stop_token t) { encoder_work(t); }};
@@ -872,6 +1028,11 @@ void compositor::resume()
 {
 	for (auto & encoder: encoders)
 		encoder->reset();
+	// The headset lost whatever it had; the pyramid of the frame before the pause
+	// has nothing to do with the one that comes next.
+	if (motion)
+		motion->reset();
+	motion_previous_display_time = 0;
 	send_video_stream_description();
 }
 

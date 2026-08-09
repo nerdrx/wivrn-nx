@@ -285,8 +285,8 @@ void settings_video(const settings_context & ctx)
 	{
 		list.push_back({
 		        .id = "##spacewarp",
-		        .label = _("Application SpaceWarp"),
-		        .description = _("Renders at half the refresh rate. The headset may synthesise frames."),
+		        .label = _("Half framerate mode"),
+		        .description = _("Stream at half the refresh rate. The image is sent, encoded and decoded half as often, which saves bandwidth and power; every frame is simply shown twice, nothing is synthesised."),
 		        .ui = ui_kind::toggle,
 		        .get_bool = [&config] { return config.fps_divider == 2; },
 		        .set_bool = [&ctx, &config](bool v) { config.fps_divider = v ? 2 : 1; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
@@ -438,6 +438,16 @@ void settings_streaming(const settings_context & ctx)
 	        .get_bool = [&config] { return config.comfort_vignette; },
 	        .set_bool = [&config](bool v) { config.comfort_vignette = v; config.save(); },
 	        .default_bool = default_config.comfort_vignette,
+	});
+
+	list.push_back({
+	        .id = "##motion_smoothing",
+	        .label = _("Motion smoothing"),
+	        .description = _("When the application runs below the display rate, shift the last image along the motion the server measured between application frames instead of repeating it unchanged. Smooths out judder at the cost of some smearing around moving edges. Only active while the application is actually behind."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.motion_smoothing; },
+	        .set_bool = [&ctx, &config](bool v) { config.motion_smoothing = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.motion_smoothing,
 	});
 
 	// in-stream: steer where foveation focuses quality

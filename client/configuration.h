@@ -82,6 +82,11 @@ public:
 	// Darken the periphery of the streamed image when the application frame rate collapses
 	bool comfort_vignette = true;
 
+	// Ask the server for a motion field between application frames, and warp the last
+	// decoded frame along it on the refreshes the application did not produce anything
+	// for. Off by default: the artefacts it trades judder for depend on the content.
+	bool motion_smoothing = false;
+
 	// Contrast adaptive sharpening, applied to the decoded image by the reprojection pass
 	bool cas_sharpening = false;
 	float cas_sharpness = 0.5;

@@ -172,6 +172,11 @@ private:
 	bool comfort_vignette_active = false;
 	float comfort_vignette_fade = 0;
 
+	// Motion smoothing: the last field the server sent, replaced whenever a new one
+	// arrives. It is only used for the frame it names, so a lost or late packet just
+	// means no smoothing until the next application frame.
+	thread_safe<std::optional<wivrn::to_headset::motion_field>> motion_field;
+
 	// Tab currently being displayed
 	stream_tab gui_status = stream_tab::hidden;
 	// Tab that we will switch to if button is pressed
@@ -252,6 +257,7 @@ public:
 	void operator()(to_headset::path_pong &&);
 	void operator()(to_headset::server_message &&);
 	void operator()(to_headset::video_stream_data_shard &&);
+	void operator()(to_headset::motion_field &&);
 	void operator()(to_headset::haptics &&);
 	void operator()(to_headset::timesync_query &&);
 	void operator()(to_headset::tracking_control &&);

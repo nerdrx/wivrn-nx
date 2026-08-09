@@ -139,6 +139,12 @@ constexpr float vignette_outer_radius = 1.15;
 // How much the periphery is darkened once the vignette is fully faded in
 constexpr float vignette_strength = 0.8;
 
+// Motion smoothing: how far past the last application frame the image may be warped,
+// in units of the interval the motion field spans. At 10 fps on a 90 Hz display this
+// turns one frame into four, which is about where the smearing starts to cost more
+// than the judder it removes.
+constexpr float motion_max_steps = 3;
+
 constexpr float gui_max_foveation_speed = 2; // Maximum speed (@ 1m) when changing the foveation distance with the thumbstick
 constexpr float gui_min_foveation_distance = 0.5;
 constexpr float gui_max_foveation_distance = 100;

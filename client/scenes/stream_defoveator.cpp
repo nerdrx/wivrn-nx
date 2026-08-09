@@ -291,6 +291,8 @@ void stream_defoveator::reset_pipelines()
 		p = {};
 	for (auto & p: pipeline_a)
 		p = {};
+	// Reclaim the descriptor sets, the pool is too small to allocate new ones otherwise
+	ds_pool.reset();
 }
 
 static size_t required_vertices(const wivrn::to_headset::foveation_parameter & p)

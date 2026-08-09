@@ -433,6 +433,16 @@ void settings_streaming(const settings_context & ctx)
 	});
 
 	list.push_back({
+	        .id = "##fec",
+	        .label = _("Error correction (FEC)"),
+	        .description = _("Send a small amount of redundant data alongside the video so that a packet the Wi-Fi drops is rebuilt here instead of losing the whole frame and waiting for a new keyframe. Costs about 12% of the bandwidth, which the server takes out of the video quality rather than adding on top, so the amount on the wire does not change."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.fec; },
+	        .set_bool = [&ctx, &config](bool v) { config.fec = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.fec,
+	});
+
+	list.push_back({
 	        .id = "##wifi_qos",
 	        .label = _("Wi-Fi QoS priority"),
 	        .description = _("Tag the streaming traffic so that the access point puts it in its high priority queues ahead of everything else on the network. A few networks mangle or drop tagged traffic instead; turn this off if the connection is worse with it on."),

@@ -324,6 +324,11 @@ struct settings_changed
 	// what overflows an access point's buffer; the server also has its own switch, and the
 	// fraction is a server configuration key.
 	bool smooth_pacing = true;
+	// Whether the server should send a parity shard per group of video shards, so that
+	// the headset rebuilds a lost datagram instead of losing the frame. Costs about
+	// 12% of the video bandwidth, which the server takes out of the encoder bitrate so
+	// that the total on the wire stays where the bitrate controller put it.
+	bool fec = true;
 	// Whether both ends should mark their sockets with a DSCP class, which maps to the WMM
 	// access categories on Wi-Fi. Each end applies it to its own sockets; some networks
 	// mangle or drop marked traffic, hence the switch.
@@ -677,6 +682,12 @@ struct feedback
 	XrTime displayed;
 
 	uint8_t times_displayed;
+
+	// Data shards of this frame that were rebuilt from a parity shard rather than
+	// received (see to_headset::video_stream_parity_shard). Nonzero means the link
+	// dropped datagrams and forward error correction absorbed them: the frame is
+	// complete, sent_to_decoder is set, and it must not be counted as lost.
+	uint8_t reconstructed_shards;
 };
 
 struct battery
@@ -1005,6 +1016,53 @@ public:
 	data_holder data;
 };
 
+// Forward error correction for the video stream: one parity shard per group of
+// consecutive data shards of a frame, so that a single datagram lost out of the
+// group is rebuilt on the headset instead of costing the whole frame and the IDR
+// round trip that follows it.
+//
+// The scheme is a plain XOR over the group, which recovers exactly one erasure.
+// That is the dominant loss on a Wi-Fi link: an access point drops the odd
+// datagram far more often than it drops a run of them. A code that survives a
+// burst (Reed-Solomon over the same groups) is a v2 item; it costs the same
+// bandwidth but a great deal more arithmetic.
+//
+// What is XOR'd is not the payload alone but a *recovery blob* per data shard:
+// its view_info, its timing_info and its payload, in the same encoding the data
+// shard itself uses (see common/fec.h). Doing it that way makes the group uniform
+// — the first shard of a frame, which carries the pose, and the last one, which
+// carries the timings and without which the headset cannot even tell the frame is
+// finished, are recovered like any other. Blobs shorter than the longest in the
+// group are zero padded before the XOR, and blob_size records the true length of
+// each so the padding can be cut back off.
+//
+// Only ever sent on the UDP stream socket. On the TCP paths (control socket,
+// secondary path) nothing is lost in the first place and parity would be pure
+// waste.
+class video_stream_parity_shard
+{
+public:
+	// Same stream numbering as video_stream_data_shard
+	uint8_t stream_item_idx;
+	// Frame the covered data shards belong to
+	uint64_t frame_idx;
+	// shard_idx of the first data shard of the group. The group is
+	// [first_shard_idx, first_shard_idx + blob_size.size()), always contiguous.
+	uint16_t first_shard_idx;
+	// Recovery blob length of each covered data shard, in shard_idx order. Its
+	// size is the group size: the configured K for a full group, less for the
+	// last group of a frame. Also tells the headset that those shard indices
+	// exist at all, which is how the last shard of a frame can be missed and
+	// still be rebuilt.
+	std::vector<uint16_t> blob_size;
+	// XOR of the covered recovery blobs, each zero padded to the longest of them.
+	// Its length is therefore max(blob_size).
+	std::span<uint8_t> payload;
+
+	// Container for the data, read payload instead
+	data_holder data;
+};
+
 // Coarse motion field between two consecutive *distinct* application frames, sent
 // once per application frame while motion smoothing is active. The headset uses it
 // to warp the last decoded frame on the refreshes for which the application has not
@@ -1155,6 +1213,7 @@ using packets = std::variant<
         video_stream_description,
         audio_data,
         video_stream_data_shard,
+        video_stream_parity_shard,
         motion_field,
         haptics,
         timesync_query,

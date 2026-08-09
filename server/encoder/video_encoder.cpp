@@ -314,7 +314,30 @@ void video_encoder::reset()
 
 void video_encoder::set_bitrate(uint32_t bitrate_bps)
 {
-	pending_bitrate = bitrate_bps * bitrate_multiplier;
+	requested_bitrate = bitrate_bps;
+	apply_bitrate();
+}
+
+void video_encoder::apply_bitrate()
+{
+	const uint32_t requested = requested_bitrate;
+	if (requested == 0)
+		return;
+
+	// The bitrate the controller decides is a budget for the whole link, and the
+	// parity shards are on that link too: with FEC on, an encoder left at the full
+	// number would put 12.5% more than the budget on the wire and the controller
+	// would then spend its time chasing the loss it caused itself. So the encoder
+	// gets the data share and the parity gets the rest.
+	const double share = fec_enabled ? fec::data_share : 1.0;
+	pending_bitrate = uint32_t(requested * bitrate_multiplier * share);
+}
+
+void video_encoder::set_fec(bool enabled)
+{
+	if (fec_enabled.exchange(enabled) == enabled)
+		return;
+	apply_bitrate();
 }
 
 void video_encoder::set_framerate(float framerate)
@@ -394,6 +417,22 @@ void video_encoder::encode(wivrn_session & cnx,
 	}
 }
 
+void video_encoder::send_parity()
+{
+	auto parity = fec_group.take();
+	if (not parity)
+		return;
+
+	try
+	{
+		cnx->send_stream(std::move(*parity));
+	}
+	catch (...)
+	{
+		// Ignore network errors, same as for the data shards
+	}
+}
+
 void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool control, shard_pacer pacer)
 {
 	std::lock_guard lock(mutex);
@@ -403,6 +442,7 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		wivrn::trace::cpu_begin(wivrn::trace::cpu_track::network, stream_idx, shard.frame_idx, "SendData");
 		cnx->dump_time("send_begin", shard.frame_idx, os_monotonic_get_ns(), stream_idx);
 		timing_info.send_begin = clock.to_headset(os_monotonic_get_ns());
+		fec_group.reset(stream_idx, shard.frame_idx);
 	}
 	if (end_of_frame)
 	{
@@ -413,7 +453,13 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 	if (video_dump)
 		video_dump.write((char *)data.data(), data.size());
 
-	ssize_t max_payload_size = (cnx->has_stream() and not control) ? to_headset::video_stream_data_shard::max_payload_size : std::numeric_limits<uint32_t>::max();
+	// Parity is only worth anything on the lossy path. The control socket and the
+	// secondary (USB) path are both TCP: nothing is dropped there, so a parity shard
+	// would be pure overhead, and an IDR that goes out on the control socket is
+	// exactly the frame that must not be made larger.
+	const bool fec_active = fec_enabled and not control and cnx->has_stream() and not cnx->video_on_secondary();
+
+	ssize_t max_payload_size = (cnx->has_stream() and not control) ? ssize_t(fec::shard_payload_budget(fec_active)) : std::numeric_limits<uint32_t>::max();
 
 	auto begin = data.begin();
 	auto end = data.end();
@@ -444,6 +490,20 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		{
 			// Ignore network errors
 		}
+
+		// The parity shard of a group goes out immediately after the group's last
+		// data shard, so it travels in (or right at the edge of) the same pacing
+		// micro-burst and reaches the headset while the group is still open there.
+		// Deliberately not held back to the end of the frame: that would put every
+		// parity shard of the frame in one tail burst, and a hiccup that swallowed
+		// the tail would take the whole frame's protection with it.
+		if (fec_active)
+		{
+			fec_group.add(shard);
+			if (fec_group.full())
+				send_parity();
+		}
+
 		++shard.shard_idx;
 		shard.view_info.reset();
 		begin = next;
@@ -452,9 +512,22 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		// schedule says it may go out. Never past the frame's budget, and the
 		// budget is a fraction of a frame period, so this can never push the
 		// end of the frame into the next one.
+		//
+		// Parity bytes are not counted into the schedule: the frame's own bytes
+		// still take exactly the window they were given, and the parity rides
+		// alongside. The bitrate accounting already took the overhead out of the
+		// encoder (see apply_bitrate), so the link sees the same rate either way.
 		if (auto at = pacer.wait_until(size_t(begin - data.begin()), os_monotonic_get_ns()))
 			sleep_until_ns(*at);
 	}
+
+	// Last group of the frame, usually a partial one. Emitted even for a group of
+	// a single shard: a one-shard frame is cheap to duplicate in absolute bytes and
+	// losing it costs exactly as much as losing a big one — a frame plus the IDR
+	// round trip it triggers.
+	if (fec_active and end_of_frame)
+		send_parity();
+
 	if (end_of_frame)
 	{
 		cnx->dump_time("send_end", shard.frame_idx, os_monotonic_get_ns(), stream_idx);

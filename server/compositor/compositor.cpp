@@ -1300,6 +1300,25 @@ void compositor::set_pacing(bool enabled, float window)
 	}
 }
 
+void compositor::set_fec(bool enabled)
+{
+	if (fec_enabled == enabled)
+		return;
+
+	fec_enabled = enabled;
+
+	if (enabled)
+		U_LOG_I("Forward error correction enabled, one parity shard per %d video shards", int(wivrn::fec::group_size));
+	else
+		U_LOG_I("Forward error correction disabled");
+
+	for (auto & encoder: encoders)
+	{
+		if (encoder)
+			encoder->set_fec(enabled);
+	}
+}
+
 void compositor::set_framerate(float hz)
 {
 	if (frame_rate.exchange(hz) == hz)

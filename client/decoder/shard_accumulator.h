@@ -46,14 +46,26 @@ class shard_accumulator
 
 public:
 	using data_shard = wivrn::to_headset::video_stream_data_shard;
+	using parity_shard = wivrn::to_headset::video_stream_parity_shard;
 	struct shard_set
 	{
 		size_t min_for_reconstruction = -1;
 		std::vector<std::optional<data_shard>> data;
+		// Parity shards of this frame whose group still has a hole in it. A parity
+		// shard for a group that is already whole is dropped on arrival, so on a
+		// clean link this stays empty and costs nothing.
+		std::vector<parity_shard> parity;
 		void reset(uint64_t frame_index);
 		bool empty() const;
 
 		std::optional<uint16_t> insert(data_shard &&, xr::instance & instance);
+
+		// Rebuild the single missing data shard of `p`'s group, if that is what the
+		// group is short of. Returns its index when one was rebuilt and inserted.
+		std::optional<uint16_t> reconstruct(const parity_shard & p, xr::instance & instance);
+
+		// Whether every data shard `p` covers has arrived, which makes `p` useless
+		bool group_complete(const parity_shard & p) const;
 
 		wivrn::from_headset::feedback feedback{};
 
@@ -75,6 +87,12 @@ private:
 	std::weak_ptr<scenes::stream> weak_scene;
 	xr::instance & instance;
 
+	// Shards rebuilt from parity since the last report, and when that report was
+	// made. Logging every reconstruction would itself become the problem on a link
+	// that is losing packets steadily.
+	uint64_t fec_reconstructed = 0;
+	int64_t fec_last_report = 0;
+
 public:
 	explicit shard_accumulator(
 	        vk::raii::Device & device,
@@ -94,6 +112,7 @@ public:
 	}
 
 	void push_shard(wivrn::to_headset::video_stream_data_shard &&);
+	void push_parity(wivrn::to_headset::video_stream_parity_shard &&);
 
 	vk::Sampler sampler()
 	{
@@ -107,5 +126,17 @@ private:
 	void try_submit_frame(uint16_t shard_idx);
 	void send_feedback(wivrn::from_headset::feedback & feedback);
 	void advance();
+
+	// Try every parity shard `set` is holding and drop the ones that are spent.
+	// Returns the lowest shard index rebuilt, which is where try_submit_frame has
+	// to start looking again.
+	std::optional<uint16_t> drain_parity(shard_set & set);
+	void report_reconstructions();
+
+	// Parity shards one frame may hold on to. Only groups with a hole in them are
+	// kept, so this is only ever reached by a frame that is losing packets wholesale
+	// — at which point the frame is gone anyway and there is no point pinning more
+	// receive buffers for it.
+	static constexpr size_t max_parity_per_frame = 64;
 };
 } // namespace wivrn

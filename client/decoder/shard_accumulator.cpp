@@ -18,9 +18,12 @@
  */
 
 #include "shard_accumulator.h"
+#include "fec.h"
 #include "scenes/stream.h" // IWYU pragma: keep
 #include "spdlog/spdlog.h"
 #include "xr/instance.h"
+
+#include <limits>
 
 namespace wivrn
 {
@@ -28,6 +31,13 @@ namespace wivrn
 using namespace wivrn::to_headset;
 using shard_set = shard_accumulator::shard_set;
 using data_shard = shard_accumulator::data_shard;
+using parity_shard = shard_accumulator::parity_shard;
+
+namespace
+{
+// One line at most every this many nanoseconds, whatever the loss rate
+constexpr int64_t fec_report_period = 10'000'000'000;
+} // namespace
 
 shard_set::shard_set(uint8_t stream_index)
 {
@@ -38,6 +48,7 @@ void shard_set::reset(uint64_t frame_index)
 {
 	min_for_reconstruction = -1;
 	data.clear();
+	parity.clear();
 
 	uint8_t stream_index = feedback.stream_index;
 	feedback = {};
@@ -75,6 +86,46 @@ std::optional<uint16_t> shard_set::insert(data_shard && shard, xr::instance & in
 		return {};
 	data[idx] = std::move(shard);
 	return idx;
+}
+
+std::optional<uint16_t> shard_set::reconstruct(const parity_shard & p, xr::instance & instance)
+{
+	const size_t n = p.blob_size.size();
+	if (n == 0)
+		return {};
+
+	const size_t last = size_t(p.first_shard_idx) + n;
+
+	// A group needs all but one of its shards to be rebuildable, so a parity shard
+	// may only ever tell us about one index past what we already hold. That is also
+	// what keeps a corrupt first_shard_idx from growing `data` without bound.
+	if (data.size() + 1 < last)
+		return {};
+	if (data.size() < last)
+		data.resize(last);
+
+	auto shard = wivrn::fec::reconstruct(p, [this](uint16_t idx) -> const data_shard * {
+		return (idx < data.size() and data[idx]) ? &*data[idx] : nullptr;
+	});
+	if (not shard)
+		return {};
+
+	// Through the normal path: a real copy arriving late afterwards is then simply
+	// a duplicate, which insert() already drops.
+	if (feedback.reconstructed_shards < std::numeric_limits<uint8_t>::max())
+		++feedback.reconstructed_shards;
+	return insert(std::move(*shard), instance);
+}
+
+bool shard_set::group_complete(const parity_shard & p) const
+{
+	const size_t last = size_t(p.first_shard_idx) + p.blob_size.size();
+	if (data.size() < last)
+		return false;
+	for (size_t i = p.first_shard_idx; i < last; ++i)
+		if (not data[i])
+			return false;
+	return true;
 }
 
 static void debug_why_not_sent(const shard_set & shards)
@@ -126,11 +177,16 @@ void shard_accumulator::push_shard(video_stream_data_shard && shard)
 	else if (frame_diff == 0)
 	{
 		auto shard_idx = current.insert(std::move(shard), instance);
+		// The shard that just landed may have been the last one a group was short
+		// of bar one, which is the point at which its parity becomes usable.
+		if (auto rebuilt = drain_parity(current))
+			shard_idx = std::min(shard_idx.value_or(*rebuilt), *rebuilt);
 		try_submit_frame(shard_idx);
 	}
 	else if (frame_diff == 1)
 	{
 		next.insert(std::move(shard), instance);
+		drain_parity(next);
 		if (is_complete(next))
 		{
 			debug_why_not_sent(current);
@@ -161,6 +217,107 @@ void shard_accumulator::push_shard(video_stream_data_shard && shard)
 
 		push_shard(std::move(shard));
 	}
+}
+
+void shard_accumulator::push_parity(video_stream_parity_shard && parity)
+{
+	assert(current.frame_index() + 1 == next.frame_index());
+
+	// A parity shard is never evidence that a frame has started or ended: it only
+	// ever fills a hole in a frame the data shards have already put us on. One that
+	// names any other frame is for a frame we have given up on, or one we have not
+	// reached yet and whose data shards will move us along in their own time.
+	shard_set * set = nullptr;
+	if (parity.frame_idx == current.frame_index())
+		set = &current;
+	else if (parity.frame_idx == next.frame_index())
+		set = &next;
+	else
+		return;
+
+	// Nothing to hold on to for a group that is already whole, which on a link that
+	// is not losing anything is every group.
+	if (set->group_complete(parity) or set->parity.size() >= max_parity_per_frame)
+		return;
+
+	set->parity.push_back(std::move(parity));
+
+	if (set == &current)
+	{
+		if (auto rebuilt = drain_parity(current))
+			try_submit_frame(*rebuilt);
+		return;
+	}
+
+	drain_parity(next);
+	if (is_complete(next))
+	{
+		debug_why_not_sent(current);
+		send_feedback(current.feedback);
+
+		advance();
+
+		try_submit_frame(0);
+	}
+}
+
+std::optional<uint16_t> shard_accumulator::drain_parity(shard_set & set)
+{
+	if (set.parity.empty())
+		return {};
+
+	std::optional<uint16_t> rebuilt;
+
+	// Groups are disjoint, so rebuilding in one of them can never unblock another:
+	// a single pass is enough.
+	size_t kept = 0;
+	for (size_t i = 0; i < set.parity.size(); ++i)
+	{
+		parity_shard & p = set.parity[i];
+
+		// Spent: either the group filled up on its own or we have just filled it
+		if (set.group_complete(p))
+			continue;
+
+		if (auto idx = set.reconstruct(p, instance))
+		{
+			++fec_reconstructed;
+			rebuilt = std::min(rebuilt.value_or(*idx), *idx);
+			continue;
+		}
+
+		if (kept != i)
+			set.parity[kept] = std::move(p);
+		++kept;
+	}
+	set.parity.resize(kept);
+
+	report_reconstructions();
+	return rebuilt;
+}
+
+void shard_accumulator::report_reconstructions()
+{
+	if (fec_reconstructed == 0)
+		return;
+
+	const int64_t now = instance.now();
+	if (fec_last_report == 0)
+	{
+		// First one: open the window rather than log a report covering no time
+		fec_last_report = now;
+		return;
+	}
+	if (now - fec_last_report < fec_report_period)
+		return;
+
+	spdlog::info("Stream {}: rebuilt {} lost video shard(s) from parity over the last {:.0f} s",
+	             current.feedback.stream_index,
+	             fec_reconstructed,
+	             (now - fec_last_report) / 1e9);
+
+	fec_reconstructed = 0;
+	fec_last_report = now;
 }
 
 void shard_accumulator::try_submit_frame(std::optional<uint16_t> shard_idx)

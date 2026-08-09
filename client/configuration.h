@@ -87,6 +87,12 @@ public:
 	// buffer is never asked to swallow a whole frame at once
 	bool smooth_pacing = true;
 
+	// Ask the server to send a parity shard per group of video shards, so that a
+	// datagram the Wi-Fi drops is rebuilt here instead of costing the whole frame
+	// and the keyframe round trip that follows it. Costs about 12% of the video
+	// bandwidth, which the server takes out of the encoder rather than adding on top.
+	bool fec = true;
+
 	// Mark both ends' sockets with a DSCP class, which access points map to the
 	// WMM access categories. Off is for the networks that mangle marked traffic.
 	bool wifi_qos = true;

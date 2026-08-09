@@ -82,6 +82,18 @@ void scenes::stream::operator()(to_headset::video_stream_data_shard && shard)
 	decoders[idx].decoder->push_shard(std::move(shard));
 }
 
+void scenes::stream::operator()(to_headset::video_stream_parity_shard && parity)
+{
+	std::shared_lock lock(decoder_mutex);
+	uint8_t idx = parity.stream_item_idx;
+	if (idx >= decoders.size() or not decoders[idx].decoder)
+	{
+		// We don't know (yet?) about this stream, ignore packet
+		return;
+	}
+	decoders[idx].decoder->push_parity(std::move(parity));
+}
+
 void scenes::stream::operator()(to_headset::motion_field && chunk)
 {
 	// A field arrives as several chunks; only a complete one is ever warped along.

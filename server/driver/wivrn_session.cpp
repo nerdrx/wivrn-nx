@@ -144,6 +144,10 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 	pacing_conf = conf.pacing;
 	compositor.set_pacing(pacing_conf.enabled and get_info().settings.smooth_pacing, pacing_conf.window);
 	connection->set_qos(get_info().settings.wifi_qos);
+	// No server configuration key: the group size is a constant and the overhead is
+	// paid out of the bitrate the headset already chose, so the headset toggle is
+	// the only thing worth having.
+	compositor.set_fec(get_info().settings.fec);
 
 	multipath_usb_max_bitrate = conf.multipath.usb_max_bitrate_bps;
 	connection->set_path_switch_callback([this](bool on_secondary, std::string_view reason) {
@@ -531,6 +535,7 @@ void wivrn_session::operator()(const from_headset::settings_changed & settings)
 	// Both switches must be on, same as the automatic bitrate
 	compositor.set_pacing(pacing_conf.enabled and settings.smooth_pacing, pacing_conf.window);
 	connection->set_qos(settings.wifi_qos);
+	compositor.set_fec(settings.fec);
 
 	if (settings.preferred_refresh_rate != 0)
 		compositor.set_framerate(settings.preferred_refresh_rate / settings.fps_divider);

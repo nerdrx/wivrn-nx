@@ -397,6 +397,7 @@ static void send_settings_changed_packet(xr::session & session, wivrn_session * 
 	                .bitrate_auto = config.bitrate_auto,
 	                .radio_aware = config.radio_aware,
 	                .smooth_pacing = config.smooth_pacing,
+	                .fec = config.fec,
 	                .wifi_qos = config.wifi_qos,
 	                .sharp_text = config.sharp_text,
 	                .motion_smoothing = config.motion_smoothing,

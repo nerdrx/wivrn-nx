@@ -20,6 +20,7 @@
 #pragma once
 
 #include "driver/clock_offset.h"
+#include "fec.h"
 #include "idr_handler.h"
 #include "shard_pacer.h"
 #include "wivrn_packets.h"
@@ -140,6 +141,22 @@ private:
 
 	std::shared_ptr<sender> shared_sender;
 
+	// --- Forward error correction -------------------------------------------
+	// Headset toggle, read by the sender thread. Parity is only ever produced for
+	// shards that actually ride the UDP stream socket, see SendData.
+	std::atomic<bool> fec_enabled = false;
+	// Open group of the frame being sent. Only touched under `mutex`.
+	fec::group_builder fec_group;
+	// Bitrate the controller last asked for, before the encoder's share and the
+	// parity overhead are taken out of it. Kept so that toggling FEC can re-derive
+	// the encoder bitrate without waiting for the controller to move.
+	std::atomic_uint32_t requested_bitrate = 0;
+
+	void apply_bitrate();
+	// Send the open group's parity shard, if there is one, and open the next group.
+	// Called with `mutex` held.
+	void send_parity();
+
 	// --- Packet pacing ------------------------------------------------------
 	// Effective state: the headset toggle and the server configuration must
 	// both allow it. Read by the sender thread, written by the network thread.
@@ -178,6 +195,12 @@ public:
 	// Spread this encoder's shards over `window` of a frame period instead of
 	// handing them to the socket as fast as the kernel takes them. Live.
 	void set_pacing(bool enabled, float window);
+
+	// Send a parity shard per group of video shards so that the headset can rebuild
+	// a lost one. Live, and re-derives the encoder bitrate: the parity rides the
+	// same link, so the encoder gets fec::data_share of what the controller asked
+	// for and the total on the wire is unchanged.
+	void set_fec(bool enabled);
 
 	void encode(wivrn_session & cnx,
 	            const to_headset::video_stream_data_shard::view_info_t & view_info,

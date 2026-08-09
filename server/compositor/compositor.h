@@ -142,6 +142,8 @@ private:
 	// change from the repeated calls a settings_changed packet produces
 	bool pacing_enabled = false;
 	float pacing_window = 0;
+	// Same story for forward error correction
+	bool fec_enabled = false;
 
 	// Separate streaming of one overlay quad layer. Null unless the headset asked
 	// for it when the session was set up, in which case the layer is picked afresh
@@ -284,6 +286,10 @@ public:
 	// Packet pacing: spread each frame's shards over `window` of a frame period
 	// instead of handing them to the socket in one burst. Logs state changes.
 	void set_pacing(bool enabled, float window);
+
+	// Forward error correction: add a parity shard per group of video shards so
+	// that the headset rebuilds a lost one. Logs state changes.
+	void set_fec(bool enabled);
 	void update_tracking(const from_headset::tracking &);
 	void update_foveation_center_override(const from_headset::override_foveation_center &);
 

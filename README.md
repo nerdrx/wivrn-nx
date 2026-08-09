@@ -46,6 +46,19 @@ headset WiVRn supports.
   never delays the control socket (IDRs and their parameter sets), never runs while the USB path
   carries video, and gives the window back when the encoder delivers late. Config key `pacing`
   (`window`, default 0.4).
+- **Error correction (FEC)** *(toggle, default on)* — a single dropped datagram used to cost the
+  whole frame *and* the keyframe round trip that followed it, which is why one lost packet shows
+  up as a visible hitch rather than a smudge. NX sends a parity shard after every group of 8
+  video shards; the headset XORs the group back together and rebuilds the missing one, in time
+  for the frame it belongs to. The parity covers the shard's pose and timing information as well
+  as its picture data, so the first and last shards of a frame — the two without which a frame
+  cannot be submitted at all — recover like any other, and the parity shard is what tells the
+  headset a lost *last* shard existed in the first place. Each group's parity goes out with its
+  own micro-burst rather than in one tail burst, so a hiccup cannot swallow a whole frame's
+  protection. Costs ~12%, which is taken *out of* the encoder bitrate rather than added on top:
+  the total on the wire stays exactly where the bitrate controller put it, and a rebuilt frame is
+  never counted as lost. XOR recovers one loss per group, which is the common case; a burst-
+  tolerant code over the same groups is a v2 item. No server configuration.
 - **Wi-Fi QoS priority** *(toggle, default on)* — both ends mark their sockets with a DSCP class,
   which access points map to the WMM access categories: the server's video stream gets AF41 (AC_VI),
   every socket carrying control, tracking, inputs and feedback gets EF (AC_VO), so a tracking packet
@@ -104,7 +117,7 @@ identity everywhere: application ID `org.meumeu.wivrn.nx`, app name "WiVRn NX", 
 
 ## Roadmap (in active development)
 
-Forward error correction (parity shards — lost packets reconstruct client-side) · audio on the
+Reed-Solomon parity (burst-tolerant, on the same groups as the XOR above) · audio on the
 loss-tolerant path with concealment · hardware-encoder failover to x264 · BBR-style bitrate
 control v2 · an in-headset transport HUD.
 Design documents live in

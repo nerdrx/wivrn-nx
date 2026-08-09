@@ -269,6 +269,7 @@ public:
 	void operator()(to_headset::path_pong &&);
 	void operator()(to_headset::server_message &&);
 	void operator()(to_headset::video_stream_data_shard &&);
+	void operator()(to_headset::video_stream_parity_shard &&);
 	void operator()(to_headset::motion_field &&);
 	void operator()(to_headset::haptics &&);
 	void operator()(to_headset::timesync_query &&);

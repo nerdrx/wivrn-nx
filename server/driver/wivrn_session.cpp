@@ -144,7 +144,9 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 	// Same story for packet pacing and for the QoS marks
 	pacing_conf = conf.pacing;
 	set_pacing(get_info().settings.smooth_pacing);
-	connection->set_qos(get_info().settings.wifi_qos);
+	// this-> is required: the constructor parameter `connection` shadows the
+	// member here and was moved from into the member in the initializer list.
+	this->connection->set_qos(get_info().settings.wifi_qos);
 	// No server configuration key: the group size is a constant and the overhead is
 	// paid out of the bitrate the headset already chose, so the headset toggle is
 	// the only thing worth having.
@@ -156,7 +158,7 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 	compositor.set_encoder_failover(encoder_failover_conf and get_info().settings.encoder_failover);
 
 	multipath_usb_max_bitrate = conf.multipath.usb_max_bitrate_bps;
-	connection->set_path_switch_callback([this](bool on_secondary, std::string_view reason) {
+	this->connection->set_path_switch_callback([this](bool on_secondary, std::string_view reason) {
 		on_path_switch(on_secondary, reason);
 	});
 

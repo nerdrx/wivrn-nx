@@ -21,6 +21,7 @@
 
 #include "app_launcher.h"
 #include "audio/audio.h"
+#include "constants.h"
 #include "decoder/shard_accumulator.h"
 #include "render/imgui_impl.h"
 #include "scene.h"
@@ -188,6 +189,37 @@ private:
 	// names, so a lost or late chunk just means no smoothing until the next
 	// application frame.
 	thread_safe<wivrn::motion_field_assembler> motion_field;
+	// When a complete field last arrived, and how many have. Only the Transport page reads
+	// them; the warp itself works off the assembler.
+	std::atomic<XrTime> motion_field_last = 0;
+	std::atomic<uint64_t> motion_field_count = 0;
+
+	// --- Transport page ---------------------------------------------------------------
+	// Server side transport state, refreshed at wivrn::transport_status_interval while the
+	// page holds a subscription and left alone afterwards; transport_status_received dates
+	// it so the page can say "no answer" rather than show numbers that stopped moving.
+	thread_safe<std::optional<to_headset::transport_status>> transport_status;
+	std::atomic<XrTime> transport_status_received = 0;
+	// When the subscription is next renewed. Render thread only, 0 while not subscribed.
+	XrTime transport_status_next_req = 0;
+
+	// Frames that never reached the decoder, which is exactly what makes the server force
+	// an IDR: the headset never asks for one, it reports the hole and the server decides.
+	std::atomic<uint64_t> incomplete_frames = 0;
+
+	// Last reading of the headset's own Wi-Fi radio. The server keeps a trend of its own to
+	// drive the bitrate; this one is local because a trend that has crossed the link is a
+	// trend about the past, and because the page must still work with the radio-aware
+	// bitrate switched off.
+	std::atomic<bool> radio_valid = false;
+	std::atomic<int32_t> radio_rssi_dbm = 0;
+	std::atomic<int32_t> radio_link_speed_mbps = 0;
+	// Fast and slow exponential averages of the RSSI; their difference is the direction the
+	// signal is moving, which is all an arrow needs.
+	std::atomic<float> radio_rssi_fast = 0;
+	std::atomic<float> radio_rssi_slow = 0;
+	// Fold one radio reading in. Tracking thread.
+	void on_wifi_sample(bool valid, int rssi_dbm, int link_speed_mbps);
 
 	// Tab currently being displayed
 	stream_tab gui_status = stream_tab::hidden;
@@ -279,6 +311,7 @@ public:
 	void operator()(to_headset::video_stream_description &&);
 	void operator()(to_headset::refresh_rate_change &&);
 	void operator()(to_headset::stream_tab_change &&);
+	void operator()(to_headset::transport_status &&);
 	void operator()(to_headset::application_list &&);
 	void operator()(to_headset::application_icon &&);
 	void operator()(to_headset::running_applications &&);
@@ -369,11 +402,32 @@ private:
 		float predicted_display;
 	};
 
+	// One sample per constants::stream::transport_sample_period, for the Transport page's
+	// plots. Kept apart from global_metrics: those are per displayed frame, these are on a
+	// wall clock so that 60 s of history is 60 s whatever the framerate does.
+	struct transport_metric
+	{
+		float video_bps = 0;    // measured, from the bytes the sockets actually took in
+		float setpoint_bps = 0; // what the server last said it was encoding at
+		float primary_rtt_s = 0;
+		float secondary_rtt_s = 0;
+		float fec_per_s = 0;       // shards rebuilt from parity
+		float conceal_per_min = 0; // audio gaps papered over
+	};
+
 	std::vector<global_metric> global_metrics{300};
 	std::vector<std::vector<decoder_metric>> decoder_metrics;
 	std::vector<float> axis_scale;
 	XrTime last_metric_time = 0;
 	int metrics_offset = 0;
+
+	std::vector<transport_metric> transport_metrics{constants::stream::transport_history};
+	int transport_offset = 0;
+	XrTime transport_last_sample = 0;
+	uint64_t transport_bytes_received = 0;
+	uint64_t transport_reconstructed = 0;
+	uint64_t transport_concealments = 0;
+	std::vector<float> transport_axis_scale;
 
 	// Used for compact view
 	float compact_bandwidth_rx = 0;
@@ -382,7 +436,10 @@ private:
 	float compact_gpu_time = 0;
 
 	void accumulate_metrics(XrTime predicted_display_time, const std::array<std::shared_ptr<wivrn::shard_accumulator::blit_handle>, decoder_count> & blit_handles, const gpu_timestamps & timestamps);
+	// Wall clock sampling behind the Transport page's plots, driven from accumulate_metrics
+	void accumulate_transport_metrics(XrTime predicted_display_time);
 	void gui_performance_metrics();
+	void gui_transport();
 	void gui_compact_view();
 	void gui_settings(float predicted_display_period);
 	void gui_bitrate_settings(float predicted_display_period);

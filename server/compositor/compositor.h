@@ -163,13 +163,18 @@ private:
 	// whatever displays state in the headset), and exported to the debug GUI.
 	std::atomic<bool> software_fallback = false;
 	bool software_fallback_var = false;
+	// Same thing per stream, one bit per index, for the headset's Transport page: which
+	// eye lost its hardware encoder is the part a user can act on.
+	std::atomic<uint8_t> software_fallback_mask = 0;
 
-	// Packet pacing, mirrored here only so that set_pacing can tell a real
-	// change from the repeated calls a settings_changed packet produces
-	bool pacing_enabled = false;
-	float pacing_window = 0;
+	// Packet pacing, mirrored here so that set_pacing can tell a real change from the
+	// repeated calls a settings_changed packet produces, and so that the transport status
+	// packet can report it. Atomic for the latter: the setters run on the network thread
+	// and the status is assembled on the worker thread.
+	std::atomic<bool> pacing_enabled = false;
+	std::atomic<float> pacing_window = 0;
 	// Same story for forward error correction
-	bool fec_enabled = false;
+	std::atomic<bool> fec_enabled = false;
 
 	// Separate streaming of one overlay quad layer. Null unless the headset asked
 	// for it when the session was set up, in which case the layer is picked afresh
@@ -340,6 +345,25 @@ public:
 	{
 		return software_fallback;
 	}
+
+	// The same, one bit per stream index. Sticky for the session, like the failover.
+	uint8_t software_encoders() const
+	{
+		return software_fallback_mask;
+	}
+
+	// Live state of the two per-frame transport switches, for the headset's Transport
+	// page. Both are what the encoders were last told, which is the headset toggle ANDed
+	// with the server's own configuration.
+	bool fec_active() const
+	{
+		return fec_enabled;
+	}
+	bool pacing_active() const
+	{
+		return pacing_enabled and pacing_window > 0;
+	}
+
 	void update_tracking(const from_headset::tracking &);
 	void update_foveation_center_override(const from_headset::override_foveation_center &);
 

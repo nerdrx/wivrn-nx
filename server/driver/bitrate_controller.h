@@ -378,6 +378,20 @@ public:
 	// Control law actually in force.
 	mode active_mode() const;
 
+	// Everything the headset's Transport page shows about the bitrate control, read in one
+	// go under the controller's own mutex so that the fields agree with each other rather
+	// than being stitched together from separate accessors racing the evaluator.
+	struct status
+	{
+		uint32_t bitrate_bps = 0;
+		uint32_t ceiling_bps = 0;
+		mode control = mode::aimd;
+		to_headset::transport_status::controller_state state =
+		        to_headset::transport_status::controller_state::off;
+		bool radio_hold = false;
+	};
+	status snapshot() const;
+
 	// The pacing window currently in force, as a fraction of a frame period, or 0 when the
 	// video shards are not paced. Only the v2 estimator uses it, to tell a frame that filled
 	// its paced window from one that was over in a single micro-burst.

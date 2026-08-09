@@ -208,6 +208,10 @@ enum class stream_tab : uint8_t
 	overlay_only,
 	compact,
 	stats,
+	// NX transport HUD: the state of every transport feature, live. Its own wire tab
+	// rather than a client-side sub-page of stats, because the server has to know it is
+	// open — see to_headset::transport_status.
+	transport,
 	settings,
 	foveation_settings,
 	applications,
@@ -262,6 +266,16 @@ enum class bitrate_mode : uint8_t
 	aimd = 0,
 	bbr = 1,
 };
+
+// Cadence of the transport status feed: how often the server sends
+// to_headset::transport_status while subscribed, how often the headset renews the
+// subscription, and how long the server keeps sending without a renewal.
+//
+// The refresh is comfortably shorter than the timeout so that one lost renewal (it rides
+// the control socket, so it takes a disconnect rather than a drop) does not blink the page.
+inline constexpr std::chrono::milliseconds transport_status_interval{500};
+inline constexpr std::chrono::milliseconds transport_status_refresh{2000};
+inline constexpr std::chrono::milliseconds transport_status_timeout{5000};
 
 namespace from_headset
 {
@@ -798,6 +812,20 @@ struct stream_tab_changed
 	stream_tab tab;
 };
 
+// Subscription to to_headset::transport_status, the feed behind the headset's Transport
+// page. Nothing else consumes it, so it is not streamed while nobody is looking: the page
+// sends this with active true when it opens and every transport_status_refresh while it
+// stays open, and with active false when it closes.
+//
+// The repeat is not redundancy, it is the lease: the server stops after
+// transport_status_timeout without one. A headset that crashes, disconnects mid-frame or
+// simply forgets to unsubscribe therefore costs at most one timeout of chatter, and the
+// unsubscribe is only an optimisation on top of it.
+struct transport_status_subscribe
+{
+	bool active;
+};
+
 struct override_foveation_center
 {
 	bool enabled;
@@ -858,6 +886,7 @@ using packets = std::variant<
         session_state_changed,
         user_presence_changed,
         stream_tab_changed,
+        transport_status_subscribe,
         override_foveation_center,
         get_application_list,
         start_app,
@@ -1228,6 +1257,67 @@ struct stream_tab_change
 	stream_tab tab;
 };
 
+// Everything the headset's Transport page needs that only the server can know, in one
+// packet at transport_status_interval while subscribed (from_headset::transport_status_subscribe).
+//
+// Deliberately small and deliberately incomplete: anything the headset can measure for
+// itself — RTT, its own Wi-Fi radio, received bandwidth, FEC repairs, decode timings — is
+// measured on the headset and never asked for here, because a number that has crossed the
+// link is a number about the past. What is left is the server's own decisions.
+struct transport_status
+{
+	// What the automatic bitrate controller is doing. off means it is not running at all
+	// and the bitrate is exactly the one the headset asked for; the rest name the state of
+	// whichever control law is in force (mode says which).
+	enum class controller_state : uint8_t
+	{
+		off,
+		// aimd: slow additive probing around the current value
+		// bbr: cruising at the steady gain on the bandwidth estimate
+		steady,
+		// aimd only: below a remembered pre-drop bitrate after a deep drop, rebounding
+		recovering,
+		// bbr only: still growing the bandwidth estimate
+		startup,
+		// bbr only: a short probe above the estimate
+		probe,
+	};
+
+	// Which path the server is putting video on, and whether it has a choice.
+	enum class path_state : uint8_t
+	{
+		// No secondary path attached: Wi-Fi, and nothing to fail over to
+		wifi_only,
+		// USB attached and idle, Wi-Fi still carries video
+		wifi_usb_ready,
+		// Video flipped to the USB path
+		usb,
+	};
+
+	// Bitrate the encoders are running at, and the ceiling in force: the one the headset
+	// asked for, clamped by the path's own limit when the USB path carries video.
+	uint32_t bitrate_bps;
+	uint32_t ceiling_bps;
+
+	bitrate_mode mode;
+	controller_state state;
+	path_state path;
+
+	// The radio trend took a preemptive step down and has not released it: upward probing
+	// is held off until the signal recovers or the reports go stale.
+	bool radio_hold;
+	// Shards are being spread over a fraction of the frame period rather than burst.
+	bool pacing_active;
+	// A parity shard is going out per group of video shards.
+	bool fec_active;
+
+	// Bit per video stream index, set when that stream failed over to the software
+	// encoder. Sticky for the session, like the failover itself. A clear bit means
+	// hardware, which is also what a stream that does not exist reads as — the headset
+	// only draws a row for a stream it has a decoder for.
+	uint8_t software_encoders;
+};
+
 struct application_list
 {
 	std::string language;
@@ -1279,6 +1369,7 @@ using packets = std::variant<
         feature_control,
         refresh_rate_change,
         stream_tab_change,
+        transport_status,
         application_list,
         application_icon,
         running_applications>;

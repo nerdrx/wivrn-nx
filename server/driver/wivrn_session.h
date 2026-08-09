@@ -121,6 +121,15 @@ class wivrn_session : public xrt_system_devices
 	clock_offset_estimator offset_est;
 	std::atomic<XrDuration> tracking_latency; // production to reception time
 
+	// Transport status feed, for the headset's Transport page. The deadline is a lease
+	// rather than a flag: the page renews it while it is open and the feed stops on its
+	// own once it lapses, so a headset that goes away mid-session cannot leave it running.
+	// Written from the network thread by the subscribe handler, read from the worker
+	// thread; steady_clock nanoseconds since the epoch, 0 while nobody is subscribed.
+	std::atomic<int64_t> transport_status_until = 0;
+	// Worker thread only
+	std::chrono::steady_clock::time_point transport_status_next{};
+
 	std::mutex csv_mutex;
 	std::ofstream feedback_csv;
 
@@ -199,6 +208,7 @@ public:
 	void operator()(from_headset::user_presence_changed &&);
 	void operator()(from_headset::refresh_rate_changed &&);
 	void operator()(from_headset::stream_tab_changed &&);
+	void operator()(from_headset::transport_status_subscribe &&);
 	void operator()(from_headset::override_foveation_center &&);
 	void operator()(from_headset::get_application_list &&);
 	void operator()(const from_headset::start_app &);
@@ -263,6 +273,10 @@ private:
 	// The path carrying video and control changed (multipath failover). Called
 	// from the network thread.
 	void on_path_switch(bool on_secondary, std::string_view reason);
+
+	// Assemble and send one to_headset::transport_status, if the subscription lease is
+	// still valid. Worker thread.
+	void send_transport_status();
 
 	void update_client_states(bool visible, bool focused);
 	void poll_session_loss();

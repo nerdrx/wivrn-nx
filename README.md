@@ -96,6 +96,17 @@ headset WiVRn supports.
   refreshes the game produced nothing for. Rotation was already smooth; this smooths position,
   animation and hands too. Frames are never dropped or held to a fixed cadence in the first
   place — NX free-runs the app and takes every real frame it can produce.
+- **Transport page** — a page in the in-headset overlay, next to *Statistics*, showing the whole
+  stack above live: which path is carrying video and the round trip time of each, Wi-Fi signal
+  with a trend arrow and whether the QoS marks are on, the bitrate the server is actually
+  encoding at with the control law and the state it is in, the ceiling, and a 60 s history of
+  that setpoint against what really arrives; parity repairs per second, frames lost and audio
+  gaps concealed; the codec of each stream with a software-encoder fallback called out in
+  warning colour; and whether motion smoothing is warping right now. Everything the headset can
+  measure for itself it measures for itself — a number that has crossed the link is a number
+  about the past — and the server reports the rest twice a second on a lease the page renews
+  while it is open and which lapses a few seconds after it closes, so nothing is streamed to a
+  page nobody is looking at. No toggle: opening the page is the toggle.
 
 ## Multipath: USB backup with seamless failover
 
@@ -141,8 +152,7 @@ identity everywhere: application ID `org.meumeu.wivrn.nx`, app name "WiVRn NX", 
 
 ## Roadmap (in active development)
 
-Reed-Solomon parity (burst-tolerant, on the same groups as the XOR above) · an in-headset
-transport HUD.
+Reed-Solomon parity (burst-tolerant, on the same groups as the XOR above).
 Design documents live in
 [docs/](docs/): [multipath](docs/multipath.md), [frame extrapolation](docs/frame-extrapolation.md),
 [quad layers](docs/quad-layers.md).

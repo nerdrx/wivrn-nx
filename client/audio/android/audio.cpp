@@ -323,6 +323,7 @@ void wivrn::android::audio::operator()(wivrn::audio_data && data)
 			// callback pulls from the same ring and cannot tell the difference,
 			// and the ring's own depth still absorbs the jitter
 			const size_t size = r.concealment.size();
+			concealments.fetch_add(1, std::memory_order_relaxed);
 			wivrn::audio_data filler;
 			// It plays out immediately before the packet that revealed the gap
 			filler.timestamp = data.timestamp - speaker_plc.ns_for(size);

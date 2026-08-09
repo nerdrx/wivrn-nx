@@ -96,6 +96,53 @@ bitrate_controller::mode bitrate_controller::active_mode() const
 	return mode_locked();
 }
 
+bitrate_controller::status bitrate_controller::snapshot() const
+{
+	using controller_state = to_headset::transport_status::controller_state;
+
+	std::lock_guard lock(mutex);
+
+	status s{
+	        .bitrate_bps = bitrate,
+	        .ceiling_bps = effective_ceiling(),
+	        .control = mode_locked(),
+	};
+
+	if (not(conf.enabled and client_enabled))
+	{
+		// Nothing is controlling anything: the bitrate is the one the headset set, and
+		// neither state machine has any meaning to report.
+		s.state = controller_state::off;
+		return s;
+	}
+
+	if (s.control == mode::bbr)
+	{
+		switch (bbr_st)
+		{
+			case bbr_state::startup:
+				s.state = controller_state::startup;
+				break;
+			case bbr_state::steady:
+				s.state = controller_state::steady;
+				break;
+			case bbr_state::probe:
+				s.state = controller_state::probe;
+				break;
+		}
+	}
+	else
+	{
+		s.state = st == state::recovering ? controller_state::recovering : controller_state::steady;
+	}
+
+	// The hold is a latch that outlives the switch being turned off; it only holds anything
+	// back while the switch is on, so that is what the page is told.
+	s.radio_hold = radio_hold and radio_aware;
+
+	return s;
+}
+
 std::optional<uint32_t> bitrate_controller::set_client_mode(std::optional<mode> m)
 {
 	std::lock_guard lock(mutex);

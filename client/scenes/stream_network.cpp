@@ -97,7 +97,17 @@ void scenes::stream::operator()(to_headset::video_stream_parity_shard && parity)
 void scenes::stream::operator()(to_headset::motion_field && chunk)
 {
 	// A field arrives as several chunks; only a complete one is ever warped along.
-	motion_field.lock()->add(chunk);
+	auto field = motion_field.lock();
+	const bool was_complete = field->complete();
+	field->add(chunk);
+
+	// Count the chunk that completed a field, not every chunk: a field the link tore in
+	// half is not one the warp can use, and the Transport page is there to show that.
+	if (field->complete() and not was_complete)
+	{
+		motion_field_last = instance.now();
+		++motion_field_count;
+	}
 }
 
 void scenes::stream::operator()(to_headset::feature_control && control)
@@ -149,6 +159,14 @@ void scenes::stream::operator()(to_headset::stream_tab_change && tab)
 	next_gui_status = tab.tab;
 }
 
+void scenes::stream::operator()(to_headset::transport_status && status)
+{
+	// Arrives only while the Transport page holds a subscription. Dated on arrival: a feed
+	// that stops has to look different from one reporting unchanging numbers.
+	*transport_status.lock() = std::move(status);
+	transport_status_received = instance.now();
+}
+
 void scenes::stream::operator()(to_headset::timesync_query && query)
 {
 	network_session->send_stream(from_headset::timesync_response{
@@ -193,6 +211,12 @@ void scenes::stream::operator()(audio_data && data)
 
 void scenes::stream::send_feedback(const wivrn::from_headset::feedback & feedback)
 {
+	// A frame reported without a sent_to_decoder time never made it out of the accumulator,
+	// and that report is exactly what makes the server force an IDR on this stream. The
+	// headset never asks for one, so this is the only count of them it can keep.
+	if (feedback.sent_to_decoder == 0)
+		++incomplete_frames;
+
 	try
 	{
 		network_session->send_control(wivrn::from_headset::feedback{feedback});

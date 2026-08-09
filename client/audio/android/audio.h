@@ -65,6 +65,9 @@ class audio
 	uint16_t mic_seq = 0;
 	// Sequence tracking and concealment for the speaker, network thread only
 	wivrn::audio_plc speaker_plc;
+	// Gaps in the speaker stream the concealer has papered over since the session
+	// started. Monotonic; the Transport page differences it into a rate.
+	std::atomic<uint64_t> concealments = 0;
 
 	wivrn::audio_data speaker_tmp;
 	AAudioStreamStruct * speaker = nullptr;
@@ -96,6 +99,13 @@ public:
 	// the control socket. What the server sends is its own decision, driven by the
 	// same setting through settings_changed.
 	void set_low_latency(bool enabled);
+
+	// Gaps in the received speaker stream that packet loss concealment filled in,
+	// since the session started. Monotonic, readable from any thread.
+	uint64_t concealment_events() const
+	{
+		return concealments;
+	}
 
 	static void get_audio_description(wivrn::from_headset::headset_info_packet & info);
 };

@@ -152,6 +152,21 @@ constexpr float gui_max_foveation_distance = 100;
 constexpr float gui_min_foveation_pitch = -M_PI / 3;
 constexpr float gui_max_foveation_pitch = M_PI / 3;
 
+// Transport page: one sample every transport_sample_period, transport_history of them,
+// which is the 60 s of history the plots show. The period matches the cadence the server
+// sends its own status at, so a plotted setpoint step lands on one sample rather than
+// being smeared over two.
+constexpr XrDuration transport_sample_period = 500'000'000;
+constexpr size_t transport_history = 120;
+// A radio trend below this many dB between the fast and slow average is noise, not the
+// user walking somewhere. The two averages are fed at the 1 Hz the radio is sampled at.
+constexpr float radio_trend_deadband_db = 0.8;
+constexpr float radio_fast_alpha = 0.5;
+constexpr float radio_slow_alpha = 0.08;
+// A status packet older than this means the server stopped answering: the page says so
+// rather than showing numbers that have quietly stopped moving.
+constexpr XrDuration transport_status_stale = 3'000'000'000;
+
 constexpr float gui_max_layer_speed = 10; // Maximum speed (@ 1m) when changing the GUI distance with the thumbstick
 constexpr float gui_min_layer_distance = 0.5;
 constexpr float gui_max_layer_distance = 3;

@@ -282,6 +282,7 @@ std::optional<uint16_t> shard_accumulator::drain_parity(shard_set & set)
 		if (auto idx = set.reconstruct(p, instance))
 		{
 			++fec_reconstructed;
+			++fec_reconstructed_total;
 			rebuilt = std::min(rebuilt.value_or(*idx), *idx);
 			continue;
 		}

@@ -833,6 +833,7 @@ bool scenes::stream::is_interactable(stream_tab tab)
 	switch (tab)
 	{
 		case stream_tab::stats:
+		case stream_tab::transport:
 		case stream_tab::settings:
 		case stream_tab::foveation_settings:
 		case stream_tab::applications:
@@ -1136,6 +1137,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 				dimming = dimming - frame_state.predictedDisplayPeriod / (1e9 * constants::stream::fade_duration);
 				break;
 			case stream_tab::stats:
+			case stream_tab::transport:
 			case stream_tab::settings:
 			case stream_tab::applications:
 			case stream_tab::application_launcher:

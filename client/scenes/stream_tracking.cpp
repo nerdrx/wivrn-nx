@@ -568,9 +568,14 @@ void scenes::stream::tracking()
 			// sample out on its own after a few seconds.
 			if (next_wifi_check < now)
 			{
+				// Read whether or not it is reported: the Transport page shows the
+				// radio even with the radio-aware bitrate switched off, and the read
+				// itself is a couple of JNI calls.
+				auto status = get_wifi_status();
+				on_wifi_sample(status.valid, status.rssi_dbm, status.link_speed_mbps);
+
 				if (config.radio_aware and not network_session->sending_on_secondary())
 				{
-					auto status = get_wifi_status();
 					network_session->send_control(from_headset::wifi_state{
 					        .valid = status.valid,
 					        .rssi_dbm = int8_t(status.rssi_dbm),

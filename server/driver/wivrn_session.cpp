@@ -992,6 +992,46 @@ void wivrn_session::operator()(from_headset::stream_tab_changed && event)
 	send_to_main(std::move(event));
 }
 
+void wivrn_session::operator()(from_headset::transport_status_subscribe && request)
+{
+	// A lease, not a flag: the page renews it every transport_status_refresh and the feed
+	// lapses transport_status_timeout after the last renewal. Unsubscribing is only the
+	// fast path for the common case of the page being closed cleanly.
+	if (request.active)
+		transport_status_until = (std::chrono::steady_clock::now() + transport_status_timeout).time_since_epoch().count();
+	else
+		transport_status_until = 0;
+}
+
+void wivrn_session::send_transport_status()
+{
+	const int64_t until = transport_status_until;
+	if (until == 0 or std::chrono::steady_clock::now().time_since_epoch().count() >= until)
+		return;
+
+	const auto bitrate = bitrate_ctl.snapshot();
+
+	using path_state = to_headset::transport_status::path_state;
+	const bool on_secondary = connection->video_on_secondary();
+	const path_state path = on_secondary                  ? path_state::usb
+	                        : connection->has_secondary() ? path_state::wifi_usb_ready
+	                                                      : path_state::wifi_only;
+
+	connection->send_control(to_headset::transport_status{
+	        .bitrate_bps = bitrate.bitrate_bps,
+	        .ceiling_bps = bitrate.ceiling_bps,
+	        .mode = bitrate.control,
+	        .state = bitrate.state,
+	        .path = path,
+	        .radio_hold = bitrate.radio_hold,
+	        // The pacer stands down whenever the shards are not riding the UDP stream
+	        // socket, so the switch being on is not the same as pacing happening.
+	        .pacing_active = compositor.pacing_active() and connection->has_stream() and not on_secondary,
+	        .fec_active = compositor.fec_active(),
+	        .software_encoders = compositor.software_encoders(),
+	});
+}
+
 void wivrn_session::operator()(from_headset::get_application_list && request)
 {
 	to_headset::application_list response{
@@ -1240,9 +1280,15 @@ void wivrn_session::run_worker(std::stop_token stop)
 			                refresh.next,
 			                control.next,
 			                offset_est.next(),
+			                transport_status_next,
 			        }));
 			auto now = std::chrono::steady_clock::now();
 			offset_est.request_sample(now, *connection);
+			if (now >= transport_status_next)
+			{
+				transport_status_next = now + transport_status_interval;
+				send_transport_status();
+			}
 			const bool do_refresh = refresh.advance(now);
 			const bool do_control = control.advance(now);
 			if (do_refresh or do_control)

@@ -22,6 +22,7 @@
 #include "decoder.h"
 #include "wivrn_packets.h"
 
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -92,8 +93,18 @@ private:
 	// that is losing packets steadily.
 	uint64_t fec_reconstructed = 0;
 	int64_t fec_last_report = 0;
+	// The same reconstructions, never reset: the Transport page differences it to get a
+	// rate, which a counter that empties itself every report period cannot give.
+	std::atomic<uint64_t> fec_reconstructed_total = 0;
 
 public:
+	// Video shards rebuilt from parity on this stream since it was created. Monotonic,
+	// readable from any thread.
+	uint64_t reconstructed_shards() const
+	{
+		return fec_reconstructed_total;
+	}
+
 	explicit shard_accumulator(
 	        vk::raii::Device & device,
 	        vk::raii::PhysicalDevice & physical_device,

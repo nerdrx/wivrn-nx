@@ -31,6 +31,7 @@
 #include "implot.h"
 #include "render/ui_theme.h"
 #include "render/ui_widgets.h"
+#include "transport_rates.h"
 #include "utils/i18n.h"
 #include "utils/ranges.h"
 #include <IconsFontAwesome6.h>
@@ -94,6 +95,10 @@ ImPlotPoint getter(int index, void * data_)
 
 void scenes::stream::accumulate_metrics(XrTime predicted_display_time, const std::array<std::shared_ptr<shard_accumulator::blit_handle>, decoder_count> & blit_handles, const gpu_timestamps & timestamps)
 {
+	// On a wall clock of its own, so 60 s of transport history is 60 s whatever the
+	// framerate is doing, and unaffected by the guard below
+	accumulate_transport_metrics(predicted_display_time);
+
 	uint64_t rx = network_session->bytes_received();
 	uint64_t tx = network_session->bytes_sent();
 
@@ -359,6 +364,446 @@ void scenes::stream::gui_performance_metrics()
 		else
 			ImGui::Text("%s", _S("Press both thumbsticks to display the WiVRn window"));
 	}
+}
+
+void scenes::stream::on_wifi_sample(bool valid, int rssi_dbm, int link_speed_mbps)
+{
+	radio_valid = valid;
+	if (not valid)
+		return;
+
+	radio_rssi_dbm = rssi_dbm;
+	radio_link_speed_mbps = link_speed_mbps;
+
+	// Two averages of the same series at different rates: the fast one follows the signal,
+	// the slow one lags behind it, and the gap between them is the direction it is moving.
+	// Steadier than differencing consecutive samples and cheaper than the regression the
+	// server runs — the page only needs an arrow, not a slope in dB/s.
+	//
+	// Zero is the "no sample yet" sentinel: a real RSSI is negative, never 0.
+	const float fast = radio_rssi_fast;
+	if (fast == 0)
+	{
+		radio_rssi_fast = float(rssi_dbm);
+		radio_rssi_slow = float(rssi_dbm);
+		return;
+	}
+
+	radio_rssi_fast = wivrn::ema_step(fast, float(rssi_dbm), constants::stream::radio_fast_alpha);
+	radio_rssi_slow = wivrn::ema_step(radio_rssi_slow, float(rssi_dbm), constants::stream::radio_slow_alpha);
+}
+
+void scenes::stream::accumulate_transport_metrics(XrTime predicted_display_time)
+{
+	// Every stream rebuilds its own shards; the page shows the link, not the eye.
+	// decoder_mutex is already held, shared, by render() for the whole frame.
+	auto reconstructed_total = [this] {
+		uint64_t total = 0;
+		for (const auto & d: decoders)
+		{
+			if (d.decoder)
+				total += d.decoder->reconstructed_shards();
+		}
+		return total;
+	};
+
+	if (transport_last_sample == 0)
+	{
+		// A rate needs two readings; the first one only opens the window
+		transport_last_sample = predicted_display_time;
+		transport_bytes_received = network_session->bytes_received();
+		transport_reconstructed = reconstructed_total();
+		transport_concealments = audio_handle ? audio_handle->concealment_events() : 0;
+		return;
+	}
+
+	const XrDuration dt = predicted_display_time - transport_last_sample;
+	if (dt < constants::stream::transport_sample_period)
+		return;
+
+	const uint64_t rx = network_session->bytes_received();
+	const uint64_t fec = reconstructed_total();
+	const uint64_t concealed = audio_handle ? audio_handle->concealment_events() : 0;
+
+	// The setpoint holds its last value while the server is quiet: a line falling to zero
+	// would read as the bitrate collapsing, which is not what a missing status packet means.
+	const size_t previous = (transport_offset + transport_metrics.size() - 1) % transport_metrics.size();
+	float setpoint = transport_metrics[previous].setpoint_bps;
+	if (auto status = transport_status.lock();
+	    status->has_value() and predicted_display_time - transport_status_received < constants::stream::transport_status_stale)
+		setpoint = float((*status)->bitrate_bps);
+
+	transport_metrics[transport_offset] = transport_metric{
+	        .video_bps = float(wivrn::counter_rate(transport_bytes_received, rx, dt) * 8),
+	        .setpoint_bps = setpoint,
+	        .primary_rtt_s = float(primary_rtt_ns) * 1e-9f,
+	        .secondary_rtt_s = float(secondary_rtt_ns) * 1e-9f,
+	        .fec_per_s = float(wivrn::counter_rate(transport_reconstructed, fec, dt)),
+	        .conceal_per_min = float(wivrn::counter_rate(transport_concealments, concealed, dt) * 60),
+	};
+	transport_offset = (transport_offset + 1) % transport_metrics.size();
+
+	transport_last_sample = predicted_display_time;
+	transport_bytes_received = rx;
+	transport_reconstructed = fec;
+	transport_concealments = concealed;
+}
+
+void scenes::stream::gui_transport()
+{
+	const wivrn::ui::theme & t = wivrn::ui::current();
+	const configuration & config = application::get_config();
+	const XrTime now = instance.now();
+
+	// Renew the lease on the server's status feed. It is a lease and not a switch on
+	// purpose: the server drops the feed by itself once it lapses, so a page that stops
+	// being drawn — including because the headset went away mid-frame — stops the traffic
+	// whether or not the client ever gets to say so.
+	if (transport_status_next_req == 0 or now >= transport_status_next_req)
+	{
+		transport_status_next_req = now + XrDuration(std::chrono::nanoseconds(wivrn::transport_status_refresh).count());
+		network_session->send_control(from_headset::transport_status_subscribe{.active = true});
+	}
+
+	std::optional<to_headset::transport_status> status;
+	{
+		auto locked = transport_status.lock();
+		if (locked->has_value() and now - transport_status_received < constants::stream::transport_status_stale)
+			status = *locked;
+	}
+
+	const size_t newest = (transport_offset + transport_metrics.size() - 1) % transport_metrics.size();
+	const transport_metric & latest = transport_metrics[newest];
+
+	wivrn::ui::page_header(_cS("page header title", "Transport"),
+	                       _cS("page header subtitle", "Link, bitrate control and error recovery, live."));
+
+	// muted caption on the left, value right-aligned, one line
+	auto stat = [&t](const std::string & label, const std::string & value, const ImVec4 & color) {
+		ImGui::PushStyleColor(ImGuiCol_Text, t.text_muted);
+		ImGui::TextUnformatted(label.c_str());
+		ImGui::PopStyleColor();
+		ImGui::SameLine();
+		const float w = ImGui::CalcTextSize(value.c_str()).x;
+		ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.f, ImGui::GetContentRegionAvail().x - w));
+		ImGui::PushStyleColor(ImGuiCol_Text, color);
+		ImGui::TextUnformatted(value.c_str());
+		ImGui::PopStyleColor();
+	};
+
+	struct series
+	{
+		float transport_metric::* data;
+		ImVec4 color;
+	};
+
+	// 60 s of history, no decorations: at arm's length in VR the shape is the message and
+	// tick labels are unreadable anyway, so the unit goes in the axis title instead.
+	auto history_plot = [&](const char * id, const char * unit, int scale_index, const std::vector<series> & plots) {
+		const float height = ImGui::GetFrameHeight() * 3.2f;
+		if (not ImPlot::BeginPlot(id, {-1, height}, ImPlotFlags_NoTitle | ImPlotFlags_NoMenus | ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMouseText | ImPlotFlags_NoLegend))
+			return;
+
+		float max_v = 0;
+		for (const auto & p: plots)
+			max_v = std::max(max_v, compute_plot_max_value(&(transport_metrics.data()->*p.data), transport_metrics.size(), sizeof(transport_metric)));
+
+		auto [multiplier, prefix] = compute_plot_unit(max_v);
+
+		float & scale = transport_axis_scale[scale_index];
+		if (scale == 0 or std::isnan(scale))
+			scale = max_v;
+		else
+			scale = 0.9f * scale + 0.1f * max_v;
+
+		const std::string axis = std::string(prefix) + unit;
+		ImPlot::SetupAxes(nullptr, axis.c_str(), ImPlotAxisFlags_NoDecorations, 0);
+		ImPlot::SetupAxesLimits(0, transport_metrics.size() - 1, 0, std::max(scale * multiplier, 1e-3f), ImGuiCond_Always);
+
+		for (const auto & p: plots)
+		{
+			getter_data gdata{
+			        .data = (uintptr_t)&(transport_metrics.data()->*p.data),
+			        .stride = sizeof(transport_metric),
+			        .multiplier = multiplier,
+			};
+			ImPlot::SetNextLineStyle(p.color);
+			ImPlot::SetNextFillStyle(p.color, 0.2f);
+			ImPlot::PlotLineG("", getter, &gdata, transport_metrics.size(), ImPlotLineFlags_Shaded);
+		}
+
+		// Where the ring wraps, i.e. the present
+		double x[] = {double(transport_offset), double(transport_offset)};
+		double y[] = {0, 1e12};
+		ImPlot::SetNextLineStyle(t.border);
+		ImPlot::PlotLine("", x, y, 2);
+
+		ImPlot::EndPlot();
+	};
+
+	transport_axis_scale.resize(3);
+
+	ImPlot::PushStyleColor(ImPlotCol_PlotBg, IM_COL32(0, 0, 0, 0));
+	ImPlot::PushStyleColor(ImPlotCol_PlotBorder, IM_COL32(0, 0, 0, 0));
+	ImPlot::PushStyleColor(ImPlotCol_InlayText, t.text_muted);
+	ImPlot::PushStyleColor(ImPlotCol_FrameBg, IM_COL32(0, 0, 0, 0));
+	ImPlot::PushStyleColor(ImPlotCol_AxisText, t.text_muted);
+	ImPlot::PushStyleColor(ImPlotCol_AxisBg, IM_COL32(0, 0, 0, 0));
+	ImPlot::PushStyleColor(ImPlotCol_AxisBgActive, IM_COL32(0, 0, 0, 0));
+	ImPlot::PushStyleColor(ImPlotCol_AxisBgHovered, IM_COL32(0, 0, 0, 0));
+
+	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, wivrn::ui::metrics::card_item_spacing);
+
+	if (ImGui::BeginTable("transport", 2, ImGuiTableFlags_SizingStretchSame))
+	{
+		// --- Link -------------------------------------------------------------------
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn();
+		wivrn::ui::begin_card("##link");
+		{
+			ImGui::TextUnformatted(_S("Link"));
+			ImGui::Dummy({0, 2});
+
+			using path_state = to_headset::transport_status::path_state;
+			const bool on_usb = status ? status->path == path_state::usb : network_session->sending_on_secondary();
+			const bool usb_ready = status ? status->path != path_state::wifi_only : network_session->has_secondary();
+
+			wivrn::ui::chip(on_usb ? _("USB backup") : _("Wi-Fi"),
+			                on_usb ? wivrn::ui::chip_style::warning : wivrn::ui::chip_style::success,
+			                true);
+			ImGui::SameLine();
+			if (usb_ready and not on_usb)
+				wivrn::ui::chip(_("USB standing by"), wivrn::ui::chip_style::muted);
+			else if (not usb_ready)
+				wivrn::ui::chip(_("no backup path"), wivrn::ui::chip_style::muted);
+			ImGui::SameLine();
+			wivrn::ui::chip(config.wifi_qos ? _("QoS on") : _("QoS off"),
+			                config.wifi_qos ? wivrn::ui::chip_style::accent : wivrn::ui::chip_style::muted);
+
+			ImGui::Dummy({0, 4});
+
+			auto rtt = [&](int64_t ns) {
+				return ns > 0 ? fmt::format("{:.1f} ms", float(ns) * 1e-6f) : std::string("—");
+			};
+			stat(_("Wi-Fi RTT"), rtt(primary_rtt_ns), on_usb ? t.text_muted : t.text);
+			stat(_("USB RTT"), rtt(secondary_rtt_ns), on_usb ? t.text : t.text_muted);
+
+			history_plot("##rtt", "s", 0, {{&transport_metric::primary_rtt_s, t.accent}, {&transport_metric::secondary_rtt_s, t.success}});
+
+			if (radio_valid)
+			{
+				// The trend is the gap between the two averages, not a slope: rising
+				// means the signal is getting better than it has recently been.
+				const int trend = wivrn::trend_direction(radio_rssi_fast, radio_rssi_slow, constants::stream::radio_trend_deadband_db);
+				const char * arrow = trend > 0 ? ICON_FA_ARROW_UP : trend < 0 ? ICON_FA_ARROW_DOWN
+				                                                              : ICON_FA_ARROW_RIGHT;
+				const ImVec4 & color = trend > 0 ? t.success : trend < 0 ? t.warning
+				                                                         : t.text;
+
+				stat(_("Signal"), fmt::format("{} {} dBm", arrow, int(radio_rssi_dbm)), color);
+				if (radio_link_speed_mbps > 0)
+					stat(_("PHY rate"), fmt::format("{} Mbit/s", int(radio_link_speed_mbps)), t.text);
+			}
+			else
+			{
+				stat(_("Signal"), _("unavailable"), t.text_muted);
+			}
+		}
+		wivrn::ui::end_card();
+
+		// --- Bitrate ----------------------------------------------------------------
+		ImGui::TableNextColumn();
+		wivrn::ui::begin_card("##bitrate");
+		{
+			ImGui::TextUnformatted(_S("Bitrate"));
+			ImGui::Dummy({0, 2});
+
+			// Falls back to what the headset asked for: without the server's answer
+			// that is the only bitrate anything is known to be running at.
+			const uint32_t bps = status ? status->bitrate_bps : config.bitrate_bps;
+			ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * wivrn::ui::metrics::font_title);
+			ImGui::PushStyleColor(ImGuiCol_Text, t.accent);
+			ImGui::TextUnformatted(fmt::format("{:.1f} Mbit/s", bps / 1e6).c_str());
+			ImGui::PopStyleColor();
+			ImGui::PopFont();
+
+			using controller_state = to_headset::transport_status::controller_state;
+			std::string law = _C("Bitrate control", "Manual");
+			std::string state;
+			if (status)
+			{
+				switch (status->state)
+				{
+					case controller_state::off:
+						break;
+					case controller_state::steady:
+						state = _C("bitrate controller state", "steady");
+						break;
+					case controller_state::recovering:
+						state = _C("bitrate controller state", "recovering");
+						break;
+					case controller_state::startup:
+						state = _C("bitrate controller state", "growing estimate");
+						break;
+					case controller_state::probe:
+						state = _C("bitrate controller state", "probing");
+						break;
+				}
+				if (status->state != controller_state::off)
+					law = status->mode == wivrn::bitrate_mode::bbr
+					              ? _C("Bitrate control", "Adaptive v2")
+					              : _C("Bitrate control", "Adaptive");
+			}
+
+			stat(_("Control"), state.empty() ? law : law + " · " + state, t.text);
+			stat(_("Ceiling"),
+			     status ? fmt::format("{:.0f} Mbit/s", status->ceiling_bps / 1e6) : std::string("—"),
+			     t.text_muted);
+
+			if (status and status->radio_hold)
+			{
+				ImGui::Dummy({0, 2});
+				wivrn::ui::chip(wivrn::ui::icon_label(ICON_FA_TOWER_BROADCAST, _("radio hold")),
+				                wivrn::ui::chip_style::warning,
+				                true);
+			}
+
+			// Server setpoint against what actually arrived: the gap between them is
+			// the overhead, and a measured line that will not follow the setpoint up
+			// is the link refusing to carry it.
+			history_plot("##bitrate", "bit/s", 1, {{&transport_metric::setpoint_bps, t.accent}, {&transport_metric::video_bps, t.text_muted}});
+
+			stat(_("Received"), fmt::format("{:.1f} Mbit/s", latest.video_bps / 1e6), t.text_muted);
+
+			if (not status)
+			{
+				ImGui::PushStyleColor(ImGuiCol_Text, t.text_muted);
+				ImGui::TextUnformatted(_S("The server is not reporting: everything above is what the headset asked for."));
+				ImGui::PopStyleColor();
+			}
+		}
+		wivrn::ui::end_card();
+
+		// --- Reliability ------------------------------------------------------------
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn();
+		wivrn::ui::begin_card("##reliability");
+		{
+			ImGui::TextUnformatted(_S("Reliability"));
+			ImGui::Dummy({0, 2});
+
+			const bool fec = status ? status->fec_active : config.fec;
+			wivrn::ui::chip(fec ? _("FEC on") : _("FEC off"),
+			                fec ? wivrn::ui::chip_style::success : wivrn::ui::chip_style::muted,
+			                true);
+
+			ImGui::Dummy({0, 4});
+			stat(_("Shards rebuilt"), fmt::format("{}", transport_reconstructed), t.text);
+			stat(_("Rebuilt now"), fmt::format("{:.1f} /s", latest.fec_per_s), t.text);
+
+			history_plot("##fec", "/s", 2, {{&transport_metric::fec_per_s, t.success}});
+
+			// The headset never asks for a keyframe: it reports the hole and the server
+			// decides. This is the count of holes it reported.
+			stat(_("Frames lost"), fmt::format("{}", uint64_t(incomplete_frames)), incomplete_frames > 0 ? t.warning : t.text_muted);
+			stat(_("Audio gaps concealed"), fmt::format("{}", transport_concealments), t.text_muted);
+			stat(_("Audio gaps now"), fmt::format("{:.1f} /min", latest.conceal_per_min), t.text_muted);
+		}
+		wivrn::ui::end_card();
+
+		// --- Encoders ---------------------------------------------------------------
+		ImGui::TableNextColumn();
+		wivrn::ui::begin_card("##encoders");
+		{
+			ImGui::TextUnformatted(_S("Encoders"));
+			ImGui::Dummy({0, 2});
+
+			const bool paced = status ? status->pacing_active : false;
+			wivrn::ui::chip(paced ? _("pacing on") : _("pacing off"),
+			                paced ? wivrn::ui::chip_style::success : wivrn::ui::chip_style::muted,
+			                true);
+			ImGui::Dummy({0, 4});
+
+			const std::string stream_names[] = {
+			        _C("video stream", "Left"),
+			        _C("video stream", "Right"),
+			        _C("video stream", "Alpha"),
+			        _C("video stream", "Quad layer"),
+			};
+
+			// decoder_mutex is held, shared, by render() around the whole frame,
+			// this page included: taking it again here would be a recursive
+			// shared lock, which std::shared_mutex does not allow.
+			if (not video_stream_description)
+			{
+				ImGui::PushStyleColor(ImGuiCol_Text, t.text_muted);
+				ImGui::TextUnformatted(_S("No video stream yet."));
+				ImGui::PopStyleColor();
+			}
+			for (size_t i = 0; video_stream_description and i < decoder_count; ++i)
+			{
+				if (not decoders[i].decoder)
+					continue;
+
+				const char * codec = "?";
+				switch (video_stream_description->codec[i])
+				{
+					case wivrn::video_codec::h264:
+						codec = "H.264";
+						break;
+					case wivrn::video_codec::h265:
+						codec = "HEVC";
+						break;
+					case wivrn::video_codec::av1:
+						codec = "AV1";
+						break;
+					case wivrn::video_codec::raw:
+						codec = "Raw";
+						break;
+				}
+
+				// A stream the server had to hand to x264 is the one thing on this
+				// page a user can act on, so it is the one thing coloured.
+				const bool software = status and (status->software_encoders & (1u << i));
+				stat(stream_names[i],
+				     software ? fmt::format("{} · {}", codec, _("software")) : std::string(codec),
+				     software ? t.warning : t.text);
+			}
+		}
+		wivrn::ui::end_card();
+
+		// --- Motion smoothing -------------------------------------------------------
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn();
+		wivrn::ui::begin_card("##smoothing");
+		{
+			ImGui::TextUnformatted(_S("Motion smoothing"));
+			ImGui::Dummy({0, 2});
+
+			const XrTime last = motion_field_last;
+			const XrDuration age = last ? now - last : 0;
+			// Fields only arrive when the application falls behind the display, so
+			// idle is the normal state and not a fault.
+			const bool active = config.motion_smoothing and last and age < 1'000'000'000;
+
+			wivrn::ui::chip(not config.motion_smoothing ? _("off")
+			                : active                    ? _("warping")
+			                                            : _("idle"),
+			                active ? wivrn::ui::chip_style::accent : wivrn::ui::chip_style::muted,
+			                true);
+			ImGui::Dummy({0, 4});
+			stat(_("Fields received"), fmt::format("{}", uint64_t(motion_field_count)), t.text_muted);
+			stat(_("Last field"), last ? fmt::format("{:.0f} ms ago", age * 1e-6) : std::string("—"), t.text_muted);
+		}
+		wivrn::ui::end_card();
+
+		ImGui::TableNextColumn();
+
+		ImGui::EndTable();
+	}
+
+	ImGui::PopStyleVar();
+	ImPlot::PopStyleColor(8);
 }
 
 void scenes::stream::gui_compact_view()
@@ -670,6 +1115,14 @@ void scenes::stream::draw_gui(XrTime predicted_display_time, XrDuration predicte
 			}
 		}
 
+		// The status feed is only useful while its page is on screen. The server drops it
+		// on its own once the lease lapses; saying so makes the common case immediate.
+		if (gui_status == stream_tab::transport and new_status != stream_tab::transport)
+		{
+			transport_status_next_req = 0;
+			network_session->send_control(from_headset::transport_status_subscribe{.active = false});
+		}
+
 		stored_gui_status = gui_status;
 		gui_status = new_status;
 		gui_status_last_change = predicted_display_time;
@@ -700,6 +1153,7 @@ void scenes::stream::draw_gui(XrTime predicted_display_time, XrDuration predicte
 			interactable = false;
 			break;
 		case stream_tab::stats:
+		case stream_tab::transport:
 		case stream_tab::settings:
 		case stream_tab::applications:
 		case stream_tab::application_launcher:
@@ -767,6 +1221,7 @@ void scenes::stream::draw_gui(XrTime predicted_display_time, XrDuration predicte
 				break;
 
 			case stream_tab::stats:
+			case stream_tab::transport:
 			case stream_tab::settings:
 			case stream_tab::applications:
 			case stream_tab::application_launcher:
@@ -826,6 +1281,7 @@ void scenes::stream::draw_gui(XrTime predicted_display_time, XrDuration predicte
 			break;
 
 		case stream_tab::stats:
+		case stream_tab::transport:
 		case stream_tab::settings:
 		case stream_tab::applications:
 			ImGui::SetNextWindowPos(margin_around_window);
@@ -895,6 +1351,18 @@ void scenes::stream::draw_gui(XrTime predicted_display_time, XrDuration predicte
 			ImGui::BeginChild("plots", {0, 0});
 			gui_performance_metrics();
 			ImGui::EndChild();
+			ImGui::EndChild();
+			ImGui::PopStyleVar();
+			break;
+
+		case stream_tab::transport:
+			ImGui::SetCursorPos({tab_width + content_margin, top_bar_h});
+			ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {20, 20});
+			ImGui::BeginChild("Main", ImVec2(ImGui::GetWindowSize().x - ImGui::GetCursorPosX() - content_margin, 0));
+			ImGui::SetCursorPosY(20);
+			gui_transport();
+			ImGui::Dummy(ImVec2(0, 20));
+			ScrollWhenDragging();
 			ImGui::EndChild();
 			ImGui::PopStyleVar();
 			break;
@@ -1037,6 +1505,8 @@ void scenes::stream::draw_gui(XrTime predicted_display_time, XrDuration predicte
 			}
 			if (wivrn::ui::nav_item(ICON_FA_COMPUTER, _S("Statistics"), gui_status == stream_tab::stats))
 				next_gui_status = stream_tab::stats;
+			if (wivrn::ui::nav_item(ICON_FA_TOWER_BROADCAST, _cS("tab label", "Transport"), gui_status == stream_tab::transport))
+				next_gui_status = stream_tab::transport;
 
 			wivrn::ui::nav_section(_cS("tab group", "SETTINGS"));
 			auto settings_item = [&](const char * icon, const std::string & label, settings_page page) {

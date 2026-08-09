@@ -493,6 +493,7 @@ bool compositor::fail_over_encoder(size_t idx, const std::string & reason)
 	settings[idx] = conf;
 	software_fallback = true;
 	software_fallback_var = true;
+	software_fallback_mask |= uint8_t(1u << idx);
 
 	U_LOG_W("Stream %zu is now on the software encoder (x264, %ux%u, %.1f Mbit/s), built in %" PRId64 " ms. "
 	        "It starts on a keyframe, so the picture comes back within a frame or two. Expect a heavier CPU "

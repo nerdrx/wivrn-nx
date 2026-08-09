@@ -1,9 +1,9 @@
 [Desktop Entry]
-Name=WiVRn server
+Name=WiVRn NX server
 Comment=Play your PC VR games on a standalone headset
-GenericName=WiVRn dashboard
+GenericName=WiVRn NX dashboard
 Exec=@CMAKE_INSTALL_PREFIX@/bin/wivrn-dashboard
-Icon=io.github.wivrn.wivrn
+Icon=io.github.wivrn.wivrn.nx
 Type=Application
 Categories=Network;
 Keywords=VR;Virtual reality;OpenVR;OpenXR;

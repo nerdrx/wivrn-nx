@@ -33,8 +33,8 @@ set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../dbus/io.github.wivrn.
 qt_add_dbus_interface(DBUS_INTERFACE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../dbus/io.github.wivrn.Server.xml wivrn_server_dbus)
 target_sources(wivrn-dashboard PRIVATE ${DBUS_INTERFACE_SRC})
 
-set_source_files_properties(../images/wivrn.svg PROPERTIES QT_RESOURCE_ALIAS qml/wivrn.svg)
-qt_add_resources(wivrn-dashboard PREFIX "/" BASE .. FILES ../images/wivrn.svg)
+set_source_files_properties(../images/wivrn-nx.svg PROPERTIES QT_RESOURCE_ALIAS qml/wivrn.svg)
+qt_add_resources(wivrn-dashboard PREFIX "/" BASE .. FILES ../images/wivrn-nx.svg)
 
 set_source_files_properties(qml/DashboardSettings.qml PROPERTIES
     QT_QML_SINGLETON_TYPE TRUE
@@ -60,13 +60,13 @@ qt_add_qml_module(wivrn-dashboard
         qml/TroubleshootPage.qml
         qml/TroubleshootCard.qml
     RESOURCES
-        ../images/wivrn.svg
+        ../images/wivrn-nx.svg
         qml/Discord.svg
         qml/Github.svg
 )
 
 configure_file(gui_config.h.in gui_config.h)
-configure_file(io.github.wivrn.wivrn.desktop.in io.github.wivrn.wivrn.desktop)
+configure_file(io.github.wivrn.wivrn.desktop.in io.github.wivrn.wivrn.nx.desktop)
 
 target_link_libraries(wivrn-dashboard
     PRIVATE
@@ -95,11 +95,11 @@ install(FILES io.github.wivrn.wivrn.metainfo.xml
 	DESTINATION share/metainfo
 )
 
-install(FILES ../images/wivrn.svg
+install(FILES ../images/wivrn-nx.svg
 	DESTINATION share/icons/hicolor/scalable/apps
-	RENAME io.github.wivrn.wivrn.svg
+	RENAME io.github.wivrn.wivrn.nx.svg
 )
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/io.github.wivrn.wivrn.desktop
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/io.github.wivrn.wivrn.nx.desktop
 	DESTINATION share/applications
 )
 

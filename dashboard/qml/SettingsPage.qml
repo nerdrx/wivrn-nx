@@ -80,6 +80,16 @@ Kirigami.ScrollablePage {
                 }
             }
 
+            RowLayout {
+                Controls.CheckBox {
+                    id: bitrate_auto
+                    text: i18n("Automatic bitrate")
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("Adapt the bitrate to the wireless link quality while streaming. The bitrate configured on the headset is the maximum. On a sudden lag spike the bitrate drops sharply to let the connection recover, then climbs back. Applies from the next connection.")
+                }
+            }
+
             Kirigami.Separator {
                 Kirigami.FormData.isSection: true
             }
@@ -307,6 +317,7 @@ Kirigami.ScrollablePage {
 
         DashboardSettings.show_system_checks = show_system_checks.checked;
 
+        Settings.bitrateAuto = bitrate_auto.checked;
         Settings.debugGui = debug_gui.checked;
         Settings.steamVrLh = steamvr_lh.checked;
         Settings.lhStickDeadzone = lh_stick_deadzone.value;
@@ -317,6 +328,7 @@ Kirigami.ScrollablePage {
 
     function load() {
         select_game.load();
+        bitrate_auto.checked = Settings.bitrateAuto;
         debug_gui.checked = Settings.debugGui;
         steamvr_lh.checked = Settings.steamVrLh;
         lh_stick_deadzone.value = Settings.lhStickDeadzone;

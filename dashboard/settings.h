@@ -66,6 +66,7 @@ public:
 	Q_PROPERTY(QList<video_codec> allowedCodecs READ allowedCodecs NOTIFY encoderChanged)
 	Q_PROPERTY(bool can10bit READ can10bit NOTIFY codecChanged)
 	Q_PROPERTY(bool tenbit READ tenbit WRITE set_tenbit NOTIFY tenbitChanged)
+	Q_PROPERTY(bool bitrateAuto READ bitrateAuto WRITE set_bitrateAuto NOTIFY bitrateAutoChanged)
 
 	Q_PROPERTY(bool tcpOnly READ tcpOnly WRITE set_tcpOnly NOTIFY tcpOnlyChanged)
 	Q_PROPERTY(int port READ port WRITE set_port NOTIFY portChanged)
@@ -88,6 +89,7 @@ public:
 	SETTER_GETTER_NOTIFY(encoder_name, encoder)
 	SETTER_GETTER_NOTIFY(video_codec, codec)
 	SETTER_GETTER_NOTIFY(bool, tenbit)
+	SETTER_GETTER_NOTIFY(bool, bitrateAuto)
 	SETTER_GETTER_NOTIFY(QString, application)
 	SETTER_GETTER_NOTIFY(bool, hidForwarding)
 	SETTER_GETTER_NOTIFY(bool, debugGui)

@@ -116,6 +116,7 @@ void Settings::emitAllChanged()
 	encoderChanged();
 	codecChanged();
 	tenbitChanged();
+	bitrateAutoChanged();
 	tcpOnlyChanged();
 	applicationChanged();
 	openvrChanged();
@@ -382,6 +383,35 @@ void Settings::set_hidForwarding(const bool & value)
 	m_jsonSettings["hid-forwarding"] = value;
 	if (old != value)
 		hidForwardingChanged();
+}
+
+bool Settings::bitrateAuto() const
+{
+	// "bitrate-auto" can be a boolean or an object {"enabled": bool, "min-bitrate": bps}
+	auto it = m_jsonSettings.find("bitrate-auto");
+	if (it != m_jsonSettings.end())
+	{
+		if (it->is_boolean())
+			return *it;
+		if (it->is_object())
+		{
+			if (auto enabled = it->find("enabled"); enabled != it->end() and enabled->is_boolean())
+				return *enabled;
+		}
+	}
+	return true;
+}
+
+void Settings::set_bitrateAuto(const bool & value)
+{
+	auto old = bitrateAuto();
+	// Keep the object form (and its min-bitrate) if the user configured one by hand
+	if (auto it = m_jsonSettings.find("bitrate-auto"); it != m_jsonSettings.end() and it->is_object())
+		(*it)["enabled"] = value;
+	else
+		m_jsonSettings["bitrate-auto"] = value;
+	if (old != value)
+		bitrateAutoChanged();
 }
 
 bool Settings::debugGui() const

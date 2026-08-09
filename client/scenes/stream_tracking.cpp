@@ -33,6 +33,7 @@
 
 #ifdef __ANDROID__
 #include "android/battery.h"
+#include "android/wifi.h"
 #endif
 
 namespace
@@ -236,6 +237,11 @@ void scenes::stream::tracking()
 
 	XrTime next_battery_check = 0;
 	const XrDuration battery_check_interval = 30'000'000'000; // 30s
+
+	// The server builds a trend out of these, so they have to come often enough for a few
+	// of them to fit inside its window, and rarely enough to be free. 1 Hz is both.
+	XrTime next_wifi_check = 0;
+	const XrDuration wifi_check_interval = 1'000'000'000; // 1s
 #endif
 
 	magic_enum::containers::array<device_id, XrSpace> spaces{};
@@ -551,6 +557,29 @@ void scenes::stream::tracking()
 					network_session->send_secondary(from_headset::battery{battery});
 
 				next_battery_check = now + battery_check_interval;
+			}
+
+			// The Wi-Fi radio, as a leading indicator for the server's bitrate control.
+			// Read live so that toggling the setting takes effect without reconnecting;
+			// a second of staleness either way is of no consequence.
+			//
+			// Not reported while the USB path is the one carrying video: the Wi-Fi trend
+			// says nothing about the link in use then, and the server ages the last
+			// sample out on its own after a few seconds.
+			if (next_wifi_check < now)
+			{
+				if (config.radio_aware and not network_session->sending_on_secondary())
+				{
+					auto status = get_wifi_status();
+					network_session->send_control(from_headset::wifi_state{
+					        .valid = status.valid,
+					        .rssi_dbm = int8_t(status.rssi_dbm),
+					        .link_speed_mbps = uint16_t(std::min(status.link_speed_mbps, 65535)),
+					        .timestamp = now,
+					});
+				}
+
+				next_wifi_check = now + wifi_check_interval;
 			}
 #endif
 

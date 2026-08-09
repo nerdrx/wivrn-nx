@@ -315,6 +315,10 @@ struct settings_changed
 	// Whether the headset lets the server adapt the bitrate to the link quality, with
 	// bitrate_bps as the ceiling. The server also has its own switch, both must be enabled.
 	bool bitrate_auto = true;
+	// Whether the headset reports its Wi-Fi radio state (see from_headset::wifi_state) and
+	// the server may step the bitrate down on a falling signal, before the loss it is about
+	// to cause shows up in the frame timings. Only meaningful with bitrate_auto on.
+	bool radio_aware = true;
 	// Whether the video shards of a frame should be spread over a fraction of the frame
 	// period instead of being handed to the socket as fast as it takes them. The burst is
 	// what overflows an access point's buffer; the server also has its own switch, and the
@@ -682,6 +686,27 @@ struct battery
 	bool charging;
 };
 
+// State of the headset's Wi-Fi radio, sampled about once a second and sent on the control
+// socket (tiny, and a lost sample is a hole in a trend rather than one stale frame).
+//
+// The server uses the *trend* only: absolute RSSI is not comparable across houses, headsets
+// or even antenna orientations, but a signal falling several dB over a few seconds is the
+// user walking away from the access point, and it precedes the packet loss by a second or
+// two. valid is false whenever the platform gave no usable reading — a non-Android client,
+// no WifiManager (wired or unknown transport), or the sentinel values Android returns when
+// it will not answer (RSSI -127, link speed -1). The other fields are then meaningless.
+struct wifi_state
+{
+	bool valid;
+	// Received signal strength, negative dBm, e.g. -55 close to the AP, -75 far from it
+	int8_t rssi_dbm;
+	// Negotiated PHY rate, Mbit/s. Nominal: aggregation, contention and the uplink all take
+	// their share of it, so the usable throughput is a fraction of this.
+	uint16_t link_speed_mbps;
+	// Headset clock, for logging and ordering only; the server ages samples on its own clock
+	XrTime timestamp;
+};
+
 struct refresh_rate_changed
 {
 	float from;
@@ -758,6 +783,7 @@ using packets = std::variant<
         inputs,
         timesync_response,
         battery,
+        wifi_state,
         visibility_mask_changed,
         refresh_rate_changed,
         session_state_changed,

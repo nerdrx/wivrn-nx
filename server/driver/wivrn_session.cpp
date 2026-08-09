@@ -138,7 +138,7 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 	auto conf = configuration();
 
 	// Both switches must be on: the server configuration and the one in the headset settings
-	bitrate_ctl.configure(conf.bitrate_auto, get_info().settings.bitrate_bps, get_info().settings.bitrate_auto);
+	bitrate_ctl.configure(conf.bitrate_auto, get_info().settings.bitrate_bps, get_info().settings.bitrate_auto, get_info().settings.radio_aware);
 
 	// Same story for packet pacing and for the QoS marks
 	pacing_conf = conf.pacing;
@@ -510,6 +510,9 @@ void wivrn_session::operator()(from_headset::headset_info_packet &&)
 void wivrn_session::operator()(const from_headset::settings_changed & settings)
 {
 	*this->settings.lock() = settings;
+
+	// Only ever narrows what the radio trend may do; never changes the bitrate on its own
+	bitrate_ctl.set_radio_aware(settings.radio_aware);
 
 	if (settings.bitrate_bps != 0)
 	{
@@ -884,6 +887,16 @@ void wivrn_session::operator()(from_headset::feedback && feedback)
 void wivrn_session::operator()(from_headset::battery && battery)
 {
 	hmd.update_battery(battery);
+}
+
+void wivrn_session::operator()(from_headset::wifi_state && wifi)
+{
+	// A sample the headset could not take says nothing; the controller ages the last usable
+	// one out on its own after a few seconds.
+	if (not wifi.valid)
+		return;
+
+	apply_auto_bitrate(bitrate_ctl.on_wifi_state(wifi.rssi_dbm, wifi.link_speed_mbps));
 }
 
 void wivrn_session::operator()(from_headset::visibility_mask_changed && mask)

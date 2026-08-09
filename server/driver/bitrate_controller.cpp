@@ -31,12 +31,13 @@ namespace
 constexpr double to_mbits = 1e-6;
 }
 
-void bitrate_controller::configure(const config & c, uint32_t ceiling_bps, bool client_enabled_)
+void bitrate_controller::configure(const config & c, uint32_t ceiling_bps, bool client_enabled_, bool radio_aware_)
 {
 	std::lock_guard lock(mutex);
 
 	conf = c;
 	client_enabled = client_enabled_;
+	radio_aware = radio_aware_;
 	ceiling = ceiling_bps;
 	auto eff = effective_ceiling();
 	// A client asking for less than the configured minimum wins: the ceiling is always honoured.
@@ -48,11 +49,13 @@ void bitrate_controller::configure(const config & c, uint32_t ceiling_bps, bool 
 	frames = {};
 	has_frames = false;
 	flush();
+	flush_radio();
 
 	if (conf.enabled and client_enabled and eff)
-		U_LOG_I("Automatic bitrate enabled, ceiling %.1f Mbit/s, floor %.1f Mbit/s",
+		U_LOG_I("Automatic bitrate enabled, ceiling %.1f Mbit/s, floor %.1f Mbit/s, radio trend %s",
 		        eff * to_mbits,
-		        min_bitrate * to_mbits);
+		        min_bitrate * to_mbits,
+		        radio_aware ? "on" : "off");
 	else if (conf.enabled and not client_enabled and eff)
 		U_LOG_I("Automatic bitrate disabled on the headset, using %.1f Mbit/s", eff * to_mbits);
 }
@@ -86,6 +89,22 @@ std::optional<uint32_t> bitrate_controller::set_client_enabled(bool enabled_)
 	return reset_locked();
 }
 
+void bitrate_controller::set_radio_aware(bool enabled_)
+{
+	std::lock_guard lock(mutex);
+
+	if (enabled_ == radio_aware)
+		return;
+
+	radio_aware = enabled_;
+
+	U_LOG_I("Radio-aware bitrate %s on the headset", radio_aware ? "enabled" : "disabled");
+
+	// The trend is only as good as the reports, which stop when the switch goes off. Never
+	// touches the bitrate: the AIMD probes back up on its own if the step was unnecessary.
+	flush_radio();
+}
+
 uint32_t bitrate_controller::current() const
 {
 	std::lock_guard lock(mutex);
@@ -102,6 +121,15 @@ void bitrate_controller::flush()
 	window.clear();
 	healthy_since.reset();
 	last_evaluation = {};
+}
+
+void bitrate_controller::flush_radio()
+{
+	radio_window.clear();
+	radio_ema.reset();
+	last_radio_sample = {};
+	last_radio_step = {};
+	radio_hold = false;
 }
 
 std::optional<uint32_t> bitrate_controller::set_ceiling(uint32_t ceiling_bps)
@@ -159,10 +187,15 @@ std::optional<uint32_t> bitrate_controller::reset_locked()
 	has_frames = false;
 	flush();
 
+	// The radio samples are a property of the radio, not of the bitrate, and survive a reset;
+	// the hold does not, the bitrate is back at the ceiling and probing is allowed again.
+	radio_hold = false;
+	last_radio_step = {};
+
 	return bitrate;
 }
 
-void bitrate_controller::close_frame(frame_state & frame, std::chrono::steady_clock::time_point now)
+void bitrate_controller::close_frame(frame_state & frame, clock::time_point now)
 {
 	if (frame.index == uint64_t(-1))
 		return;
@@ -183,7 +216,7 @@ void bitrate_controller::close_frame(frame_state & frame, std::chrono::steady_cl
 	frame = {};
 }
 
-bitrate_controller::stats bitrate_controller::analyse(std::chrono::steady_clock::time_point now)
+bitrate_controller::stats bitrate_controller::analyse(clock::time_point now)
 {
 	while (not window.empty() and now - window.front().when > window_duration)
 		window.pop_front();
@@ -217,7 +250,153 @@ bitrate_controller::stats bitrate_controller::analyse(std::chrono::steady_clock:
 	return res;
 }
 
-std::optional<uint32_t> bitrate_controller::on_feedback(const from_headset::feedback & feedback, int64_t period_ns, bool streaming)
+bitrate_controller::radio_trend bitrate_controller::analyse_radio(clock::time_point now)
+{
+	while (not radio_window.empty() and now - radio_window.front().when > radio_trend_window)
+		radio_window.pop_front();
+
+	radio_trend res;
+	if (radio_window.size() < radio_min_samples)
+		return res;
+
+	const auto & oldest = radio_window.front();
+	const auto & newest = radio_window.back();
+
+	res.span_s = std::chrono::duration<double>(newest.when - oldest.when).count();
+	if (res.span_s <= 0)
+		return res;
+
+	// Least squares slope of the smoothed level against time, in dB/s. Ordinary means and
+	// covariance, the window holds a handful of samples.
+	double mean_t = 0;
+	double mean_y = 0;
+	for (const auto & s: radio_window)
+	{
+		mean_t += std::chrono::duration<double>(s.when - oldest.when).count();
+		mean_y += s.rssi_dbm;
+	}
+	mean_t /= double(radio_window.size());
+	mean_y /= double(radio_window.size());
+
+	double cov = 0;
+	double var = 0;
+	for (const auto & s: radio_window)
+	{
+		double dt = std::chrono::duration<double>(s.when - oldest.when).count() - mean_t;
+		cov += dt * (s.rssi_dbm - mean_y);
+		var += dt * dt;
+	}
+	if (var <= 0)
+		return res;
+
+	res.usable = true;
+	res.rssi_dbm = newest.rssi_dbm;
+	res.slope_db_per_s = cov / var;
+	res.delta_db = res.slope_db_per_s * res.span_s;
+	res.link_speed_mbps = newest.link_speed_mbps;
+	for (const auto & s: radio_window)
+		res.link_speed_peak_mbps = std::max(res.link_speed_peak_mbps, s.link_speed_mbps);
+
+	return res;
+}
+
+std::optional<uint32_t> bitrate_controller::on_wifi_state(int rssi_dbm, int link_speed_mbps, clock::time_point when)
+{
+	std::lock_guard lock(mutex);
+
+	// Both switches, plus the radio one, plus a stream to control at all.
+	if (not conf.enabled or not client_enabled or not radio_aware or not ceiling)
+		return {};
+
+	// Sentinels and nonsense. Android answers -127 when it will not say, and no real Wi-Fi
+	// link sits at 0 dBm or below -110 dBm.
+	if (rssi_dbm >= 0 or rssi_dbm <= -110)
+		return {};
+
+	// A gap in the reports means the trend across it is meaningless: start a new one.
+	if (not radio_window.empty() and when - last_radio_sample > radio_max_age)
+	{
+		radio_window.clear();
+		radio_ema.reset();
+		radio_hold = false;
+	}
+	last_radio_sample = when;
+
+	radio_ema = radio_ema
+	                    ? radio_ema_alpha * rssi_dbm + (1 - radio_ema_alpha) * *radio_ema
+	                    : double(rssi_dbm);
+	radio_window.push_back({
+	        .when = when,
+	        .rssi_dbm = *radio_ema,
+	        .link_speed_mbps = std::max(0, link_speed_mbps),
+	});
+
+	auto trend = analyse_radio(when);
+	if (not trend.usable)
+		return {};
+
+	// The deep drop and its rebound are a closed loop of their own; a guess from the radio
+	// on top of it would only make the two fight.
+	if (st == state::recovering)
+		return {};
+
+	// The signal is coming back: let the normal probing upwards resume at once.
+	if (radio_hold and trend.delta_db > radio_rise_db and trend.rssi_dbm > radio_low_rssi_dbm)
+	{
+		radio_hold = false;
+		U_LOG_I("Radio-aware bitrate: signal recovering (%+.1f dB over %.1f s, now %.0f dBm), probing allowed again",
+		        trend.delta_db,
+		        trend.span_s,
+		        trend.rssi_dbm);
+	}
+
+	// Trigger 1: a real fall, and low enough that the fall has nothing left to eat into.
+	const bool falling = trend.delta_db < -radio_fall_db and trend.rssi_dbm < radio_low_rssi_dbm;
+	// Trigger 2: the radio's own rate adaptation already gave up half of the PHY rate, and
+	// what is left no longer has room for what is being sent.
+	const bool starved = trend.link_speed_mbps > 0 and
+	                     trend.link_speed_peak_mbps > 0 and
+	                     double(trend.link_speed_mbps) <= radio_link_speed_collapse * double(trend.link_speed_peak_mbps) and
+	                     double(trend.link_speed_mbps) * 1e6 < radio_link_speed_headroom * double(bitrate);
+
+	if (not falling and not starved)
+		return {};
+
+	// Same cooldowns as any other decrease, plus one of its own: a preemptive step is a
+	// guess and the frame timings must be given time to confirm or deny it.
+	if (when - last_decrease < decrease_cooldown or when - last_radio_step < radio_step_interval)
+		return {};
+
+	const uint32_t previous = bitrate;
+	bitrate = clamp(uint64_t(bitrate * decrease_factor));
+
+	// Hold the probing back up until the radio says the degradation is over, whether or not
+	// the bitrate could actually move (it may already be on the floor).
+	radio_hold = true;
+	last_decrease = when;
+	last_radio_step = when;
+
+	if (bitrate == previous)
+		return {};
+
+	// The utilisation samples were taken at the old bitrate and say nothing about the new one.
+	flush();
+
+	U_LOG_I("Automatic bitrate: radio degrading, %.1f -> %.1f Mbit/s (%s: RSSI %.0f dBm, %+.1f dB over %.1f s, %.1f dB/s, link %d Mbit/s, peak %d Mbit/s)",
+	        previous * to_mbits,
+	        bitrate * to_mbits,
+	        falling ? "falling signal" : "PHY rate collapse",
+	        trend.rssi_dbm,
+	        trend.delta_db,
+	        trend.span_s,
+	        trend.slope_db_per_s,
+	        trend.link_speed_mbps,
+	        trend.link_speed_peak_mbps);
+
+	return bitrate;
+}
+
+std::optional<uint32_t> bitrate_controller::on_feedback(const from_headset::feedback & feedback, int64_t period_ns, bool streaming, clock::time_point now)
 {
 	std::lock_guard lock(mutex);
 
@@ -229,8 +408,6 @@ std::optional<uint32_t> bitrate_controller::on_feedback(const from_headset::feed
 		return {};
 
 	frame_period = period_ns;
-
-	auto now = std::chrono::steady_clock::now();
 
 	if (not has_frames or feedback.frame_index > newest_frame)
 	{
@@ -273,11 +450,20 @@ std::optional<uint32_t> bitrate_controller::on_feedback(const from_headset::feed
 	return evaluate(now);
 }
 
-std::optional<uint32_t> bitrate_controller::evaluate(std::chrono::steady_clock::time_point now)
+std::optional<uint32_t> bitrate_controller::evaluate(clock::time_point now)
 {
 	if (now - last_evaluation < evaluation_interval)
 		return {};
 	last_evaluation = now;
+
+	// The headset stopped reporting its radio: a hold taken on data this old would last
+	// forever. Stale radio data does nothing at all, including nothing to the probing.
+	if (radio_hold and now - last_radio_sample > radio_max_age)
+	{
+		radio_hold = false;
+		U_LOG_I("Radio-aware bitrate: no Wi-Fi report for %d ms, releasing the hold",
+		        int(radio_max_age.count()));
+	}
 
 	auto s = analyse(now);
 	if (s.count < min_samples)
@@ -318,6 +504,9 @@ std::optional<uint32_t> bitrate_controller::evaluate(std::chrono::steady_clock::
 			st = state::recovering;
 			first_recovery_step = true;
 			reason = "acute congestion";
+			// The deep drop and its rebound are in charge from here; the radio must
+			// neither hold the rebound back nor step on top of it.
+			radio_hold = false;
 		}
 		else
 		{
@@ -351,6 +540,11 @@ std::optional<uint32_t> bitrate_controller::evaluate(std::chrono::steady_clock::
 		}
 		else
 		{
+			// Frame timings look fine, but the radio says the signal is still on the
+			// way down: probing back up now only walks into the degradation again.
+			if (radio_hold)
+				return {};
+
 			if (held < increase_hold or bitrate >= effective_ceiling())
 				return {};
 

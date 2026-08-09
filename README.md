@@ -29,6 +29,15 @@ headset WiVRn supports.
   followed by a fast slow-start rebound to the pre-drop level, with ssthresh-style backoff.
   The bitrate set on the headset is always the ceiling. Toggles: headset (*Automatic bitrate*)
   and dashboard; config key `bitrate-auto` (`min-bitrate` floor, default 10 Mbit/s).
+- **Radio-aware bitrate** *(toggle, default on)* — frame timings are a *lagging* indicator: by
+  the time the utilisation rises the packets are already late. The headset reports its Wi-Fi
+  RSSI and PHY rate once a second, and the server steps the bitrate down **before** the loss
+  when the signal has been falling for a few seconds (or when rate adaptation has already
+  halved the PHY rate out from under the stream) — walking away from the router now costs a
+  bitrate step instead of a lag spike. Only the *trend* is used, never absolute dBm, which
+  means nothing across houses and headsets. It can only ever lower the bitrate, it stands down
+  while the deep-drop rebound is in charge, and reports older than five seconds are ignored
+  entirely. Needs *Automatic bitrate*; no server configuration, the thresholds are constants.
 - **Smooth packet pacing** *(toggle, default on)* — a frame used to be drained into the socket as
   fast as the kernel would take it: a few hundred kilobytes hitting the access point every 11 ms,
   which is exactly what overflows its buffer and produces the lag-then-recover wedge the deep drop
@@ -95,9 +104,9 @@ identity everywhere: application ID `org.meumeu.wivrn.nx`, app name "WiVRn NX", 
 
 ## Roadmap (in active development)
 
-Radio-aware bitrate (RSSI as a leading indicator) · forward error correction (parity shards —
-lost packets reconstruct client-side) · audio on the loss-tolerant path with concealment ·
-hardware-encoder failover to x264 · BBR-style bitrate control v2 · an in-headset transport HUD.
+Forward error correction (parity shards — lost packets reconstruct client-side) · audio on the
+loss-tolerant path with concealment · hardware-encoder failover to x264 · BBR-style bitrate
+control v2 · an in-headset transport HUD.
 Design documents live in
 [docs/](docs/): [multipath](docs/multipath.md), [frame extrapolation](docs/frame-extrapolation.md),
 [quad layers](docs/quad-layers.md).

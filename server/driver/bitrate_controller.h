@@ -55,9 +55,20 @@ namespace wivrn
 // All decisions are taken from a sliding window of per-frame samples, using a high percentile so
 // that a single unlucky frame does not move the bitrate. The window is flushed after every change
 // so that stale samples cannot trigger a second change.
+//
+// On top of that, the headset reports its Wi-Fi radio state about once a second
+// (from_headset::wifi_state). Frame timings are a *lagging* indicator: by the time the utilisation
+// rises the packets are already late. The radio is a *leading* one — the signal starts falling a
+// second or two before the rate adaptation gives up and the first packet is lost. The controller
+// therefore steps down preemptively on a falling signal, while the frame timings still look fine.
+// Only the trend is used: absolute dBm says nothing portable, a fall of several dB over a few
+// seconds says the user is walking away from the access point. Radio input can only ever *lower*
+// the bitrate; it never raises one, and it never runs while the deep-drop recovery is in charge.
 class bitrate_controller
 {
 public:
+	using clock = std::chrono::steady_clock;
+
 	struct config
 	{
 		// NX default is on
@@ -128,12 +139,48 @@ public:
 	// If congestion comes back while rebounding, lower the rebound target by this factor.
 	static constexpr double recovery_target_backoff = 0.75;
 
+	// --- Radio trend (preemptive decrease) ----------------------------------------------
+	// Length of the trend window. Long enough that the ±3 dB the radio reports while the
+	// user stands still averages out, short enough to still be ahead of the loss.
+	static constexpr std::chrono::milliseconds radio_trend_window{4000};
+	// A sample older than this is stale: the headset stopped reporting (an older client, a
+	// non-Android one, a failed read), and a trend from before the gap says nothing about
+	// the link now. Stale data is ignored entirely and releases any hold.
+	static constexpr std::chrono::milliseconds radio_max_age{5000};
+	// No trend is computed from fewer samples, i.e. not before ~3 s of reports at 1 Hz.
+	static constexpr size_t radio_min_samples = 4;
+	// Smoothing of the reported RSSI before it is used as "the current level". One sample
+	// per second, so this is a time constant of roughly two seconds.
+	static constexpr double radio_ema_alpha = 0.4;
+	// The fall, in dB over the window, that separates walking away from the access point
+	// from the noise of standing still. Read off the least squares slope times the time the
+	// window actually covers.
+	static constexpr double radio_fall_db = 6.0;
+	// ... but a fall only matters once the absolute level is low enough that the radio's
+	// rate adaptation is about to start dropping MCS. -65 dBm is roughly where a 5 GHz link
+	// leaves its top rates; above it there is margin for the fall to eat.
+	static constexpr double radio_low_rssi_dbm = -65.0;
+	// Second, independent trigger: the radio's own rate adaptation already halved the PHY
+	// rate compared to the best it saw in the window, *and* what is left is less than this
+	// multiple of the bitrate being sent. PHY rates are nominal — aggregation, contention
+	// and the uplink all take their share — so twice the video bitrate is already the edge.
+	static constexpr double radio_link_speed_headroom = 2.0;
+	static constexpr double radio_link_speed_collapse = 0.5;
+	// Minimum time between two preemptive steps, on top of decrease_cooldown: a preemptive
+	// step is a guess, and the frame timings must be given time to confirm or deny it.
+	static constexpr std::chrono::milliseconds radio_step_interval{4000};
+	// The signal coming back up by this much over the window releases the hold that a
+	// preemptive step put on the normal probing-upwards path.
+	static constexpr double radio_rise_db = 3.0;
+
 	bitrate_controller() = default;
 
 	// Set the configuration and the initial ceiling. The ceiling is the bitrate the client asked
 	// for; the controller never goes above it. client_enabled is the headset side switch: the
-	// control only runs when both it and the server configuration are enabled.
-	void configure(const config &, uint32_t ceiling_bps, bool client_enabled);
+	// control only runs when both it and the server configuration are enabled. radio_aware is
+	// the headset side switch for the preemptive radio trend, which additionally requires the
+	// automatic bitrate to be on at all.
+	void configure(const config &, uint32_t ceiling_bps, bool client_enabled, bool radio_aware);
 
 	bool enabled() const;
 	uint32_t current() const;
@@ -142,6 +189,11 @@ public:
 	// setting say nothing; switching off therefore restores the full ceiling. Returns the
 	// bitrate to apply, if any.
 	std::optional<uint32_t> set_client_enabled(bool);
+
+	// The headset toggled the radio trend switch. Never changes the bitrate on its own:
+	// switching off only stops the preemptive steps and releases any hold they left, the
+	// normal AIMD takes it from there.
+	void set_radio_aware(bool);
 
 	// A new ceiling was requested (client settings, or a manual change from the dashboard).
 	// Resets the controller to it. Returns the bitrate to apply.
@@ -159,8 +211,16 @@ public:
 
 	// Feed one feedback packet. frame_period_ns is the current video frame period (from the
 	// pacer), streaming tells whether the stream is up at all. Returns a new bitrate to apply,
-	// if any.
-	std::optional<uint32_t> on_feedback(const from_headset::feedback &, int64_t frame_period_ns, bool streaming);
+	// if any. now is injectable so the policy can be driven on a virtual clock by the tests;
+	// leaving it out is the real thing.
+	std::optional<uint32_t> on_feedback(const from_headset::feedback &, int64_t frame_period_ns, bool streaming, clock::time_point now = clock::now());
+
+	// Feed one Wi-Fi radio report from the headset. Only call it for a sample the headset
+	// marked valid; obviously impossible values (a non-negative or absurdly low RSSI, the
+	// -127 sentinel) are rejected here as well. link_speed_mbps <= 0 means unknown, the rest
+	// of the sample is still used. Returns a lower bitrate to apply, if the trend calls for a
+	// preemptive step; never a higher one.
+	std::optional<uint32_t> on_wifi_state(int rssi_dbm, int link_speed_mbps, clock::time_point when = clock::now());
 
 private:
 	// State of one video frame while its per-stream feedback packets are being collected.
@@ -176,10 +236,31 @@ private:
 
 	struct sample
 	{
-		std::chrono::steady_clock::time_point when;
+		clock::time_point when;
 		float utilisation = 0;
 		bool lost = false;
 		bool late = false;
+	};
+
+	// One Wi-Fi report, after the sentinel filtering.
+	struct radio_sample
+	{
+		clock::time_point when;
+		double rssi_dbm = 0; // smoothed, not the raw report
+		int link_speed_mbps = 0;
+	};
+
+	// What the window says about the radio right now.
+	struct radio_trend
+	{
+		bool usable = false;
+		double rssi_dbm = 0; // smoothed current level
+		double slope_db_per_s = 0;
+		double span_s = 0;
+		// Change over the window, positive while the signal improves
+		double delta_db = 0;
+		int link_speed_mbps = 0;
+		int link_speed_peak_mbps = 0;
 	};
 
 	enum class state
@@ -203,6 +284,8 @@ private:
 	config conf;
 	// Headset side switch, ANDed with conf.enabled
 	bool client_enabled = true;
+	// Headset side switch for the radio trend, ANDed with the two above
+	bool radio_aware = true;
 	// Ceiling requested by the client
 	uint32_t ceiling = 0;
 	// Ceiling of the path carrying video, if it is more restrictive
@@ -221,18 +304,31 @@ private:
 	int64_t frame_period = 0;
 
 	std::deque<sample> window;
-	std::optional<std::chrono::steady_clock::time_point> healthy_since;
-	std::chrono::steady_clock::time_point last_evaluation{};
-	std::chrono::steady_clock::time_point last_decrease{};
+	std::optional<clock::time_point> healthy_since;
+	clock::time_point last_evaluation{};
+	clock::time_point last_decrease{};
+
+	std::deque<radio_sample> radio_window;
+	// Smoothed RSSI carried across samples, empty until the first one
+	std::optional<double> radio_ema;
+	clock::time_point last_radio_sample{};
+	clock::time_point last_radio_step{};
+	// A preemptive step was taken and the radio has not recovered since: hold the normal
+	// probing upwards, it would only walk straight back into the degradation. Released by a
+	// recovering signal, by the radio data going stale, and by every reset.
+	bool radio_hold = false;
 
 	// Ceiling actually in force: the client's, clamped by the current path's
 	uint32_t effective_ceiling() const;
 	// reset(), with the mutex already held
 	std::optional<uint32_t> reset_locked();
-	void close_frame(frame_state &, std::chrono::steady_clock::time_point now);
+	void close_frame(frame_state &, clock::time_point now);
 	void flush();
-	stats analyse(std::chrono::steady_clock::time_point now);
-	std::optional<uint32_t> evaluate(std::chrono::steady_clock::time_point now);
+	// Forget the radio trend and release the hold
+	void flush_radio();
+	stats analyse(clock::time_point now);
+	radio_trend analyse_radio(clock::time_point now);
+	std::optional<uint32_t> evaluate(clock::time_point now);
 	uint32_t clamp(uint64_t value) const;
 };
 

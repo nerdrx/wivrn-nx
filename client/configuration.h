@@ -71,6 +71,9 @@ public:
 	uint32_t bitrate_bps = 50'000'000;
 	// Let the server adapt the bitrate to the link quality, using bitrate_bps as the maximum
 	bool bitrate_auto = true;
+	// Report the Wi-Fi radio state (~1 Hz) so that the automatic bitrate can step down on a
+	// falling signal, before the packet loss it is about to cause. Needs bitrate_auto.
+	bool radio_aware = true;
 	uint8_t bit_depth = 10;
 	// Ask the server to bias the encoders for fine detail instead of a smooth image
 	bool sharp_text = false;

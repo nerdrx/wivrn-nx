@@ -396,6 +396,18 @@ void settings_streaming(const settings_context & ctx)
 	        .default_bool = default_config.bitrate_auto,
 	});
 
+	list.push_back({
+	        .id = "##radio_aware",
+	        .label = _("Radio-aware bitrate"),
+	        .description = _("Report the Wi-Fi signal to the server about once a second. A signal that has been falling for a few seconds means you are walking away from the access point, and the server lowers the bitrate before the packets start dropping instead of after. Only the trend is used, and it can only ever lower the bitrate."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.radio_aware; },
+	        .set_bool = [&ctx, &config](bool v) { config.radio_aware = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.radio_aware,
+	        .enabled = [&config] { return config.bitrate_auto; },
+	        .disabled_tooltip = _("Enable automatic bitrate to change this setting."),
+	});
+
 	const int mb = 1'000'000;
 	list.push_back({
 	        .id = "##bitrate",

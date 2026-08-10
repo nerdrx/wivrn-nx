@@ -19,6 +19,13 @@ layout(set = 0, binding = 1) uniform mesh_ubo
     mat4 model;
     mat4 modelview[nb_views];
     mat4 modelviewproj[nb_views];
+#ifdef SKY_ANIM_PARAMS
+    // Extra per-node data appended after the instance data by scene_renderer
+    // (components::node::extra_shader_data). Only the space-lobby sky dome
+    // provides this; other shaders never define SKY_ANIM_PARAMS so their block
+    // layout is unchanged.
+    vec4 anim_params;
+#endif
 } mesh;
 
 layout(set = 0, binding = 2) uniform joints_ubo

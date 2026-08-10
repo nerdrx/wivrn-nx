@@ -408,6 +408,106 @@ void scenes::lobby::connect(const configuration::server_data & data)
 	        },
 	        data.service,
 	        data.manual);
+
+	// Start the hyperspace warp as soon as the connection attempt begins; the
+	// per-frame state machine in update_lobby_animation() drives it from here.
+	if (application::get_config().warp_transition)
+	{
+		warp_active = true;
+		warp_target = 1.0f;
+	}
+}
+
+void scenes::lobby::resolve_sky_node()
+{
+	sky_entity = find_node_by_name(world, "SkyDome");
+	sky_angle = 0;
+	if (sky_entity != entt::null)
+	{
+		if (auto * node = world.try_get<components::node>(sky_entity))
+			sky_base_orientation = node->orientation;
+	}
+}
+
+void scenes::lobby::update_lobby_animation(const XrFrameState & frame_state)
+{
+	auto & config = application::get_config();
+	const bool animated = config.animated_lobby;
+	const bool warp_enabled = config.warp_transition;
+
+	// Elapsed time since the lobby was focused, wrapped at a multiple of the
+	// comet period so precision stays good and a wrap never cuts a comet.
+	if (anim_start_time == 0)
+		anim_start_time = frame_state.predictedDisplayTime;
+	const double elapsed = (frame_state.predictedDisplayTime - anim_start_time) * 1e-9;
+	const float time = float(std::fmod(std::max(elapsed, 0.0), 12480.0));
+	const float dt = frame_state.predictedDisplayPeriod * 1e-9f;
+
+	// --- Warp state machine (feature "Warp transition") ---
+	if (warp_enabled)
+	{
+		// Keep building while a connection attempt is in flight or the stream
+		// scene is coming up; decelerate back otherwise (covers the failure and
+		// cancellation paths, where async_error is set or the attempt is gone).
+		const bool connecting =
+		        (async_session.valid() && not async_error) ||
+		        (next_scene && next_scene->current_state() != scenes::stream::state::shutdown);
+
+		if (connecting)
+		{
+			warp_active = true;
+			warp_target = 1.0f;
+		}
+		else if (warp_active)
+			warp_target = 0.0f;
+
+		constexpr float warp_duration = 1.2f; // seconds for a full sweep
+		const float step = dt / warp_duration;
+		if (warp_amount < warp_target)
+			warp_amount = std::min(warp_target, warp_amount + step);
+		else
+			warp_amount = std::max(warp_target, warp_amount - step);
+
+		if (warp_active && warp_target == 0.0f && warp_amount <= 0.0f)
+			warp_active = false;
+	}
+	else
+	{
+		warp_amount = 0;
+		warp_target = 0;
+		warp_active = false;
+	}
+
+	if (sky_entity == entt::null)
+		return;
+
+	auto * node = world.try_get<components::node>(sky_entity);
+	if (not node)
+		return;
+
+	// Use the custom sky shader whenever either effect can be visible; otherwise
+	// fall back to the stock lit.frag so the static scene is byte-identical.
+	const bool use_sky_shader = animated || warp_enabled;
+	if (node->mesh && not node->mesh->primitives.empty())
+	{
+		if (auto & mat = node->mesh->primitives[0].material_)
+			mat->fragment_shader = use_sky_shader ? "lit_sky.frag" : "lit.frag";
+	}
+
+	if (use_sky_shader)
+		node->set_extra_shader_data(glm::vec4(time, warp_amount, animated ? 1.0f : 0.0f, 0.0f));
+	else
+		node->extra_shader_data.clear();
+
+	// Slow sky-dome drift so the starfield turns a few degrees per minute.
+	if (animated)
+	{
+		constexpr float drift_rate = 0.001164f; // rad/s (~4 deg/min)
+		sky_angle += dt * drift_rate;
+		node->orientation = sky_base_orientation * glm::angleAxis(sky_angle, glm::vec3(0, 1, 0));
+	}
+	else
+		node->orientation = sky_base_orientation;
 }
 
 std::optional<glm::vec3> scenes::lobby::check_recenter_gesture(
@@ -1044,6 +1144,8 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 
 	renderer::animate(world, frame_state.predictedDisplayPeriod * 1.0e-9);
 
+	update_lobby_animation(frame_state);
+
 	world.get<components::node>(lobby_entity).visible = not application::get_config().passthrough_enabled;
 
 	render_start(application::get_config().passthrough_enabled, frame_state.predictedDisplayTime);
@@ -1126,6 +1228,27 @@ void scenes::lobby::on_focused()
 		lobby_entity = add_gltf(config.environment_model, layer_lobby).first;
 		config.save();
 	}
+
+	// Locate the animated sky dome (built-in space lobby only; custom
+	// environments simply have no "SkyDome" node and the effects stay inert).
+	resolve_sky_node();
+	anim_start_time = 0;
+
+	// Decelerate out of warp when returning from a stream, but not on the very
+	// first focus (app launch), so the lobby does not warp-in on startup.
+	if (entered_lobby_before && config.warp_transition)
+	{
+		warp_amount = 1.0f;
+		warp_active = true;
+		warp_target = 0.0f;
+	}
+	else
+	{
+		warp_amount = 0.0f;
+		warp_active = false;
+		warp_target = 0.0f;
+	}
+	entered_lobby_before = true;
 
 	const auto & profile = application::get_hmd_traits().controller_profile;
 	input.emplace(

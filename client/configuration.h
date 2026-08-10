@@ -233,6 +233,14 @@ public:
 
 	std::string environment_model = "assets://ground.glb";
 
+	// Subtle ambient animation of the space lobby (sky drift, star twinkle,
+	// gas-giant self-rotation, occasional comet). Purely client-local visual.
+	bool animated_lobby = true;
+
+	// Hyperspace star-streak transition when connecting to / returning from a
+	// server. Purely client-local visual.
+	bool warp_transition = true;
+
 	bool override_foveation_enable = false;
 	float override_foveation_pitch = -10 * M_PI / 180;
 	float override_foveation_distance = 3;

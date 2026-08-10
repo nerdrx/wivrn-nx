@@ -1184,6 +1184,32 @@ void settings_theme(const settings_context & ctx)
 		ui::end_card();
 	}
 
+	// Space-lobby visuals. Purely client-local, no server involvement.
+	ui::begin_card("##lobby_visuals");
+	{
+		bool animated = config.animated_lobby;
+		const bool animated_default = default_config.animated_lobby;
+		ui::setting_label(_cS("setting name", "Animated lobby"), _cS("setting description", "Subtle motion in the space lobby: the starfield drifts, stars twinkle, the gas giant turns and the odd comet passes by."), control_w);
+		if (ui::toggle("##animated_lobby", &animated, &animated_default))
+		{
+			config.animated_lobby = animated;
+			config.save();
+		}
+
+		ui::row_separator();
+
+		bool warp = config.warp_transition;
+		const bool warp_default = default_config.warp_transition;
+		ui::setting_label(_cS("setting name", "Warp transition"), _cS("setting description", "Stars stretch into a hyperspace tunnel when connecting to a server, and settle back when you return to the lobby."), control_w);
+		if (ui::toggle("##warp_transition", &warp, &warp_default))
+		{
+			config.warp_transition = warp;
+			config.save();
+		}
+
+		ui::end_card();
+	}
+
 	ImGui::PopStyleVar(); // ImGuiStyleVar_ItemSpacing
 }
 

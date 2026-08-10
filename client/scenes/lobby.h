@@ -71,6 +71,19 @@ class lobby : public scene_impl<lobby>
 	std::optional<input_profile> input;
 	entt::entity lobby_entity;
 
+	// Space-lobby ambient animation (feature "Animated lobby") and hyperspace
+	// warp transition (feature "Warp transition"). All client-local visuals.
+	entt::entity sky_entity = entt::null; // SkyDome node, entt::null if absent
+	glm::quat sky_base_orientation = {1, 0, 0, 0};
+	float sky_angle = 0;               // accumulated dome-drift yaw (rad)
+	XrTime anim_start_time = 0;        // first render time, for elapsed seconds
+	float warp_amount = 0;             // current warp intensity [0,1]
+	float warp_target = 0;             // where warp_amount is heading
+	bool warp_active = false;          // a warp is building up or decaying
+	bool entered_lobby_before = false; // to warp-in only when returning from a stream
+	void resolve_sky_node();
+	void update_lobby_animation(const XrFrameState & frame_state);
+
 	file_picker lobby_file_picker;
 	std::future<file_picker_result> lobby_file_picker_future;
 

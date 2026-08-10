@@ -362,6 +362,8 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("first_run", &configuration::first_run),
 	        scalar("locale", &configuration::locale),
 	        scalar("environment_model", &configuration::environment_model),
+	        scalar("animated_lobby", &configuration::animated_lobby),
+	        scalar("warp_transition", &configuration::warp_transition),
 	        scalar("high_power_mode", &configuration::high_power_mode),
 	        scalar("fps_divider", &configuration::fps_divider),
 	        scalar("extended_config", &configuration::extended_config),

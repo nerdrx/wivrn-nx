@@ -363,6 +363,55 @@ void settings_streaming(const settings_context & ctx)
 	        .disabled_tooltip = _("Enable reduced resolution streaming to change this setting."),
 	});
 
+	list.push_back({
+	        .id = "##sharper_center",
+	        .label = _("Sharper center (foveation)"),
+	        .description = _("Reshape the foveation curve so the center of the image stays full resolution over a wider area and the periphery falls off more steeply, spending more of the same encoded size on where you are looking. The encoded size, bitrate and display resolution are unchanged, so it costs nothing extra and takes effect immediately without reconnecting. Best on headsets without eye tracking, where the sharp region is fixed at the center."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.sharper_center; },
+	        .set_bool = [&ctx, &config](bool v) { config.sharper_center = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.sharper_center,
+	});
+
+	list.push_back({
+	        .id = "##foveation_strength",
+	        .label = _C("setting name", "Sharper center strength"),
+	        .description = _("How much the center is favored. Higher widens the full-resolution center and steepens the periphery falloff. The server clamps the steepest periphery when the streaming resolution is low so the edges do not collapse into a blocky upscale."),
+	        .ui = ui_kind::slider,
+	        .get_int = [&config] { return int(std::lround(config.foveation_strength * 100)); },
+	        .set_int = [&ctx, &config](int v) { config.foveation_strength = std::clamp(v, 0, 100) * 0.01f; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .v_min = 0,
+	        .v_max = 100,
+	        .fmt = "%d%%",
+	        .default_int = int(std::lround(default_config.foveation_strength * 100)),
+	        .enabled = [&config] { return config.sharper_center; },
+	        .disabled_tooltip = _("Enable sharper center to change this setting."),
+	});
+
+	list.push_back({
+	        .id = "##foveation_adaptive",
+	        .label = _("Adaptive foveation"),
+	        .description = _("Let the server steepen the center-sharpening curve on its own when the link degrades, so the periphery compresses under a Wi-Fi dip instead of the whole image losing quality. Only the curve shape changes, never the encoded size, so it stays live. Needs the automatic bitrate."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.foveation_adaptive; },
+	        .set_bool = [&ctx, &config](bool v) { config.foveation_adaptive = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.foveation_adaptive,
+	        .enabled = [&config] { return config.sharper_center and config.bitrate_auto; },
+	        .disabled_tooltip = _("Enable sharper center and the automatic bitrate to use adaptive foveation."),
+	});
+
+	list.push_back({
+	        .id = "##foveation_foveal_qp",
+	        .label = _("Protect foveal quality (NVENC/x264)"),
+	        .description = _("Bias the encoder to spend fewer bits compressing the fixed central region, where the encoder exposes a per-region quality map. Only NVENC and x264 have such a path; VAAPI and Vulkan encoders ignore it. Takes effect on the next connection."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.foveation_foveal_qp; },
+	        .set_bool = [&ctx, &config](bool v) { config.foveation_foveal_qp = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.foveation_foveal_qp,
+	        .enabled = [&config] { return config.sharper_center; },
+	        .disabled_tooltip = _("Enable sharper center to change this setting."),
+	});
+
 	auto codec_name = [](std::optional<wivrn::video_codec> codec) -> std::string {
 		if (not codec)
 			return _C("Codec", "Automatic");

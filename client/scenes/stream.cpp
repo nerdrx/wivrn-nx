@@ -286,6 +286,10 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 		// Reduced resolution streaming: the server reads this when it builds the encoders,
 		// so it only takes effect on connection (this is that connection).
 		info.settings.render_scale = config.effective_render_scale();
+		// Fixed-foveation "sharper center": reshapes the foveation curve live, no reconnect.
+		info.settings.foveation_strength = config.effective_foveation_strength();
+		info.settings.foveation_adaptive = config.foveation_adaptive;
+		info.settings.foveation_foveal_qp = config.foveation_foveal_qp;
 
 		info.hand_tracking = config.check_feature(feature::hand_tracking);
 		info.eye_gaze = config.check_feature(feature::eye_gaze);

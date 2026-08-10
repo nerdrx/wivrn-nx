@@ -269,6 +269,13 @@ video_encoder_va::video_encoder_va(wivrn::vk_bundle & vk,
 		// tune here. Encoder specific options from the configuration file still apply.
 		U_LOG_I("vaapi: text clarity mode has no effect, the VAAPI encoders expose no detail retention setting");
 	}
+	if (settings.foveation_foveal_qp)
+	{
+		// Foveation v2 lever 3: the FFmpeg VAAPI encoders expose no per-region QP map, so the
+		// foveal QP bias cannot be honoured here. The curve reshaping (levers 1+2) still applies,
+		// it is only this extra central QP protection that is skipped.
+		U_LOG_I("vaapi: foveal QP protection has no effect, the VAAPI encoders expose no region-of-interest QP map");
+	}
 
 	for (auto option: settings.options)
 	{

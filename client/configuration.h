@@ -109,6 +109,27 @@ public:
 		return std::clamp(render_scale, 0.5f, 1.0f);
 	}
 
+	// Fixed-foveation "sharper center" (foveation v2). Reshapes the server's foveation curve at
+	// a fixed encode size so the centre stays 1:1 over a wider plateau and the periphery falls
+	// off more steeply — more central sharpness for the same encoded size. Off by default so
+	// behaviour is unchanged; foveation_strength is the slider that applies when it is on.
+	// Applied live by the server (recomputed per frame), so it takes effect without a reconnect.
+	bool sharper_center = false;
+	float foveation_strength = 0.5;
+	// The factor actually sent to the server: 0 (neutral) unless sharper center is on.
+	float effective_foveation_strength() const
+	{
+		if (not sharper_center)
+			return 0.0f;
+		return std::clamp(foveation_strength, 0.0f, 1.0f);
+	}
+	// Let the server steepen that curve on its own as the link degrades (needs the automatic
+	// bitrate). Off by default.
+	bool foveation_adaptive = false;
+	// Ask the server to protect foveal quality with a per-region QP bias where the encoder can
+	// (NVENC, x264). VAAPI/Vulkan have no such path and ignore it. Off by default.
+	bool foveation_foveal_qp = false;
+
 	// Attach a secondary path over the USB cable while streaming. Off means the
 	// tunnel is never probed and the server never sees a second path at all, which
 	// is why this stayed a plain switch: it is the one state the server cannot be

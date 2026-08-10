@@ -172,6 +172,14 @@ wivrn::video_encoder_vulkan::video_encoder_vulkan(
         encode_caps(patch_capabilities(in_encode_caps)),
         num_dpb_slots(std::min(video_caps.maxDpbSlots, 16u))
 {
+	if (settings.foveation_foveal_qp)
+	{
+		// Foveation v2 lever 3: the Vulkan video encode extension has no portable per-region QP
+		// map, so the foveal QP bias cannot be honoured here. The foveation curve reshaping
+		// (levers 1+2) still applies; only this extra central QP protection is skipped.
+		U_LOG_I("vulkan: foveal QP protection has no effect, the Vulkan video encoders expose no region-of-interest QP map");
+	}
+
 	if (not std::get<vk::PhysicalDeviceVulkan12Features>(vk.feat).timelineSemaphore)
 		throw std::runtime_error("Cannot use vulkan video encode without timeline semaphores");
 	if (not std::get<vk::PhysicalDeviceVideoMaintenance1FeaturesKHR>(vk.feat).videoMaintenance1)

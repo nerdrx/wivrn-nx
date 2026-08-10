@@ -52,6 +52,10 @@ struct encoder_settings
 	// Bias the encoder towards keeping fine detail (text, user interfaces) rather than a
 	// smooth image, requested by the headset. Only read when the encoder is created.
 	bool sharp_text = false;
+	// Foveation v2 lever 3: protect the static foveal rectangle with a per-region QP bias.
+	// Only NVENC and x264 have a path for it (still a TODO there); VAAPI and Vulkan log once
+	// that they cannot honour it. Only read when the encoder is created.
+	bool foveation_foveal_qp = false;
 	std::optional<std::string> device;
 };
 

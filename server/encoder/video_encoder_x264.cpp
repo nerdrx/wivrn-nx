@@ -183,6 +183,13 @@ video_encoder_x264::video_encoder_x264(
 		param.analyse.f_psy_trellis = 0.15;
 	}
 
+	// TODO (foveation v2, lever 3 — ROI QP): when from_headset::settings_changed.foveation_foveal_qp
+	// is set, bias QP down over the static foveal rectangle via pic.prop.quant_offsets (a per
+	// macroblock float offset map set on each x264_picture_t before x264_encoder_encode). Not
+	// wired yet: it needs the foveal rect threaded from the compositor into present_image, and
+	// the user's path here is VAAPI/Vulkan which has no equivalent, so it was left a stub while
+	// the curve reshaping (levers 1+2) carries the win. See docs/foveation-v2.md.
+
 	x264_param_apply_profile(&param, "main");
 
 	enc = x264_encoder_open(&param);

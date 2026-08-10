@@ -137,6 +137,15 @@ log every attach/flip with reasons and RTT.
 - **Text clarity mode** *(toggle, default off)* — biases the encoders for fine-detail
   retention (deblocking offsets, adaptive quantization, DCT decimation off where each API
   allows). Takes effect on the next connection.
+- **Sharper center (fixed foveation v2)** *(toggle + strength slider, default off)* — reshapes
+  the foveation resample curve at a **fixed encode size** so the center stays 1:1 over a wider
+  plateau and the periphery falls off more steeply: more pixels where a headset without eye
+  tracking always looks (the center), for the same encoded size, bitrate and decode cost.
+  Recomputed per frame, so it applies **live without reconnecting**. An **Adaptive foveation**
+  sub-toggle lets the server steepen the curve on its own as the link degrades (needs the
+  automatic bitrate), compressing the periphery under a Wi-Fi dip instead of dropping global
+  quality. Composes with reduced-resolution streaming and FSR (a guardrail clamps the periphery
+  when the streaming resolution is low). See [docs/foveation-v2.md](docs/foveation-v2.md).
 - **Comfort vignette** *(toggle, default on)* — a soft peripheral fade that eases in when the
   app framerate craters and lifts when it recovers; peripheral judder is what triggers nausea.
 - **Sharp overlay layers** *(toggle, default on)* — one opaque OpenXR quad layer

@@ -875,6 +875,10 @@ static void send_settings_changed_packet(xr::session & session, wivrn_session * 
 	                .enabled_body_parts = config.body_part_mask,
 	                // Stored for the next connection; the encoded size cannot change live.
 	                .render_scale = config.effective_render_scale(),
+	                // Foveation v2: applied live by the server, recomputed per frame.
+	                .foveation_strength = config.effective_foveation_strength(),
+	                .foveation_adaptive = config.foveation_adaptive,
+	                .foveation_foveal_qp = config.foveation_foveal_qp,
 	        });
 }
 

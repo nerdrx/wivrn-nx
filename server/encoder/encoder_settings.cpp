@@ -315,6 +315,7 @@ std::array<encoder_settings, num_streams> get_encoder_settings(wivrn::vk_bundle 
 		dst.options = src.options;
 		dst.device = src.device;
 		dst.sharp_text = settings.sharp_text;
+		dst.foveation_foveal_qp = settings.foveation_foveal_qp;
 
 		std::tie(dst.encoder_name, dst.codec) = prober.select_encoder(src);
 	}

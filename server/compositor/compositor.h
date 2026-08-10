@@ -111,6 +111,16 @@ private:
 	layer_squasher squasher;
 	wivrn::foveation foveation;
 
+	// Adaptive foveation (foveation v2, lever 2): the curve strength actually pushed to the
+	// foveation object, slew-limited toward the target so it does not pop frame to frame. The
+	// target is the base setting plus, when adaptive is on and the automatic bitrate is active,
+	// a bump proportional to how far the controller has backed off the ceiling. Present thread
+	// only. -1 marks "not yet initialised" so the first frame snaps instead of ramping from 0.
+	float foveation_adaptive_state = -1;
+	std::chrono::steady_clock::time_point foveation_adaptive_last{};
+	// Recompute the foveation curve shape for this frame and hand it to the foveation object.
+	void update_foveation_shape();
+
 	// Motion smoothing. The estimator is only built once the headset asks for it,
 	// and destroyed again as soon as it stops asking, so a session that never turns
 	// the feature on pays nothing at all.

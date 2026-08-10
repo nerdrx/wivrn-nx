@@ -228,6 +228,14 @@ video_encoder_nvenc::video_encoder_nvenc(
 		config.rcParams.aqStrength = 1;
 	}
 
+	// TODO (foveation v2, lever 3 — ROI QP): when from_headset::settings_changed.foveation_foveal_qp
+	// is set, bias QP down over the (now static, gaze-independent) foveal rectangle by enabling
+	// NV_ENC_RC_PARAMS.qpMapMode = NV_ENC_QP_MAP_DELTA and filling NV_ENC_PIC_PARAMS.qpDeltaMap
+	// per frame from the foveation centre/size the compositor already computes. Not wired yet:
+	// it needs the foveal rect threaded from the compositor into the encode path, and the user's
+	// path here is VAAPI/Vulkan (below) which has no equivalent, so it was left as a stub while
+	// levers 1+2 (curve reshaping) carry the win. See docs/foveation-v2.md.
+
 	config.gopLength = NVENC_INFINITE_GOPLENGTH;
 	config.frameIntervalP = 1;
 

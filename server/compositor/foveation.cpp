@@ -182,27 +182,53 @@ uint32_t divide_and_round_up(uint32_t a, uint32_t b)
 
 } // namespace
 
-// a, b: parameters computed by solve_foveation
-// λ: pixel ratio between full size and foveated image (in range ]0,1[)
-// c: coordinates in -1,1 range of the full size image where pixel ratio must be 1:1
-// x: coordinates in -1,1 range of the foveated image
-// result: full size image coordinates in -1,1 range
-static double defoveate(double a, double b, double λ, double c, double x)
+// The foveation curve maps foveated (encoded, destination) coordinates back to source
+// (full size) coordinates, both in the -1,1 range. Only a portion of the image is encoded at
+// full resolution; the rest is compressed by the tan periphery below.
+//
+// Foveation v2 generalises the single-tan curve to a central 1:1 plateau surrounded by two
+// independent tan periphery branches:
+//
+//   defoveate(x) = c + λ·(x - xc)                        for |x - xc| <= p   (1:1 plateau)
+//                = (c + λp) + λ/aR·tan(aR·(x - xc - p))   for  x > xc + p     (right periphery)
+//                = (c - λp) + λ/aL·tan(aL·(x - xc + p))   for  x < xc - p     (left periphery)
+//
+// λ: pixel ratio between full size and foveated image (in ]0,1[), i.e. foveated_dim/source_dim
+// c: source coordinate that sits at 1:1 (the fovea centre)
+// xc: destination coordinate of the fovea centre; the neutral single-tan curve's 1:1 point
+// p: half-width of the 1:1 plateau in destination coordinates, 0 for the neutral curve
+// aL, aR: periphery steepness of each branch, solved so that:
+//   - the edges of the image are not moved: defoveate(-1) = -1, defoveate(1) = 1
+//   - the pixel ratio is exactly 1:1 across the whole [xc-p, xc+p] plateau (slope λ, so one
+//     source pixel per destination pixel), and the periphery joins it C¹ (slope λ at xc±p)
+//
+// At p = 0 the two branches collapse to the original single tan (aL = aR = a from
+// solve_foveation, and defoveate(x) = λ/a·tan(a·x + b) + c with b = -a·xc), so a strength of
+// 0 reproduces the pre-v2 curve exactly.
+//
+// The plateau widens (and the periphery steepens) with foveation_strength at a FIXED encode
+// size: more source pixels are kept 1:1 in the centre, paid for by a steeper periphery, for
+// the same number of encoded pixels. We then round to integer pixel ratios (1:1, 1:2 …) and
+// sort the spans so ratios only increase going out from the centre — the wire format and the
+// client defoveator are unchanged, they just receive a different span distribution.
+struct fov_curve
 {
-	// In order to save encoding, transmit and decoding time, only a portion of the image is encoded in full resolution.
-	// on each axis, foveated coordinates are defined by the following formula.
-	return λ / a * tan(a * x + b) + c;
-	// a and b are defined such as:
-	// edges of the image are not moved
-	// f(-1) = -1
-	// f( 1) =  1
-	// the function also enforces pixel ratio 1:1 at fovea
-	// df⁻¹(x)/dx = 1/scale for x = c
+	double λ;
+	double c;
+	double xc;
+	double p;
+	double aL;
+	double aR;
+};
 
-	// We then ensure that source and destination pixel grids match by
-	// rounding to integer pixel ratios: 1:1, 1:2 etc.
-	// Finally, pixel spans are sorted so that we only have increasing
-	// ratios going out from the center.
+static double defoveate(const fov_curve & cu, double x)
+{
+	const double d = x - cu.xc;
+	if (d >= -cu.p and d <= cu.p)
+		return cu.c + cu.λ * d; // 1:1 plateau
+	if (d > cu.p)
+		return (cu.c + cu.λ * cu.p) + cu.λ / cu.aR * tan(cu.aR * (d - cu.p));
+	return (cu.c - cu.λ * cu.p) + cu.λ / cu.aL * tan(cu.aL * (d + cu.p));
 }
 
 static std::tuple<float, float> solve_foveation(float λ, float c)
@@ -262,6 +288,90 @@ static std::tuple<float, float> solve_foveation(float λ, float c)
 	return {a, b(a)};
 }
 
+// Solve one periphery branch: find a > 0 such that tan(a·d) = a·Δ/λ, where d is the branch's
+// destination length (junction to edge) and Δ its source length. This is the same equation
+// solve_foveation solves for the coupled two-sided curve, split into an independent branch so
+// that the plateau can consume different destination and source amounts on each side while the
+// edge still lands exactly (defoveate(±1) = ±1) and the junction slope stays λ.
+//
+// g(a) = tan(a·d) - a·Δ/λ is negative near 0 (Δ/λ > d whenever the plateau leaves any
+// periphery to compress) and +∞ as a·d → π/2, so it has a single root; bisection is robust and
+// converges in double precision well within the iteration budget.
+static double solve_branch(double λ, double d, double Δ)
+{
+	if (d <= 0)
+		return 0;
+	double lo = 1e-12;
+	double hi = (M_PI / 2) / d - 1e-12;
+	auto g = [&](double a) { return tan(a * d) - a * Δ / λ; };
+	for (int i = 0; i < 100; ++i)
+	{
+		double m = 0.5 * (lo + hi);
+		if (g(m) > 0)
+			hi = m;
+		else
+			lo = m;
+	}
+	return 0.5 * (lo + hi);
+}
+
+// Steepest periphery pixel ratio (source pixels per destination pixel) of a curve, evaluated
+// at both edges. slope_norm/λ converts the normalised-coordinate slope to a pixel ratio.
+static double edge_ratio(const fov_curve & cu)
+{
+	const double h = 1e-6;
+	double sR = (1.0 - defoveate(cu, 1.0 - h)) / h / cu.λ;
+	double sL = (defoveate(cu, -1.0 + h) - (-1.0)) / h / cu.λ;
+	return std::max(sR, sL);
+}
+
+// Build the foveation curve for a given fovea centre (source coord c), strength and the active
+// render_scale. strength widens the 1:1 plateau; render_scale caps how far it may go so the
+// combined peripheral factor (render_scale × 1/periphery_ratio) does not collapse into a blocky
+// FSR upscale — see the render_scale/FSR guardrail note. strength 0 returns the neutral curve.
+static fov_curve build_curve(double λ, double c, double strength, double render_scale)
+{
+	auto [a, b] = solve_foveation(λ, c);
+	const double xc = -b / a;
+
+	fov_curve neutral{λ, c, xc, 0.0, a, a};
+	if (strength <= 0)
+		return neutral;
+
+	// How far the plateau may reach toward the nearer edge, in destination coordinates.
+	const double room = std::min(1.0 - xc, 1.0 + xc);
+
+	auto build_p = [&](double p) -> fov_curve {
+		double dR = 1.0 - xc - p, ΔR = 1.0 - c - λ * p;
+		double dL = 1.0 + xc - p, ΔL = 1.0 + c - λ * p;
+		return {λ, c, xc, p, solve_branch(λ, dL, ΔL), solve_branch(λ, dR, ΔR)};
+	};
+
+	// Guardrail: bound the added periphery steepness relative to the neutral curve, and tighten
+	// that bound as render_scale falls (a smaller encode already upscales the periphery by
+	// 1/render_scale before foveation acts). At render_scale 1 the periphery may reach 3× the
+	// neutral edge ratio, at 0.5 only 2×. render_scale owns central sharpness, foveation owns
+	// the peripheral taper, FSR reconstructs — this keeps the two from compounding into mush.
+	const double cap = edge_ratio(neutral) * (1.0 + 2.0 * std::clamp(render_scale, 0.0, 1.0));
+
+	double p_target = std::clamp(strength, 0.0, 1.0) * 0.6 * room;
+	fov_curve cand = build_p(p_target);
+	if (edge_ratio(cand) <= cap)
+		return cand;
+
+	// edge_ratio is monotone in p; bisect for the widest plateau that stays within the cap.
+	double lo = 0, hi = p_target;
+	for (int i = 0; i < 40; ++i)
+	{
+		double m = 0.5 * (lo + hi);
+		if (edge_ratio(build_p(m)) <= cap)
+			lo = m;
+		else
+			hi = m;
+	}
+	return build_p(lo);
+}
+
 static bool is_zero_quat(xrt_quat q)
 {
 	return q.x == 0 and q.y == 0 and q.z == 0 and q.w == 0;
@@ -315,10 +425,12 @@ static void fill_param_2d(
         float c,
         size_t foveated_dim,
         size_t source_dim,
+        float strength,
+        float render_scale,
         std::vector<uint16_t> & out)
 {
-	float scale = float(foveated_dim) / source_dim;
-	auto [a, b] = solve_foveation(scale, c);
+	double scale = double(foveated_dim) / source_dim;
+	fov_curve curve = build_curve(scale, c, strength, render_scale);
 
 	uint16_t last = 0;
 	std::vector<uint16_t> left; // index 0: 1:1 ratio, then 2:1 etc.
@@ -326,7 +438,7 @@ static void fill_param_2d(
 	for (size_t i = 1; i < foveated_dim; ++i)
 	{
 		double u = (i * 2.) / foveated_dim - 1;
-		auto f = defoveate(a, b, scale, c, u);
+		auto f = defoveate(curve, u);
 		uint16_t n = std::clamp<uint16_t>((f * 0.5 + 0.5) * source_dim + 0.5, 0, source_dim);
 		assert(n > last);
 		size_t count = n - last;
@@ -373,7 +485,7 @@ void foveation::compute_params()
 			auto distance = manual_foveation.enabled ? manual_foveation.distance : convergence_distance;
 			auto angle_x = convergence_angle(distance, eye_x[i], -e.x);
 			auto center = angles_to_center(angle_x, fov.angle_left, fov.angle_right);
-			fill_param_2d(center, foveated_size.width, extent_w, params[i].x);
+			fill_param_2d(center, foveated_size.width, extent_w, shape.strength, shape.render_scale, params[i].x);
 		}
 		else
 			params[i].x = {uint16_t(extent_w)};
@@ -388,7 +500,7 @@ void foveation::compute_params()
 				angle_y += angle_offset;
 			}
 			auto center = angles_to_center(-angle_y, fov.angle_up, fov.angle_down);
-			fill_param_2d(center, foveated_size.height, extent_h, params[i].y);
+			fill_param_2d(center, foveated_size.height, extent_h, shape.strength, shape.render_scale, params[i].y);
 		}
 		else
 			params[i].y = {uint16_t(extent_h)};
@@ -459,6 +571,13 @@ void foveation::update_foveation_center_override(const from_headset::override_fo
 	manual_foveation = center;
 }
 
+void foveation::set_shape(float strength, float render_scale)
+{
+	std::lock_guard lock(mutex);
+	shape.strength = std::clamp(strength, 0.f, 1.f);
+	shape.render_scale = std::clamp(render_scale, 0.f, 1.f);
+}
+
 static void fill_ubo(
         std::span<uint32_t> ubo,
         const std::vector<uint16_t> & params,
@@ -522,7 +641,11 @@ void foveation::update_ubo(
 	    std::abs(last.eye_x[1] - eye_x[1]) < 0.0005 and
 	    last.manual_foveation.enabled == manual_foveation.enabled and
 	    std::abs(last.manual_foveation.pitch - manual_foveation.pitch) < 0.0005 and
-	    std::abs(last.manual_foveation.distance - manual_foveation.distance) < 0.0005)
+	    std::abs(last.manual_foveation.distance - manual_foveation.distance) < 0.0005 and
+	    // Foveation v2: a changed curve shape re-quantises the spans without touching the
+	    // encode size, so it is picked up here and applied live on the next frame.
+	    std::abs(last.shape.strength - shape.strength) < 0.0005 and
+	    std::abs(last.shape.render_scale - shape.render_scale) < 0.0005)
 		return;
 
 	last = {
@@ -532,6 +655,7 @@ void foveation::update_ubo(
 	        .fovs = {src_fov[0], src_fov[1]},
 	        .eye_x = {eye_x[0], eye_x[1]},
 	        .manual_foveation = manual_foveation,
+	        .shape = shape,
 	};
 
 	compute_params();

@@ -491,6 +491,23 @@ struct settings_changed
 	// done live, so like the stream/render eye sizes it only takes effect on the next
 	// connection: the server reads it when it builds the encoders.
 	float render_scale = 1.0;
+
+	// Fixed-foveation "sharper center". Reshapes the foveation resample curve at a FIXED
+	// encode size so the central region stays 1:1 over a wider plateau and the periphery
+	// falls off more steeply — more central pixels for the same encoded size and bit budget.
+	// 0 is the neutral curve WiVRn has always used (behaviour unchanged); 1 is the widest
+	// plateau / steepest periphery. Unlike render_scale it never changes the encode size, so
+	// the server recomputes it per frame and it applies live, no reconnect. In ]0, 1].
+	float foveation_strength = 0.0;
+	// Let the server steepen that curve on its own as the link degrades, so the periphery
+	// compresses under a Wi-Fi dip instead of the whole image losing quality. Only the curve
+	// SHAPE moves (recomputed per frame), never the encode size, so this too is live. Read on
+	// every frame and gated on bitrate_auto being active.
+	bool foveation_adaptive = false;
+	// Bias the encoder QP down over the (now static, gaze-independent) foveal rectangle where
+	// the encoder exposes a per-region QP map. Only NVENC (qpDeltaMap) and x264 (quant_offsets)
+	// have such a path; VAAPI and Vulkan ignore it. Read when the encoders are created.
+	bool foveation_foveal_qp = false;
 };
 
 // The motion smoothing mode a settings packet asks for. A headset that names one always

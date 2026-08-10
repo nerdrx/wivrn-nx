@@ -182,6 +182,18 @@ public:
 		return settings.lock();
 	}
 
+	// For adaptive foveation: the automatic bitrate controller's current state, read per frame
+	// by the compositor to steepen the foveation curve as the link backs off the ceiling. Its
+	// own mutex, safe from the present thread.
+	wivrn::bitrate_controller::status bitrate_status() const
+	{
+		return bitrate_ctl.snapshot();
+	}
+	bool bitrate_auto_active() const
+	{
+		return bitrate_ctl.enabled();
+	}
+
 	wivrn_hmd & get_hmd()
 	{
 		return hmd;

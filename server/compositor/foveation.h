@@ -48,6 +48,18 @@ class foveation
 	float eye_x[2] = {}; // eye x position
 	xrt_quat gaze = {};
 	from_headset::override_foveation_center manual_foveation = {};
+
+	// Fixed-foveation "sharper center" (foveation v2). strength reshapes the resample curve at
+	// a fixed encode size (wider 1:1 plateau + steeper periphery); render_scale is the active
+	// encode-size factor, used only as a guardrail on how steep the periphery may get. Pushed
+	// per frame by the compositor (base setting plus any adaptive bump), recomputed live.
+	struct shape_params
+	{
+		float strength = 0;
+		float render_scale = 1;
+	};
+	shape_params shape;
+
 	std::array<to_headset::foveation_parameter, 2> params;
 
 	buffer_allocation gpu_buffer;
@@ -69,6 +81,7 @@ class foveation
 		float eye_x[2] = {};
 
 		from_headset::override_foveation_center manual_foveation = {};
+		shape_params shape = {};
 	};
 	P last;
 
@@ -87,6 +100,11 @@ public:
 
 	void update_tracking(const from_headset::tracking &);
 	void update_foveation_center_override(const from_headset::override_foveation_center &);
+
+	// Fixed-foveation "sharper center". strength in [0, 1] (0 = neutral pre-v2 curve),
+	// render_scale is the active encode-size factor for the guardrail. Applied on the next
+	// update_ubo, i.e. live and per frame with no encode-size change and no renegotiation.
+	void set_shape(float strength, float render_scale);
 
 	std::array<to_headset::foveation_parameter, 2> foveate(
 	        vk::raii::Device &,

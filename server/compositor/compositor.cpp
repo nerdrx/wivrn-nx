@@ -877,6 +877,9 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 		auto now = os_monotonic_get_ns();
 		session.add_tracking_request(device_id::EYE_GAZE, frame.rendering.desired_present_time_ns, now, now);
 	}
+	// Foveation v2: refresh the curve shape (base "sharper center" setting plus any adaptive
+	// bump) before foveating. Recomputed per frame with no encode-size change, so it is live.
+	update_foveation_shape();
 	view_info.foveation = foveation.foveate(
 	        vk.device,
 	        cmd,
@@ -1801,6 +1804,60 @@ void compositor::update_tracking(const from_headset::tracking & tracking)
 void compositor::update_foveation_center_override(const from_headset::override_foveation_center & center)
 {
 	foveation.update_foveation_center_override(center);
+}
+
+void compositor::update_foveation_shape()
+{
+	float base;
+	float render_scale;
+	bool adaptive;
+	{
+		auto s = session.get_settings();
+		base = std::clamp(s->foveation_strength, 0.f, 1.f);
+		render_scale = std::clamp(s->render_scale, 0.f, 1.f);
+		adaptive = s->foveation_adaptive;
+	}
+
+	// Lever 2: steepen the curve as the automatic bitrate controller backs off its ceiling, so
+	// the periphery compresses under a Wi-Fi dip instead of the whole image losing quality.
+	// Gated on the automatic bitrate being active — with a fixed bitrate there is no controller
+	// state to read. Only ever raises the strength; the base setting is the floor.
+	float target = base;
+	if (adaptive and session.bitrate_auto_active())
+	{
+		auto st = session.bitrate_status();
+		if (st.ceiling_bps > 0)
+		{
+			// 1 while riding the ceiling, falling toward 0 as the controller backs off. The
+			// 0.85 dead zone leaves the steady-state headroom (BBR cruises a little under the
+			// estimate) alone, so foveation only kicks in on a real degradation.
+			float ratio = float(st.bitrate_bps) / float(st.ceiling_bps);
+			float degrade = std::clamp((0.85f - ratio) / 0.85f, 0.f, 1.f);
+			target = std::clamp(base + degrade * (1.f - base), 0.f, 1.f);
+		}
+	}
+
+	// Slew-limit the pushed strength so the curve never pops frame to frame: a first-order lag
+	// toward the target, rising over ~2 s and falling more slowly (~4 s) so a brief dip does not
+	// flap the periphery. The first frame snaps straight to the target.
+	auto now = std::chrono::steady_clock::now();
+	if (foveation_adaptive_state < 0)
+	{
+		foveation_adaptive_state = target;
+	}
+	else
+	{
+		float dt = std::chrono::duration<float>(now - foveation_adaptive_last).count();
+		dt = std::clamp(dt, 0.f, 0.5f);
+		float tau = target > foveation_adaptive_state ? 2.0f : 4.0f;
+		foveation_adaptive_state += (target - foveation_adaptive_state) * std::clamp(dt / tau, 0.f, 1.f);
+	}
+	foveation_adaptive_last = now;
+
+	// Snap to coarse steps so a slowly drifting lag does not re-quantise the spans every single
+	// frame; a real change of one step still applies live on the next frame.
+	float pushed = std::round(foveation_adaptive_state / 0.02f) * 0.02f;
+	foveation.set_shape(pushed, render_scale);
 }
 
 void compositor::resume()

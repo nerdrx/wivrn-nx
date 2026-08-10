@@ -199,3 +199,23 @@ once the primary has been healthy for the whole window.
 Linux client against a local server, two routes: loopback as "Wi-Fi", a veth/netns pair with
 `tc netem` loss/latency as "USB". Kill or degrade one route mid-stream; success = session
 survives, log shows path-down → flip → IDR → recovery, poses never stall.
+
+### Stage 3 — striping (bandwidth aggregation)
+
+Selector gains a third posture: "combine". Wi-Fi remains the primary and is paced exactly as
+today; when a frame's shards would exceed the pacing window's byte budget, the tail spills to
+the secondary (USB TCP). Aggregate ceiling ≈ Wi-Fi estimate + `multipath.usb-max-bitrate`.
+
+- FEC groups are built BEFORE the split so parity is path-agnostic; global dedup/reassembly
+  already merges arrivals from both sockets.
+- The shard reassembly ring deepens (2 → 6 frames) to tolerate inter-path skew; the
+  frame-advance logic must not discard a frame merely because a faster path delivered a newer
+  one (skew ≤ ~3 frame periods tolerated, beyond that the old frame is abandoned as today).
+- Bitrate controller: while combining, the delivered-bandwidth estimator treats the paths as
+  one aggregate link (wire time = per-frame max across paths — already what the feedback
+  measures); the path ceiling becomes wifi-estimate + usb-max instead of the failover clamp.
+- Failover semantics preserved: either path dying collapses to the survivor with an IDR and
+  the selector returns to its Stage-2 postures; combining resumes when both are healthy for
+  the hysteresis window.
+- Headset control: the "USB backup connection" toggle becomes a selector — Backup only /
+  Combine (experimental).

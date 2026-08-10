@@ -158,6 +158,9 @@ private:
 		float bias = 0;
 		float sharpness = 0;
 		bool cas_full = false;
+		// Whether FSR (EASU + RCAS) is the sampling path this refresh; sharpness above then
+		// carries the FSR/RCAS strength instead of the CAS strength.
+		bool fsr = false;
 		float vignette = 0;
 		float glow = 0;
 		float deband = 0;

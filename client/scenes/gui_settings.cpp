@@ -338,6 +338,31 @@ void settings_streaming(const settings_context & ctx)
 	        .disabled_tooltip = disconnect_tip,
 	});
 
+	list.push_back({
+	        .id = "##reduced_resolution",
+	        .label = _("Reduced resolution streaming"),
+	        .description = _("Encode, transmit and decode the video at a fraction of the normal resolution to save bitrate, encode and decode cost. The display resolution is unchanged; the smaller image is reconstructed on the headset when it is drawn. Pairs with FSR upscaling on the Post-processing page for sharpness (without it the reconstruction is a plain bilinear stretch). Takes effect on the next connection."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.reduced_resolution; },
+	        .set_bool = [&ctx, &config](bool v) { config.reduced_resolution = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.reduced_resolution,
+	});
+
+	list.push_back({
+	        .id = "##render_scale",
+	        .label = _C("setting name", "Streaming resolution"),
+	        .description = _("Fraction of the normal encode resolution the video is streamed at. Lower saves more bandwidth and power but softens the image; pair it with FSR upscaling. Takes effect on the next connection."),
+	        .ui = ui_kind::slider,
+	        .get_int = [&config] { return int(std::lround(config.render_scale * 100)); },
+	        .set_int = [&ctx, &config](int v) { config.render_scale = std::clamp(v, 50, 100) * 0.01f; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .v_min = 50,
+	        .v_max = 100,
+	        .fmt = "%d%%",
+	        .default_int = int(std::lround(default_config.render_scale * 100)),
+	        .enabled = [&config] { return config.reduced_resolution; },
+	        .disabled_tooltip = _("Enable reduced resolution streaming to change this setting."),
+	});
+
 	auto codec_name = [](std::optional<wivrn::video_codec> codec) -> std::string {
 		if (not codec)
 			return _C("Codec", "Automatic");
@@ -677,6 +702,31 @@ void settings_post_processing(const settings_context & ctx)
 	}
 
 	list.push_back({
+	        .id = "##fsr",
+	        .label = _("FSR upscaling"),
+	        .description = _("Reconstruct the decoded video with AMD FSR 1 (edge-adaptive upscaling plus sharpening) instead of a plain bilinear stretch. Sharpest when the stream is encoded below the display resolution, so it pairs with 'Reduced resolution streaming' on the Streaming page, but it also works at full resolution as a mild sharpen and anti-alias. Costs about a dozen extra texture reads per pixel, so it is off by default and replaces contrast adaptive sharpening while it is on."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.fsr; },
+	        .set_bool = [&config](bool v) { config.fsr = v; config.save(); },
+	        .default_bool = default_config.fsr,
+	});
+
+	list.push_back({
+	        .id = "##fsr_sharpness",
+	        .label = _C("setting name", "FSR sharpness"),
+	        .description = _("How strongly FSR's RCAS pass sharpens the reconstructed image. 0% leaves a pure edge-adaptive upscale."),
+	        .ui = ui_kind::slider,
+	        .get_int = [&config] { return int(std::lround(config.fsr_sharpness * 100)); },
+	        .set_int = [&config](int v) { config.fsr_sharpness = v * 0.01f; config.save(); },
+	        .v_min = 0,
+	        .v_max = 100,
+	        .fmt = "%d%%",
+	        .default_int = int(std::lround(default_config.fsr_sharpness * 100)),
+	        .enabled = [&config] { return config.fsr; },
+	        .disabled_tooltip = _("Enable FSR upscaling to change this setting."),
+	});
+
+	list.push_back({
 	        .id = "##cas_sharpening",
 	        .label = _("Contrast adaptive sharpening"),
 	        .description = _("Sharpen the decoded video, more where the image is flat and less where it already has contrast."),
@@ -684,6 +734,8 @@ void settings_post_processing(const settings_context & ctx)
 	        .get_bool = [&config] { return config.cas_sharpening; },
 	        .set_bool = [&config](bool v) { config.cas_sharpening = v; config.save(); },
 	        .default_bool = default_config.cas_sharpening,
+	        .enabled = [&config] { return not config.fsr; },
+	        .disabled_tooltip = _("FSR upscaling already sharpens the image; turn it off to use contrast adaptive sharpening instead."),
 	});
 
 	list.push_back({
@@ -697,8 +749,8 @@ void settings_post_processing(const settings_context & ctx)
 	        .v_max = 100,
 	        .fmt = "%d%%",
 	        .default_int = int(std::lround(default_config.cas_sharpness * 100)),
-	        .enabled = [&config] { return config.cas_sharpening; },
-	        .disabled_tooltip = _("Enable contrast adaptive sharpening to change this setting."),
+	        .enabled = [&config] { return config.cas_sharpening and not config.fsr; },
+	        .disabled_tooltip = config.fsr ? _("FSR upscaling already sharpens the image; turn it off to use contrast adaptive sharpening instead.") : _("Enable contrast adaptive sharpening to change this setting."),
 	});
 
 	list.push_back({
@@ -709,8 +761,8 @@ void settings_post_processing(const settings_context & ctx)
 	        .get_bool = [&config] { return config.cas_full_kernel; },
 	        .set_bool = [&config](bool v) { config.cas_full_kernel = v; config.save(); },
 	        .default_bool = default_config.cas_full_kernel,
-	        .enabled = [&config] { return config.cas_sharpening; },
-	        .disabled_tooltip = _("Enable contrast adaptive sharpening to change this setting."),
+	        .enabled = [&config] { return config.cas_sharpening and not config.fsr; },
+	        .disabled_tooltip = config.fsr ? _("FSR upscaling already sharpens the image; turn it off to use contrast adaptive sharpening instead.") : _("Enable contrast adaptive sharpening to change this setting."),
 	});
 
 	list.push_back({

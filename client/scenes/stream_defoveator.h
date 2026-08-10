@@ -62,6 +62,9 @@ class stream_defoveator
 	// rebuilds them if the requested kernel differs, so switching is a rare pipeline
 	// reset rather than a per-pixel branch.
 	bool cas_full_baked = false;
+	// Whether FSR (EASU + RCAS) is compiled into the currently built pipelines, same
+	// specialization-constant scheme as cas_full_baked above.
+	bool fsr_baked = false;
 
 	// Motion smoothing texture the sampler above is bound with
 	image_allocation motion_image;
@@ -148,7 +151,8 @@ public:
 	        const post_processing & post,
 	        const motion_warp & motion,
 	        int destination,
-	        bool cas_full_kernel = false);
+	        bool cas_full_kernel = false,
+	        bool fsr = false);
 
 	static XrExtent2Di defoveated_size(const wivrn::to_headset::foveation_parameter &);
 };

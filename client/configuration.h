@@ -22,6 +22,7 @@
 #include "wivrn_discover.h"
 #include "wivrn_packets.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -89,6 +90,24 @@ public:
 	uint8_t bit_depth = 10;
 	// Ask the server to bias the encoders for fine detail instead of a smooth image
 	bool sharp_text = false;
+
+	// Reduced resolution streaming: ask the server to encode the eye images at a fraction
+	// of the size it otherwise would, so the stream is encoded, transmitted and decoded at
+	// a lower resolution to save bitrate, encode and decode cost. The headset's display /
+	// defoveated resolution is unchanged; the smaller decoded image is reconstructed when
+	// it is sampled (bilinear on its own, sharp when FSR upscaling is on). Off by default;
+	// render_scale is the slider value that applies when reduced_resolution is on. Changing
+	// the encoded size cannot be done live, so it takes effect on the next connection.
+	bool reduced_resolution = false;
+	float render_scale = 0.75;
+	// The factor actually sent to the server: 1.0 unless reduced resolution is on, clamped
+	// to a sane range so a bad config value can never ask for a degenerate encode size.
+	float effective_render_scale() const
+	{
+		if (not reduced_resolution)
+			return 1.0f;
+		return std::clamp(render_scale, 0.5f, 1.0f);
+	}
 
 	// Attach a secondary path over the USB cable while streaming. Off means the
 	// tunnel is never probed and the server never sees a second path at all, which
@@ -158,6 +177,18 @@ public:
 	// here as a real quad layer. On by default: it is strictly sharper and the
 	// runtime, rather than the server, holds it still when the head moves.
 	bool quad_layers = true;
+
+	// AMD FSR1 (EASU + RCAS) spatial upscaling, applied to the decoded image by the
+	// reprojection pass in place of the plain bilinear tap. The decoded image is usually
+	// smaller than the defoveated/display size (foveation, and more so with reduced
+	// resolution streaming below), so EASU reconstructs the edges and RCAS sharpens.
+	// Off by default: EASU costs about a dozen texture taps and this pass already runs on
+	// every opaque pixel every vsync on weak GPUs (Adreno/Pico). When on it REPLACES the
+	// contrast adaptive sharpening below (EASU+RCAS instead of a plain CAS pass), so the
+	// CAS controls are ignored while FSR is enabled. fsr_sharpness drives the RCAS lobe,
+	// 0 disables the sharpen and leaves a pure EASU upscale (a mild edge-preserving AA).
+	bool fsr = false;
+	float fsr_sharpness = 0.5;
 
 	// Contrast adaptive sharpening, applied to the decoded image by the reprojection pass
 	bool cas_sharpening = false;

@@ -483,6 +483,14 @@ struct settings_changed
 	bool mirror_gamepad = false;
 	// which virtual trackers should be enabled for body tracking
 	std::underlying_type_t<body_part_mask> enabled_body_parts;
+	// Fraction of the stream eye size the server should actually encode the eye images at,
+	// in ]0, 1]. 1.0 is the normal full-resolution stream; below that the encoder, the
+	// foveation target and therefore the decoded image shrink by this factor, and the
+	// headset reconstructs the full defoveated resolution when sampling the decoded image
+	// (best paired with the headset's FSR upscaling). Changing the encoded size cannot be
+	// done live, so like the stream/render eye sizes it only takes effect on the next
+	// connection: the server reads it when it builds the encoders.
+	float render_scale = 1.0;
 };
 
 // The motion smoothing mode a settings packet asks for. A headset that names one always

@@ -873,6 +873,8 @@ static void send_settings_changed_packet(xr::session & session, wivrn_session * 
 	                .standby_freeze = config.standby_freeze,
 	                .mirror_gamepad = config.forward_gamepad,
 	                .enabled_body_parts = config.body_part_mask,
+	                // Stored for the next connection; the encoded size cannot change live.
+	                .render_scale = config.effective_render_scale(),
 	        });
 }
 

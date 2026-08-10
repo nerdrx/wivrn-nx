@@ -283,6 +283,9 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 		info.settings.standby_freeze = config.standby_freeze;
 		info.settings.mirror_gamepad = config.forward_gamepad;
 		info.settings.enabled_body_parts = config.body_part_mask;
+		// Reduced resolution streaming: the server reads this when it builds the encoders,
+		// so it only takes effect on connection (this is that connection).
+		info.settings.render_scale = config.effective_render_scale();
 
 		info.hand_tracking = config.check_feature(feature::hand_tracking);
 		info.eye_gaze = config.check_feature(feature::eye_gaze);
@@ -1164,8 +1167,13 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		const auto & config = application::get_config();
 		const float v = comfort_vignette_fade * comfort_vignette_fade * (3 - 2 * comfort_vignette_fade); // Easing function
 
+		// FSR takes over the sharpen when it is on: sharpness then feeds the RCAS lobe, and
+		// the CAS controls are ignored. Off, it is the CAS strength exactly as before.
+		const bool fsr_on = config.fsr;
 		stream_defoveator::post_processing post{
-		        .sharpness = config.cas_sharpening ? std::clamp<float>(config.cas_sharpness, 0, 1) : 0.f,
+		        .sharpness = fsr_on
+		                             ? std::clamp<float>(config.fsr_sharpness, 0, 1)
+		                             : (config.cas_sharpening ? std::clamp<float>(config.cas_sharpness, 0, 1) : 0.f),
 		        .vignette = v * constants::stream::vignette_strength,
 		        .vignette_inner = constants::stream::vignette_inner_radius,
 		        .vignette_outer = constants::stream::vignette_outer_radius,
@@ -1227,6 +1235,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			state.bias = bias;
 			state.sharpness = post.sharpness;
 			state.cas_full = config.cas_full_kernel;
+			state.fsr = fsr_on;
 			state.vignette = post.vignette;
 			state.glow = post.glow;
 			state.deband = post.deband;
@@ -1261,7 +1270,8 @@ void scenes::stream::render(const XrFrameState & frame_state)
 				                      post,
 				                      motion,
 				                      image_index,
-				                      config.cas_full_kernel);
+				                      config.cas_full_kernel,
+				                      fsr_on);
 			}
 		}
 

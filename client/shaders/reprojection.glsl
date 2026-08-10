@@ -72,6 +72,14 @@ layout(constant_id = 1) const bool do_srgb = false;
 // and halving the taps matters on weak GPUs (Adreno/Pico) where this pass runs on
 // every opaque pixel, every vsync. true restores the full "better diagonals" 3x3.
 layout(constant_id = 2) const bool cas_full_kernel = false;
+// AMD FSR1 spatial upscaling. false (the default) keeps the plain bilinear base tap and
+// the whole EASU/RCAS path below compiles out, so an opaque pixel pays zero extra taps and
+// the output is byte identical to no FSR. true replaces the base tap with edge-adaptive
+// upsampling followed by an RCAS sharpen, which is a dozen-odd extra taps: only worth it
+// when the decoded image is meaningfully smaller than the display (foveation, and more so
+// with reduced resolution streaming). Baked like cas_full_kernel, so toggling it is a rare
+// pipeline rebuild rather than a per-pixel branch.
+layout(constant_id = 3) const bool fsr_enable = false;
 
 layout(set = 0, binding = 0) uniform sampler2D rgb[alpha + 1];
 // One cell per motion vector, covering the whole eye image, sampled with the
@@ -132,6 +140,181 @@ vec3 contrast_adaptive_sharpen(vec2 uv, vec3 e, float sharpness)
 	// 0 w 0
 	vec3 w = amplitude * (-1.0 / mix(8.0, 5.0, clamp(sharpness, 0.0, 1.0)));
 	return clamp(((b + d + f + h) * w + e) / (1.0 + 4.0 * w), 0.0, 1.0);
+}
+
+// AMD FidelityFX Super Resolution 1.0 (FSR1), spatial upscaling, following the public
+// EASU + RCAS reference math. When the decoded image is smaller than the defoveated
+// output (foveation, and more so with reduced resolution streaming) EASU reconstructs the
+// colour at the sample position with an edge-adaptive 12-tap filter instead of a plain
+// bilinear tap, and RCAS then sharpens it. Everything here compiles out unless fsr_enable
+// is set, so it is free when FSR is off.
+//
+// The whole neighbourhood is read through the attached (YCbCr) sampler like every other
+// effect in this pass: a bilinear sample placed exactly on a texel centre returns that
+// texel, which is how EASU reads its 4x4 grid without texelFetch. Work is done in the raw
+// sampled (gamma) space, the perceptual space FSR expects and the space CAS and the glow
+// already use.
+
+// Reciprocal with a tiny-denominator guard so a flat neighbourhood (all diffs zero) yields
+// a finite weight of zero rather than the NaN a bare 1/0 would feed forward.
+float fsr_rcp(float x)
+{
+	return 1.0 / max(x, 1e-6);
+}
+
+// One EASU directional-analysis contribution, at one of the four nearest texels, weighted
+// by the bilinear share of that texel. lA..lE are the centre luma (lC) and its up/left/
+// right/down neighbours (lA/lB/lD/lE), following the reference FsrEasuSetF.
+void fsr_easu_set(inout vec2 dir, inout float len, vec2 pp, float w, float lA, float lB, float lC, float lD, float lE)
+{
+	float dc = lD - lC;
+	float cb = lC - lB;
+	float lenX = fsr_rcp(max(abs(dc), abs(cb)));
+	float dirX = lD - lB;
+	dir.x += dirX * w;
+	lenX = clamp(abs(dirX) * lenX, 0.0, 1.0);
+	lenX *= lenX;
+	len += lenX * w;
+
+	float ec = lE - lC;
+	float ca = lC - lA;
+	float lenY = fsr_rcp(max(abs(ec), abs(ca)));
+	float dirY = lE - lA;
+	dir.y += dirY * w;
+	lenY = clamp(abs(dirY) * lenY, 0.0, 1.0);
+	lenY *= lenY;
+	len += lenY * w;
+}
+
+// One EASU output tap: an anisotropic windowed-sinc weight for the texel at `off` (in
+// texels, relative to the fractional sample position `pp` already subtracted by the
+// caller), rotated into the detected edge frame, following the reference FsrEasuTapF.
+void fsr_easu_tap(inout vec3 aC, inout float aW, vec2 off, vec2 dir, vec2 len2, float lob, float clp, vec3 c)
+{
+	vec2 v = vec2(off.x * dir.x + off.y * dir.y,
+	              off.x * -dir.y + off.y * dir.x);
+	v *= len2;
+	float d2 = min(v.x * v.x + v.y * v.y, clp);
+	float wB = (2.0 / 5.0) * d2 - 1.0;
+	float wA = lob * d2 - 1.0;
+	wB *= wB;
+	wA *= wA;
+	wB = (25.0 / 16.0) * wB - (25.0 / 16.0 - 1.0);
+	float w = wB * wA;
+	aC += c * w;
+	aW += w;
+}
+
+// FSR luminance proxy: the reference weights 0.5*R + G + 0.5*B, cheap and gamma-space.
+float fsr_luma(vec3 c)
+{
+	return dot(c, vec3(0.5, 1.0, 0.5));
+}
+
+// EASU: edge-adaptive spatial upsampling of the decoded image at normalized coordinate uv.
+vec3 fsr_easu(vec2 uv)
+{
+	vec2 src_size = vec2(rgb_rect.zw);
+	vec2 rcp_size = 1.0 / src_size;
+
+	// Sample position in source texels; texel centres sit at integer coordinates here.
+	vec2 pp = uv * src_size - 0.5;
+	vec2 fp = floor(pp);
+	pp -= fp;
+	vec2 base = fp + 0.5; // centre of texel fp, in texels
+
+	// 12-tap neighbourhood, named as in the reference:
+	//        b  c
+	//     e  f  g  h
+	//     i  j  k  l
+	//        n  o
+	// f/g/j/k are the four texels straddling the sample point.
+#define FSR_TAP(dx, dy) texture(rgb[0], (base + vec2(dx, dy)) * rcp_size).rgb
+	vec3 b = FSR_TAP(0.0, -1.0), c = FSR_TAP(1.0, -1.0);
+	vec3 e = FSR_TAP(-1.0, 0.0), f = FSR_TAP(0.0, 0.0), g = FSR_TAP(1.0, 0.0), h = FSR_TAP(2.0, 0.0);
+	vec3 i = FSR_TAP(-1.0, 1.0), j = FSR_TAP(0.0, 1.0), k = FSR_TAP(1.0, 1.0), l = FSR_TAP(2.0, 1.0);
+	vec3 n = FSR_TAP(0.0, 2.0), o = FSR_TAP(1.0, 2.0);
+#undef FSR_TAP
+
+	float bL = fsr_luma(b), cL = fsr_luma(c);
+	float eL = fsr_luma(e), fL = fsr_luma(f), gL = fsr_luma(g), hL = fsr_luma(h);
+	float iL = fsr_luma(i), jL = fsr_luma(j), kL = fsr_luma(k), lL = fsr_luma(l);
+	float nL = fsr_luma(n), oL = fsr_luma(o);
+
+	// Detect the dominant edge direction and its strength from the four nearest texels.
+	vec2 dir = vec2(0.0);
+	float len = 0.0;
+	fsr_easu_set(dir, len, pp, (1.0 - pp.x) * (1.0 - pp.y), bL, eL, fL, gL, jL); // around f
+	fsr_easu_set(dir, len, pp, pp.x * (1.0 - pp.y), cL, fL, gL, hL, kL);         // around g
+	fsr_easu_set(dir, len, pp, (1.0 - pp.x) * pp.y, fL, iL, jL, kL, nL);         // around j
+	fsr_easu_set(dir, len, pp, pp.x * pp.y, gL, jL, kL, lL, oL);                 // around k
+
+	// Normalize the direction and turn the strength into an anisotropic kernel shape.
+	float dirR = dir.x * dir.x + dir.y * dir.y;
+	bool zro = dirR < (1.0 / 32768.0);
+	dirR = inversesqrt(max(dirR, 1e-8));
+	dirR = zro ? 1.0 : dirR;
+	dir.x = zro ? 1.0 : dir.x;
+	dir *= dirR;
+	len = len * 0.5;
+	len *= len;
+	float stretch = (dir.x * dir.x + dir.y * dir.y) * fsr_rcp(max(abs(dir.x), abs(dir.y)));
+	vec2 len2 = vec2(1.0 + (stretch - 1.0) * len, 1.0 + (-0.5) * len);
+	float lob = 0.5 + ((1.0 / 4.0 - 0.04) - 0.5) * len;
+	float clp = fsr_rcp(lob);
+
+	// Range of the four nearest texels, used to clamp ringing out of the result.
+	vec3 mn4 = min(min(f, g), min(j, k));
+	vec3 mx4 = max(max(f, g), max(j, k));
+
+	vec3 aC = vec3(0.0);
+	float aW = 0.0;
+	fsr_easu_tap(aC, aW, vec2(0.0, -1.0) - pp, dir, len2, lob, clp, b);
+	fsr_easu_tap(aC, aW, vec2(1.0, -1.0) - pp, dir, len2, lob, clp, c);
+	fsr_easu_tap(aC, aW, vec2(-1.0, 1.0) - pp, dir, len2, lob, clp, i);
+	fsr_easu_tap(aC, aW, vec2(0.0, 1.0) - pp, dir, len2, lob, clp, j);
+	fsr_easu_tap(aC, aW, vec2(0.0, 0.0) - pp, dir, len2, lob, clp, f);
+	fsr_easu_tap(aC, aW, vec2(-1.0, 0.0) - pp, dir, len2, lob, clp, e);
+	fsr_easu_tap(aC, aW, vec2(1.0, 1.0) - pp, dir, len2, lob, clp, k);
+	fsr_easu_tap(aC, aW, vec2(2.0, 1.0) - pp, dir, len2, lob, clp, l);
+	fsr_easu_tap(aC, aW, vec2(2.0, 0.0) - pp, dir, len2, lob, clp, h);
+	fsr_easu_tap(aC, aW, vec2(1.0, 0.0) - pp, dir, len2, lob, clp, g);
+	fsr_easu_tap(aC, aW, vec2(1.0, 2.0) - pp, dir, len2, lob, clp, o);
+	fsr_easu_tap(aC, aW, vec2(0.0, 2.0) - pp, dir, len2, lob, clp, n);
+
+	return min(mx4, max(mn4, aC * fsr_rcp(aW)));
+}
+
+// RCAS: FSR's robust contrast adaptive sharpening, run on the EASU result. RCAS is the
+// close cousin of the CAS pass above; the reference runs it at output resolution against a
+// dedicated buffer, but this pass produces one output pixel at a time, so like every other
+// sharpen here it reads its cross neighbours from the decoded image (through the sampler).
+// The centre `e` is the already-upscaled EASU colour, reused rather than resampled.
+// sharpness in [0, 1] scales the lobe; 0 leaves a pure EASU upscale.
+vec3 fsr_rcas(vec2 uv, vec3 e, float sharpness)
+{
+	vec2 texel = 1.0 / vec2(rgb_rect.zw);
+
+	//   b
+	// d e f
+	//   h
+	vec3 b = texture(rgb[0], uv + vec2(0, -1) * texel).rgb;
+	vec3 d = texture(rgb[0], uv + vec2(-1, 0) * texel).rgb;
+	vec3 f = texture(rgb[0], uv + vec2(1, 0) * texel).rgb;
+	vec3 h = texture(rgb[0], uv + vec2(0, 1) * texel).rgb;
+
+	vec3 mn4 = min(min(b, d), min(f, h));
+	vec3 mx4 = max(max(b, d), max(f, h));
+
+	// Per-channel distance to the black/white limit, as in the reference (peak = (1, -4)).
+	vec3 hitMin = min(mn4, e) / max(4.0 * mx4, vec3(1e-4));
+	vec3 hitMax = (vec3(1.0) - max(mx4, e)) / min(4.0 * mn4 - 4.0, vec3(-1e-4));
+	vec3 lobeRGB = max(-hitMin, hitMax);
+	// FSR_RCAS_LIMIT is 0.25 - 1/16; the lobe is negative, and the slider scales it.
+	float lobe = max(-(0.25 - 1.0 / 16.0), min(max(max(lobeRGB.r, lobeRGB.g), lobeRGB.b), 0.0)) * clamp(sharpness, 0.0, 1.0);
+
+	float rcpL = 1.0 / (4.0 * lobe + 1.0);
+	return clamp((lobe * (b + d + f + h) + e) * rcpL, 0.0, 1.0);
 }
 
 float sRGB_to_linear(float x)
@@ -259,10 +442,23 @@ void main()
 	}
 
 	// One base tap. When CAS is active it doubles as the kernel's centre `e`, so an
-	// opaque pixel pays a single centre sample whether or not it is sharpened.
+	// opaque pixel pays a single centre sample whether or not it is sharpened. When FSR is
+	// active EASU replaces the colour but the tap still supplies colour.a (only read on the
+	// no-alpha-stream path below).
 	vec4 colour = texture(rgb[0], uv);
-	if (post.x > 0.0)
+	if (fsr_enable)
+	{
+		// FSR takes over sampling and sharpening: EASU upscales, then RCAS sharpens with
+		// post.x carrying the FSR sharpness. The CAS path is never run while FSR is on, so
+		// the two never stack.
+		colour.rgb = fsr_easu(uv);
+		if (post.x > 0.0)
+			colour.rgb = fsr_rcas(uv, colour.rgb, post.x);
+	}
+	else if (post.x > 0.0)
+	{
 		colour.rgb = contrast_adaptive_sharpen(uv, colour.rgb, post.x);
+	}
 
 	// Ambient bias lighting, applied after sharpening while still in the raw sampled
 	// (gamma) space and only to the colour channels: the alpha stream that carries

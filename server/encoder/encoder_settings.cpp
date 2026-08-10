@@ -25,6 +25,7 @@
 #include "video_encoder.h"
 #include "wivrn_packets.h"
 
+#include <algorithm>
 #include <magic_enum.hpp>
 #include <string>
 #include <vulkan/vulkan.hpp>
@@ -318,8 +319,16 @@ std::array<encoder_settings, num_streams> get_encoder_settings(wivrn::vk_bundle 
 		std::tie(dst.encoder_name, dst.codec) = prober.select_encoder(src);
 	}
 
-	auto width = align(info.stream_eye_width, 64);
-	auto height = align(info.stream_eye_height, 64);
+	// Reduced resolution streaming: the headset can ask for the eye images to be encoded at
+	// a fraction of the stream eye size to save bitrate, encode and decode cost. The
+	// foveation target and therefore the decoded image shrink by the same factor (the
+	// foveation object below is built from this encode extent), while the headset keeps its
+	// full defoveated/display resolution and reconstructs the difference when it samples the
+	// decoded image (bilinear on its own, sharp with FSR). Clamped so a stray value can
+	// never ask for a degenerate encode size. Only read here, so it applies on connection.
+	const float render_scale = std::clamp(settings.render_scale, 0.5f, 1.0f);
+	auto width = align(uint16_t(info.stream_eye_width * render_scale), 64);
+	auto height = align(uint16_t(info.stream_eye_height * render_scale), 64);
 	// Ensure we don't try to encode too large images (only for left/right, ignore alpha)
 	for (size_t i = 0; i < 2; ++i)
 		check_video_size(res[i].encoder_name, res[i].codec, width, height);

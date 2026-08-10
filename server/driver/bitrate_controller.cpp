@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 namespace wivrn
@@ -72,7 +73,10 @@ void bitrate_controller::configure(const config & c, uint32_t ceiling_bps, bool 
 
 uint32_t bitrate_controller::effective_ceiling() const
 {
-	if (path_ceiling and ceiling)
+	// While the two paths are combined the USB budget is not a ceiling on the session: it
+	// caps a session running *on* the tunnel, and this one only spills the tail of every
+	// frame onto it. The client's own ceiling still stands, and is the only one.
+	if (path_ceiling and ceiling and not combined)
 		return std::min(ceiling, *path_ceiling);
 	return ceiling;
 }
@@ -301,6 +305,42 @@ std::optional<uint32_t> bitrate_controller::set_path_ceiling(std::optional<uint3
 		U_LOG_I("Bitrate ceiling back to the client's %.1f Mbit/s", ceiling * to_mbits);
 
 	return reset_locked();
+}
+
+std::optional<uint32_t> bitrate_controller::set_combined(bool on, uint32_t usb_bps)
+{
+	std::lock_guard lock(mutex);
+
+	if (combined == on and combined_usb_bps == usb_bps)
+		return {};
+
+	combined = on;
+	combined_usb_bps = usb_bps;
+
+	if (not ceiling)
+		return {};
+
+	min_bitrate = std::min(conf.min_bitrate_bps, effective_ceiling());
+
+	if (combined)
+		U_LOG_I("Bitrate control now measuring both paths as one link, ceiling %.1f Mbit/s (USB path budget %.1f Mbit/s, not added to it)",
+		        effective_ceiling() * to_mbits,
+		        usb_bps * to_mbits);
+	else
+		U_LOG_I("Bitrate control back to a single path, ceiling %.1f Mbit/s", effective_ceiling() * to_mbits);
+
+	// Everything on record describes the other link, whichever direction this went in
+	return reset_locked();
+}
+
+uint32_t bitrate_controller::bandwidth_estimate() const
+{
+	std::lock_guard lock(mutex);
+
+	if (mode_locked() != mode::bbr or not bandwidth.valid() or bandwidth_samples < estimator_min_samples)
+		return 0;
+
+	return uint32_t(std::min<double>(bandwidth.get(), std::numeric_limits<uint32_t>::max()));
 }
 
 std::optional<uint32_t> bitrate_controller::reset()

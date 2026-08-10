@@ -91,10 +91,18 @@ private:
 		// [0]: stream socket, [1]: control socket
 		std::array<queue, 2> queues;
 
+		// When one frame's shards go out, and which path each of them takes.
+		// Both parts are inactive whenever they do not apply.
+		struct schedule
+		{
+			shard_pacer pacer;
+			spill_scheduler spill;
+		};
+
 		void run(std::stop_token, queue &);
-		// Pacing schedule for one frame, inactive whenever pacing does not
-		// apply. `queued` is how many frames wait behind this one.
-		static shard_pacer make_pacer(queue &, const data &, size_t queued);
+		// Schedule for one frame. `queued` is how many frames wait behind this
+		// one on the same socket, with which it shares the pacing window.
+		static schedule make_schedule(queue &, const data &, size_t queued);
 		sender();
 
 	public:
@@ -155,6 +163,18 @@ private:
 	// session at the last one. One SendData call per NAL, so it has to be a member rather
 	// than a local. Only touched under `mutex`.
 	uint32_t frame_bytes = 0;
+	// The same bytes split by the path they went out on, while the two are combined
+	// (multipath stage 3). Reported to the session at the last shard of the frame.
+	uint32_t frame_bytes_primary = 0;
+	uint32_t frame_bytes_secondary = 0;
+	// Byte offset within the frame of the shard about to go out: what the split point
+	// is compared against. Reset at the first shard of a frame, like frame_bytes, and
+	// deliberately counting data payload only — parity never enters the split.
+	size_t frame_offset = 0;
+	// Whether any shard of the open FEC group went out on the primary (lossy) path. A
+	// group that spilled whole needs no parity: nothing can drop it on a TCP socket,
+	// and the shard would only take Wi-Fi bandwidth away from the shards that can.
+	bool group_on_primary = false;
 
 	std::ofstream video_dump;
 
@@ -243,9 +263,10 @@ protected:
 	// called when command buffer finished executing
 	virtual std::optional<data> encode(uint8_t slot, uint64_t frame_index) = 0;
 
-	// `pacer` is built by the sender thread for whole-frame sends on the stream
-	// socket; a default constructed one never sleeps.
-	void SendData(std::span<uint8_t> data, bool end_of_frame, bool control = false, shard_pacer pacer = {});
+	// `pacer` and `spill` are built by the sender thread for whole-frame sends on
+	// the stream socket; default constructed ones never sleep and never split, which
+	// is what the encoders that send synchronously from inside encode() (x264) get.
+	void SendData(std::span<uint8_t> data, bool end_of_frame, bool control = false, shard_pacer pacer = {}, spill_scheduler spill = {});
 };
 
 } // namespace wivrn

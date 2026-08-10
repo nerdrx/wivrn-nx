@@ -287,6 +287,26 @@ enum class motion_mode : uint8_t
 	server = 2,
 };
 
+// What the headset wants done with a secondary (USB) path, see docs/multipath.md.
+//
+// off: no secondary path is attached at all. The headset never probes the tunnel, so the
+// server never sees one; it is listed here only so that the wire says what the headset's
+// selector says.
+//
+// backup: the Stage 2 behaviour. The path is attached, kept alive and used as a spare —
+// video and control flip to it when the Wi-Fi link fails, and flip back when it recovers.
+//
+// combine: the Stage 3 behaviour. While both paths are healthy the server puts the tail of
+// every frame that does not fit the Wi-Fi path's pacing window on the USB path instead, so
+// the two links add up. Collapses back to `backup` semantics the moment either path
+// degrades. Never entered for a session whose primary already rides the same USB tunnel.
+enum class multipath_mode : uint8_t
+{
+	off = 0,
+	backup = 1,
+	combine = 2,
+};
+
 // Cadence of the transport status feed: how often the server sends
 // to_headset::transport_status while subscribed, how often the headset renews the
 // subscription, and how long the server keeps sending without a renewal.
@@ -436,6 +456,10 @@ struct settings_changed
 	// headset says nothing about it, in which case motion_smoothing alone decides and
 	// the answer is the headset-side warp the switch has always meant.
 	std::optional<motion_mode> motion_smoothing_mode;
+	// What the headset wants done with the secondary (USB) path. Empty means the headset
+	// says nothing about it — an older client, for which the Stage 2 backup behaviour is
+	// the whole story and combining must never be entered behind its back.
+	std::optional<multipath_mode> multipath;
 	// Whether the server may pull an overlay quad layer out of the composited eye
 	// images and stream it on its own, for the headset to submit as a real quad
 	// layer. Read when the encoders are created (the stream needs its own encoder
@@ -447,6 +471,13 @@ struct settings_changed
 	// to what it sends (the server to the speaker, the headset to the microphone); a
 	// receiver needs no setting, an audio_data says which path it came from.
 	bool low_latency_audio = true;
+	// Whether a device component that has ever been tracked should hold its last tracked
+	// pose while the runtime reports it valid but no longer tracked, instead of following
+	// whatever pose the runtime keeps emitting. On is the NX behaviour, which stops a
+	// controller entering standby from teleporting; off is upstream's, where any valid
+	// pose is served and flagged tracked. Components whose runtime never sets the tracked
+	// flag at all (estimated body joints) are unaffected either way.
+	bool standby_freeze = true;
 	// Whether the server should mirror the gamepad to a virtual uinput device;
 	// gamepad inputs are always forwarded for the OpenXR path
 	bool mirror_gamepad = false;
@@ -462,6 +493,14 @@ inline motion_mode effective_motion_mode(const settings_changed & settings)
 	if (settings.motion_smoothing_mode)
 		return *settings.motion_smoothing_mode;
 	return settings.motion_smoothing ? motion_mode::headset : motion_mode::off;
+}
+
+// What a settings packet asks for the secondary path. A headset that names a mode always
+// wins; one that names none is an older client, and for it the path can only ever be a
+// backup — striping needs a reassembly window that client does not have.
+inline multipath_mode effective_multipath_mode(const settings_changed & settings)
+{
+	return settings.multipath.value_or(multipath_mode::backup);
 }
 
 struct headset_info_packet
@@ -1330,6 +1369,9 @@ struct transport_status
 		wifi_usb_ready,
 		// Video flipped to the USB path
 		usb,
+		// Both paths carry video at once: Wi-Fi takes what fits its pacing window,
+		// the tail of every frame goes over USB (docs/multipath.md, stage 3)
+		combining,
 	};
 
 	// Bitrate the encoders are running at, and the ceiling in force: the one the headset
@@ -1340,6 +1382,11 @@ struct transport_status
 	bitrate_mode mode;
 	controller_state state;
 	path_state path;
+
+	// Share of the video bytes the server put on the primary (Wi-Fi) path over the last
+	// status period, in percent; the rest went over the secondary (USB) one. 100 whenever
+	// the two paths are not both carrying video, which is what every other state means.
+	uint8_t wifi_share_pct;
 
 	// The radio trend took a preemptive step down and has not released it: upward probing
 	// is held off until the signal recovers or the reports go stale.

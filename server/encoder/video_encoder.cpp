@@ -98,7 +98,10 @@ void video_encoder::sender::run(std::stop_token t, queue & q)
 		}
 
 		if (not d.span.empty())
-			d.encoder->SendData(d.span, true, d.prefer_control, make_pacer(q, d, queued));
+		{
+			auto s = make_schedule(q, d, queued);
+			d.encoder->SendData(d.span, true, d.prefer_control, s.pacer, s.spill);
+		}
 
 		std::unique_lock lock(mutex);
 		q.in_flight = nullptr;
@@ -110,28 +113,63 @@ void video_encoder::sender::run(std::stop_token t, queue & q)
 	cv.notify_all();
 }
 
-shard_pacer video_encoder::sender::make_pacer(queue & q, const data & d, size_t queued)
+video_encoder::sender::schedule video_encoder::sender::make_schedule(queue & q, const data & d, size_t queued)
 {
 	video_encoder * encoder = d.encoder;
 
-	// The control queue carries the IDRs and the parameter sets: never delayed.
-	if (d.prefer_control or not encoder->pacing_enabled)
+	// The control queue carries the IDRs and the parameter sets: never delayed,
+	// and never split — that socket is a TCP one already.
+	if (d.prefer_control or not encoder->cnx)
 		return {};
 
-	// Nothing to pace unless the shards actually ride the UDP stream socket.
-	// Over the secondary (TCP) path the kernel's congestion control already
-	// decides when bytes go out and spacing them on top only adds latency; with
-	// no stream socket at all everything is TCP, same story.
-	if (not encoder->cnx or not encoder->cnx->has_stream() or encoder->cnx->video_on_secondary())
+	// Neither pacing nor striping applies unless the shards actually ride the UDP
+	// stream socket. Over the secondary (TCP) path the kernel's congestion control
+	// already decides when bytes go out and spacing them on top only adds latency;
+	// with no stream socket at all everything is TCP, same story, and there is no
+	// second path to spill onto because the one path is already it.
+	if (not encoder->cnx->has_stream() or encoder->cnx->video_on_secondary())
 	{
 		q.pacing.reset();
 		return {};
 	}
 
-	const int64_t now = os_monotonic_get_ns();
-	const int64_t budget = q.pacing.begin_frame(now, encoder->frame_period_ns, encoder->pacing_window, queued);
+	// A combine posture with no Wi-Fi share to size the split against would put
+	// every frame whole on the tunnel, which is not what combining means and not
+	// what anything measured. Behave exactly as a single path until there is one.
+	const uint32_t wifi_share = encoder->cnx->wifi_share_bps();
+	const bool combining = encoder->cnx->video_combining() and wifi_share != 0;
+	const bool paced = encoder->pacing_enabled;
+	if (not paced and not combining)
+		return {};
 
-	return shard_pacer(now, budget, d.span.size());
+	const int64_t now = os_monotonic_get_ns();
+	const int64_t period = encoder->frame_period_ns;
+	const int64_t budget = paced ? q.pacing.begin_frame(now, period, encoder->pacing_window, queued) : 0;
+
+	schedule s;
+
+	// Bytes of this frame the primary path is going to see. Everything past the
+	// split point rides the secondary one, so the pacing schedule must spread the
+	// prefix — and only the prefix — over the window: pacing the whole frame there
+	// would hand the primary its share at 1/(spilled fraction) times the rate the
+	// window was sized for, which is the burst pacing exists to prevent.
+	size_t on_primary = d.span.size();
+
+	if (combining)
+	{
+		// Wall time this frame has to reach the headset: the slice of the pacing
+		// window it was given, or — with the shards unpaced, or a slot whose
+		// window is already spent — its share of a frame period, which is then
+		// the only deadline it has.
+		const int64_t deliver = budget > 0 ? budget : period / int64_t(queued + 1);
+		s.spill = spill_scheduler(wifi_share, deliver);
+		on_primary = std::min(on_primary, s.spill.split_at());
+	}
+
+	if (paced)
+		s.pacer = shard_pacer(now, budget, on_primary);
+
+	return s;
 }
 
 void video_encoder::sender::push(data && d)
@@ -459,12 +497,29 @@ void video_encoder::encode(wivrn_session & cnx,
 void video_encoder::send_parity()
 {
 	auto parity = fec_group.take();
+
+	// The group is always closed, whether or not its parity is worth sending: the
+	// builder's next group has to start at the next shard either way.
+	const bool useful = group_on_primary;
+	group_on_primary = false;
+
 	if (not parity)
 		return;
 
+	// A group every shard of which spilled to the secondary (TCP) path cannot lose
+	// anything, so its parity would repair nothing — and it would be spent on the
+	// primary path, taking Wi-Fi bandwidth away from the shards that *can* be lost.
+	// Groups straddling the split keep theirs: the shards that went over UDP are
+	// exactly the ones at risk, and the ones that went over TCP are as good as
+	// received for the purpose of rebuilding them.
+	if (not useful)
+		return;
+
 	// Parity is on the link like everything else, and the bitrate the controller decides is
-	// a budget for the link (see apply_bitrate), so it counts.
+	// a budget for the link (see apply_bitrate), so it counts. It always rides the primary
+	// path, which is the only one that can drop a packet.
 	frame_bytes += uint32_t(parity->payload.size());
+	frame_bytes_primary += uint32_t(parity->payload.size());
 
 	try
 	{
@@ -476,7 +531,7 @@ void video_encoder::send_parity()
 	}
 }
 
-void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool control, shard_pacer pacer)
+void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool control, shard_pacer pacer, spill_scheduler spill)
 {
 	std::lock_guard lock(mutex);
 	if (shard.shard_idx == 0)
@@ -487,6 +542,10 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		timing_info.send_begin = clock.to_headset(os_monotonic_get_ns());
 		fec_group.reset(stream_idx, shard.frame_idx);
 		frame_bytes = 0;
+		frame_bytes_primary = 0;
+		frame_bytes_secondary = 0;
+		frame_offset = 0;
+		group_on_primary = false;
 	}
 	if (end_of_frame)
 	{
@@ -523,18 +582,47 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 			}
 		}
 		shard.payload = {begin, next};
-		frame_bytes += uint32_t(next - begin);
-		try
+		const uint32_t payload_bytes = uint32_t(next - begin);
+		frame_bytes += payload_bytes;
+
+		// Striping (multipath stage 3): everything past the split point goes over the
+		// secondary path instead, where it travels in parallel with what is still
+		// going out over Wi-Fi. The split is by byte offset, so it is a prefix/suffix
+		// one and the order within each path is the order within the frame.
+		bool on_primary = true;
+		if (spill.spill(frame_offset))
 		{
-			if (control)
-				cnx->send_control(to_headset::video_stream_data_shard{shard});
+			if (cnx->send_spill(to_headset::video_stream_data_shard{shard}))
+				on_primary = false;
 			else
-				cnx->send_stream(to_headset::video_stream_data_shard{shard});
+				// The path has just been dropped, and a TCP socket whose send threw
+				// is poisoned for good: this shard and the rest of the frame go back
+				// on the primary, and the selector collapses out of the combine
+				// posture on its next update.
+				spill.fail();
 		}
-		catch (...)
+
+		if (on_primary)
 		{
-			// Ignore network errors
+			frame_bytes_primary += payload_bytes;
+			try
+			{
+				if (control)
+					cnx->send_control(to_headset::video_stream_data_shard{shard});
+				else
+					cnx->send_stream(to_headset::video_stream_data_shard{shard});
+			}
+			catch (...)
+			{
+				// Ignore network errors
+			}
 		}
+		else
+		{
+			frame_bytes_secondary += payload_bytes;
+		}
+
+		frame_offset += payload_bytes;
 
 		// The parity shard of a group goes out immediately after the group's last
 		// data shard, so it travels in (or right at the edge of) the same pacing
@@ -542,9 +630,15 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		// Deliberately not held back to the end of the frame: that would put every
 		// parity shard of the frame in one tail burst, and a hiccup that swallowed
 		// the tail would take the whole frame's protection with it.
+		//
+		// The groups are built before the split and are not affected by it: a shard
+		// covers the same group whichever path carried it, which is exactly what
+		// lets the headset rebuild a lost UDP shard from copies that arrived over
+		// the tunnel.
 		if (fec_active)
 		{
 			fec_group.add(shard);
+			group_on_primary = group_on_primary or on_primary;
 			if (fec_group.full())
 				send_parity();
 		}
@@ -582,7 +676,21 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		// the headset says it spent receiving the frame. Shard headers are not counted:
 		// a few tens of bytes on a 1.4 kB datagram, consistently, and the control law
 		// only ever uses the estimate through a gain.
+		//
+		// Deliberately the whole frame, both paths together: while combining, the span
+		// the headset reports runs from the first arrival on either path to the last on
+		// either, so the rate it yields is the rate of the two links as one.
 		cnx->on_frame_sent(shard.frame_idx, stream_idx, frame_bytes);
+		cnx->on_frame_paths(frame_bytes_primary, frame_bytes_secondary);
+
+		if (spill.active())
+			U_LOG_D("Stream %d frame %lu: %u bytes on the primary path, %u spilled to the secondary (split at %zu%s)",
+			        (int)stream_idx,
+			        (unsigned long)shard.frame_idx,
+			        (unsigned)frame_bytes_primary,
+			        (unsigned)frame_bytes_secondary,
+			        spill.split_at(),
+			        spill.failed() ? ", path lost mid-frame" : "");
 	}
 }
 

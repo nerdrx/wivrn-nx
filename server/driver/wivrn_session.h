@@ -78,6 +78,15 @@ class wivrn_session : public xrt_system_devices
 	wivrn::bitrate_controller bitrate_ctl;
 	// Ceiling applied while the secondary (USB) path carries video
 	uint32_t multipath_usb_max_bitrate = 0;
+	// Primary path capacity latched when the combine posture was entered, 0 otherwise.
+	// Read by the encoder sender threads on every frame.
+	std::atomic<uint32_t> combine_wifi_share_bps = 0;
+	// Video bytes put on each path since the session started, for the Transport page's
+	// per-path share. Written by the encoder sender threads, differenced by the worker one.
+	std::atomic<uint64_t> path_bytes_primary = 0;
+	std::atomic<uint64_t> path_bytes_secondary = 0;
+	uint64_t reported_path_bytes_primary = 0;
+	uint64_t reported_path_bytes_secondary = 0;
 	// Server side half of the packet pacing switch, read from the configuration once
 	configuration::pacing_config pacing_conf;
 	// Same story for the hardware encoder failover
@@ -233,6 +242,23 @@ public:
 	{
 		return connection->video_on_secondary();
 	}
+
+	// True while video is striped over both paths (multipath stage 3): the primary
+	// keeps everything its pacing window has room for, the tail of every frame
+	// goes to the secondary.
+	bool video_combining() const
+	{
+		return connection->combining();
+	}
+
+	// Capacity of the primary path, in bits per second, as it was measured while
+	// the whole of every frame still rode it. Latched when the combine posture is
+	// entered; 0 whenever the posture is not combine. See spill_scheduler.
+	uint32_t wifi_share_bps() const
+	{
+		return combine_wifi_share_bps;
+	}
+
 	template <typename T>
 	void send_stream(T && packet)
 	{
@@ -245,6 +271,16 @@ public:
 		connection->send_control(std::forward<T>(packet));
 	}
 
+	// One video shard onto the secondary path while combining. False when it did
+	// not go out, in which case the path has just been dropped and the caller
+	// must put this shard, and the rest of the frame, on the primary. Never
+	// retried on the secondary: see wivrn_connection::send_spill.
+	template <typename T>
+	bool send_spill(T && packet)
+	{
+		return connection->send_spill(std::forward<T>(packet));
+	}
+
 	xrt_result_t push_event(const xrt_session_event &);
 
 	void set_foveated_size(uint32_t width, uint32_t height);
@@ -255,6 +291,10 @@ public:
 	// the wire (parity shards included). Called from the encoder's send path; only the
 	// bandwidth estimating bitrate control law uses it, and it takes no lock of its own.
 	void on_frame_sent(uint64_t frame_index, uint8_t stream_index, uint32_t bytes);
+
+	// How one frame's bytes were split between the two paths, for the Transport page.
+	// Called from the encoder's send path right after on_frame_sent; two atomic adds.
+	void on_frame_paths(uint32_t primary_bytes, uint32_t secondary_bytes);
 
 private:
 	void run_net(std::stop_token stop);
@@ -270,9 +310,9 @@ private:
 	// bitrate controller, which reads it as the shortest a frame can possibly take
 	void set_pacing(bool client_enabled);
 
-	// The path carrying video and control changed (multipath failover). Called
-	// from the network thread.
-	void on_path_switch(bool on_secondary, std::string_view reason);
+	// The posture of the path selector changed (multipath failover, or entering or
+	// leaving the striping posture). Called from the network thread.
+	void on_path_switch(path_selector::posture, std::string_view reason);
 
 	// Assemble and send one to_headset::transport_status, if the subscription lease is
 	// still valid. Worker thread.

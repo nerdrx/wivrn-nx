@@ -566,13 +566,23 @@ void scenes::stream::gui_transport()
 
 			using path_state = to_headset::transport_status::path_state;
 			const bool on_usb = status ? status->path == path_state::usb : network_session->sending_on_secondary();
+			const bool combining = status and status->path == path_state::combining;
 			const bool usb_ready = status ? status->path != path_state::wifi_only : network_session->has_secondary();
 
-			wivrn::ui::chip(on_usb ? _("USB backup") : _("Wi-Fi"),
+			wivrn::ui::chip(combining ? _("Wi-Fi + USB") : on_usb ? _("USB backup")
+			                                                      : _("Wi-Fi"),
 			                on_usb ? wivrn::ui::chip_style::warning : wivrn::ui::chip_style::success,
 			                true);
 			ImGui::SameLine();
-			if (usb_ready and not on_usb)
+			if (combining)
+				// Share of the video bytes each link actually took over the last
+				// status period, which is the only honest way to say how much the
+				// aggregation is really buying.
+				wivrn::ui::chip(fmt::format(_F("{}% / {}% split"),
+				                            int(status->wifi_share_pct),
+				                            int(100 - status->wifi_share_pct)),
+				                wivrn::ui::chip_style::accent);
+			else if (usb_ready and not on_usb)
 				wivrn::ui::chip(_("USB standing by"), wivrn::ui::chip_style::muted);
 			else if (not usb_ready)
 				wivrn::ui::chip(_("no backup path"), wivrn::ui::chip_style::muted);
@@ -585,8 +595,9 @@ void scenes::stream::gui_transport()
 			auto rtt = [&](int64_t ns) {
 				return ns > 0 ? fmt::format("{:.1f} ms", float(ns) * 1e-6f) : std::string("—");
 			};
+			// Both paths carry video while combining, so neither is the muted one
 			stat(_("Wi-Fi RTT"), rtt(primary_rtt_ns), on_usb ? t.text_muted : t.text);
-			stat(_("USB RTT"), rtt(secondary_rtt_ns), on_usb ? t.text : t.text_muted);
+			stat(_("USB RTT"), rtt(secondary_rtt_ns), (on_usb or combining) ? t.text : t.text_muted);
 
 			history_plot("##rtt", "s", 0, {{&transport_metric::primary_rtt_s, t.accent}, {&transport_metric::secondary_rtt_s, t.success}});
 
@@ -855,8 +866,10 @@ static void send_settings_changed_packet(xr::session & session, wivrn_session * 
 	                .encoder_failover = config.encoder_failover,
 	                .motion_smoothing = config.motion_smoothing,
 	                .motion_smoothing_mode = config.motion_mode(),
+	                .multipath = config.multipath_mode(),
 	                .quad_layers = config.quad_layers,
 	                .low_latency_audio = config.low_latency_audio,
+	                .standby_freeze = config.standby_freeze,
 	                .mirror_gamepad = config.forward_gamepad,
 	                .enabled_body_parts = config.body_part_mask,
 	        });

@@ -203,4 +203,93 @@ private:
 	bool slot_open = false;
 };
 
+// Where one frame's shards stop going to the primary (Wi-Fi, paced UDP) path and
+// start going to the secondary (USB, TCP) one, while the path selector is in its
+// combine posture. Pure arithmetic; tests/striping_test.cpp drives it directly.
+//
+// --- The split point -------------------------------------------------------
+// Pacing gives every frame a wall-clock window to be delivered in: `deliver_ns`,
+// which is the slice pacing_slot::begin_frame handed this frame, or — when the
+// shards are not paced at all, or the slot's window is already spent — the
+// frame's share of a frame period, since that is the only deadline left. A link
+// of capacity C bits/s can carry
+//
+//     budget = C * deliver_ns / 8e9   bytes
+//
+// within that window. Everything past that byte offset would arrive late on the
+// primary, so it goes on the secondary instead, where it travels in parallel.
+//
+// C is `wifi_bps`, the primary path's *capacity*, not the bitrate: those differ
+// by exactly the pacing window (a frame spread over a fraction w of a period is
+// handed to the socket at 1/w times the nominal bitrate). The server latches it
+// when the combine posture is entered, from a measurement taken while the whole
+// frame was still riding Wi-Fi — see wivrn_session::wifi_share_bps. Latched and
+// not tracked on purpose: a share derived from the bitrate while combining would
+// grow with it and nothing would ever spill.
+//
+// Sanity check with the defaults — 100 Mbit/s over Wi-Fi, w = 0.4, 90 fps, three
+// video streams sharing the slot. C = 100/0.4 = 250 Mbit/s, deliver_ns =
+// 0.4 * 11.1 ms / 3 = 1.48 ms, so budget = 46 kB, which is exactly the size of
+// one stream's frame at 100 Mbit/s. Nothing spills at the operating point; every
+// bit the bitrate controller adds on top of it does.
+class spill_scheduler
+{
+public:
+	// Bytes the primary path can take within `deliver_ns` at `wifi_bps`.
+	// wifi_bps is at most a few hundred Mbit/s and deliver_ns at most a frame
+	// period, so the product stays far below the uint64 range.
+	static constexpr size_t budget_bytes(uint32_t wifi_bps, int64_t deliver_ns)
+	{
+		if (wifi_bps == 0 or deliver_ns <= 0)
+			return 0;
+		return size_t(uint64_t(wifi_bps) * uint64_t(deliver_ns) / 8'000'000'000ull);
+	}
+
+	// Never spills: the posture is not combine, or this frame goes on the
+	// control socket, which is the one path the split does not apply to.
+	spill_scheduler() = default;
+
+	spill_scheduler(uint32_t wifi_bps, int64_t deliver_ns) :
+	        budget(budget_bytes(wifi_bps, deliver_ns)),
+	        armed(true) {}
+
+	bool active() const
+	{
+		return armed;
+	}
+
+	// Byte offset of the first shard that goes to the secondary path. Meaningless
+	// unless armed.
+	size_t split_at() const
+	{
+		return budget;
+	}
+
+	// Whether the shard starting at this byte offset within the frame goes to the
+	// secondary path. Monotone in offset, so the split is a prefix/suffix one and
+	// the order within each path is the order within the frame.
+	bool spill(size_t offset) const
+	{
+		return armed and not broken and offset >= budget;
+	}
+
+	// The secondary path failed mid-frame. wivrn::TCP poisons a socket whose send
+	// threw, so it must never be tried again: the rest of this frame — and every
+	// later one, the scheduler is per frame — goes back on the primary.
+	void fail()
+	{
+		broken = true;
+	}
+
+	bool failed() const
+	{
+		return broken;
+	}
+
+private:
+	size_t budget = 0;
+	bool armed = false;
+	bool broken = false;
+};
+
 } // namespace wivrn

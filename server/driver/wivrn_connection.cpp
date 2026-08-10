@@ -82,6 +82,16 @@ static const timeval secondary_send_timeout{.tv_sec = 0, .tv_usec = 50'000};
 // times out half way through a packet loses the TCP framing and costs the path.
 static const timeval secondary_active_send_timeout{.tv_sec = 1, .tv_usec = 0};
 
+// While the path only carries the *tail* of every frame (the combine posture),
+// the spill is written from the video sender thread that also drives the UDP
+// socket, so a stalled USB tunnel stalls Wi-Fi video with it. A quarter second
+// is two orders of magnitude more than the few milliseconds a spill of a couple
+// of hundred kilobytes takes at USB speeds, and still bounds the damage: past it
+// the socket poisons itself, the path is dropped, and the selector collapses
+// back to the stage 2 postures, which is a far better outcome than dragging the
+// primary down with it.
+static const timeval secondary_combine_send_timeout{.tv_sec = 0, .tv_usec = 250'000};
+
 // True if both sockets are connected to the same peer address, which is how a
 // secondary path over the USB tunnel looks when the primary already goes
 // through that same tunnel (both peers are the loopback, via adb reverse)
@@ -149,10 +159,15 @@ void wivrn::wivrn_connection::attach_secondary(int fd, const path_secrets & secr
 		// selector will never pick it
 		secondary_can_failover = not same_peer(secondary.get_fd(), control.get_fd());
 
-		U_LOG_I("Secondary path %d attached%s%s",
+		// A fresh path starts its hysteresis now; combining additionally needs
+		// the headset to have asked for it.
+		selector.set_combine_allowed(multipath == multipath_mode::combine and secondary_can_failover);
+
+		U_LOG_I("Secondary path %d attached%s%s%s",
 		        (int)secondary_path_id,
 		        secrets.encrypted ? "" : " (unencrypted)",
-		        secondary_can_failover ? "" : " (same peer as the primary, not usable for failover)");
+		        secondary_can_failover ? "" : " (same peer as the primary, not usable for failover)",
+		        (multipath == multipath_mode::combine and secondary_can_failover) ? ", the headset asked to combine" : "");
 	}
 	catch (const std::exception & e)
 	{
@@ -175,8 +190,11 @@ void wivrn::wivrn_connection::drop_secondary(std::string_view reason)
 
 	secondary_can_failover = false;
 
-	// Nothing left to send on, whatever the state of the primary. The switch
-	// itself is decided by update_paths, on the network thread.
+	// Nothing left to send on, whatever the state of the primary. A combine
+	// posture collapses here and now — the encoder threads must stop striping the
+	// moment the socket is gone — while the choice between the two surviving
+	// stage 2 postures is made by update_paths, on the network thread.
+	selector.set_combine_allowed(false);
 	selector.set_secondary_usable(false);
 
 	U_LOG_I("Secondary path %d detached: %.*s", (int)secondary_path_id, (int)reason.size(), reason.data());
@@ -210,7 +228,9 @@ void wivrn::wivrn_connection::report_secondary_status()
 		        (int)secondary_path_id,
 		        (unsigned long)secondary_received,
 		        (long)since_last.count(),
-		        selector.on_secondary() ? ", carrying video" : "");
+		        selector.on_secondary() ? ", carrying video"
+		        : selector.combining()  ? ", carrying the tail of every frame"
+		                                : "");
 	}
 }
 
@@ -249,28 +269,35 @@ void wivrn::wivrn_connection::update_paths()
 	auto event = selector.update(now);
 	if (event)
 	{
-		U_LOG_I("Path switch: video and control now on the %s path (%s), %ld ms since the last switch",
-		        event->on_secondary ? "secondary" : "primary",
+		using posture = path_selector::posture;
+
+		U_LOG_I("Path switch: video and control now on the %s (%s), %ld ms since the last switch",
+		        event->to == posture::secondary ? "secondary path"
+		        : event->to == posture::combine ? "primary path with the tail of every frame on the secondary"
+		                                        : "primary path",
 		        event->reason.c_str(),
 		        (long)event->since_previous.count());
 
 		{
 			// The timeout that is right for keepalives is not the one that is
-			// right for video
+			// right for whole frames, nor the one that is right for a spill
+			// written from the thread that also drives the UDP socket
 			std::shared_lock lock(secondary_mutex);
 			if (secondary)
 			{
-				const timeval & timeout = event->on_secondary ? secondary_active_send_timeout : secondary_send_timeout;
+				const timeval & timeout = event->to == posture::secondary ? secondary_active_send_timeout
+				                          : event->to == posture::combine ? secondary_combine_send_timeout
+				                                                          : secondary_send_timeout;
 				setsockopt(secondary.get_fd(), SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 			}
 		}
 
 		if (switch_callback)
-			switch_callback(event->on_secondary, event->reason);
+			switch_callback(event->to, event->reason);
 
 		// Back on a primary whose control socket is broken for good and with
 		// nothing left to fall back to: let the session pause and reconnect
-		if (not event->on_secondary and not selector.control_up())
+		if (event->to == posture::primary and not selector.control_up())
 			throw std::runtime_error("Both paths are down");
 	}
 

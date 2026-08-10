@@ -415,6 +415,39 @@ public:
 	// property of the link and not of the AIMD.
 	std::optional<uint32_t> set_path_ceiling(std::optional<uint32_t> ceiling_bps);
 
+	// Multipath stage 3: video is striped over both paths at once, or is not any more.
+	//
+	// --- What this does, and deliberately does not, do to the accounting ---------------
+	// It does *not* raise the ceiling. The ceiling is the bitrate the headset asked for and
+	// it stays exactly that: aggregating two links is a way to *reach* the number the user
+	// chose over a Wi-Fi link that could not, not a licence to go past it. usb_bps is taken
+	// for the record (and for the log line) rather than added to anything.
+	//
+	// It does *not* credit the estimator with headroom either, and this is the important
+	// half. The delivery rate the v2 estimator measures is 8 * frame_bytes / (received_last
+	// - received_first), and both timestamps are the client's own: while combining, the
+	// bytes are the whole frame's, on both paths, and the span runs from the first arrival
+	// on either path to the last on either path. That is already an aggregate measurement —
+	// the frame really did cross both links inside that span — so the estimator needs no
+	// help to discover the extra capacity, and crediting it would double count.
+	//
+	// What it *does* do is make sure the failover clamp is out of the way (see
+	// effective_ceiling: the USB path budget applies to a session running *on* the USB
+	// path, not to one merely spilling its tail onto it), and re-seed everything, because
+	// the link the controller was measuring is not the link it is about to measure. That
+	// re-seed is what also makes a collapse out of combining correct: the caller applies the
+	// single-path ceiling in the same breath, and the estimate that was describing two links
+	// is thrown away instead of driving the bitrate of one.
+	//
+	// Returns the bitrate to apply, if any.
+	std::optional<uint32_t> set_combined(bool combined, uint32_t usb_bps);
+
+	// The delivered-bandwidth estimate in bits per second, or 0 when the v2 estimator is not
+	// the law in force or has not admitted enough samples yet. While video rides a single
+	// path this is a measurement of *that* path, which is what the striping scheduler latches
+	// as its Wi-Fi share when it enters the combine posture.
+	uint32_t bandwidth_estimate() const;
+
 	// Forget all measurements and go back to the ceiling, e.g. when the session is resumed.
 	std::optional<uint32_t> reset();
 
@@ -605,6 +638,11 @@ private:
 	uint32_t ceiling = 0;
 	// Ceiling of the path carrying video, if it is more restrictive
 	std::optional<uint32_t> path_ceiling;
+	// Video is striped over both paths (stage 3): the path ceiling, which exists to cap a
+	// session running on the USB tunnel alone, does not apply
+	bool combined = false;
+	// The USB path's configured budget while combining. Recorded, not spent: see set_combined
+	uint32_t combined_usb_bps = 0;
 	uint32_t bitrate = 0;
 	uint32_t min_bitrate = 0;
 

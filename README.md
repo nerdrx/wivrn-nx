@@ -16,7 +16,7 @@ headset WiVRn supports.
 
 | | |
 |---|---|
-| **Controller standby teleport** | Upstream discards the OpenXR *tracked* flags server-side (the old `TODO keep the tracked flag` in `pose_list.cpp`), so a Pico controller entering its non-disableable auto-sleep jumps to a garbage pose in-game. NX freezes the device at its last tracked pose — reported valid, TRACKED cleared, velocities zeroed. Devices whose runtime never sets tracked bits (estimated body joints) keep upstream behaviour exactly, so full body tracking is unaffected. |
+| **Controller standby teleport** *(toggle, default on)* | Upstream discards the OpenXR *tracked* flags server-side (the old `TODO keep the tracked flag` in `pose_list.cpp`), so a Pico controller entering its non-disableable auto-sleep jumps to a garbage pose in-game. NX freezes the device at its last tracked pose — reported valid, TRACKED cleared, velocities zeroed. Devices whose runtime never sets tracked bits (estimated body joints) keep upstream behaviour exactly, so full body tracking is unaffected. Toggle: headset (*Freeze sleeping controllers*), live and safe to flip mid-session; off restores upstream behaviour exactly — every valid pose is served and flagged tracked — while the NaN and sanitize guards stay in place either way. |
 | **Transport robustness** | A malformed, short, or oversized datagram is dropped and counted instead of tearing the session down; oversized datagrams are detected (`MSG_TRUNC`) instead of being silently truncated; a stalled TCP write can no longer block UDP video (per-socket bounded send queues). |
 | **Encoder failover** *(toggle, default on)* | A hardware encode session that dies or stops answering mid-stream — a driver reset, a suspend, a GPU reset under another application — used to freeze that eye for the rest of the session and log one error per frame, because nothing treated an encode failure as more than a dropped frame. NX watches every stream (one hard error, or three half-second windows with frames in and no picture out) and hands it to x264 with the same resolution, framerate and bitrate, starting on a keyframe: the picture is back within a frame or two, on a stream the headset's decoder cannot tell apart. The other eyes are untouched, and the failed encoder is never retried during the session. Within one codec only — the headset's decoder cannot be changed without a reconnect — so H.264 recovers and H.265/AV1 gets one explanatory line telling you to reconnect. Toggle: headset (*Encoder failover*); config key `encoder-failover`. |
 | **Honest labels** | The upstream "Application SpaceWarp" setting performs no frame synthesis — it only halves the stream rate. NX names it "Half framerate mode" and describes what it does. |
@@ -122,7 +122,11 @@ path then dies — silence for 400 ms, or hard send errors — video and control
 cable in under half a second** with a forced IDR, the bitrate controller gets a USB ceiling
 (`multipath.usb-max-bitrate`, default 100 Mbit/s), and the clock estimator resets. When Wi-Fi
 is healthy again for 5 s, everything flips back. Each secondary path gets its own encryption
-keys. Toggles: headset (*USB backup connection*), dashboard (*USB backup tunnel*). Both ends
+keys. Set the headset's *USB connection* toggle to **Combine (experimental)** and, while both
+links are healthy, the two carry video at once: Wi-Fi keeps everything its pacing window has
+room for and the tail of every frame spills to the cable, so the bandwidths add up; it falls
+straight back to backup-only failover the moment either link struggles. Toggles: headset
+(*USB connection*: Off / Backup only / Combine), dashboard (*USB backup tunnel*). Both ends
 log every attach/flip with reasons and RTT.
 
 ## Image quality and comfort

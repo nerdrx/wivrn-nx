@@ -308,6 +308,16 @@ void settings_streaming(const settings_context & ctx)
 	std::vector<setting> list;
 
 	list.push_back({
+	        .id = "##standby_freeze",
+	        .label = _("Freeze sleeping controllers"),
+	        .description = _("Some controllers, Pico's in particular, go to sleep on their own and keep reporting a pose the headset knows is no longer being tracked. On, the computer holds the controller at the last pose it was really tracked at until it wakes up. Off, the computer uses whatever pose the headset reports, which is what WiVRn has always done and which can make a sleeping controller jump across the room."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.standby_freeze; },
+	        .set_bool = [&ctx, &config](bool v) { config.standby_freeze = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.standby_freeze,
+	});
+
+	list.push_back({
 	        .id = "##foveation",
 	        .label = _("Foveated encoding"),
 	        .description = config.check_feature(feature::eye_gaze)
@@ -484,14 +494,35 @@ void settings_streaming(const settings_context & ctx)
 	        .default_bool = default_config.encoder_failover,
 	});
 
+	// Off / Backup only / Combine. multipath_usb stays the switch it always was —
+	// off is the one state that means "never attach a path at all" — and
+	// multipath_combine only says what the path is for once there is one, the same
+	// shape as bitrate_auto and bitrate_bbr above.
+	const auto multipath_index = [](const configuration & c) {
+		if (not c.multipath_usb)
+			return 0;
+		return c.multipath_combine ? 2 : 1;
+	};
+
 	list.push_back({
 	        .id = "##multipath_usb",
-	        .label = _("USB backup connection"),
-	        .description = _("Use the USB cable as a backup connection while streaming over Wi-Fi. Video and input switch to it automatically when the Wi-Fi link fails, and switch back once it has been stable again. Requires the tunnel to be armed by the WiVRn dashboard."),
-	        .ui = ui_kind::toggle,
-	        .get_bool = [&config] { return config.multipath_usb; },
-	        .set_bool = [&config](bool v) { config.multipath_usb = v; config.save(); },
-	        .default_bool = default_config.multipath_usb,
+	        .label = _("USB connection"),
+	        .description = _("Use the USB cable alongside Wi-Fi while streaming. Requires the tunnel to be armed by the WiVRn dashboard.\n\nBackup only: the cable stands by, and video and input switch to it automatically when the Wi-Fi link fails, then switch back once it has been stable again.\n\nCombine (experimental): both links carry video at once. Wi-Fi keeps everything it can deliver in time and the rest of each frame goes over the cable, so the two bandwidths add up. Falls back to backup behaviour the moment either link struggles."),
+	        .ui = ui_kind::combo,
+	        .get_int = [&config, multipath_index] { return multipath_index(config); },
+	        .set_int = [&ctx, &config](int v) {
+		        config.multipath_usb = v != 0;
+		        if (v != 0)
+			        config.multipath_combine = v == 2;
+		        config.save();
+		        if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .options = [] { return std::vector<std::string>{
+		                        _C("USB connection", "Off"),
+		                        _C("USB connection", "Backup only"),
+		                        _C("USB connection", "Combine (experimental)"),
+		                }; },
+	        .title = _("USB connection"),
+	        .default_int = multipath_index(default_config),
 	});
 
 	list.push_back({

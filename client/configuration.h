@@ -90,9 +90,24 @@ public:
 	// Ask the server to bias the encoders for fine detail instead of a smooth image
 	bool sharp_text = false;
 
-	// Attach a secondary path over the USB cable while streaming, used as a
-	// backup for the wireless link
+	// Attach a secondary path over the USB cable while streaming. Off means the
+	// tunnel is never probed and the server never sees a second path at all, which
+	// is why this stayed a plain switch: it is the one state the server cannot be
+	// told about, because there is nothing to tell it over.
 	bool multipath_usb = true;
+	// What that path is for, when there is one: a spare the session falls over to
+	// (false, the original meaning of the switch and still the default), or a second
+	// link carrying the tail of every frame alongside Wi-Fi (true, experimental).
+	// Only meaningful with multipath_usb on, exactly like bitrate_bbr under
+	// bitrate_auto and motion_smoothing_server under motion_smoothing.
+	bool multipath_combine = false;
+	// What goes on the wire for the two above
+	wivrn::multipath_mode multipath_mode() const
+	{
+		if (not multipath_usb)
+			return wivrn::multipath_mode::off;
+		return multipath_combine ? wivrn::multipath_mode::combine : wivrn::multipath_mode::backup;
+	}
 
 	// Ask the server to spread each video frame's packets over a fraction of the
 	// frame period instead of bursting them out, so that the access point's
@@ -113,6 +128,11 @@ public:
 	// driver's encoder dies or stops answering, instead of that eye freezing for
 	// the rest of the session. Costs CPU on the PC while it lasts.
 	bool encoder_failover = true;
+
+	// Let a controller that goes to sleep hold its last tracked pose on the PC instead of
+	// following whatever pose the runtime keeps reporting for it. On by default: it is what
+	// stops a sleeping Pico controller from teleporting across the play space.
+	bool standby_freeze = true;
 
 	// Darken the periphery of the streamed image when the application frame rate collapses
 	bool comfort_vignette = true;

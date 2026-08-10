@@ -82,6 +82,10 @@ private:
 	// False when the secondary shares the primary's peer address, i.e. both ride
 	// the same USB tunnel: attaching it is harmless but it can never be a backup
 	std::atomic<bool> secondary_can_failover = false;
+	// What the headset asked for the secondary path. Combining additionally needs
+	// secondary_can_failover: striping over two halves of the same USB tunnel
+	// would only make both slower.
+	std::atomic<multipath_mode> multipath = multipath_mode::backup;
 
 	// --- Path selector -----------------------------------------------------
 	// Decides where control packets and video go. Any packet received on the
@@ -91,7 +95,7 @@ private:
 	// own output to the secondary.
 	path_selector selector;
 	// Set before the threads start, read by the network thread
-	std::function<void(bool on_secondary, std::string_view reason)> switch_callback;
+	std::function<void(path_selector::posture, std::string_view reason)> switch_callback;
 
 	uint64_t reported_stream_send_errors = 0;
 	std::chrono::steady_clock::time_point next_stream_error_report{};
@@ -195,15 +199,33 @@ public:
 		return selector.on_secondary();
 	}
 
+	// True while video is striped over both paths at once (stage 3). The primary
+	// still carries everything its pacing window has room for, so this is *not*
+	// video_on_secondary and none of the "the stream socket is idle" reasoning
+	// that goes with it applies.
+	bool combining() const
+	{
+		return selector.combining();
+	}
+
+	// What the headset wants done with the secondary path. Live: the headset
+	// sends its whole settings block on every change, and a switch away from
+	// `combine` collapses the posture on the next update().
+	void set_multipath_mode(multipath_mode mode)
+	{
+		multipath = mode;
+		selector.set_combine_allowed(mode == multipath_mode::combine and secondary_can_failover);
+	}
+
 	// Apply or clear the DSCP marks on this end's sockets. Live, and idempotent:
 	// the headset sends its whole settings block on every change. The secondary
 	// path is deliberately left alone, it rides a USB tunnel through the
 	// loopback where there is no radio to prioritise anything on.
 	void set_qos(bool enabled);
 
-	// Called on every path switch, from the network thread. Must be set before
+	// Called on every posture change, from the network thread. Must be set before
 	// the session threads start.
-	void set_path_switch_callback(std::function<void(bool on_secondary, std::string_view reason)> cb)
+	void set_path_switch_callback(std::function<void(path_selector::posture, std::string_view reason)> cb)
 	{
 		switch_callback = std::move(cb);
 	}
@@ -245,6 +267,43 @@ public:
 			drop_secondary(error);
 
 		return true;
+	}
+
+	// Striping send (stage 3): put one video shard on the secondary path and say
+	// whether it really went out, so that the caller can put the rest of the frame
+	// back on the primary.
+	//
+	// Unlike send_secondary, which returns false only when there is no path at
+	// all, this says whether the bytes really went out, so that a caller holding a
+	// frame can put the rest of it on the primary. It is never retried on this
+	// path: wivrn::TCP poisons a socket whose send threw (the AES-CTR keystream
+	// has already moved past bytes that never reached the wire), and
+	// drop_secondary closes it here and now, which makes the selector collapse out
+	// of the combine posture on its next update.
+	template <typename T>
+	bool send_spill(T && packet)
+	{
+		std::string error;
+		{
+			std::shared_lock lock(secondary_mutex);
+			if (not secondary)
+				return false;
+
+			try
+			{
+				secondary.send(std::forward<T>(packet));
+			}
+			catch (const std::exception & e)
+			{
+				error = e.what();
+			}
+		}
+
+		if (error.empty())
+			return true;
+
+		drop_secondary(error);
+		return false;
 	}
 
 	// Send on the primary control socket whatever the selector says, never

@@ -1,13 +1,16 @@
-// Multipath stage 2 test harness.
+// Multipath stage 2 and 3 test harness.
 //
 // Part A drives wivrn::path_selector (the state machine shared by the server's
 // wivrn_connection and the headset's wivrn_session) on a virtual clock.
+// Part A2 does the same for the stage 3 "combine" posture: when it is entered,
+// what collapses it, and the fact that it is only ever reached from — and left
+// to — the stage 2 postures, so that everything failover does still holds.
 // Part B wires it to two real socketpairs standing in for the primary and the
 // secondary path, kills the primary, and checks that sends land on the
 // secondary and come back to the primary once it has been healthy long enough.
 //
 // Build:
-//   g++ -std=c++23 -I common -o failover_test failover_test.cpp && ./failover_test
+//   g++ -std=c++23 -I common -o failover_test tests/failover_test.cpp && ./failover_test
 
 #include "path_selector.h"
 
@@ -26,15 +29,15 @@ using clock_t_ = path_selector::clock;
 static int failures = 0;
 static int checks = 0;
 
-#define CHECK(cond)                                                      \
-	do                                                                   \
-	{                                                                    \
-		++checks;                                                        \
-		if (not(cond))                                                   \
-		{                                                                \
-			++failures;                                                  \
+#define CHECK(cond)                                                                   \
+	do                                                                            \
+	{                                                                             \
+		++checks;                                                             \
+		if (not(cond))                                                        \
+		{                                                                     \
+			++failures;                                                   \
 			std::printf("  FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
-		}                                                                \
+		}                                                                     \
 	} while (0)
 
 namespace
@@ -222,6 +225,187 @@ void test_reset()
 	CHECK(events.empty());
 }
 
+// --- Part A2: the combine posture (multipath stage 3) ---------------------
+
+using posture = path_selector::posture;
+
+void test_combine_needs_both_healthy()
+{
+	std::printf("combining waits for both paths and the headset's consent\n");
+	harness h;
+
+	// Nobody asked for it: the selector never leaves the primary, however long
+	// both paths behave. This is every stage 2 session.
+	auto events = h.run(20s, true);
+	CHECK(events.empty());
+	CHECK(h.sel.current() == posture::primary);
+	CHECK(not h.sel.combining());
+
+	// The headset asks. Both paths then have to be healthy for the hysteresis
+	// window, and the secondary's window only starts when it becomes usable.
+	h.sel.set_combine_allowed(true);
+	h.sel.set_secondary_usable(false);
+	events = h.run(1s, true);
+	CHECK(events.empty());
+
+	h.sel.set_secondary_usable(true);
+	events = h.run(4s, true);
+	CHECK(events.empty());
+	CHECK(not h.sel.combining());
+
+	events = h.run(1500ms, true);
+	CHECK(events.size() == 1);
+	CHECK(h.sel.combining());
+	CHECK(h.sel.current() == posture::combine);
+	// Combining is not "on the secondary": the primary still carries the bulk of
+	// every frame, and everything that keys off that must keep working.
+	CHECK(not h.sel.on_secondary());
+	if (not events.empty())
+	{
+		CHECK(events[0].to == posture::combine);
+		CHECK(not events[0].on_secondary);
+		std::printf("  entered combine, reason: %s\n", events[0].reason.c_str());
+	}
+}
+
+// Drive a selector straight into the combine posture. Not a factory: a harness
+// owns a path_selector, and a selector full of atomics is not movable.
+static void into_combine(harness & h)
+{
+	h.sel.set_combine_allowed(true);
+	h.sel.set_secondary_usable(true);
+	h.run(6s, true);
+	CHECK(h.sel.combining());
+}
+
+void test_combine_collapses_on_primary_loss()
+{
+	std::printf("a primary that dies while combining collapses to the secondary\n");
+	harness h;
+	into_combine(h);
+
+	auto events = h.run(2s, false);
+	// combine -> primary -> secondary. Only the posture it ended up in is
+	// reported, and it is the stage 2 answer.
+	CHECK(not events.empty());
+	CHECK(h.sel.current() == posture::secondary);
+	CHECK(h.sel.on_secondary());
+	CHECK(not h.sel.combining());
+	if (not events.empty())
+	{
+		CHECK(events.back().to == posture::secondary);
+		CHECK(events.back().on_secondary);
+		std::printf("  collapsed to the secondary, reason: %s\n", events.back().reason.c_str());
+	}
+
+	// ... and the way back is the stage 2 one: the primary alone first, and only
+	// then, after the hysteresis all over again, combining.
+	events = h.run(6s, true);
+	CHECK(not events.empty());
+	CHECK(h.sel.current() == posture::primary);
+	events = h.run(6s, true);
+	CHECK(events.size() == 1);
+	CHECK(h.sel.combining());
+}
+
+void test_combine_collapses_on_secondary_loss()
+{
+	std::printf("losing the secondary while combining collapses at once\n");
+	harness h;
+	into_combine(h);
+
+	// Not at the next update: the encoder threads must stop striping the moment
+	// the socket is gone, so the posture changes inside set_secondary_usable.
+	h.sel.set_secondary_usable(false);
+	CHECK(not h.sel.combining());
+	CHECK(h.sel.current() == posture::primary);
+
+	auto events = h.run(100ms, true);
+	CHECK(events.size() == 1);
+	if (not events.empty())
+	{
+		CHECK(events[0].to == posture::primary);
+		CHECK(not events[0].on_secondary);
+		std::printf("  reason: %s\n", events[0].reason.c_str());
+	}
+
+	// A primary that is fine stays the primary, and does not fall over to a path
+	// that no longer exists
+	events = h.run(10s, true);
+	CHECK(events.empty());
+	CHECK(h.sel.current() == posture::primary);
+}
+
+void test_combine_withdrawn_by_the_headset()
+{
+	std::printf("the headset switching back to backup collapses combining\n");
+	harness h;
+	into_combine(h);
+
+	h.sel.set_combine_allowed(false);
+	CHECK(not h.sel.combining());
+
+	auto events = h.run(100ms, true);
+	CHECK(events.size() == 1);
+	if (not events.empty())
+		CHECK(events[0].to == posture::primary);
+
+	// It stays collapsed for as long as the headset says so
+	events = h.run(20s, true);
+	CHECK(events.empty());
+	CHECK(h.sel.current() == posture::primary);
+
+	// ... and comes back on consent, after the hysteresis
+	h.sel.set_combine_allowed(true);
+	events = h.run(6s, true);
+	CHECK(events.size() == 1);
+	CHECK(h.sel.combining());
+}
+
+void test_combine_never_from_the_secondary()
+{
+	std::printf("combining is only ever entered from the primary posture\n");
+	harness h;
+	h.sel.set_combine_allowed(true);
+	h.sel.set_secondary_usable(true);
+
+	// Fail over first, then let both paths be healthy for a long time. The
+	// selector has to go back to the primary before it may combine, never
+	// straight from the secondary — the primary is what carries the bulk of a
+	// combined frame, and it has to have proven itself first.
+	h.run(1s, false);
+	CHECK(h.sel.on_secondary());
+
+	auto events = h.run(6s, true);
+	CHECK(events.size() == 1);
+	if (not events.empty())
+		CHECK(events[0].to == posture::primary);
+	CHECK(h.sel.current() == posture::primary);
+
+	events = h.run(6s, true);
+	CHECK(events.size() == 1);
+	if (not events.empty())
+		CHECK(events[0].to == posture::combine);
+}
+
+void test_combine_reset()
+{
+	std::printf("reset leaves the combine posture behind\n");
+	harness h;
+	into_combine(h);
+
+	h.sel.reset(h.now);
+	CHECK(h.sel.current() == posture::primary);
+	CHECK(not h.sel.combining());
+	CHECK(not h.sel.on_secondary());
+
+	// Consent survives a reset (it is what the headset asked for, not a property
+	// of the connection), so combining comes back after the hysteresis
+	auto events = h.run(6s, true);
+	CHECK(events.size() == 1);
+	CHECK(h.sel.combining());
+}
+
 // --- Part B: real sockets -------------------------------------------------
 
 // Mirrors the routing of wivrn_connection: control and video go to the primary
@@ -401,6 +585,12 @@ int main()
 	test_flip_back_hysteresis();
 	test_secondary_lost_forces_primary();
 	test_reset();
+	test_combine_needs_both_healthy();
+	test_combine_collapses_on_primary_loss();
+	test_combine_collapses_on_secondary_loss();
+	test_combine_withdrawn_by_the_headset();
+	test_combine_never_from_the_secondary();
+	test_combine_reset();
 	test_sockets();
 
 	std::printf("\n%d checks, %d failure(s)\n", checks, failures);

@@ -23,7 +23,9 @@
 #include "spdlog/spdlog.h"
 #include "xr/instance.h"
 
-#include <limits>
+#include <algorithm>
+#include <span>
+#include <vector>
 
 namespace wivrn
 {
@@ -38,95 +40,6 @@ namespace
 // One line at most every this many nanoseconds, whatever the loss rate
 constexpr int64_t fec_report_period = 10'000'000'000;
 } // namespace
-
-shard_set::shard_set(uint8_t stream_index)
-{
-	feedback.stream_index = stream_index;
-}
-
-void shard_set::reset(uint64_t frame_index)
-{
-	min_for_reconstruction = -1;
-	data.clear();
-	parity.clear();
-
-	uint8_t stream_index = feedback.stream_index;
-	feedback = {};
-	feedback.frame_index = frame_index;
-	feedback.stream_index = stream_index;
-}
-
-bool shard_set::empty() const
-{
-	return data.empty();
-}
-
-static bool is_complete(const shard_set & shards)
-{
-	const auto & frame = shards.data;
-	if (frame.empty())
-		return false;
-	if (not(frame.back() and frame.back()->timing_info))
-		return false;
-	for (const auto & shard: frame)
-		if (not shard)
-			return false;
-	return true;
-}
-
-std::optional<uint16_t> shard_set::insert(data_shard && shard, xr::instance & instance)
-{
-	if (empty())
-		feedback.received_first_packet = instance.now();
-
-	auto idx = shard.shard_idx;
-	if (idx >= data.size())
-		data.resize(idx + 1);
-	if (data[idx])
-		return {};
-	data[idx] = std::move(shard);
-	return idx;
-}
-
-std::optional<uint16_t> shard_set::reconstruct(const parity_shard & p, xr::instance & instance)
-{
-	const size_t n = p.blob_size.size();
-	if (n == 0)
-		return {};
-
-	const size_t last = size_t(p.first_shard_idx) + n;
-
-	// A group needs all but one of its shards to be rebuildable, so a parity shard
-	// may only ever tell us about one index past what we already hold. That is also
-	// what keeps a corrupt first_shard_idx from growing `data` without bound.
-	if (data.size() + 1 < last)
-		return {};
-	if (data.size() < last)
-		data.resize(last);
-
-	auto shard = wivrn::fec::reconstruct(p, [this](uint16_t idx) -> const data_shard * {
-		return (idx < data.size() and data[idx]) ? &*data[idx] : nullptr;
-	});
-	if (not shard)
-		return {};
-
-	// Through the normal path: a real copy arriving late afterwards is then simply
-	// a duplicate, which insert() already drops.
-	if (feedback.reconstructed_shards < std::numeric_limits<uint8_t>::max())
-		++feedback.reconstructed_shards;
-	return insert(std::move(*shard), instance);
-}
-
-bool shard_set::group_complete(const parity_shard & p) const
-{
-	const size_t last = size_t(p.first_shard_idx) + p.blob_size.size();
-	if (data.size() < last)
-		return false;
-	for (size_t i = p.first_shard_idx; i < last; ++i)
-		if (not data[i])
-			return false;
-	return true;
-}
 
 static void debug_why_not_sent(const shard_set & shards)
 {
@@ -154,85 +67,53 @@ static void debug_why_not_sent(const shard_set & shards)
 	spdlog::info("frame {} was not sent with {} data shards, {}{} missing", frame_idx, data, end ? "" : "at least ", missing);
 }
 
-void shard_accumulator::advance()
-{
-	std::swap(current, next);
-	next.reset(current.frame_index() + 1);
-}
-
 void shard_accumulator::push_shard(video_stream_data_shard && shard)
 {
-	assert(current.frame_index() + 1 == next.frame_index());
-
 	// Not truncated to 8 bits: a stream that is silent for a while, as the quad
 	// layer stream is whenever no layer is promoted, comes back with a gap of any
 	// size, and a gap that happened to be a multiple of 256 would look like no gap
 	// at all and file the new frame's shards under the old frame index.
-	uint64_t frame_diff = shard.frame_idx - current.frame_index();
-	if (shard.frame_idx < current.frame_index())
+	const uint64_t frame_idx = shard.frame_idx;
+
+	shard_set * set = window.slot(frame_idx, [this](shard_set & s) {
+		debug_why_not_sent(s);
+		send_feedback(s.feedback);
+	});
+
+	if (not set)
 	{
-		// frame is in the past, drop it
-		spdlog::info("Drop shard for old frame {} (current {})", shard.frame_idx, current.frame_index());
+		// Older than anything still being reassembled. With two paths in play this
+		// is also what a shard that lost a race by more than the window looks like.
+		spdlog::info("Drop shard for old frame {} (oldest {})", frame_idx, window.front_index());
+		return;
 	}
-	else if (frame_diff == 0)
-	{
-		auto shard_idx = current.insert(std::move(shard), instance);
-		// The shard that just landed may have been the last one a group was short
-		// of bar one, which is the point at which its parity becomes usable.
-		if (auto rebuilt = drain_parity(current))
-			shard_idx = std::min(shard_idx.value_or(*rebuilt), *rebuilt);
-		try_submit_frame(shard_idx);
-	}
-	else if (frame_diff == 1)
-	{
-		next.insert(std::move(shard), instance);
-		drain_parity(next);
-		if (is_complete(next))
-		{
-			debug_why_not_sent(current);
-			send_feedback(current.feedback);
 
-			advance();
+	set->insert(std::move(shard), instance.now());
+	// The shard that just landed may have been the last one a group was short of
+	// bar one, which is the point at which its parity becomes usable.
+	drain_parity(*set);
 
-			try_submit_frame(0);
-		}
-	}
-	else if (frame_diff == 2)
-	{
-		debug_why_not_sent(current);
-		send_feedback(current.feedback);
+	if (set->complete())
+		window.note_complete(frame_idx);
 
-		advance();
-
-		push_shard(std::move(shard));
-	}
-	else
-	{
-		// We have lost more than one frame
-		send_feedback(current.feedback);
-		send_feedback(next.feedback);
-
-		current.reset(shard.frame_idx);
-		next.reset(shard.frame_idx + 1);
-
-		push_shard(std::move(shard));
-	}
+	// Only the oldest frame is ever handed to the decoder, and the pump is what
+	// does it; a shard for a newer one can only ever change whether the oldest is
+	// still worth waiting for.
+	pump();
 }
 
 void shard_accumulator::push_parity(video_stream_parity_shard && parity)
 {
-	assert(current.frame_index() + 1 == next.frame_index());
-
 	// A parity shard is never evidence that a frame has started or ended: it only
 	// ever fills a hole in a frame the data shards have already put us on. One that
-	// names any other frame is for a frame we have given up on, or one we have not
-	// reached yet and whose data shards will move us along in their own time.
-	shard_set * set = nullptr;
-	if (parity.frame_idx == current.frame_index())
-		set = &current;
-	else if (parity.frame_idx == next.frame_index())
-		set = &next;
-	else
+	// names a frame outside the window is for a frame we have given up on, or one we
+	// have not reached yet and whose data shards will move us along in their own time.
+	const uint64_t frame_idx = parity.frame_idx;
+	if (frame_idx < window.front_index() or frame_idx >= window.front_index() + window_t::depth)
+		return;
+
+	shard_set * set = window.slot(frame_idx, [](shard_set &) {});
+	if (not set or set->frame_index() != frame_idx)
 		return;
 
 	// Nothing to hold on to for a group that is already whole, which on a link that
@@ -242,23 +123,22 @@ void shard_accumulator::push_parity(video_stream_parity_shard && parity)
 
 	set->parity.push_back(std::move(parity));
 
-	if (set == &current)
-	{
-		if (auto rebuilt = drain_parity(current))
-			try_submit_frame(*rebuilt);
-		return;
-	}
+	drain_parity(*set);
 
-	drain_parity(next);
-	if (is_complete(next))
-	{
-		debug_why_not_sent(current);
-		send_feedback(current.feedback);
+	if (set->complete())
+		window.note_complete(frame_idx);
 
-		advance();
+	pump();
+}
 
-		try_submit_frame(0);
-	}
+void shard_accumulator::pump()
+{
+	window.drain(
+	        [this](shard_set & set) { return try_submit_front(set); },
+	        [this](shard_set & set) {
+		        debug_why_not_sent(set);
+		        send_feedback(set.feedback);
+	        });
 }
 
 std::optional<uint16_t> shard_accumulator::drain_parity(shard_set & set)
@@ -279,7 +159,7 @@ std::optional<uint16_t> shard_accumulator::drain_parity(shard_set & set)
 		if (set.group_complete(p))
 			continue;
 
-		if (auto idx = set.reconstruct(p, instance))
+		if (auto idx = set.reconstruct(p, instance.now()))
 		{
 			++fec_reconstructed;
 			++fec_reconstructed_total;
@@ -313,7 +193,7 @@ void shard_accumulator::report_reconstructions()
 		return;
 
 	spdlog::info("Stream {}: rebuilt {} lost video shard(s) from parity over the last {:.0f} s",
-	             current.feedback.stream_index,
+	             window.front().feedback.stream_index,
 	             fec_reconstructed,
 	             (now - fec_last_report) / 1e9);
 
@@ -321,37 +201,44 @@ void shard_accumulator::report_reconstructions()
 	fec_last_report = now;
 }
 
-void shard_accumulator::try_submit_frame(std::optional<uint16_t> shard_idx)
+shard_accumulator::window_t::step shard_accumulator::try_submit_front(shard_set & current)
 {
-	if (shard_idx)
-		try_submit_frame(*shard_idx);
-}
-
-void shard_accumulator::try_submit_frame(uint16_t shard_idx)
-{
+	using step = window_t::step;
 	auto & data_shards = current.data;
 
-	for (size_t idx = 0; idx < shard_idx; ++idx)
-		if (not data_shards[idx])
-			return;
+	// Everything before `submitted` is already in the decoder's input buffer, and
+	// the decoder appends what it is given: the run to hand over starts there and
+	// stops at the first hole.
+	uint16_t first = current.submitted;
+	uint16_t last = first;
+	while (last < data_shards.size() and data_shards[last])
+		++last;
 
-	uint16_t last_idx = shard_idx + 1;
-	for (size_t size = data_shards.size();
-	     last_idx < size and data_shards[last_idx];
-	     ++last_idx)
+	const bool frame_complete = last == data_shards.size() and
+	                            not data_shards.empty() and
+	                            data_shards.back()->timing_info;
+
+	if (last > first)
 	{
+		if (frame_complete and not data_shards.front()->view_info)
+		{
+			// Nothing can be done with this frame: the decoder needs the view
+			// info that rides the first shard to submit the layer at all.
+			spdlog::warn("first shard has no view_info");
+			return step::unusable;
+		}
+
+		std::vector<std::span<const uint8_t>> payload;
+		payload.reserve(last - first);
+		for (size_t idx = first; idx < last; ++idx)
+			payload.emplace_back(data_shards[idx]->payload);
+
+		decoder_->push_data(payload, data_shards[first]->frame_idx, not frame_complete);
+		current.submitted = last;
 	}
 
-	std::vector<std::span<const uint8_t>> payload;
-	payload.reserve(last_idx - shard_idx);
-	for (size_t idx = shard_idx; idx < last_idx; ++idx)
-		payload.emplace_back(data_shards[idx]->payload);
-
-	bool frame_complete = last_idx == data_shards.size() and data_shards.back()->timing_info;
-	decoder_->push_data(payload, data_shards[shard_idx]->frame_idx, not frame_complete);
-
 	if (not frame_complete)
-		return;
+		return step::wait;
 
 	current.feedback.received_last_packet = instance.now();
 	current.feedback.sent_to_decoder = current.feedback.received_last_packet;
@@ -362,17 +249,15 @@ void shard_accumulator::try_submit_frame(uint16_t shard_idx)
 	current.feedback.send_end = timing_info.send_end;
 
 	if (not data_shards.front()->view_info)
-	{
-		spdlog::warn("first shard has no view_info");
-		return;
-	}
+		return step::unusable;
 
 	// Try to extract a frame
 	decoder_->frame_completed(current.feedback, *data_shards.front()->view_info);
 
 	send_feedback(current.feedback);
 
-	advance();
+	// The window advances on `done`; advancing here as well would skip a frame.
+	return step::done;
 }
 
 void shard_accumulator::send_feedback(wivrn::from_headset::feedback & feedback)

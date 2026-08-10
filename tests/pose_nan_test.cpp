@@ -26,6 +26,10 @@
 // Part D: zero and non-finite quaternion handling.
 // Part E: the ingest predicate, on the OpenXR types, as pose_list::is_sane() uses it.
 // Part F: the sanitize boundary that wivrn_hmd and wivrn_controller sit behind.
+// Part G: the standby freeze toggle. The freeze is what leaves the stale samples of
+//         Part B behind, so the two belong in the same harness: turning it off must
+//         restore upstream behaviour without reopening the NaN, including when it is
+//         turned off in the middle of a freeze.
 //
 // Build (from the repository root, and with -ffast-math: testing these guards
 // without the flag that breaks the naive ones would be pointless):
@@ -34,12 +38,19 @@
 //       -I build-server/_deps/monado-src/src/xrt/include \
 //       -I build-server/_deps/monado-src/src/external/openxr_includes \
 //       -isystem $EIGEN_INCLUDE_DIR \
-//       -o pose_nan_test tests/pose_nan_test.cpp
+//       -isystem build-server/_deps/boost-src/libs/pfr/include \
+//       -isystem external \
+//       -o pose_nan_test tests/pose_nan_test.cpp common/smp.cpp -lcrypto
 //   ./pose_nan_test
+//
+// (smp is only there because pose_list.h reaches wivrn_packets.h, which declares the
+// pairing constants; nothing under test uses them.)
 
 #include "polynomial_interpolator.h"
+#include "pose_list.h"
 #include "pose_sanitize.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -575,6 +586,261 @@ void test_sanitize_boundary()
 	}
 }
 
+/*
+ *
+ * Part G: the standby freeze toggle
+ *
+ */
+
+// One component (position or orientation) of one device, driven exactly as
+// pose_list::add_sample and pose_list::get_at drive it: the same policy predicates
+// decide what reaches the interpolator and at which timestamp it is queried.
+struct component_sim
+{
+	pose_list::tracked_state state;
+	polynomial_interpolator<3> positions;
+
+	// Returns whether the sample was given to the interpolator
+	bool feed(XrTime timestamp, bool tracked, float x, bool freeze)
+	{
+		if (not pose_list::update_tracked_state(state, timestamp, timestamp, true, tracked, freeze))
+			return false;
+
+		polynomial_interpolator<3>::sample s{timestamp, timestamp};
+		s.y.emplace(x, 1.6f, 0.f);
+		positions.add_sample(s);
+		return true;
+	}
+
+	polynomial_interpolator<3>::sample query(XrTime at, bool freeze) const
+	{
+		if (pose_list::component_tracked(state, freeze))
+			return positions.get_at(at);
+		return positions.get_at(std::min(at, state.last_tracked_timestamp));
+	}
+};
+
+// Feeds `n` tracked samples at 72 Hz starting at `from`, the device drifting slowly.
+// Returns the timestamp of the last one.
+XrTime feed_tracked(component_sim & c, XrTime from, int n, bool freeze)
+{
+	XrTime last = from;
+	for (int i = 0; i < n; ++i)
+	{
+		last = from + i * frame;
+		c.feed(last, true, 0.001f * i, freeze);
+	}
+	return last;
+}
+
+void test_standby_freeze_toggle()
+{
+	std::printf("Part G: the standby freeze toggle\n");
+
+	// The process-wide switch itself.
+	check(pose_list::standby_freeze(), "the freeze is on before anything sets it");
+	pose_list::set_standby_freeze(false);
+	check(not pose_list::standby_freeze(), "and follows what a settings packet asks for");
+	pose_list::set_standby_freeze(true);
+	check(pose_list::standby_freeze(), "in both directions");
+
+	// The ingest policy.
+	{
+		pose_list::tracked_state s;
+
+		// A runtime that never sets the tracked bit keeps upstream behaviour whatever
+		// the toggle says: this is the estimated body joint case.
+		pose_list::tracked_state never;
+		check(pose_list::update_tracked_state(never, t0, t0, true, false, true),
+		      "a component that was never tracked keeps its samples with the freeze on");
+		check(pose_list::component_tracked(never, true),
+		      "and is still reported as tracked");
+
+		check(pose_list::update_tracked_state(s, t0, t0, true, true, true), "a tracked sample is kept");
+		check(pose_list::component_tracked(s, true), "and the component reads as tracked");
+
+		// Same state, same sample, the two policies.
+		pose_list::tracked_state frozen = s;
+		pose_list::tracked_state upstream = s;
+		check(not pose_list::update_tracked_state(frozen, t0 + frame, t0 + frame, true, false, true),
+		      "a valid but untracked sample is dropped with the freeze on");
+		check(pose_list::update_tracked_state(upstream, t0 + frame, t0 + frame, true, false, false),
+		      "and kept with the freeze off");
+
+		check(not pose_list::component_tracked(frozen, true),
+		      "the frozen component stops reading as tracked");
+		check(pose_list::component_tracked(upstream, false),
+		      "the upstream one always reads as tracked");
+
+		// The state machine runs whatever the toggle says, so the two agree on
+		// everything but the answer.
+		check(frozen.currently_tracked == upstream.currently_tracked and
+		              frozen.ever_tracked == upstream.ever_tracked and
+		              frozen.last_tracked_timestamp == upstream.last_tracked_timestamp,
+		      "the tracking state is maintained identically either way");
+
+		// A sample the headset marks invalid is forwarded either way, it is what
+		// invalidates the pose.
+		check(pose_list::update_tracked_state(frozen, t0 + 2 * frame, t0 + 2 * frame, false, false, true),
+		      "an invalid sample is forwarded with the freeze on");
+		check(pose_list::update_tracked_state(upstream, t0 + 2 * frame, t0 + 2 * frame, false, false, false),
+		      "and with the freeze off");
+	}
+
+	// Freeze on: the sleeping controller holds the pose it was last tracked at,
+	// instead of the one the runtime keeps reporting for it.
+	{
+		component_sim c;
+		const XrTime last_tracked = feed_tracked(c, t0, 30, true);
+		const float held = 0.029f;
+
+		XrTime t = last_tracked;
+		int kept = 0;
+		for (int i = 1; i <= 300; ++i)
+		{
+			t = last_tracked + i * frame;
+			kept += c.feed(t, false, 0.5f, true);
+		}
+		check(kept == 0, "every standby sample is dropped (" + std::to_string(kept) + " kept)");
+
+		auto s = c.query(t, true);
+		check(s.y.has_value(), "the frozen component still has a pose");
+		check(s.y and std::fabs((*s.y)[0] - held) < 0.01f,
+		      "which is the last tracked one, not the standby garbage");
+		check(not pose_list::component_tracked(c.state, true), "reported not tracked");
+	}
+
+	// Freeze off: upstream behaviour, the standby pose is served and flagged tracked.
+	{
+		component_sim c;
+		const XrTime last_tracked = feed_tracked(c, t0, 30, false);
+
+		XrTime t = last_tracked;
+		int kept = 0;
+		for (int i = 1; i <= 30; ++i)
+		{
+			t = last_tracked + i * frame;
+			kept += c.feed(t, false, 0.5f, false);
+		}
+		check(kept == 30, "every standby sample is kept with the freeze off (" + std::to_string(kept) + "/30)");
+
+		auto s = c.query(t, false);
+		check(s.y.has_value(), "the component has a pose");
+		check(s.y and std::fabs((*s.y)[0] - 0.5f) < 0.01f,
+		      "which is whatever the runtime reported, teleport included");
+		check(pose_list::component_tracked(c.state, false), "reported tracked, as upstream did");
+	}
+
+	// The one that matters: the toggle goes off in the middle of a freeze. For the
+	// whole freeze the interpolator's ring was not refreshed, so it holds samples as
+	// old as the freeze lasted; the moment the toggle flips, the runtime's untracked
+	// samples start being kept again and the query moves back to the requested time.
+	// That is Part B's state exactly, reached through the toggle rather than through
+	// tracking resuming. What keeps it safe is not the toggle but max_sample_age_ns:
+	// a sample further than a second from the query is left out of the fit, so the
+	// stale block cannot reach the weight math at all.
+	const auto toggle_off_mid_freeze = [](int64_t freeze_ns, int fresh) {
+		component_sim c;
+		const XrTime last_tracked = feed_tracked(c, t0, 30, true);
+
+		// Asleep, freeze on: valid but untracked, nothing reaches the interpolator.
+		for (int i = 1; i * frame < freeze_ns; ++i)
+			c.feed(last_tracked + i * frame, false, 0.5f, true);
+
+		// The user flips the toggle off while it is still asleep. The runtime is
+		// still reporting the same poses, and they are kept from here on.
+		const XrTime resume = last_tracked + freeze_ns;
+		XrTime t = resume;
+		for (int i = 0; i < fresh; ++i)
+		{
+			t = resume + i * frame;
+			c.feed(t, false, 0.5f, false);
+		}
+
+		return std::pair{c.query(t, false), c.state};
+	};
+
+	{
+		// The exact freeze durations that used to make the weight infinite, as in
+		// Part B: a stale sample 2^32 - window ns from the query.
+		constexpr int64_t two_pow_32 = 4'294'967'296;
+		constexpr int64_t window = 30'000'000;
+
+		for (int fresh: {1, 2, 3, 5, 8})
+		{
+			const int64_t inf_point = two_pow_32 - window - (fresh - 1) * frame;
+
+			for (int64_t off: {int64_t(0), int64_t(-1'000), int64_t(1'000), int64_t(-20'000), int64_t(20'000)})
+			{
+				auto [s, state] = toggle_off_mid_freeze(inf_point + off, fresh);
+				check(sample_is_finite(s),
+				      "no NaN when the freeze is lifted at the infinite weight point, fresh=" +
+				              std::to_string(fresh) + " off=" + std::to_string(off) + " ns");
+				check(pose_list::component_tracked(state, false),
+				      "and the component is reported tracked again");
+			}
+		}
+
+		// And over a wide sweep of freeze durations. Once the stale block is past the
+		// usable age the fit is the fresh samples alone, i.e. the pose the runtime is
+		// reporting now: upstream behaviour, not a blend with the frozen one.
+		int nonfinite = 0;
+		int no_pose = 0;
+		float worst_err = 0;
+		int64_t worst_freeze = 0;
+
+		for (int64_t freeze_ns = 2'000'000'000; freeze_ns <= 9'000'000'000; freeze_ns += 997'361)
+		{
+			auto [s, state] = toggle_off_mid_freeze(freeze_ns, 3);
+			if (not sample_is_finite(s))
+			{
+				++nonfinite;
+				continue;
+			}
+			if (not s.y)
+			{
+				++no_pose;
+				continue;
+			}
+			const float err = std::fabs((*s.y)[0] - 0.5f);
+			if (err > worst_err)
+			{
+				worst_err = err;
+				worst_freeze = freeze_ns;
+			}
+		}
+
+		check(nonfinite == 0,
+		      "turning the freeze off mid freeze never produces a non-finite pose (" +
+		              std::to_string(nonfinite) + " hits)");
+		check(no_pose == 0, "and always produces a pose (" + std::to_string(no_pose) + " misses)");
+		check(worst_err < 0.01f,
+		      "which is the pose the runtime reports now, not a blend with the frozen one (worst " +
+		              std::to_string(worst_err) + " m after a " + std::to_string(worst_freeze / 1000000) + " ms freeze)");
+	}
+
+	// And back on again: the state kept running while the freeze was off, so the
+	// component freezes at the sample it was really last tracked at.
+	{
+		component_sim c;
+		const XrTime last_tracked = feed_tracked(c, t0, 30, false);
+
+		XrTime t = last_tracked;
+		for (int i = 1; i <= 10; ++i)
+		{
+			t = last_tracked + i * frame;
+			c.feed(t, false, 0.5f, false);
+		}
+
+		check(c.state.last_tracked_timestamp == last_tracked,
+		      "the last tracked timestamp survived the freeze being off");
+		check(not pose_list::component_tracked(c.state, true),
+		      "turning it back on freezes the component immediately");
+		check(not c.feed(t + frame, false, 0.5f, true),
+		      "and standby samples stop reaching the interpolator again");
+	}
+}
+
 } // namespace
 
 int main()
@@ -588,6 +854,7 @@ int main()
 	test_quaternions();
 	test_ingest();
 	test_sanitize_boundary();
+	test_standby_freeze_toggle();
 
 	std::printf("\n%d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;

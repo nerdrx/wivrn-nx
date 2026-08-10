@@ -231,39 +231,6 @@ void pose_list::reset()
 	orientation_state = {};
 }
 
-bool pose_list::update_tracked_state(tracked_state & state, XrTime production_timestamp, XrTime timestamp, bool valid, bool tracked)
-{
-	// Samples without valid data are forwarded as-is, they invalidate the pose
-	if (not valid)
-		return true;
-
-	// Ignore out of order samples for the state, they must not undo a newer one
-	const bool up_to_date = production_timestamp >= state.production_timestamp;
-
-	if (tracked)
-	{
-		state.ever_tracked = true;
-		if (up_to_date)
-		{
-			state.currently_tracked = true;
-			state.production_timestamp = production_timestamp;
-		}
-		state.last_tracked_timestamp = std::max(state.last_tracked_timestamp, timestamp);
-		return true;
-	}
-
-	if (up_to_date)
-	{
-		state.currently_tracked = false;
-		state.production_timestamp = production_timestamp;
-	}
-
-	// Runtimes that never report the tracked flag (estimated poses, body joints...)
-	// keep the previous behaviour, for the others the sample is dropped so that the
-	// interpolation is frozen on the last tracked data
-	return not state.ever_tracked;
-}
-
 void pose_list::add_sample(XrTime production_timestamp, XrTime timestamp, const from_headset::tracking::pose & pose, const clock_offset & offset)
 {
 	production_timestamp = offset.from_headset(production_timestamp);
@@ -329,19 +296,24 @@ void pose_list::add_sample(XrTime production_timestamp, XrTime timestamp, const 
 
 	std::lock_guard lock(mutex);
 
+	// Read once so that both components of this sample see the same policy
+	const bool freeze = standby_freeze();
+
 	const bool keep_position = update_tracked_state(
 	        position_state,
 	        production_timestamp,
 	        timestamp,
 	        pose.flags & from_headset::pose_flags::position_valid,
-	        pose.flags & from_headset::pose_flags::position_tracked);
+	        pose.flags & from_headset::pose_flags::position_tracked,
+	        freeze);
 
 	const bool keep_orientation = update_tracked_state(
 	        orientation_state,
 	        production_timestamp,
 	        timestamp,
 	        pose.flags & from_headset::pose_flags::orientation_valid,
-	        pose.flags & from_headset::pose_flags::orientation_tracked);
+	        pose.flags & from_headset::pose_flags::orientation_tracked,
+	        freeze);
 
 	if (keep_position)
 		positions.add_sample(position);
@@ -379,10 +351,11 @@ std::pair<XrTime, xrt_space_relation> pose_list::get_at(XrTime at_timestamp_ns)
 		ret.relation_flags = xrt_space_relation_flags(int(ret.relation_flags) | f);
 	};
 
-	// A component that was never reported as tracked is assumed to always be, else
-	// the pose is frozen on the last tracked sample
-	const bool position_tracked = position_state.currently_tracked or not position_state.ever_tracked;
-	const bool orientation_tracked = orientation_state.currently_tracked or not orientation_state.ever_tracked;
+	// Read once so that both components of this query see the same policy
+	const bool freeze = standby_freeze();
+
+	const bool position_tracked = component_tracked(position_state, freeze);
+	const bool orientation_tracked = component_tracked(orientation_state, freeze);
 
 	auto position = positions.get_at(position_tracked ? at_timestamp_ns : std::min(at_timestamp_ns, position_state.last_tracked_timestamp));
 	auto orientation = orientations.get_at(orientation_tracked ? at_timestamp_ns : std::min(at_timestamp_ns, orientation_state.last_tracked_timestamp));

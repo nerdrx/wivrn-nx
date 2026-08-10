@@ -24,6 +24,7 @@
 #include "application.h"
 #include "configuration.h"
 #include "driver/app_pacer.h"
+#include "driver/pose_list.h"
 #include "driver/xrt_cast.h"
 #include "encoder/shard_pacer.h"
 #include "server/ipc_server.h"
@@ -157,10 +158,16 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 	encoder_failover_conf = conf.encoder_failover;
 	compositor.set_encoder_failover(encoder_failover_conf and get_info().settings.encoder_failover);
 
+	// Whether a device that stops being tracked holds its last tracked pose. No server
+	// configuration key: it only ever describes what the headset's own runtime does with
+	// its controllers, which is the headset's business. Process wide, see pose_list.
+	pose_list::set_standby_freeze(get_info().settings.standby_freeze);
+
 	multipath_usb_max_bitrate = conf.multipath.usb_max_bitrate_bps;
-	this->connection->set_path_switch_callback([this](bool on_secondary, std::string_view reason) {
-		on_path_switch(on_secondary, reason);
+	this->connection->set_path_switch_callback([this](path_selector::posture to, std::string_view reason) {
+		on_path_switch(to, reason);
 	});
+	this->connection->set_multipath_mode(effective_multipath_mode(get_info().settings));
 
 #if WIVRN_FEATURE_STEAMVR_LIGHTHOUSE
 
@@ -545,8 +552,17 @@ void wivrn_session::operator()(const from_headset::settings_changed & settings)
 	// Both switches must be on, same as the automatic bitrate
 	set_pacing(settings.smooth_pacing);
 	connection->set_qos(settings.wifi_qos);
+	// Live: switching away from "combine" collapses the posture on the next update, with
+	// the IDR and the re-seeded bitrate control every posture change gets
+	connection->set_multipath_mode(effective_multipath_mode(settings));
 	compositor.set_fec(settings.fec);
 	compositor.set_encoder_failover(encoder_failover_conf and settings.encoder_failover);
+
+	// Live, and safe either way: the per component tracking state is maintained whatever
+	// the setting says, and the interpolator drops samples older than a second from its
+	// fit, so a buffer left stale by a freeze cannot poison the pose once the freeze is
+	// lifted. See the comment on max_sample_age_ns in polynomial_interpolator.h.
+	pose_list::set_standby_freeze(settings.standby_freeze);
 
 	if (settings.preferred_refresh_rate != 0)
 		compositor.set_framerate(settings.preferred_refresh_rate / settings.fps_divider);
@@ -850,8 +866,41 @@ void wivrn_session::operator()(from_headset::path_ping && ping)
 		});
 }
 
-void wivrn_session::on_path_switch(bool on_secondary, std::string_view reason)
+void wivrn_session::on_path_switch(path_selector::posture to, std::string_view reason)
 {
+	using posture = path_selector::posture;
+
+	const bool on_secondary = to == posture::secondary;
+	const bool combining = to == posture::combine;
+
+	// The Wi-Fi share the striping scheduler splits every frame against has to be a
+	// measurement of the Wi-Fi path *alone*, so it is taken here, before anything below
+	// re-seeds the controller and before a single shard has gone over the tunnel.
+	//
+	// Two sources, in order of preference:
+	//   * the v2 estimator's delivered-bandwidth estimate, which is a capacity in the
+	//     literal sense — bytes over the time they took to arrive;
+	//   * failing that (the AIMD law, or too few samples yet), the bitrate divided by the
+	//     pacing window, which is the rate the shards were being handed to the socket at
+	//     and which the link was evidently keeping up with. With no pacing the window is
+	//     1 and the two coincide.
+	// Whichever it is, it is a snapshot and stays put for as long as the posture lasts: a
+	// share re-derived from the bitrate while combining would grow with it and nothing
+	// would ever spill. Leaving the posture drops it back to zero.
+	if (combining)
+	{
+		const auto snapshot = bitrate_ctl.snapshot();
+		const float window = std::clamp(pacing_conf.enabled ? pacing_conf.window : 1.f, 0.05f, 1.f);
+		const uint32_t measured = bitrate_ctl.bandwidth_estimate();
+		const uint32_t paced = uint32_t(snapshot.bitrate_bps / window);
+
+		combine_wifi_share_bps = std::max(measured, paced);
+	}
+	else
+	{
+		combine_wifi_share_bps = 0;
+	}
+
 	// Whatever was in flight on the old path is lost, and a P-frame referencing
 	// it would be undecodable: start over from an IDR
 	compositor.request_idr();
@@ -860,16 +909,31 @@ void wivrn_session::on_path_switch(bool on_secondary, std::string_view reason)
 	// the offset across the difference between the two paths
 	offset_est.reset();
 
-	// The USB tunnel has its own, much lower, budget
+	// The USB tunnel has its own, much lower, budget — while it carries the session on its
+	// own. It is not a budget for a session that merely spills the tail of every frame onto
+	// it, so entering the combine posture takes it off (set_combined) rather than scaling it.
 	auto ceiling = on_secondary and multipath_usb_max_bitrate
 	                       ? std::optional<uint32_t>(multipath_usb_max_bitrate)
 	                       : std::nullopt;
 	apply_auto_bitrate(bitrate_ctl.set_path_ceiling(ceiling));
+	apply_auto_bitrate(bitrate_ctl.set_combined(combining, multipath_usb_max_bitrate));
 
-	U_LOG_I("Failover to the %s path: %.*s, IDR forced, clock estimator reset",
-	        on_secondary ? "secondary" : "primary",
-	        (int)reason.size(),
-	        reason.data());
+	if (combining)
+		U_LOG_I("Combining both paths: %.*s, Wi-Fi share %.1f Mbit/s, IDR forced, clock estimator reset",
+		        (int)reason.size(),
+		        reason.data(),
+		        combine_wifi_share_bps * 1e-6f);
+	else
+		U_LOG_I("Failover to the %s path: %.*s, IDR forced, clock estimator reset",
+		        on_secondary ? "secondary" : "primary",
+		        (int)reason.size(),
+		        reason.data());
+}
+
+void wivrn_session::on_frame_paths(uint32_t primary_bytes, uint32_t secondary_bytes)
+{
+	path_bytes_primary += primary_bytes;
+	path_bytes_secondary += secondary_bytes;
 }
 
 void wivrn_session::apply_auto_bitrate(std::optional<uint32_t> bitrate)
@@ -1015,9 +1079,24 @@ void wivrn_session::send_transport_status()
 
 	using path_state = to_headset::transport_status::path_state;
 	const bool on_secondary = connection->video_on_secondary();
+	const bool combining = connection->combining();
 	const path_state path = on_secondary                  ? path_state::usb
+	                        : combining                   ? path_state::combining
 	                        : connection->has_secondary() ? path_state::wifi_usb_ready
 	                                                      : path_state::wifi_only;
+
+	// Share of the video bytes each path took since the last report. Two counters and a
+	// subtraction: cheap enough to run whether or not anything is combining, and the only
+	// thing that can tell the headset's Link card how the split is actually landing.
+	const uint64_t primary = path_bytes_primary;
+	const uint64_t secondary = path_bytes_secondary;
+	const uint64_t d_primary = primary - reported_path_bytes_primary;
+	const uint64_t d_secondary = secondary - reported_path_bytes_secondary;
+	reported_path_bytes_primary = primary;
+	reported_path_bytes_secondary = secondary;
+
+	const uint64_t total = d_primary + d_secondary;
+	const uint8_t wifi_share_pct = total ? uint8_t((d_primary * 100 + total / 2) / total) : 100;
 
 	connection->send_control(to_headset::transport_status{
 	        .bitrate_bps = bitrate.bitrate_bps,
@@ -1025,6 +1104,7 @@ void wivrn_session::send_transport_status()
 	        .mode = bitrate.control,
 	        .state = bitrate.state,
 	        .path = path,
+	        .wifi_share_pct = wifi_share_pct,
 	        .radio_hold = bitrate.radio_hold,
 	        // The pacer stands down whenever the shards are not riding the UDP stream
 	        // socket, so the switch being on is not the same as pacing happening.

@@ -20,6 +20,8 @@
 #pragma once
 
 #include "decoder.h"
+#include "frame_window.h"
+#include "shard_set.h"
 #include "wivrn_packets.h"
 
 #include <atomic>
@@ -48,43 +50,16 @@ class shard_accumulator
 public:
 	using data_shard = wivrn::to_headset::video_stream_data_shard;
 	using parity_shard = wivrn::to_headset::video_stream_parity_shard;
-	struct shard_set
-	{
-		size_t min_for_reconstruction = -1;
-		std::vector<std::optional<data_shard>> data;
-		// Parity shards of this frame whose group still has a hole in it. A parity
-		// shard for a group that is already whole is dropped on arrival, so on a
-		// clean link this stays empty and costs nothing.
-		std::vector<parity_shard> parity;
-		void reset(uint64_t frame_index);
-		bool empty() const;
+	using shard_set = wivrn::shard_set;
 
-		std::optional<uint16_t> insert(data_shard &&, xr::instance & instance);
-
-		// Rebuild the single missing data shard of `p`'s group, if that is what the
-		// group is short of. Returns its index when one was rebuilt and inserted.
-		std::optional<uint16_t> reconstruct(const parity_shard & p, xr::instance & instance);
-
-		// Whether every data shard `p` covers has arrived, which makes `p` useless
-		bool group_complete(const parity_shard & p) const;
-
-		wivrn::from_headset::feedback feedback{};
-
-		explicit shard_set(uint8_t stream_index);
-		shard_set(const shard_set &) = default;
-		shard_set(shard_set &&) = default;
-		shard_set & operator=(const shard_set &) = default;
-		shard_set & operator=(shard_set &&) = default;
-
-		uint64_t frame_index() const
-		{
-			return feedback.frame_index;
-		}
-	};
+	// How many frames are reassembled at once, and how much older than the newest
+	// complete frame the oldest one may get before it is given up on. See
+	// frame_window: six frames is 67 ms at 90 Hz of buffered shards, and three frame
+	// periods is far more inter-path skew than a Wi-Fi/USB pair ever shows.
+	using window_t = wivrn::frame_window<shard_set, 6, 3>;
 
 private:
-	shard_set current;
-	shard_set next;
+	window_t window;
 	std::weak_ptr<scenes::stream> weak_scene;
 	xr::instance & instance;
 
@@ -114,12 +89,10 @@ public:
 	        std::weak_ptr<scenes::stream> scene,
 	        uint8_t stream_index) :
 	        decoder_(decoder::make(device, physical_device, vk_queue_family_index, description, stream_index, scene, this)),
-	        current(stream_index),
-	        next(stream_index),
+	        window(shard_set(stream_index)),
 	        weak_scene(scene),
 	        instance(instance)
 	{
-		next.reset(1);
 	}
 
 	void push_shard(wivrn::to_headset::video_stream_data_shard &&);
@@ -133,13 +106,18 @@ public:
 	using blit_handle = decoder::blit_handle;
 
 private:
-	void try_submit_frame(std::optional<uint16_t> shard_idx);
-	void try_submit_frame(uint16_t shard_idx);
+	// Feed the decoder whatever the oldest frame has gained, and finish it if it is
+	// whole. Only ever the oldest: a decoder cannot be fed out of order, so a newer
+	// frame that completed first waits its turn. What it returns is what tells the
+	// window whether the frame is done with — see frame_window::drain.
+	window_t::step try_submit_front(shard_set &);
+	// Drain the window: submit and retire from the oldest end for as long as
+	// anything can be decided there.
+	void pump();
 	void send_feedback(wivrn::from_headset::feedback & feedback);
-	void advance();
 
 	// Try every parity shard `set` is holding and drop the ones that are spent.
-	// Returns the lowest shard index rebuilt, which is where try_submit_frame has
+	// Returns the lowest shard index rebuilt, which is where try_submit_front has
 	// to start looking again.
 	std::optional<uint16_t> drain_parity(shard_set & set);
 	void report_reconstructions();

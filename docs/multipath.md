@@ -139,13 +139,16 @@ peer-pinning (kernel connect filter, single-address bind, handshake address chec
   as before.
 
 ### Non-goals (for now)
-- Striping video across both paths simultaneously. The reassembly window is two frames deep,
-  so paths with >1 frame-period skew would lose frames; failover already captures most of the
-  value. Revisit only with a deepened accumulator.
+- ~~Striping video across both paths simultaneously.~~ Done in Stage 3, once the accumulator
+  was deepened to tolerate inter-path skew (2 → 6 frames).
 
 ## Config
 
-Client (headset settings, streaming page): `multipath_usb`, "USB backup connection", default on.
+Client (headset settings, streaming page): `multipath_usb` (default on) plus `multipath_combine`
+(default off), surfaced as one three-way *USB connection* selector — Off / Backup only /
+Combine (experimental). `multipath_usb` off is the one state the server is never told about
+(there is nothing to tell it over); the two on-states send `settings_changed.multipath` =
+`backup` / `combine`.
 
 Dashboard: `usb_backup_tunnel`, "USB backup tunnel", default on — arms `adb reverse tcp:9757
 tcp:9757` for every connected headset while a session is running.
@@ -200,22 +203,78 @@ Linux client against a local server, two routes: loopback as "Wi-Fi", a veth/net
 `tc netem` loss/latency as "USB". Kill or degrade one route mid-stream; success = session
 survives, log shows path-down → flip → IDR → recovery, poses never stall.
 
-### Stage 3 — striping (bandwidth aggregation)
+### Stage 3 — striping (bandwidth aggregation) — **done**
 
-Selector gains a third posture: "combine". Wi-Fi remains the primary and is paced exactly as
-today; when a frame's shards would exceed the pacing window's byte budget, the tail spills to
-the secondary (USB TCP). Aggregate ceiling ≈ Wi-Fi estimate + `multipath.usb-max-bitrate`.
+The selector gains a third posture, `combine`, entered from `primary` once both paths have
+been healthy for the hysteresis window *and* the headset asked to combine *and* the secondary
+is a genuinely different link (never a USB-primary session striping over two halves of one
+tunnel). Wi-Fi stays the primary and is paced exactly as before; the shards past a per-frame
+byte budget spill to the secondary (USB TCP), where they travel in parallel. Either path
+degrading collapses `combine` back to the Stage 2 postures with a forced IDR.
 
-- FEC groups are built BEFORE the split so parity is path-agnostic; global dedup/reassembly
-  already merges arrivals from both sockets.
-- The shard reassembly ring deepens (2 → 6 frames) to tolerate inter-path skew; the
-  frame-advance logic must not discard a frame merely because a faster path delivered a newer
-  one (skew ≤ ~3 frame periods tolerated, beyond that the old frame is abandoned as today).
-- Bitrate controller: while combining, the delivered-bandwidth estimator treats the paths as
-  one aggregate link (wire time = per-frame max across paths — already what the feedback
-  measures); the path ceiling becomes wifi-estimate + usb-max instead of the failover clamp.
-- Failover semantics preserved: either path dying collapses to the survivor with an IDR and
-  the selector returns to its Stage-2 postures; combining resumes when both are healthy for
-  the hysteresis window.
-- Headset control: the "USB backup connection" toggle becomes a selector — Backup only /
-  Combine (experimental).
+- **Split point.** Each frame gets a wall-clock delivery window — the slice pacing gave it, or,
+  unpaced/late, its share of a frame period. At the primary path's measured capacity `C`, that
+  window carries `budget = C * window_ns / 8e9` bytes; everything past that byte offset spills.
+  `C` is latched when `combine` is entered, from the delivered-bandwidth estimate (or
+  `bitrate / pacing_window`), so it is a Wi-Fi-only measurement and does not chase the bitrate
+  upward while combining. At the operating point (100 Mbit/s Wi-Fi, 0.4 window, 90 fps, three
+  streams) the budget equals one stream's frame, so nothing spills until the controller raises
+  the bitrate past what Wi-Fi was actually delivering — every added bit is what spills.
+- **FEC.** Groups are built BEFORE the split, so parity is path-agnostic and a UDP-dropped
+  shard can be rebuilt from copies that arrived over the tunnel. A group *every* shard of which
+  spilled needs no parity (TCP drops nothing) and its parity shard is suppressed so it does not
+  eat Wi-Fi budget; a group straddling the split keeps its parity. Parity always rides the
+  primary path — the only one that can lose a packet.
+- **Reassembly window** deepened 2 → 6 frames (`client/decoder/frame_window.h`,
+  `shard_set.h`). A frame is no longer given up on because a newer index arrived — over two
+  paths of different latency that is normal — but only when a *complete* frame more than ~3
+  frame periods (skew tolerance) newer exists, or when it falls off the 6-deep end. Memory is
+  bounded to 6 shard vectors per stream. Duplicate shards (the same one over both paths) are
+  dropped, and a `submitted` cursor makes re-examining a frame after a newer one moved
+  idempotent — a decoder is only ever fed the oldest frame, in index order, once.
+- **Bitrate controller** (`set_combined(bool, usb_bps)`): while combining, the delivered-rate
+  estimator already measures the aggregate — `8 * frame_bytes / (received_last - received_first)`
+  spans both paths because the frame's bytes are the whole frame's and the span runs first-to-
+  last arrival across both — so nothing is credited on top (that would double-count). The
+  ceiling stays the client's; the failover USB clamp is taken *off* while combining (it caps a
+  session running on the tunnel, not one spilling its tail onto it). Leaving `combine` re-seeds
+  the controller and the caller reapplies the correct single-path ceiling in the same breath.
+- **Headset control**: the *USB backup connection* toggle became a three-way *USB connection*
+  selector — Off / Backup only / Combine (experimental). Off still means "never attach a path";
+  the two on-states map to `multipath_mode::backup` / `::combine` (`settings_changed.multipath`,
+  an `optional<multipath_mode>` like `bitrate_control`/`motion_smoothing_mode` — empty from an
+  older client means backup, since striping needs a window it lacks). The server honours it live.
+- **HUD**: `path_state` gained `combining`; the Link card shows *Wi-Fi + USB* with a live
+  `xx% / yy%` byte split (cheap per-path counters differenced each status period,
+  `transport_status.wifi_share_pct`).
+
+#### Stage 3 deviations from the original plan
+- **The aggregate ceiling is NOT `wifi-estimate + usb-max`.** The ceiling stays exactly the
+  bitrate the headset asked for. Combining is a way to *reach* a number a single Wi-Fi link
+  could not, not a licence to exceed the user's choice; the BBR estimator discovers the extra
+  capacity on its own because it already measures both paths as one span, so raising the
+  ceiling would only let it overshoot. `usb-max-bitrate` is recorded for the log line, not added.
+- **`combine` is a server-side posture only.** The headset's uplink is tiny — there is nothing
+  to aggregate in the headset→server direction — so its selector never calls `set_combine_allowed`
+  and never leaves its Stage 2 postures. The two ends stay independent, as in Stage 2.
+- **`combine` is only ever entered from a `primary` posture already in force**, never from one
+  the same `update()` just arrived at, and never straight from `secondary`. The Wi-Fi share the
+  split is sized against must be a measurement of the primary carrying the whole stream, which a
+  path that took over a moment ago has not produced; the primary must re-prove itself (its own
+  hysteresis) before it may combine.
+- **The pacer is given the primary's *share*, not the whole frame.** Pacing the whole frame
+  while only a prefix rides Wi-Fi would hand that prefix over at `1/(spilled fraction)` times
+  the sized rate — the very burst pacing exists to prevent — so the shard_pacer is built over
+  the split point.
+- **A dedicated send timeout for the spill (250 ms).** The spill is written from the same
+  encoder thread that drives the UDP socket, so a stalled tunnel would stall Wi-Fi video with
+  it; 250 ms bounds the damage without the 1 s a full frame on a USB-*primary* session needs.
+- **Interaction with the committed TCP self-poison invariant** (commit ddf164cc). A `wivrn::TCP`
+  socket poisons itself on the first send failure — its AES-CTR keystream has advanced past
+  bytes that never reached the wire — and throws on every later send/receive. The spill send
+  (`wivrn_connection::send_spill`) therefore never retries the secondary: on a throw it drops
+  the path there and then (closing the socket, which flips `secondary_usable` false and
+  collapses the posture on the next `update()`), and the encoder reroutes that shard and the
+  rest of the frame onto the primary. The per-frame `spill_scheduler::fail()` latch guarantees
+  no further shard of the frame touches the poisoned socket. This is exercised by
+  `striping_test.cpp` Part C.

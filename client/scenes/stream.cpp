@@ -1128,9 +1128,14 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			}
 		}
 		assert(swapchain);
-		// defoveate the image, apply scale/bias
-		int image_index = swapchain.acquire();
-		swapchain.wait();
+
+		// Packed defoveated size per view, for the vsync cache signature below.
+		const std::array<int32_t, 2 * view_count> extents_packed{
+		        extents[0].width,
+		        extents[0].height,
+		        extents[1].width,
+		        extents[1].height,
+		};
 
 		switch (gui_status)
 		{
@@ -1173,6 +1178,12 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		        .glow_margin = constants::stream::ambient_glow_margin,
 		};
 
+		// Whether this refresh can re-present the image already in the swapchain
+		// instead of drawing a new one. Its signature and the decision are taken under
+		// the motion lock, so the motion step folded into the signature is exactly the
+		// one a draw would use.
+		bool cache_hit = false;
+		defoveate_state state;
 		{
 			// Motion smoothing. The field describes one application frame interval
 			// ending at the frame being displayed, so how far to move along it is
@@ -1203,14 +1214,49 @@ void scenes::stream::render(const XrFrameState & frame_state)
 				}
 			}
 
-			defoveator->defoveate(command_buffer,
-			                      foveation,
-			                      images,
-			                      {scale, scale, scale, 1.},
-			                      {bias, bias, bias, 0.},
-			                      post,
-			                      motion,
-			                      image_index);
+			// Everything the defoveation pass output depends on this refresh. Any
+			// difference from the image in the swapchain forces a real render.
+			state.extents = extents_packed;
+			state.use_alpha = use_alpha;
+			state.scale = scale;
+			state.bias = bias;
+			state.sharpness = post.sharpness;
+			state.cas_full = config.cas_full_kernel;
+			state.vignette = post.vignette;
+			state.glow = post.glow;
+			state.motion_on = motion.field != nullptr and motion.step > 0;
+			state.motion_step = motion.step;
+			state.motion_frame = motion.field ? motion.field->frame_idx : uint64_t(-1);
+			state.gui_interactable = is_gui_interactable();
+			state.gui_status = int(gui_status);
+			for (size_t i = 0; i < decoder_count; ++i)
+				state.frame_index[i] = current_blit_handles[i]
+				                               ? current_blit_handles[i]->feedback.frame_index
+				                               : uint64_t(-1);
+
+			// Re-present only when the toggle is on, we have produced an image, its
+			// signature is unchanged, and no promoted quad is on screen (the quad has
+			// its own swapchain and blit path). When off, cache_hit is always false, so
+			// the render path below is byte identical to not having this feature.
+			cache_hit = config.reduce_gpu_load and defoveate_cache_valid and
+			            not quad_info and state == defoveate_cache;
+
+			if (not cache_hit)
+			{
+				// defoveate the image, apply scale/bias
+				int image_index = swapchain.acquire();
+				swapchain.wait();
+
+				defoveator->defoveate(command_buffer,
+				                      foveation,
+				                      images,
+				                      {scale, scale, scale, 1.},
+				                      {bias, bias, bias, 0.},
+				                      post,
+				                      motion,
+				                      image_index,
+				                      config.cas_full_kernel);
+			}
 		}
 
 		// Promoted quad layer: straight into the swapchain the runtime is handed as
@@ -1283,7 +1329,11 @@ void scenes::stream::render(const XrFrameState & frame_state)
 #if WIVRN_FEATURE_RENDERDOC
 		renderdoc_end(*vk_instance);
 #endif
-		swapchain.release();
+		// On a cache hit no swapchain image was acquired; the projection layer below
+		// re-references the one released by the last real render, which the runtime
+		// keeps as the layer's source until a new image is released.
+		if (not cache_hit)
+			swapchain.release();
 		if (quad_image_index >= 0)
 			quad_swapchain.release();
 
@@ -1370,6 +1420,12 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			else
 				throw;
 		}
+
+		// Record what the swapchain now holds. On a full render that is the image just
+		// drawn; on a cache hit the signature is unchanged, so this is a no-op. Either
+		// way a valid image is now available for a later refresh to re-present.
+		defoveate_cache = state;
+		defoveate_cache_valid = true;
 	}
 
 	// Network operations may be blocking, do them once everything was submitted
@@ -1508,6 +1564,8 @@ void scenes::stream::setup_reprojection_swapchain(uint32_t swapchain_width, uint
 {
 	assert(swapchain_width);
 	assert(swapchain_height);
+	// The cached defoveated image lives in the swapchain about to be replaced.
+	defoveate_cache_valid = false;
 	device.waitIdle();
 	spdlog::info("swapchain setup, refresh rate {}", video_stream_description->refresh_rate);
 	session.set_refresh_rate(video_stream_description->refresh_rate);

@@ -702,6 +702,18 @@ void settings_post_processing(const settings_context & ctx)
 	});
 
 	list.push_back({
+	        .id = "##cas_full_kernel",
+	        .label = _("Full sharpening kernel"),
+	        .description = _("Use the full 3x3 sharpening kernel, including the diagonal samples, instead of the cheaper 5-tap cross. The cross halves the texture reads this pass makes and looks almost identical on a compressed streamed image; the full kernel is slightly crisper at diagonal edges but costs more GPU."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.cas_full_kernel; },
+	        .set_bool = [&config](bool v) { config.cas_full_kernel = v; config.save(); },
+	        .default_bool = default_config.cas_full_kernel,
+	        .enabled = [&config] { return config.cas_sharpening; },
+	        .disabled_tooltip = _("Enable contrast adaptive sharpening to change this setting."),
+	});
+
+	list.push_back({
 	        .id = "##ambient_glow",
 	        .label = _("Ambient glow"),
 	        .description = _("Bleed the frame's edge colours outward into the black periphery beyond the headset's field of view as a soft glow. Widens the perceived field of view, eases motion sickness and softens the cutoff when motion smoothing cannot keep up."),
@@ -724,6 +736,16 @@ void settings_post_processing(const settings_context & ctx)
 	        .default_int = int(std::lround(default_config.ambient_glow_intensity * 100)),
 	        .enabled = [&config] { return config.ambient_glow; },
 	        .disabled_tooltip = _("Enable ambient glow to change this setting."),
+	});
+
+	list.push_back({
+	        .id = "##reduce_gpu_load",
+	        .label = _("Reduce GPU load (experimental)"),
+	        .description = _("Skip re-rendering the streamed image on refreshes where nothing has changed, re-presenting the previous one instead. Saves GPU power when the application runs below the display rate; head tracking stays responsive because the runtime still reprojects every refresh. Watch the Defoveate meter in the Statistics tab to see the effect."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.reduce_gpu_load; },
+	        .set_bool = [&config](bool v) { config.reduce_gpu_load = v; config.save(); },
+	        .default_bool = default_config.reduce_gpu_load,
 	});
 
 	ui::page_header(_S("Post-processing"), _cS("page header subtitle", "OpenXR layer supersampling and sharpening."));

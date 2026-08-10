@@ -58,6 +58,11 @@ class stream_defoveator
 	pipeline_t pipeline_rgb[view_count];
 	pipeline_t pipeline_a[view_count];
 
+	// CAS kernel the currently built pipelines were specialized for. defoveate()
+	// rebuilds them if the requested kernel differs, so switching is a rare pipeline
+	// reset rather than a per-pixel branch.
+	bool cas_full_baked = false;
+
 	// Motion smoothing texture the sampler above is bound with
 	image_allocation motion_image;
 	std::vector<vk::raii::ImageView> motion_views;
@@ -140,7 +145,8 @@ public:
 	        std::array<float, 4> bias,
 	        const post_processing & post,
 	        const motion_warp & motion,
-	        int destination);
+	        int destination,
+	        bool cas_full_kernel = false);
 
 	static XrExtent2Di defoveated_size(const wivrn::to_headset::foveation_parameter &);
 };

@@ -162,12 +162,24 @@ public:
 	// Contrast adaptive sharpening, applied to the decoded image by the reprojection pass
 	bool cas_sharpening = false;
 	float cas_sharpness = 0.5;
+	// Sharpening kernel: false (default) is a 5-tap cross, half the texture taps and
+	// barely distinguishable on a compressed streamed image; true is the full 3x3 with
+	// the diagonal taps. Only meaningful with cas_sharpening on.
+	bool cas_full_kernel = false;
 
 	// Ambient bias lighting: bleed the frame's edge colours outward into the black
 	// periphery beyond the headset's field of view as a soft glow, softening the hard
 	// cutoff at the FOV edge. Applied by the reprojection pass, client side, in stream.
 	bool ambient_glow = true;
 	float ambient_glow_intensity = 0.4;
+
+	// Skip re-running the in-stream defoveation pass on the refreshes where nothing it
+	// draws has changed, re-presenting the last result instead. Off by default. Meant
+	// for headsets that never discard a refresh (Pico), where the pass would otherwise
+	// run at the full display rate even while the application sits at a low frame rate.
+	// Experimental: guarded by a conservative dirty check, and it falls straight back
+	// to a normal render on anything it does not recognise.
+	bool reduce_gpu_load = false;
 
 	bool passthrough_enabled = false;
 	bool mic_unprocessed_audio = false;

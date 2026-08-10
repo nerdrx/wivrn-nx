@@ -142,7 +142,8 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 	// Fragment shader
 	auto specialization = make_specialization_constants(
 	        int32_t(alpha),
-	        VkBool32(application::get_hmd_traits().needs_srgb_conversion));
+	        VkBool32(application::get_hmd_traits().needs_srgb_conversion),
+	        VkBool32(cas_full_baked));
 	auto fragment_shader = load_shader(device, "reprojection.frag");
 
 	vk::pipeline_builder pipeline_info{
@@ -395,10 +396,20 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
                                   std::array<float, 4> bias,
                                   const post_processing & post,
                                   const motion_warp & motion,
-                                  int destination)
+                                  int destination,
+                                  bool cas_full_kernel)
 {
 	if (destination < 0 || destination >= (int)output_images.size())
 		throw std::runtime_error("Invalid destination image index");
+
+	// The CAS kernel is a specialization constant, so a change means rebuilding the
+	// pipelines. The caller has waited on the frame fence before recording, so nothing
+	// is still reading the old pipelines. It only ever flips from a settings toggle.
+	if (cas_full_kernel != cas_full_baked)
+	{
+		reset_pipelines();
+		cas_full_baked = cas_full_kernel;
+	}
 
 	ensure_vertices(std::max(required_vertices(foveation[0]), required_vertices(foveation[1])));
 

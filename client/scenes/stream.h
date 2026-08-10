@@ -140,6 +140,42 @@ private:
 
 	xr::swapchain swapchain;
 
+	// Vsync caching (config.reduce_gpu_load). Everything the defoveation pass reads that
+	// can change between refreshes, captured from the last real render; a refresh whose
+	// state matches this re-presents the swapchain image already in it instead of drawing
+	// again. A missed field here would cache a stale image, so the set is deliberately
+	// broad and quad frames are never cached.
+	struct defoveate_state
+	{
+		// frame_index of every decoder handle in play, sentinel for an absent one
+		std::array<uint64_t, decoder_count> frame_index{};
+		// Defoveated size per view, derived from foveation (redundant with frame_index,
+		// kept as a cheap direct guard)
+		std::array<int32_t, 2 * view_count> extents{};
+		bool use_alpha = false;
+		// Dimming scale/bias and the post-processing amounts folded into the pass
+		float scale = 1;
+		float bias = 0;
+		float sharpness = 0;
+		bool cas_full = false;
+		float vignette = 0;
+		float glow = 0;
+		// Motion smoothing: whether it warps this refresh, how far, along which field
+		bool motion_on = false;
+		float motion_step = 0;
+		uint64_t motion_frame = uint64_t(-1);
+		// GUI state that changes what the pass draws (through dimming) or whether the
+		// gate forces a render
+		bool gui_interactable = false;
+		int gui_status = -1;
+
+		bool operator==(const defoveate_state &) const = default;
+	};
+	// Signature of the image currently held in the reprojection swapchain, and whether
+	// one has ever been produced. Invalidated whenever the swapchain is (re)created.
+	defoveate_state defoveate_cache;
+	bool defoveate_cache_valid = false;
+
 	std::optional<audio> audio_handle;
 
 	std::optional<xr::hand_tracker> left_hand;

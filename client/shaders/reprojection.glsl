@@ -62,6 +62,12 @@ void main()
 
 layout(constant_id = 0) const int alpha = 1;
 layout(constant_id = 1) const bool do_srgb = false;
+// Contrast adaptive sharpening kernel. false (the default) uses a 5-tap cross,
+// which drops the four diagonal taps of the classic 3x3 kernel: on a compressed,
+// streamed image the diagonal contribution to the soft min/max is barely visible,
+// and halving the taps matters on weak GPUs (Adreno/Pico) where this pass runs on
+// every opaque pixel, every vsync. true restores the full "better diagonals" 3x3.
+layout(constant_id = 2) const bool cas_full_kernel = false;
 
 layout(set = 0, binding = 0) uniform sampler2D rgb[alpha + 1];
 // One cell per motion vector, covering the whole eye image, sampled with the
@@ -73,35 +79,47 @@ layout(location = 1) in vec2 inPosition;
 
 layout(location = 0) out vec4 outColor;
 
-// AMD FidelityFX Contrast Adaptive Sharpening, single pass, no scaling, with the
-// "better diagonals" soft min/max. The kernel works on the decoded image as it comes out
-// of the sampler, which is still gamma encoded, that is the perceptual space CAS expects.
-vec3 contrast_adaptive_sharpen(vec2 uv, float sharpness)
+// AMD FidelityFX Contrast Adaptive Sharpening, single pass, no scaling. The kernel
+// works on the decoded image as it comes out of the sampler, which is still gamma
+// encoded, that is the perceptual space CAS expects. The centre tap `e` is the base
+// colour already sampled by the caller and is reused here rather than sampled again.
+vec3 contrast_adaptive_sharpen(vec2 uv, vec3 e, float sharpness)
 {
 	vec2 texel = 1.0 / vec2(rgb_rect.zw);
 
-	// a b c
+	//   b
 	// d e f
-	// g h i
-	vec3 a = texture(rgb[0], uv + vec2(-1, -1) * texel).rgb;
+	//   h
 	vec3 b = texture(rgb[0], uv + vec2(0, -1) * texel).rgb;
-	vec3 c = texture(rgb[0], uv + vec2(1, -1) * texel).rgb;
 	vec3 d = texture(rgb[0], uv + vec2(-1, 0) * texel).rgb;
-	vec3 e = texture(rgb[0], uv).rgb;
 	vec3 f = texture(rgb[0], uv + vec2(1, 0) * texel).rgb;
-	vec3 g = texture(rgb[0], uv + vec2(-1, 1) * texel).rgb;
 	vec3 h = texture(rgb[0], uv + vec2(0, 1) * texel).rgb;
-	vec3 i = texture(rgb[0], uv + vec2(1, 1) * texel).rgb;
 
-	// Soft min and max, the cross counts once and the whole 3x3 once, so both are in [0, 2]
+	// Soft min and max over the cross, which counts once (range [0, 1]).
 	vec3 mn = min(min(min(d, e), min(f, b)), h);
-	mn += min(min(min(mn, a), min(c, g)), i);
-
 	vec3 mx = max(max(max(d, e), max(f, b)), h);
-	mx += max(max(max(mx, a), max(c, g)), i);
+
+	// The signal limit the amplitude is measured against: the cross alone reaches 1;
+	// the full kernel folds in the four diagonal taps once more, exactly the original
+	// "better diagonals" weighting, and reaches 2.
+	float peak = 1.0;
+	if (cas_full_kernel)
+	{
+		// a   c
+		//
+		// g   i
+		vec3 a = texture(rgb[0], uv + vec2(-1, -1) * texel).rgb;
+		vec3 c = texture(rgb[0], uv + vec2(1, -1) * texel).rgb;
+		vec3 g = texture(rgb[0], uv + vec2(-1, 1) * texel).rgb;
+		vec3 i = texture(rgb[0], uv + vec2(1, 1) * texel).rgb;
+
+		mn += min(min(min(mn, a), min(c, g)), i);
+		mx += max(max(max(mx, a), max(c, g)), i);
+		peak = 2.0;
+	}
 
 	// Smooth distance to the signal limit divided by the smooth maximum
-	vec3 amplitude = clamp(min(mn, 2.0 - mx) / max(mx, 1e-4), 0.0, 1.0);
+	vec3 amplitude = clamp(min(mn, peak - mx) / max(mx, 1e-4), 0.0, 1.0);
 	amplitude = sqrt(amplitude);
 
 	// Filter shape, w is negative:
@@ -219,9 +237,11 @@ void main()
 		}
 	}
 
+	// One base tap. When CAS is active it doubles as the kernel's centre `e`, so an
+	// opaque pixel pays a single centre sample whether or not it is sharpened.
 	vec4 colour = texture(rgb[0], uv);
 	if (post.x > 0.0)
-		colour.rgb = contrast_adaptive_sharpen(uv, post.x);
+		colour.rgb = contrast_adaptive_sharpen(uv, colour.rgb, post.x);
 
 	// Ambient bias lighting, applied after sharpening while still in the raw sampled
 	// (gamma) space and only to the colour channels: the alpha stream that carries

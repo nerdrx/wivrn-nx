@@ -20,6 +20,7 @@
 
 #include "encoder/encoder_settings.h"
 #include "encoder/video_encoder.h"
+#include "is_finite.h"
 #include "utils/wivrn_vk_bundle.h"
 #include "wivrn_config.h"
 
@@ -268,7 +269,7 @@ xrt_rect quad_converter::convert(
 	// not upscale the source. Whatever is left of the image stays black.
 	uint32_t w = std::min<uint32_t>(size.width, std::max(2u, uint32_t(std::abs(src_rect.w) * src_width)));
 	uint32_t h = std::min<uint32_t>(size.height, std::max(2u, uint32_t(std::abs(src_rect.h) * src_height)));
-	if (std::isfinite(aspect) and aspect > 0)
+	if (wivrn::is_finite(aspect) and aspect > 0)
 	{
 		if (float(w) / aspect > float(h))
 			w = uint32_t(h * aspect);

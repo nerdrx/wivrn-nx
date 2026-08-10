@@ -41,6 +41,12 @@ struct shard_set
 	using data_shard = wivrn::to_headset::video_stream_data_shard;
 	using parity_shard = wivrn::to_headset::video_stream_parity_shard;
 
+	// shard_idx is a uint16 straight off the wire. Even a high-bitrate frame is only a
+	// few hundred shards, so a corrupt index could otherwise resize `data` to 65536
+	// entries off a single packet. Refuse anything past this generous cap. The parity
+	// path already bounds its growth to one past what we hold (see reconstruct()).
+	static constexpr uint16_t max_shards_per_frame = 4096;
+
 	size_t min_for_reconstruction = -1;
 	std::vector<std::optional<data_shard>> data;
 	// Parity shards of this frame whose group still has a hole in it. A parity
@@ -106,6 +112,8 @@ struct shard_set
 			feedback.received_first_packet = now;
 
 		auto idx = shard.shard_idx;
+		if (idx >= max_shards_per_frame)
+			return {};
 		if (idx >= data.size())
 			data.resize(idx + 1);
 		if (data[idx])

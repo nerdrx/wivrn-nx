@@ -66,6 +66,10 @@ inline float motion_warp_step(XrTime now, XrTime frame_display_time, XrTime span
 {
 	if (span_ns <= 0)
 		return 0;
+	// std::clamp is UB when the low bound exceeds the high one, and max_steps comes from
+	// config; a negative one would put 0 above the high bound. Treat it as no motion.
+	if (max_steps < 0)
+		return 0;
 	const double steps = double(now - frame_display_time) / double(span_ns);
 	return float(std::clamp<double>(steps, 0, max_steps));
 }
@@ -108,6 +112,13 @@ inline std::vector<to_headset::motion_field> split_motion_field(const motion_fie
 	return chunks;
 }
 
+// The estimator builds a grid of eye_pixels / MOTION_BLOCK_PX (= 64) cells per side, so
+// even an extravagant 8192 px-per-eye headset yields only a 128x128 grid. A corrupt
+// chunk can name any uint16 width/height, and current.vectors.assign(width*height*2*2)
+// below would then try to allocate hundreds of megabytes off a single bad datagram.
+// Refuse anything past this generous cap (16x the cells any real field carries).
+static constexpr size_t MOTION_MAX_CELLS = size_t(128) * 128;
+
 // Puts the chunks of a field back together. Only the newest field is worth anything —
 // the consumer drops one that does not name the frame it is displaying — so a chunk of
 // a frame older than the one being assembled is discarded, and a chunk of a newer one
@@ -137,6 +148,9 @@ public:
 	{
 		// Do not trust the sender's arithmetic
 		if (chunk.width == 0 or chunk.height == 0 or chunk.row_count == 0 or chunk.view >= 2)
+			return;
+		// A whole field of this size must fit the cap, or the assign() below is an OOM
+		if (size_t(chunk.width) * chunk.height > MOTION_MAX_CELLS)
 			return;
 		if (size_t(chunk.row_offset) + chunk.row_count > chunk.height)
 			return;

@@ -21,7 +21,8 @@
 //         the estimate, however absurd the rate they imply.
 // Part F: the utilisation floor that packet pacing puts under every sample does not read as
 //         congestion, and does not stop the estimator converging.
-// Part G: a degrading radio lowers the gain and blocks probing; a recovering one releases it.
+// Part G: a degrading radio lowers the gain and blocks probing; a recovering one, or one that
+//         simply stops falling and settles lower, releases it.
 // Part H: the ceilings (client, path) and the floor clamp the estimate.
 // Part I: switching control law mid-session starts over cleanly, both directions.
 //
@@ -446,10 +447,15 @@ void part_g()
 	if (verbose)
 		std::printf("    radio step at %d dBm: %.1f -> %.1f Mbit/s\n", rssi, mbit(settled_at), mbit(held));
 
-	// The signal stays low. Several probe intervals go by and the bitrate must not walk
-	// back up: probing into a falling signal is the mistake the hold exists to prevent.
-	for (int i = 0; i < 30; ++i)
+	// While the signal is genuinely still falling the hold stays and the bitrate must not
+	// walk back up: probing into a falling signal is the mistake the hold exists to
+	// prevent. Kept inside the plausible RSSI range so the fall is unambiguous rather than
+	// a signal that has quietly flattened out (which, correctly, would release the hold).
+	for (int i = 0; i < 6; ++i)
+	{
+		rssi -= 2;
 		h.second(rssi);
+	}
 
 	CHECK(h.current() <= held);
 
@@ -466,6 +472,35 @@ void part_g()
 	CHECK(near(h.current(), settled(30e6)));
 	// The radio never returned a bitrate on the way up.
 	CHECK(h.radio_changes.size() == 1);
+
+	// A signal that simply stops falling, without climbing back, releases the hold too:
+	// the user walked to a new spot and settled at a lower but steady level, reports
+	// still coming and the link healthy. Without the stabilisation release the bitrate
+	// would stay latched below the ceiling forever.
+	{
+		harness h2(mode::bbr, 30e6);
+		for (int i = 0; i < 15; ++i)
+			h2.second(-52);
+		const uint32_t settled2 = h2.current();
+
+		int r = -52;
+		for (int i = 0; i < 15 and h2.radio_changes.empty(); ++i)
+		{
+			r -= 2;
+			h2.second(r);
+		}
+		CHECK(h2.radio_changes.size() == 1);
+		const uint32_t held2 = h2.current();
+		CHECK(held2 < settled2);
+
+		// Flat from here: the fall has stopped, and the hold must not outlive it.
+		for (int i = 0; i < 30; ++i)
+			h2.second(r);
+
+		CHECK(h2.current() > held2);
+		CHECK(near(h2.current(), settled(30e6)));
+		CHECK(h2.radio_changes.size() == 1);
+	}
 }
 
 void part_h()

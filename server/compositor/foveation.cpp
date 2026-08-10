@@ -20,6 +20,7 @@
 #include "foveation.h"
 
 #include "driver/xrt_cast.h"
+#include "is_finite.h"
 #include "utils/wivrn_vk_bundle.h"
 #include "vk/specialization_constants.h"
 #include "wivrn_packets.h"
@@ -294,7 +295,7 @@ static float angles_to_center(float e, float l, float r)
 	r = tan(r);
 	float res = std::clamp((e - l) / (r - l) * 2 - 1, -1.f, 1.f);
 	// If the center isn't in the FoV, fallback to middle of image
-	if (std::isnan(res))
+	if (not wivrn::is_finite(res))
 		return 0;
 	return res;
 }

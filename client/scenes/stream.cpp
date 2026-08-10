@@ -35,6 +35,7 @@
 #include "boost/pfr/core.hpp"
 #include "decoder/shard_accumulator.h"
 #include "inplace_vector.hpp"
+#include "is_finite.h"
 #include "spdlog/spdlog.h"
 #include "utils/named_thread.h"
 #include "utils/ranges.h"
@@ -800,7 +801,7 @@ void scenes::stream::update_gui_position(xr::spaces controller, float predicted_
 		auto gui_intersection = gui_controller_position + lambda * gui_controller_direction;
 
 		auto viewport_size = imgui_ctx->layers()[0].size;
-		if (std::isnan(lambda) or lambda < 0 or
+		if (not wivrn::is_finite(lambda) or lambda < 0 or
 		    std::abs(gui_intersection.x) > viewport_size.x / 2 or
 		    std::abs(gui_intersection.y) > viewport_size.y / 2)
 		{
@@ -1270,7 +1271,20 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		if (quad_info)
 		{
 			const auto & handle = current_blit_handles[quad_stream_idx];
-			const auto & rect = quad_info->source;
+
+			// source is a signed rectangle straight off the wire: a negative offset
+			// or an extent reaching past the decoded image is an out-of-bounds read in
+			// the blit below, and an overrun of the quad swapchain in the layer further
+			// down (both are sized to the decoded quad). Clamp it to that image, in
+			// place, so both consumers see the same corrected rectangle.
+			auto & src = quad_info->source;
+			const int32_t decoded_w = int32_t(handle->extent.width);
+			const int32_t decoded_h = int32_t(handle->extent.height);
+			src.offset.x = std::clamp(src.offset.x, 0, decoded_w);
+			src.offset.y = std::clamp(src.offset.y, 0, decoded_h);
+			src.extent.width = std::clamp(src.extent.width, 0, decoded_w - src.offset.x);
+			src.extent.height = std::clamp(src.extent.height, 0, decoded_h - src.offset.y);
+			const auto & rect = src;
 			try
 			{
 				setup_quad_swapchain(decoders[quad_stream_idx].decoder->sampler());

@@ -18,6 +18,7 @@
 
 #include "motion_estimator.h"
 
+#include "is_finite.h"
 #include "utils/wivrn_vk_bundle.h"
 #include "vk/allocation.h"
 
@@ -605,7 +606,7 @@ motion_estimator::field motion_estimator::read_back()
 	for (size_t i = 0; i < count; ++i)
 	{
 		float v = values[i];
-		if (not std::isfinite(v))
+		if (not wivrn::is_finite(v))
 			v = 0;
 		peak = std::max(peak, std::abs(v));
 	}
@@ -622,7 +623,7 @@ motion_estimator::field motion_estimator::read_back()
 	for (size_t i = 0; i < count; ++i)
 	{
 		float v = values[i];
-		if (not std::isfinite(v))
+		if (not wivrn::is_finite(v))
 			v = 0;
 		res.vectors[i] = int8_t(std::clamp<int>(std::lround(v * inv), -127, 127));
 	}

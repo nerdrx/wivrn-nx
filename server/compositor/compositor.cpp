@@ -1536,6 +1536,18 @@ compositor::compositor(wivrn_session & session) :
 
 compositor::~compositor()
 {
+	// A submission that timed out (a GPU hang) may still be running: draining it before
+	// anything below frees the motion/warp images and pipelines keeps it from reading or
+	// writing them after destruction. Errors here (device already lost) are nothing we can
+	// act on at teardown, so they are ignored.
+	try
+	{
+		vk.device.waitIdle();
+	}
+	catch (...)
+	{
+	}
+
 	u_var_remove_root(this);
 	encoder_thread.request_stop();
 	encode_request = -2;

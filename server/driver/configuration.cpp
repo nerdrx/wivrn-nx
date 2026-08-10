@@ -178,113 +178,167 @@ configuration::configuration()
 			}
 		}
 
+		// Each of the NX-added keys below is parsed under its own try/catch: they sit
+		// ahead of the upstream keys (port, hostname, ...), and a wrong type in one of
+		// them must not throw out of the single outer catch and silently drop every
+		// later key. A malformed NX key logs a warning and leaves its own defaults.
+
 		// "quad-layers": {"max-size": pixels, "allow-blended": bool}, or false to
 		// refuse the feature whatever the headset asks for
-		if (auto it = json.find("quad-layers"); it != json.end())
+		try
 		{
-			if (it->is_boolean())
+			if (auto it = json.find("quad-layers"); it != json.end())
 			{
-				if (not it->get<bool>())
-					quad_layers.max_size = 0;
+				if (it->is_boolean())
+				{
+					if (not it->get<bool>())
+						quad_layers.max_size = 0;
+				}
+				else if (it->is_object())
+				{
+					if (auto size = it->find("max-size"); size != it->end())
+					{
+						// encoder_settings does align(max_size, 64) and returns a
+						// uint16_t: align(65535, 64) == 65536 wraps to 0, and the
+						// max_size > 0 enable gate still passes, giving a 0x0 encoder
+						// image. Clamp to a range that survives the alignment.
+						const int64_t requested = size->get<int64_t>();
+						quad_layers.max_size = uint16_t(std::clamp<int64_t>(requested, 0, 4096));
+					}
+					if (auto blended = it->find("allow-blended"); blended != it->end())
+						quad_layers.allow_blended = *blended;
+				}
+				else
+					throw std::runtime_error("invalid quad-layers value, expected a boolean or an object");
 			}
-			else if (it->is_object())
-			{
-				if (auto size = it->find("max-size"); size != it->end())
-					quad_layers.max_size = *size;
-				if (auto blended = it->find("allow-blended"); blended != it->end())
-					quad_layers.allow_blended = *blended;
-			}
-			else
-				throw std::runtime_error("invalid quad-layers value, expected a boolean or an object");
+		}
+		catch (const std::exception & e)
+		{
+			U_LOG_W("Ignoring invalid \"quad-layers\" configuration: %s", e.what());
 		}
 
 		// "bitrate-auto": true/false, or an object
 		// {"enabled": bool, "min-bitrate": bits/s, "mode": "aimd"|"bbr"}
-		if (auto it = json.find("bitrate-auto"); it != json.end())
+		try
 		{
-			if (it->is_boolean())
-				bitrate_auto.enabled = *it;
-			else if (it->is_object())
+			if (auto it = json.find("bitrate-auto"); it != json.end())
 			{
-				if (auto enabled = it->find("enabled"); enabled != it->end())
-					bitrate_auto.enabled = *enabled;
-				if (auto min = it->find("min-bitrate"); min != it->end())
-					bitrate_auto.min_bitrate_bps = *min;
-				// Only the default: a headset that expresses a control law of its
-				// own always wins over this.
-				if (auto m = it->find("mode"); m != it->end())
+				if (it->is_boolean())
+					bitrate_auto.enabled = *it;
+				else if (it->is_object())
 				{
-					const std::string name = *m;
-					if (name == "aimd")
-						bitrate_auto.control = bitrate_mode::aimd;
-					else if (name == "bbr")
-						bitrate_auto.control = bitrate_mode::bbr;
-					else
-						throw std::runtime_error("invalid bitrate-auto mode, expected \"aimd\" or \"bbr\"");
+					if (auto enabled = it->find("enabled"); enabled != it->end())
+						bitrate_auto.enabled = *enabled;
+					if (auto min = it->find("min-bitrate"); min != it->end())
+						bitrate_auto.min_bitrate_bps = *min;
+					// Only the default: a headset that expresses a control law of its
+					// own always wins over this.
+					if (auto m = it->find("mode"); m != it->end())
+					{
+						const std::string name = *m;
+						if (name == "aimd")
+							bitrate_auto.control = bitrate_mode::aimd;
+						else if (name == "bbr")
+							bitrate_auto.control = bitrate_mode::bbr;
+						else
+							throw std::runtime_error("invalid bitrate-auto mode, expected \"aimd\" or \"bbr\"");
+					}
 				}
+				else
+					throw std::runtime_error("invalid bitrate-auto value, expected a boolean or an object");
 			}
-			else
-				throw std::runtime_error("invalid bitrate-auto value, expected a boolean or an object");
+		}
+		catch (const std::exception & e)
+		{
+			U_LOG_W("Ignoring invalid \"bitrate-auto\" configuration: %s", e.what());
 		}
 
 		// "pacing": true/false, or an object {"enabled": bool, "window": fraction of a frame period}
-		if (auto it = json.find("pacing"); it != json.end())
+		try
 		{
-			if (it->is_boolean())
-				pacing.enabled = *it;
-			else if (it->is_object())
+			if (auto it = json.find("pacing"); it != json.end())
 			{
-				if (auto enabled = it->find("enabled"); enabled != it->end())
-					pacing.enabled = *enabled;
-				if (auto window = it->find("window"); window != it->end())
-					pacing.window = *window;
-			}
-			else
-				throw std::runtime_error("invalid pacing value, expected a boolean or an object");
+				if (it->is_boolean())
+					pacing.enabled = *it;
+				else if (it->is_object())
+				{
+					if (auto enabled = it->find("enabled"); enabled != it->end())
+						pacing.enabled = *enabled;
+					if (auto window = it->find("window"); window != it->end())
+						pacing.window = *window;
+				}
+				else
+					throw std::runtime_error("invalid pacing value, expected a boolean or an object");
 
-			pacing.window = std::clamp(pacing.window, 0.f, 1.f);
+				pacing.window = std::clamp(pacing.window, 0.f, 1.f);
+			}
+		}
+		catch (const std::exception & e)
+		{
+			U_LOG_W("Ignoring invalid \"pacing\" configuration: %s", e.what());
 		}
 
 		// "encoder-failover": true/false
-		if (auto it = json.find("encoder-failover"); it != json.end())
+		try
 		{
-			if (it->is_boolean())
-				encoder_failover = *it;
-			else
-				throw std::runtime_error("invalid encoder-failover value, expected a boolean");
+			if (auto it = json.find("encoder-failover"); it != json.end())
+			{
+				if (it->is_boolean())
+					encoder_failover = *it;
+				else
+					throw std::runtime_error("invalid encoder-failover value, expected a boolean");
+			}
+		}
+		catch (const std::exception & e)
+		{
+			U_LOG_W("Ignoring invalid \"encoder-failover\" configuration: %s", e.what());
 		}
 
 		// "multipath": {"usb-max-bitrate": bits/s}
-		if (auto it = json.find("multipath"); it != json.end())
+		try
 		{
-			if (it->is_object())
+			if (auto it = json.find("multipath"); it != json.end())
 			{
-				if (auto max = it->find("usb-max-bitrate"); max != it->end())
-					multipath.usb_max_bitrate_bps = *max;
+				if (it->is_object())
+				{
+					if (auto max = it->find("usb-max-bitrate"); max != it->end())
+						multipath.usb_max_bitrate_bps = *max;
+				}
+				else
+					throw std::runtime_error("invalid multipath value, expected an object");
 			}
-			else
-				throw std::runtime_error("invalid multipath value, expected an object");
+		}
+		catch (const std::exception & e)
+		{
+			U_LOG_W("Ignoring invalid \"multipath\" configuration: %s", e.what());
 		}
 
 		// "mirror": true/false, or an object {"enabled": bool, "fps": int, "scale": float}
-		if (auto it = json.find("mirror"); it != json.end())
+		try
 		{
-			if (it->is_boolean())
-				mirror.enabled = *it;
-			else if (it->is_object())
+			if (auto it = json.find("mirror"); it != json.end())
 			{
-				if (auto enabled = it->find("enabled"); enabled != it->end())
-					mirror.enabled = *enabled;
-				if (auto fps = it->find("fps"); fps != it->end())
-					mirror.fps = *fps;
-				if (auto scale = it->find("scale"); scale != it->end())
-					mirror.scale = *scale;
-			}
-			else
-				throw std::runtime_error("invalid mirror value, expected a boolean or an object");
+				if (it->is_boolean())
+					mirror.enabled = *it;
+				else if (it->is_object())
+				{
+					if (auto enabled = it->find("enabled"); enabled != it->end())
+						mirror.enabled = *enabled;
+					if (auto fps = it->find("fps"); fps != it->end())
+						mirror.fps = *fps;
+					if (auto scale = it->find("scale"); scale != it->end())
+						mirror.scale = *scale;
+				}
+				else
+					throw std::runtime_error("invalid mirror value, expected a boolean or an object");
 
-			mirror.fps = std::clamp(mirror.fps, 1, 240);
-			mirror.scale = std::clamp(mirror.scale, 0.1f, 1.0f);
+				mirror.fps = std::clamp(mirror.fps, 1, 240);
+				mirror.scale = std::clamp(mirror.scale, 0.1f, 1.0f);
+			}
+		}
+		catch (const std::exception & e)
+		{
+			U_LOG_W("Ignoring invalid \"mirror\" configuration: %s", e.what());
 		}
 
 		if (auto it = json.find("application"); it != json.end())

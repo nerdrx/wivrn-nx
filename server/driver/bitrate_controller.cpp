@@ -239,6 +239,7 @@ void bitrate_controller::flush_radio()
 	last_radio_sample = {};
 	last_radio_step = {};
 	radio_hold = false;
+	radio_stable_since.reset();
 }
 
 void bitrate_controller::flush_estimator()
@@ -371,6 +372,7 @@ std::optional<uint32_t> bitrate_controller::reset_locked()
 	// The radio samples are a property of the radio, not of the bitrate, and survive a reset;
 	// the hold does not, the bitrate is back at the ceiling and probing is allowed again.
 	radio_hold = false;
+	radio_stable_since.reset();
 	last_radio_step = {};
 
 	return bitrate;
@@ -568,6 +570,7 @@ std::optional<uint32_t> bitrate_controller::on_wifi_state(int rssi_dbm, int link
 		radio_window.clear();
 		radio_ema.reset();
 		radio_hold = false;
+		radio_stable_since.reset();
 	}
 	last_radio_sample = when;
 
@@ -608,6 +611,31 @@ std::optional<uint32_t> bitrate_controller::on_wifi_state(int rssi_dbm, int link
 	                     trend.link_speed_peak_mbps > 0 and
 	                     double(trend.link_speed_mbps) <= radio_link_speed_collapse * double(trend.link_speed_peak_mbps) and
 	                     double(trend.link_speed_mbps) * 1e6 < radio_link_speed_headroom * double(bitrate);
+
+	// A hold taken on a fall must also let go when the fall simply *stops*: the user walked
+	// to a new spot and settled there, the signal is lower but steady, reports keep coming
+	// and nothing is congested. The rise-based release above never fires for that (there is
+	// no rise back up), so without this the hold would latch forever and block every probe.
+	// Release once the slope has stayed flat — neither trigger active, |slope| below
+	// radio_stable_slope — for a sustained radio_stable_hold. While the signal is genuinely
+	// still falling the flat test is false and the timer never starts, so the hold stays.
+	if (radio_hold and not falling and not starved and
+	    std::abs(trend.slope_db_per_s) < radio_stable_slope)
+	{
+		if (not radio_stable_since)
+			radio_stable_since = when;
+		else if (when - *radio_stable_since >= radio_stable_hold)
+		{
+			radio_hold = false;
+			radio_stable_since.reset();
+			U_LOG_I("Radio-aware bitrate: signal stable at %.0f dBm (%.2f dB/s over %.1f s), probing allowed again",
+			        trend.rssi_dbm,
+			        trend.slope_db_per_s,
+			        trend.span_s);
+		}
+	}
+	else
+		radio_stable_since.reset();
 
 	if (not falling and not starved)
 		return {};

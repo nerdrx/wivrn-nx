@@ -277,6 +277,14 @@ void test_losses_and_garbage()
 		assembler.add(bad);
 		CHECK(not assembler.complete());
 
+		// A grid whose cell count blows past MOTION_MAX_CELLS is refused before the
+		// field is ever allocated: a corrupt height must not drive a huge assign().
+		bad = chunks[0];
+		bad.height = 65535;
+		bad.width = 65535;
+		assembler.add(bad);
+		CHECK(not assembler.complete());
+
 		// And the honest one still finishes the job
 		assembler.add(chunks[0]);
 		CHECK(assembler.complete());

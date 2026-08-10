@@ -19,9 +19,9 @@
 
 #pragma once
 
+#include "is_finite.h"
 #include "xrt/xrt_defines.h"
 
-#include <bit>
 #include <cstdint>
 #include <limits>
 #include <openxr/openxr.h>
@@ -29,33 +29,10 @@
 namespace wivrn
 {
 
-// WARNING
-//
-// The server, the client and wivrn-common are all built with -ffast-math (see the
-// target_compile_options() block at the end of the top level CMakeLists.txt), which
-// implies -ffinite-math-only: the compiler is then allowed to assume no operand is
-// ever NaN or infinite, and it folds std::isfinite()/std::isnan()/std::isinf() and
-// the x != x idiom to compile time constants. Verified with the actual build flags:
-//
-//   isnan(0.f/0.f)     -> 0
-//   isfinite(0.f/0.f)  -> 1
-//   isinf(1.f/0.f)     -> 0
-//   (x != x)           -> 0
-//
-// The hardware of course still produces NaN and infinity at run time, so the guards
-// below all work on the IEEE-754 bit pattern instead, which no optimisation can
-// remove. Never use <cmath> classification functions in this code base.
-
-inline bool is_finite(float f)
-{
-	// exponent all ones == infinity or NaN
-	return (std::bit_cast<uint32_t>(f) & 0x7f800000u) != 0x7f800000u;
-}
-
-inline bool is_finite(double d)
-{
-	return (std::bit_cast<uint64_t>(d) & 0x7ff0000000000000ull) != 0x7ff0000000000000ull;
-}
+// The scalar is_finite(float)/is_finite(double) primitives (and the reason <cmath>
+// classification functions must never be used in this fast-math build) live in
+// common/is_finite.h so the client can share them. The overloads below extend them to
+// the xrt_ and Xr types.
 
 inline bool is_finite(const xrt_vec3 & v)
 {

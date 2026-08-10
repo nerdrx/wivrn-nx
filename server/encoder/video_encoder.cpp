@@ -568,7 +568,21 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 	auto end = data.end();
 	while (begin != end)
 	{
-		const size_t payload_size = std::max(0z, max_payload_size - ssize_t(serialized_size(shard.view_info)));
+		size_t payload_size = std::max(0z, max_payload_size - ssize_t(serialized_size(shard.view_info)));
+		if (payload_size == 0)
+		{
+			// The first shard carries view_info; if it ever grew to fill the whole
+			// payload budget, next would equal begin, begin would never advance and
+			// this loop would spin forever. Not reachable with today's budgets, but
+			// force at least one byte of progress rather than hang if it ever becomes so.
+			static bool warned = false;
+			if (not warned)
+			{
+				warned = true;
+				U_LOG_W("video_encoder: view_info fills the shard payload budget, forcing progress");
+			}
+			payload_size = 1;
+		}
 		auto next = std::min(end, begin + payload_size);
 		if (next == end)
 		{

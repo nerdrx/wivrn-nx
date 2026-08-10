@@ -29,6 +29,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "implot.h"
+#include "is_finite.h"
 #include "render/ui_theme.h"
 #include "render/ui_widgets.h"
 #include "transport_rates.h"
@@ -222,7 +223,7 @@ void scenes::stream::gui_performance_metrics()
 			}
 			auto [multiplier, prefix] = compute_plot_unit(max_v);
 
-			if (axis_scale[n] == 0 || std::isnan(axis_scale[n]))
+			if (axis_scale[n] == 0 || not wivrn::is_finite(axis_scale[n]))
 				axis_scale[n] = max_v;
 			else
 				axis_scale[n] = 0.99 * axis_scale[n] + 0.01 * max_v;
@@ -511,7 +512,7 @@ void scenes::stream::gui_transport()
 		auto [multiplier, prefix] = compute_plot_unit(max_v);
 
 		float & scale = transport_axis_scale[scale_index];
-		if (scale == 0 or std::isnan(scale))
+		if (scale == 0 or not wivrn::is_finite(scale))
 			scale = max_v;
 		else
 			scale = 0.9f * scale + 0.1f * max_v;

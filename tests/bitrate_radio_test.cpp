@@ -10,12 +10,14 @@
 // Part B: a falling ramp fires one gentle decrease, with no loss anywhere in the window, and
 // respects its own cooldown afterwards.
 // Part C: the trend never raises the bitrate on its own, and the hold it leaves behind blocks
-// the normal probing until the signal recovers.
+// the normal probing while the signal is still falling, until the signal recovers.
 // Part D: the deep-drop recovery owns the bitrate while it runs; the radio keeps quiet.
 // Part E: stale data (the headset stopped reporting) is ignored entirely and releases the hold.
 // Part F: sentinels and implausible readings are rejected instead of being fed to the trend.
 // Part G: the PHY rate collapse trigger, and the headroom it needs before it counts.
 // Part H: both switches gate the whole thing.
+// Part I: a signal that stops falling and settles at a lower level releases the hold, so the
+// bitrate is not stuck below the ceiling forever after the user walks to a new spot.
 //
 // Build:
 //   g++ -std=c++23 -I server -I common -I build-server/common \
@@ -232,13 +234,10 @@ void part_b()
 	CHECK(h.radio_changes.size() == before);
 }
 
-void part_c()
+// Ramp the signal down until the first preemptive step fires, and hand back the RSSI it
+// fired at (the harness is then one step down, the signal sitting at that level).
+int step_in(harness & h)
 {
-	std::printf("Part C: the trend only ever pushes down\n");
-
-	harness h;
-
-	// Get one preemptive step in.
 	int rssi = -52;
 	for (int i = 0; i < 20 and h.radio_changes.empty(); ++i)
 	{
@@ -246,33 +245,77 @@ void part_c()
 		h.second(rssi);
 	}
 	CHECK(h.radio_changes.size() == 1);
+	return rssi;
+}
+
+void part_c()
+{
+	std::printf("Part C: the trend only ever pushes down, and its hold\n");
+
+	// --- The hold blocks the probing back up while the signal is still falling -------
+	// The link measures perfect, but the radio says the signal is still on its way
+	// down, so probing up now would only walk straight back into the degradation. The
+	// bitrate may be pushed further down; it must never rise while the fall continues.
+	{
+		harness h;
+		int rssi = step_in(h);
+		const uint32_t stepped = h.current();
+		CHECK(stepped < ceiling);
+
+		for (int i = 0; i < 12; ++i)
+		{
+			rssi -= 2;
+			h.second(rssi);
+		}
+
+		CHECK(h.current() <= stepped);
+	}
+
+	// --- A recovering signal releases it --------------------------------------------
+	{
+		harness h;
+		int rssi = step_in(h);
+		const uint32_t stepped = h.current();
+
+		for (int i = 0; i < 10; ++i)
+		{
+			rssi += 3;
+			h.second(rssi);
+		}
+		// Now the healthy-increase path is allowed again, and only that path: whatever
+		// the radio does, it never returns a bitrate of its own on the way up.
+		CHECK(h.radio_changes.size() == 1);
+
+		for (int i = 0; i < 10; ++i)
+			h.second(-50);
+
+		CHECK(h.current() > stepped);
+		CHECK(h.changes.size() > 1);
+		CHECK(h.radio_changes.size() == 1);
+	}
+}
+
+void part_i()
+{
+	std::printf("Part I: a signal that stabilises lower releases the hold\n");
+
+	harness h;
+	const int rssi = step_in(h);
 	const uint32_t stepped = h.current();
 	CHECK(stepped < ceiling);
 
-	// --- The hold blocks the probing back up ----------------------------------------
-	// increase_hold is 5 s of healthy frames; give it four times that, with the signal
-	// staying low. The link measures perfect and the bitrate must still not move.
-	for (int i = 0; i < 20; ++i)
+	// The user stops walking and settles: the signal holds flat at this new, lower
+	// level, reports keep coming and the link stays healthy. There is no rise back up,
+	// so the rise-based release of Part C never fires — but the fall has *stopped*, and
+	// the hold must not outlive it. Once the slope has read flat for radio_stable_hold
+	// the hold lifts and the normal healthy probing walks the bitrate back up. Without
+	// the stabilisation release this latched forever and the bitrate stayed stuck low.
+	for (int i = 0; i < 30; ++i)
 		h.second(rssi);
-
-	CHECK(h.current() == stepped);
-	CHECK(h.changes.size() == 1);
-
-	// --- A recovering signal releases it --------------------------------------------
-	for (int i = 0; i < 10; ++i)
-	{
-		rssi += 3;
-		h.second(rssi);
-	}
-	// Now the healthy-increase path is allowed again, and only that path: whatever the
-	// radio does, it never returns a bitrate of its own on the way up.
-	CHECK(h.radio_changes.size() == 1);
-
-	for (int i = 0; i < 10; ++i)
-		h.second(-50);
 
 	CHECK(h.current() > stepped);
-	CHECK(h.changes.size() > 1);
+	// And it came back through the healthy probe, never the radio: the radio never
+	// returns a higher bitrate of its own.
 	CHECK(h.radio_changes.size() == 1);
 }
 
@@ -534,6 +577,7 @@ int main(int argc, char ** argv)
 	part_f();
 	part_g();
 	part_h();
+	part_i();
 
 	std::printf("\n%d checks, %d failure(s)\n", checks, failures);
 	return failures ? 1 : 0;

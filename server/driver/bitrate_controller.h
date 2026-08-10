@@ -279,6 +279,17 @@ public:
 	// The signal coming back up by this much over the window releases the hold that a
 	// preemptive step put on the normal probing-upwards path.
 	static constexpr double radio_rise_db = 3.0;
+	// A hold is also released when the signal simply stops falling: the user walked to a
+	// new spot and settled at a lower but steady level, with reports still coming and
+	// nothing congested. The rise test above never fires for that (there is no rise
+	// back), so the hold would otherwise latch forever and block every upward probe. The
+	// slope, in dB/s, below which |slope| counts as "stabilised, no longer falling". Well
+	// under the ~1.5 dB/s slope a genuine radio_fall_db fall shows over the trend window.
+	static constexpr double radio_stable_slope = 0.75;
+	// How long the slope has to stay flat before that release fires: long enough that the
+	// trend window has refilled with post-move samples and a momentary flat patch in an
+	// ongoing fall does not trip it.
+	static constexpr std::chrono::milliseconds radio_stable_hold{3000};
 
 	// --- v2: delivered-bandwidth estimator ----------------------------------------------
 	// Memory of the maximum filter on the delivery rate. BBR uses ten round trips for its
@@ -690,8 +701,12 @@ private:
 	clock::time_point last_radio_step{};
 	// A preemptive step was taken and the radio has not recovered since: hold the normal
 	// probing upwards, it would only walk straight back into the degradation. Released by a
-	// recovering signal, by the radio data going stale, and by every reset.
+	// recovering signal, by the signal stabilising at a lower level (see radio_stable_slope),
+	// by the radio data going stale, and by every reset.
 	bool radio_hold = false;
+	// When the slope first read flat while a hold was in force, for the stabilisation
+	// release. Empty whenever the signal is falling, starved, or not being held.
+	std::optional<clock::time_point> radio_stable_since;
 
 	// Ceiling actually in force: the client's, clamped by the current path's
 	uint32_t effective_ceiling() const;

@@ -139,6 +139,20 @@ constexpr float vignette_outer_radius = 1.15;
 // How much the periphery is darkened once the vignette is fully faded in
 constexpr float vignette_strength = 0.8;
 
+// Ambient bias lighting ("Ambient glow"). The streamed image ends at the headset's
+// projection FOV; the physical periphery beyond it is black void the compositor cannot
+// be given content for (the projection layer already covers the full device FOV, so
+// there is no border region to render into). Instead, over the outermost margin of each
+// eye image the reprojection pass blends the sampled colour toward a blurred,
+// edge-biased sample of the frame, turning the hard cutoff into a soft colour wash that
+// matches the scene. Purely client side and headset toggleable.
+//
+// Fraction of the half image, measured from each edge inward, the wash covers.
+constexpr float ambient_glow_margin = 0.14;
+// Cap on the mix weight at the very edge, applied to the configured intensity so a mid
+// slider stays OLED-tasteful.
+constexpr float ambient_glow_strength = 0.7;
+
 // Motion smoothing: how far past the last application frame the image may be warped,
 // in units of the interval the motion field spans. At 10 fps on a 90 Hz display this
 // turns one frame into four, which is about where the smearing starts to cost more

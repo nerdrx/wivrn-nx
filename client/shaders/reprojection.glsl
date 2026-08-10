@@ -34,6 +34,10 @@ layout(push_constant) uniform pc
 	//    or no field uses
 	// y: longest vector in the field, as a fraction of the eye image
 	vec4 motion;
+	// Ambient bias lighting
+	// x: strength of the peripheral colour wash at the very edge, 0 disables it
+	// y: fraction of the half image, from each edge inward, the wash covers
+	vec4 glow;
 };
 
 #ifdef VERT_SHADER
@@ -124,6 +128,53 @@ vec4 sRGB_to_linear_rgba(vec4 x)
 	        x.a);
 }
 
+// Ambient bias lighting. The streamed image ends at the headset's projection FOV, into
+// black void. Over the outermost margin of the eye image, blend the pixel toward a
+// softened, edge-biased sample of the frame so the transition to that void is a colour
+// wash that matches the scene rather than a hard cutoff: it widens the perceived FOV,
+// eases motion sickness and hides the discontinuity when motion smoothing cannot keep
+// up.
+//
+// Cost is kept low for the every-vsync path on weak GPUs (Adreno/Pico): interior pixels
+// take zero extra taps (the branch is coherent, hugging the four image edges), and the
+// margin band takes only three. It leans on foveation, which stores the periphery at
+// far lower resolution than the centre, so a single clamp-to-edge tap pulled outward
+// already reads as a smooth patch of colour; the two extra taps only spread it along
+// the edge so a bright object near the boundary does not streak inward.
+vec3 ambient_glow(vec3 base, vec2 uv, vec2 position, float strength, float margin)
+{
+	// How deep this pixel is into the margin along each axis: 0 in the interior,
+	// growing to 1 at the very edge.
+	vec2 e = smoothstep(vec2(1.0 - margin), vec2(1.0), abs(position));
+	float w = max(e.x, e.y);
+	if (w <= 0.0)
+		return base;
+
+	vec2 texel = 1.0 / vec2(rgb_rect.zw);
+	vec2 lo = 0.5 * texel;
+	vec2 hi = 1.0 - 0.5 * texel;
+
+	// Pull the sample toward the nearest edge along the dominant axis so the boundary
+	// colour bleeds inward, and blur along that edge (the tangential axis) so the wash
+	// is a smooth colour field, not a mirror of the edge detail.
+	const float r = 6.0;  // how far the sample is pulled toward the edge, in texels
+	const float rt = 8.0; // tangential blur radius, in texels
+	bool vertical_edge = e.x >= e.y;
+	vec2 pull = vertical_edge ? vec2(sign(position.x), 0.0) : vec2(0.0, sign(position.y));
+	vec2 tangent = vertical_edge ? vec2(0.0, 1.0) : vec2(1.0, 0.0);
+
+	vec2 c = clamp(uv + pull * texel * r, lo, hi);
+	vec3 acc = texture(rgb[0], c).rgb;
+	acc += texture(rgb[0], clamp(c + tangent * texel * rt, lo, hi)).rgb;
+	acc += texture(rgb[0], clamp(c - tangent * texel * rt, lo, hi)).rgb;
+	acc *= 1.0 / 3.0;
+
+	// Ramp the wash in over the margin and cap it with the configured strength, so the
+	// inner margin stays mostly the real image and only the extreme edge becomes a
+	// soft colour field.
+	return mix(base, acc, w * strength);
+}
+
 // Motion smoothing. The field is measured, and is given here, in normalized
 // coordinates of the defoveated eye image; what this pass samples is the foveated
 // image. The two are related by the vertex grid, which maps positions to texture
@@ -171,6 +222,13 @@ void main()
 	vec4 colour = texture(rgb[0], uv);
 	if (post.x > 0.0)
 		colour.rgb = contrast_adaptive_sharpen(uv, post.x);
+
+	// Ambient bias lighting, applied after sharpening while still in the raw sampled
+	// (gamma) space and only to the colour channels: the alpha stream that carries
+	// passthrough transparency below is never touched, so the wash tints the virtual
+	// content near the edge without ever making transparent periphery opaque.
+	if (glow.x > 0.0)
+		colour.rgb = ambient_glow(colour.rgb, uv, inPosition, glow.x, glow.y);
 
 	if (alpha == 1)
 	{

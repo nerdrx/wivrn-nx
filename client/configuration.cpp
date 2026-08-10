@@ -334,6 +334,8 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("quad_layers", &configuration::quad_layers),
 	        scalar("cas_sharpening", &configuration::cas_sharpening),
 	        scalar("cas_sharpness", &configuration::cas_sharpness),
+	        scalar("ambient_glow", &configuration::ambient_glow),
+	        scalar("ambient_glow_intensity", &configuration::ambient_glow_intensity),
 	        scalar("enable_stream_gui", &configuration::enable_stream_gui),
 	        scalar("app_list_view", &configuration::app_list_view),
 	        scalar("app_icon_size", &configuration::app_icon_size),

@@ -701,6 +701,31 @@ void settings_post_processing(const settings_context & ctx)
 	        .disabled_tooltip = _("Enable contrast adaptive sharpening to change this setting."),
 	});
 
+	list.push_back({
+	        .id = "##ambient_glow",
+	        .label = _("Ambient glow"),
+	        .description = _("Bleed the frame's edge colours outward into the black periphery beyond the headset's field of view as a soft glow. Widens the perceived field of view, eases motion sickness and softens the cutoff when motion smoothing cannot keep up."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.ambient_glow; },
+	        .set_bool = [&config](bool v) { config.ambient_glow = v; config.save(); },
+	        .default_bool = default_config.ambient_glow,
+	});
+
+	list.push_back({
+	        .id = "##ambient_glow_intensity",
+	        .label = _C("setting name", "Ambient glow intensity"),
+	        .description = _("How strongly the peripheral colour wash bleeds inward."),
+	        .ui = ui_kind::slider,
+	        .get_int = [&config] { return int(std::lround(config.ambient_glow_intensity * 100)); },
+	        .set_int = [&config](int v) { config.ambient_glow_intensity = v * 0.01f; config.save(); },
+	        .v_min = 0,
+	        .v_max = 100,
+	        .fmt = "%d%%",
+	        .default_int = int(std::lround(default_config.ambient_glow_intensity * 100)),
+	        .enabled = [&config] { return config.ambient_glow; },
+	        .disabled_tooltip = _("Enable ambient glow to change this setting."),
+	});
+
 	ui::page_header(_S("Post-processing"), _cS("page header subtitle", "OpenXR layer supersampling and sharpening."));
 	render_settings(ctx, "##post_processing", list);
 }

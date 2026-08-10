@@ -104,6 +104,10 @@ public:
 		// Normalized radii, 0 at the center of the eye and 1 at the edge of the image
 		float vignette_inner = 0;
 		float vignette_outer = 1;
+		// Ambient bias lighting: strength of the peripheral colour wash, 0 disables it,
+		// and the fraction of the half image, from each edge inward, it covers
+		float glow = 0;
+		float glow_margin = 0;
 	};
 
 	// Motion smoothing. Neutral by default: with a null field, or a zero step, the

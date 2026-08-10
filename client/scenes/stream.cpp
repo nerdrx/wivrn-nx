@@ -1163,6 +1163,14 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		        .vignette = v * constants::stream::vignette_strength,
 		        .vignette_inner = constants::stream::vignette_inner_radius,
 		        .vignette_outer = constants::stream::vignette_outer_radius,
+		        // Ambient bias lighting samples whatever frame is on screen, so it needs
+		        // no special handling when motion smoothing is warping or repeating a
+		        // frame: it fills the periphery with the current image's edge colours
+		        // either way, which is exactly when the softened cutoff helps most.
+		        .glow = config.ambient_glow
+		                        ? std::clamp<float>(config.ambient_glow_intensity, 0, 1) * constants::stream::ambient_glow_strength
+		                        : 0.f,
+		        .glow_margin = constants::stream::ambient_glow_margin,
 		};
 
 		{

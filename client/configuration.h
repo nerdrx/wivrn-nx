@@ -163,6 +163,12 @@ public:
 	bool cas_sharpening = false;
 	float cas_sharpness = 0.5;
 
+	// Ambient bias lighting: bleed the frame's edge colours outward into the black
+	// periphery beyond the headset's field of view as a soft glow, softening the hard
+	// cutoff at the FOV edge. Applied by the reprojection pass, client side, in stream.
+	bool ambient_glow = true;
+	float ambient_glow_intensity = 0.4;
+
 	bool passthrough_enabled = false;
 	bool mic_unprocessed_audio = false;
 

@@ -33,6 +33,7 @@
 #include "vk/vk_helpers.h"
 
 #include "driver/configuration.h"
+#include "driver/pose_sanitize.h"
 #include "driver/wivrn_session.h"
 #include "encoder/video_encoder.h"
 #include "inplace_vector.hpp"
@@ -94,6 +95,91 @@ namespace
 const comp_swapchain_image & get_layer_image(const comp_layer & layer, uint32_t swapchain_index, uint32_t image_index)
 {
 	return reinterpret_cast<struct comp_swapchain *>(comp_layer_get_swapchain(&layer, swapchain_index))->images[image_index];
+}
+
+// Extrapolation helpers for server-side motion smoothing. A warped duplicate carries
+// the retained frame advanced along the motion field to a later instant; these move a
+// pose/fov to that same instant so the runtime's timewarp complements the head motion
+// the warp already baked into the picture rather than double-counting it.
+//
+// The parameter u runs along the segment prev(u=0) -> cur(u=1): u == 1 + t reaches t
+// field-intervals past the retained frame, which is exactly where the warp put the
+// content. u > 1 is therefore an extrapolation, not an interpolation.
+
+// Shortest-arc quaternion slerp that also extrapolates past u == 1. -ffast-math build,
+// so no std::isnan; the caller validates the result and falls back if it is not usable.
+XrQuaternionf slerp_extrapolate(const XrQuaternionf & a, XrQuaternionf b, float u)
+{
+	float dot = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+	// Take the shorter of the two arcs to the same orientation.
+	if (dot < 0)
+	{
+		b = {-b.x, -b.y, -b.z, -b.w};
+		dot = -dot;
+	}
+	dot = std::clamp(dot, -1.f, 1.f);
+
+	XrQuaternionf r;
+	if (dot > 0.9995f)
+	{
+		// Nearly parallel: sin(theta0) -> 0 makes the slerp weights blow up. nlerp
+		// extrapolates the same way to first order and cannot divide by ~zero.
+		r = {
+		        a.x + u * (b.x - a.x),
+		        a.y + u * (b.y - a.y),
+		        a.z + u * (b.z - a.z),
+		        a.w + u * (b.w - a.w),
+		};
+	}
+	else
+	{
+		const float theta0 = __builtin_acosf(dot);
+		const float sin0 = __builtin_sinf(theta0);
+		const float sa = __builtin_sinf((1.f - u) * theta0) / sin0;
+		const float sb = __builtin_sinf(u * theta0) / sin0;
+		r = {
+		        sa * a.x + sb * b.x,
+		        sa * a.y + sb * b.y,
+		        sa * a.z + sb * b.z,
+		        sa * a.w + sb * b.w,
+		};
+	}
+
+	// nlerp is not unit and slerp drifts a hair; renormalise so the result is a rotation.
+	const float n2 = r.x * r.x + r.y * r.y + r.z * r.z + r.w * r.w;
+	if (n2 > 0)
+	{
+		const float inv = 1.f / __builtin_sqrtf(n2);
+		r = {r.x * inv, r.y * inv, r.z * inv, r.w * inv};
+	}
+	return r;
+}
+
+XrVector3f lerp_extrapolate(const XrVector3f & a, const XrVector3f & b, float u)
+{
+	return {
+	        a.x + u * (b.x - a.x),
+	        a.y + u * (b.y - a.y),
+	        a.z + u * (b.z - a.z),
+	};
+}
+
+XrPosef pose_extrapolate(const XrPosef & prev, const XrPosef & cur, float u)
+{
+	return {
+	        .orientation = slerp_extrapolate(prev.orientation, cur.orientation, u),
+	        .position = lerp_extrapolate(prev.position, cur.position, u),
+	};
+}
+
+XrFovf fov_extrapolate(const XrFovf & prev, const XrFovf & cur, float u)
+{
+	return {
+	        .angleLeft = prev.angleLeft + u * (cur.angleLeft - prev.angleLeft),
+	        .angleRight = prev.angleRight + u * (cur.angleRight - prev.angleRight),
+	        .angleUp = prev.angleUp + u * (cur.angleUp - prev.angleUp),
+	        .angleDown = prev.angleDown + u * (cur.angleDown - prev.angleDown),
+	};
 }
 
 std::array<vk::Format, 3> image_formats(int bit_depth)
@@ -1002,6 +1088,7 @@ void compositor::drop_retained_frame()
 {
 	motion_warp.reset();
 	motion_retained = false;
+	motion_retained_prev = false;
 	motion_retained_field = false;
 	motion_retained_display_time = 0;
 	motion_retained_quad = nullptr;
@@ -1133,6 +1220,20 @@ void compositor::motion_warp_commit(
 		// Keep the frame as it was composited. It is encoded live, unwarped: a
 		// real frame is never anything but itself.
 		motion_warp->retain(vk.device, cmd, src, src_rect, flip_y);
+		// The field the estimator produces next spans the previously retained frame
+		// to this one, so keep that frame's pose/fov as the far end of the interval
+		// before this frame overwrites them; a later duplicate extrapolates along it.
+		// On the very first retained frame there is no previous one to keep.
+		if (motion_retained)
+		{
+			motion_retained_prev_pose = motion_retained_pose;
+			motion_retained_prev_fov = motion_retained_fov;
+			motion_retained_prev = true;
+		}
+		else
+		{
+			motion_retained_prev = false;
+		}
 		motion_retained = true;
 		motion_retained_display_time = view_info.display_time;
 		motion_retained_pose = view_info.pose;
@@ -1161,17 +1262,44 @@ void compositor::motion_warp_commit(
 
 	motion_warp->warp(vk.device, cmd, motion->vectors(), t);
 
-	// From here on this commit carries the synthesized frame, and has to describe it:
-	// the picture is the retained application frame moved forward, so the pose and
-	// the field of view are the ones it was rendered with, and the runtime's timewarp
-	// on the headset takes care of the head having moved since. That is the same deal
-	// the headset-side mode makes with the frame it holds.
+	// From here on this commit carries the synthesized frame, and has to describe it.
 	src = motion_warp->output_views();
 	src_rect = motion_warp->output_rect();
 	src_fov = motion_retained_src_fov;
 	flip_y = false;
-	view_info.pose = motion_retained_pose;
-	view_info.fov = motion_retained_fov;
+
+	// The picture is the retained application frame advanced along the motion field to
+	// this commit's instant: the field spans the previous real frame -> the retained
+	// one, and the warp read the retained image t of those intervals forward. The
+	// field is optical flow between two composited eye views rendered from two
+	// different head poses, so it already carries the head-motion component. Freezing
+	// the submitted pose to the retained frame would make the runtime's timewarp apply
+	// that head motion a second time, over an interval that beats against the warp's t
+	// frame to frame -> head-correlated jitter. So advance the pose the same t past the
+	// retained frame (u = 1 + t along the prev -> retained segment); the runtime's
+	// timewarp then only closes the small residual to actual scanout.
+	if (motion_retained_prev)
+	{
+		const float u = 1.f + t;
+		for (size_t view = 0; view < 2; ++view)
+		{
+			const XrPosef pose = pose_extrapolate(motion_retained_prev_pose[view], motion_retained_pose[view], u);
+			const XrFovf fov = fov_extrapolate(motion_retained_prev_fov[view], motion_retained_fov[view], u);
+			// -ffast-math: a non-finite or degenerate extrapolation must never reach
+			// the encoder or the headset. Fall back to the frozen retained value.
+			view_info.pose[view] = (is_finite(pose) and is_valid_orientation(pose.orientation))
+			                               ? pose
+			                               : motion_retained_pose[view];
+			view_info.fov[view] = is_finite(fov) ? fov : motion_retained_fov[view];
+		}
+	}
+	else
+	{
+		// No previous real frame yet (first frame after a (re)start or reset): keep the
+		// frozen retained pose, the behaviour before this fix.
+		view_info.pose = motion_retained_pose;
+		view_info.fov = motion_retained_fov;
+	}
 }
 
 void compositor::update_motion_field(
@@ -1689,6 +1817,7 @@ void compositor::resume()
 		motion->reset();
 	motion_previous_display_time = 0;
 	motion_retained = false;
+	motion_retained_prev = false;
 	motion_retained_field = false;
 	send_video_stream_description();
 }

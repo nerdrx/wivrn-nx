@@ -267,18 +267,49 @@ a write-only `image2DArray` (UNORM view). Push constants: eye size, grid size, `
 
 ### What a warped commit says about itself
 
-The picture it carries is the *retained* application frame moved forward, so the commit
-describes that frame: `view_info.pose` and `view_info.fov` are the retained ones, and the
-foveation pass is handed the retained field of view with an identity source rectangle and
-`flip_y` false. The head having moved since is the runtime's timewarp's problem on the
-headset — which is exactly the deal the headset-side mode already makes with the frame it is
-holding.
+The picture it carries is the *retained* application frame moved **forward along the field**
+to this commit's instant, so the commit has to describe *that* instant, not the retained
+frame's. The foveation pass is still handed the retained source field of view with an
+identity source rectangle and `flip_y` false — that is about resampling the warped image,
+which lives in the retained eye view's space. But `view_info.pose` and `view_info.fov`, the
+ones the runtime timewarps against the live head pose at scanout, are **extrapolated** to
+match the content.
 
-That is a real trade in the squashed path: without the warp, a duplicate commit re-squashes
-the same layers against the fresh head pose, so the server reprojects and the headset's
-timewarp has less to do. Warping hands the older pose over instead. In the single-projection
-fast path there is nothing to lose — the composited image *is* the application's eye image
-and its pose does not change between replays.
+Why they must be, rather than frozen to the retained frame: the field is block-matched
+optical flow between two consecutive composited eye views, and those two views were rendered
+from two *different* head poses, so the field already carries the head-motion component of the
+interval it spans. The warp reads the retained image `t` intervals forward along that field,
+which bakes `t`-worth of that head motion into the picture. If the submitted pose were the
+frozen retained one, the runtime's timewarp would then correct from the retained frame's
+instant all the way to scanout — re-applying the very head motion the warp already baked in.
+The two ~90 Hz clocks (the server's per-commit predicted display time and the headset's actual
+scanout) are not genlocked, so `t` and that timewarp interval beat against each other frame to
+frame, and the double-counted head motion with them: a head-correlated temporal jitter that no
+single frame reveals. This was a visible defect on the Pico in server mode.
+
+The fix is to advance the submitted pose the *same* `t` the content was advanced, so the
+runtime's timewarp **complements** the baked-in motion instead of duplicating it. The field
+spans the previous real frame → the retained one; the content is the retained frame
+extrapolated `t` of those intervals past it; so the pose is the retained pose extrapolated the
+same `t` past it. Parameterising the segment previous→retained as `u ∈ [0, 1]`, the instant
+the content lands on is `u = 1 + t`, and the pose/fov are `slerp`/`lerp`-extrapolated to that
+`u` (shortest-arc orientation, linear position and fov, renormalised, and validated — the
+build is `-ffast-math`, so a non-finite or degenerate result falls back to the frozen retained
+pose rather than reaching the headset). The retained frame's own instant is unchanged, and
+`view_info.display_time` is left alone: it already advances per commit, so it names the same
+instant the extrapolated pose and the warped content now agree on. On the first retained frame
+after a (re)start, a pause or a resolution change there is no previous real frame to form the
+segment, so the pose stays frozen to the retained one — the pre-fix behaviour, for one frame.
+
+This is a client-only-visible correction: nothing on the wire changes (`view_info` already
+carries pose, fov and display time), and the headset does exactly what it always did with
+them.
+
+There is still a real trade in the squashed path: without the warp, a duplicate commit
+re-squashes the same layers against the fresh head pose, so the server reprojects and the
+headset's timewarp has less to do. Warping hands an *extrapolated* pose over instead. In the
+single-projection fast path there is nothing to lose — the composited image *is* the
+application's eye image and its pose does not change between replays.
 
 The alpha (passthrough) plane travels inside the retained RGBA image and is warped with the
 colour, because it is the same composited pixel and a mask that does not follow what it masks
@@ -333,14 +364,22 @@ no re-enabled submission on repeat refreshes, no field packets, no per-refresh p
 Adreno — and a warp with the full float field rather than an `int8` one, applied in the eye
 image's own space rather than through a foveation Jacobian.
 
-The timing is slightly worse, too: the server warps to a *predicted* display time chosen a
-frame ahead, while the headset warps to the refresh it is actually about to scan out. The
-difference is one frame period of prediction error on the extrapolation distance, which at
-these ratios is a few percent of a step.
+The timing is close but not identical. The server warps to a *predicted* display time chosen a
+frame ahead and extrapolates the submitted pose to that same predicted instant (see *What a
+warped commit says about itself*), while the headset warps to the refresh it is actually about
+to scan out. Because the pose now travels with the content, the head motion is no longer
+double-counted — the jitter that used to make server mode visibly worse than headset mode on a
+head-active user is gone. What remains is the honest residual: the two ends run on two ~90 Hz
+clocks that are not genlocked, so which duplicate lands on which refresh is a frame-selection
+beat between them, and the server's one-frame prediction error on the extrapolation distance
+(a few percent of a step) is real. Server mode is therefore now *close* to headset mode rather
+than a step below it, but not the same thing.
 
 Rule of thumb: headset mode when the link is the constraint, server mode when the headset is
 (or when the headset-side warp is unavailable — an old client, or a runtime that will not
-re-submit repeat refreshes).
+re-submit repeat refreshes). For a head-active user on a headset that can afford either,
+headset mode is still the one to reach for: it warps on a single clock at scanout and has no
+frame-selection beat at all.
 
 ### Mode switches mid-session
 

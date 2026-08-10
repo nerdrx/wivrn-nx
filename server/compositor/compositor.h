@@ -163,6 +163,16 @@ private:
 	std::array<XrPosef, 2> motion_retained_pose{};
 	std::array<XrFovf, 2> motion_retained_fov{};
 	std::array<xrt_fov, 2> motion_retained_src_fov{};
+	// The previous real frame's pose/fov: the far end of the interval the motion
+	// field spans (previous real frame -> the retained one). A warped duplicate
+	// advances the submitted pose along this segment, the same way the warp advances
+	// the picture along the field, so the runtime's timewarp completes the head
+	// motion the warp baked in instead of applying it a second time. Cleared when
+	// there is no previous real frame yet, in which case the warp falls back to the
+	// frozen retained pose.
+	bool motion_retained_prev = false;
+	std::array<XrPosef, 2> motion_retained_prev_pose{};
+	std::array<XrFovf, 2> motion_retained_prev_fov{};
 	// Swapchain the quad layer promoted out of the retained frame came from, or null.
 	// A commit that would promote a different one must not be warped: the retained
 	// image was composited around a different set of layers.

@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cassert>
+#include <limits.h>
 #include <memory>
 #include <netdb.h>
 #include <netinet/ip.h>
@@ -477,6 +478,17 @@ size_t wivrn::UDP::send_many_raw(std::span<serialization_packet> packets)
 
 wivrn::deserialization_packet wivrn::TCP::receive_raw()
 {
+	// Single reader by design: the reassembly buffer and the receive decrypter
+	// are deliberately used without taking the mutex, which only serializes
+	// senders, so that a receive never waits behind a slow send. The receive
+	// keystream is a separate cipher context from the send one.
+	//
+	// A socket whose send failed is dead in both directions: the path selectors
+	// assume a failed TCP socket never comes back, and honouring that here is
+	// what makes the assumption safe (see the broken flag).
+	if (broken)
+		throw socket_shutdown{};
+
 	static constexpr size_t max_payload = 16 * 1024 * 1024;
 
 	ssize_t expected_size;
@@ -556,9 +568,63 @@ wivrn::deserialization_packet wivrn::TCP::receive_pending()
 	return deserialization_packet{buffer, span};
 }
 
-size_t wivrn::TCP::send_raw(serialization_packet && packet)
+// Send every iovec entry, chunking at IOV_MAX and retrying EINTR. Called with
+// the send mutex held, after the payload was encrypted: any failure poisons the
+// socket (see the broken flag), because the CTR keystream has already advanced
+// past bytes that may never reach the wire.
+size_t wivrn::TCP::send_iovecs(iovec * iov, size_t iovcnt)
 {
 	size_t total_sent = 0;
+
+	while (iovcnt > 0)
+	{
+		msghdr hdr{
+		        .msg_name = nullptr,
+		        .msg_namelen = 0,
+		        .msg_iov = iov,
+		        .msg_iovlen = std::min<size_t>(iovcnt, IOV_MAX),
+		        .msg_control = nullptr,
+		        .msg_controllen = 0,
+		        .msg_flags = 0,
+		};
+
+		ssize_t sent = ::sendmsg(fd, &hdr, MSG_NOSIGNAL);
+
+		// A signal before the first byte was transferred: nothing was sent, the
+		// keystream still matches the wire, this exact send can be retried.
+		// (A signal after a partial transfer makes sendmsg return the count.)
+		if (sent < 0 and errno == EINTR)
+			continue;
+
+		if (sent <= 0)
+		{
+			broken = true;
+			if (sent == 0)
+				throw socket_shutdown{};
+			throw std::system_error{errno, std::generic_category()};
+		}
+
+		total_sent += sent;
+
+		// iov fully consumed
+		while (iovcnt > 0 and (size_t)sent >= iov->iov_len)
+		{
+			sent -= iov->iov_len;
+			++iov;
+			--iovcnt;
+		}
+		if (iovcnt > 0)
+		{
+			iov->iov_base = (void *)((uintptr_t)iov->iov_base + sent);
+			iov->iov_len -= sent;
+		}
+	}
+
+	return total_sent;
+}
+
+size_t wivrn::TCP::send_raw(serialization_packet && packet)
+{
 	thread_local std::vector<iovec> iovecs;
 	iovecs.clear();
 
@@ -572,47 +638,27 @@ size_t wivrn::TCP::send_raw(serialization_packet && packet)
 		iovecs.emplace_back(span.data(), span.size_bytes());
 	}
 
-	msghdr hdr{
-	        .msg_name = nullptr,
-	        .msg_namelen = 0,
-	        .msg_iov = iovecs.data(),
-	        .msg_iovlen = iovecs.size(),
-	        .msg_control = nullptr,
-	        .msg_controllen = 0,
-	        .msg_flags = 0,
-	};
-
 	std::lock_guard lock(*mutex);
+	if (broken)
+		throw socket_shutdown{};
+
 	if (encrypter)
 	{
 		data.insert(data.begin(), {(uint8_t *)&size, sizeof(size)});
-		encrypter.encrypt_in_place(data);
-	}
-
-	while (true)
-	{
-		ssize_t sent = ::sendmsg(fd, &hdr, MSG_NOSIGNAL);
-
-		if (sent == 0)
-			throw socket_shutdown{};
-
-		if (sent < 0)
-			throw std::system_error{errno, std::generic_category()};
-
-		total_sent += sent;
-
-		// iov fully consumed
-		while (hdr.msg_iovlen > 0 and sent >= hdr.msg_iov[0].iov_len)
+		try
 		{
-			sent -= hdr.msg_iov[0].iov_len;
-			++hdr.msg_iov;
-			--hdr.msg_iovlen;
+			encrypter.encrypt_in_place(data);
 		}
-		if (hdr.msg_iovlen == 0)
-			return total_sent;
-		hdr.msg_iov[0].iov_base = (void *)((uintptr_t)hdr.msg_iov[0].iov_base + sent);
-		hdr.msg_iov[0].iov_len -= sent;
+		catch (...)
+		{
+			// The keystream position is unknown, nothing sent on this socket
+			// could ever be decrypted again
+			broken = true;
+			throw;
+		}
 	}
+
+	return send_iovecs(iovecs.data(), iovecs.size());
 }
 
 size_t wivrn::TCP::send_many_raw(std::span<serialization_packet> packets)
@@ -646,47 +692,26 @@ size_t wivrn::TCP::send_many_raw(std::span<serialization_packet> packets)
 		}
 	}
 
-	msghdr hdr{
-	        .msg_name = nullptr,
-	        .msg_namelen = 0,
-	        .msg_iov = iovecs.data(),
-	        .msg_iovlen = iovecs.size(),
-	        .msg_control = nullptr,
-	        .msg_controllen = 0,
-	        .msg_flags = 0,
-	};
-
 	std::lock_guard lock(*mutex);
+	if (broken)
+		throw socket_shutdown{};
+
 	if (encrypter)
 	{
-		encrypter.encrypt_in_place(spans);
-	}
-
-	size_t total_sent = 0;
-	while (true)
-	{
-		ssize_t sent = ::sendmsg(fd, &hdr, MSG_NOSIGNAL);
-
-		if (sent == 0)
-			throw socket_shutdown{};
-
-		if (sent < 0)
-			throw std::system_error{errno, std::generic_category()};
-
-		total_sent += sent;
-
-		// iov fully consumed
-		while (hdr.msg_iovlen > 0 and sent >= hdr.msg_iov[0].iov_len)
+		try
 		{
-			sent -= hdr.msg_iov[0].iov_len;
-			++hdr.msg_iov;
-			--hdr.msg_iovlen;
+			encrypter.encrypt_in_place(spans);
 		}
-		if (hdr.msg_iovlen == 0)
-			return total_sent;
-		hdr.msg_iov[0].iov_base = (void *)((uintptr_t)hdr.msg_iov[0].iov_base + sent);
-		hdr.msg_iov[0].iov_len -= sent;
+		catch (...)
+		{
+			// The keystream position is unknown, nothing sent on this socket
+			// could ever be decrypted again
+			broken = true;
+			throw;
+		}
 	}
+
+	return send_iovecs(iovecs.data(), iovecs.size());
 }
 
 void wivrn::UDP::set_aes_key_and_ivs(std::span<std::uint8_t, 16> key_, std::span<std::uint8_t, 8> recv_iv_header_, std::span<std::uint8_t, 8> send_iv_header_)

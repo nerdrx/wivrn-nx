@@ -84,7 +84,9 @@ public:
 		primary_last_receive = now;
 
 		// A TCP socket that failed to send is broken for good, and a broken
-		// socket never receives again, so this cannot flap
+		// socket never receives again, so this cannot flap. wivrn::TCP enforces
+		// this: it poisons itself on the first send failure (the AES-CTR send
+		// keystream may be desynced from the wire) and then refuses to receive.
 		if (from_control)
 			control_up_ = true;
 	}

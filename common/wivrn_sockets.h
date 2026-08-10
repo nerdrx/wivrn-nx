@@ -32,6 +32,7 @@
 #include <mutex>
 #include <netinet/ip.h>
 #include <span>
+#include <sys/uio.h>
 #include <utility>
 #include <vector>
 
@@ -160,6 +161,11 @@ public:
 	uint64_t take_dropped_datagrams();
 };
 
+// Threading model: the mutex serializes senders only. Receiving
+// (receive_raw/receive_pending) must stay on a single thread — the reassembly
+// buffer and the receive decrypter are deliberately unsynchronized so that a
+// receive never waits behind a slow send. The send and receive AES-CTR
+// keystreams are independent: each direction is its own cipher context.
 class TCP : public fd_base
 {
 	std::shared_ptr<uint8_t[]> buffer;
@@ -167,7 +173,20 @@ class TCP : public fd_base
 	std::span<uint8_t> data;
 	std::unique_ptr<std::mutex> mutex;
 
+	// Set on the first send failure and never cleared. Encryption advances the
+	// CTR keystream before sendmsg runs: once a send fails, bytes the keystream
+	// has moved past may never have reached the wire (or a partial frame is on
+	// it), so nothing this socket could send would ever decrypt or frame
+	// correctly again. Every later operation throws socket_shutdown instead of
+	// putting garbage on the wire — a failed TCP socket is dead, not degraded.
+	// Atomic: written under the send mutex, read by the receive thread.
+	std::atomic<bool> broken = false;
+
 	void init();
+
+	// Send every iovec entry, chunking at IOV_MAX and retrying EINTR; the send
+	// mutex must be held. Poisons the socket on any failure.
+	size_t send_iovecs(iovec * iov, size_t iovcnt);
 
 	crypto::decrypt_context decrypter;
 	crypto::encrypt_context encrypter;
@@ -177,6 +196,28 @@ public:
 	TCP(in6_addr address, int port);
 	TCP(in_addr address, int port);
 	explicit TCP(int fd);
+	TCP(TCP && other) noexcept :
+	        fd_base(std::move(other)),
+	        buffer(std::move(other.buffer)),
+	        capacity_left(other.capacity_left),
+	        data(other.data),
+	        mutex(std::move(other.mutex)),
+	        broken(other.broken.load()),
+	        decrypter(std::move(other.decrypter)),
+	        encrypter(std::move(other.encrypter))
+	{}
+	TCP & operator=(TCP && other) noexcept
+	{
+		fd_base::operator=(std::move(other));
+		buffer = std::move(other.buffer);
+		capacity_left = other.capacity_left;
+		data = other.data;
+		mutex = std::move(other.mutex);
+		broken = other.broken.load();
+		decrypter = std::move(other.decrypter);
+		encrypter = std::move(other.encrypter);
+		return *this;
+	}
 
 	deserialization_packet receive_raw();
 	deserialization_packet receive_pending();

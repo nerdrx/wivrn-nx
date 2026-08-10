@@ -1,0 +1,86 @@
+# Maintainer: nerdrx <xlermer@gmail.com>
+# WiVRn NX — a fork of WiVRn (https://github.com/WiVRn/WiVRn) with a self-healing
+# transport stack, adaptive streaming and an OLED/violet look. This package builds
+# the PC-side server + dashboard from the fork; the headset client is the Android
+# APK from the GitHub releases, not this package.
+
+pkgname=wivrn-nx-git
+pkgver=1.1
+pkgrel=1
+pkgdesc="WiVRn NX: hot-rodded WiVRn PCVR streamer server + dashboard (Monado-based)"
+arch=('x86_64')
+url="https://github.com/nerdrx/wivrn-nx"
+license=('GPL-3.0-or-later')
+depends=(
+  'vulkan-icd-loader'
+  'boost-libs'
+  'openssl'
+  'ffmpeg'
+  'libdrm'
+  'x264'
+  'libpipewire'
+  'avahi'
+  'glib2'
+  'libnotify'
+  'librsvg'
+  'libarchive'
+  'libpng'
+  'qt6-base'
+  'qt6-declarative'
+  'qt6-multimedia'
+  'kirigami'
+  'ki18n'
+  'kcoreaddons'
+  'qqc2-desktop-style'
+  'kiconthemes'
+  'qcoro-qt6'
+)
+makedepends=(
+  'git'
+  'cmake'
+  'ninja'
+  'extra-cmake-modules'
+  'vulkan-headers'
+  'eigen'
+  'cli11'
+  'nlohmann-json'
+  'boost'
+  'glslang'
+  'gettext'
+  'qt6-tools'
+)
+optdepends=(
+  'xrizer: OpenVR/SteamVR game compatibility'
+  'opencomposite: alternative OpenVR compatibility layer'
+)
+# Same binaries as upstream WiVRn (wivrn-server/wivrn-dashboard) — they cannot
+# coexist. The headset APK installs alongside stock WiVRn separately.
+conflicts=('wivrn' 'wivrn-server' 'wivrn-dashboard' 'wivrn-git')
+provides=('wivrn-server' 'wivrn-dashboard')
+source=("${pkgname}::git+https://github.com/nerdrx/wivrn-nx.git#branch=nx-patches")
+sha256sums=('SKIP')
+options=('!lto')
+
+pkgver() {
+  cd "${pkgname}"
+  # nx-1.1 -> 1.1 ; nx-1.1-5-gABCDEF -> 1.1.r5.gABCDEF
+  git describe --tags --long 2>/dev/null | sed 's/^nx-//;s/\([^-]*-g\)/r\1/;s/-/./g' \
+    || printf "0.0.r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cmake -S "${pkgname}" -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DWIVRN_BUILD_CLIENT=OFF \
+    -DWIVRN_BUILD_SERVER=ON \
+    -DWIVRN_BUILD_DASHBOARD=ON \
+    -DWIVRN_BUILD_WIVRNCTL=ON \
+    -DWIVRN_USE_SYSTEM_BOOST=ON \
+    -DWIVRN_WERROR=OFF
+  cmake --build build
+}
+
+package() {
+  DESTDIR="${pkgdir}" cmake --install build
+}

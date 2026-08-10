@@ -240,3 +240,37 @@ CI-tested with a `DuplicateHandle`-based IPC, and WiVRn's offscreen compositor s
 Windows direct-mode entirely — but it **does not deliver SteamVR presentation.** It leaves you a
 Monado-on-Windows OpenXR runtime competing with SteamVR and still needing xrizer/OpenComposite for
 OpenVR games. It answers a different question than the one asked.
+
+---
+
+## Addendum: option (a′) — Monado on Windows + OpenComposite (replace, don't bridge)
+
+A follow-up question: build Monado on Windows and bridge to SteamVR via a helper/translation
+layer? Analysis:
+
+**You cannot cheaply bridge *out of* SteamVR.** SteamVR exposes its composited frame only to an
+OpenVR *driver* (direct mode); any helper that pulls frames from a running SteamVR must BE that
+driver — i.e. option (b), the full rewrite. No lighter hook exists.
+
+**But you don't need SteamVR.** The "translation layer" is OpenComposite/xrizer — reimplementations
+of the OpenVR API that forward to an OpenXR runtime — which WiVRn already integrates
+(`active_runtime.cpp`, `docs/steamvr.md`). So:
+
+- Build Monado on Windows (viable — WiVRn's offscreen compositor sidesteps the missing Windows
+  direct-mode). Port the WiVRn server's Linux deps (§3: avahi→Bonjour, PipeWire→WASAPI,
+  D-Bus/systemd→local RPC, sockets→Winsock, fork/SCM_RIGHTS model).
+- OpenVR games → OpenComposite/xrizer → Monado→WiVRn. **SteamVR is replaced, not bridged.**
+- OpenXR games (incl. VRChat's native OpenXR path) → Monado directly, no shim.
+
+**Advantage over option (b): ALL NX features survive** — the Monado compositor stays, so
+quad-layer overlays, motion smoothing, and the mirror keep working; no inverted-model problem.
+
+**Cost:** the §3 Windows platform-port only (months, but tractable) — no compositor/driver rewrite.
+
+**Caveats:** OpenComposite/xrizer game-compat is not 100%; you lose SteamVR's compositor, overlays,
+chaperone, and binding UI; games that hard-require vrserver won't launch.
+
+**Verdict:** (a′) is the strongest path *if Windows is wanted* — far less work than (b), preserves
+the NX stack, and for a VRChat-centric setup runs nearly clean via OpenXR. The tradeoff is that it
+supplants SteamVR rather than integrating with it. Option (b) remains the only path that lives
+*inside* SteamVR, at ~10x the effort.

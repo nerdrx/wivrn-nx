@@ -38,6 +38,10 @@ layout(push_constant) uniform pc
 	// x: strength of the peripheral colour wash at the very edge, 0 disables it
 	// y: fraction of the half image, from each edge inward, the wash covers
 	vec4 glow;
+	// Debanding
+	// x: dither strength, in units of one 8-bit step (1/255) of triangular-PDF noise;
+	//    0 disables it and the output is then byte identical to no debanding
+	vec4 deband;
 };
 
 #ifdef VERT_SHADER
@@ -211,6 +215,23 @@ vec2 motion_offset(vec2 uv, vec2 position)
 	return -motion.x * v * duv_dp;
 }
 
+// Debanding dither. 8-bit output plus video compression quantizes smooth gradients
+// (skyboxes, fog, dark rooms) into visible contours, worst of all on an OLED where the
+// steps do not blur into each other. Adding a small, high-frequency dither to the colour
+// right before the panel quantizes it turns each contour into noise the eye integrates
+// back into a clean ramp.
+//
+// The noise is Jimenez's interleaved gradient noise: a single dot + two fracts, no
+// texture taps, with a spectrum that leans blue (high frequency) rather than the flat
+// white of a plain hash, so it reads as fine grain rather than static. It depends only on
+// the pixel coordinate, so the pattern is static across frames: this composes with the
+// vsync cache (a cache hit re-presents an already-dithered image) and there is no
+// temporal shimmer. Returns a uniform value in [0, 1).
+float dither_noise(vec2 p)
+{
+	return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+}
+
 void main()
 {
 	vec2 uv = inUV.xy;
@@ -286,6 +307,31 @@ void main()
 	{
 		// Soft peripheral darkening, the center of the view is left untouched
 		outColor.rgb *= 1.0 - post.y * smoothstep(post.z, post.w, length(inPosition));
+	}
+
+	// Debanding, applied last, on the final stored value the panel is about to quantize.
+	// The difference of two decorrelated uniform samples is triangular on [-1, 1], the
+	// distribution that fully decorrelates the quantization error (constant noise power,
+	// no residual contour left behind). Its peak is one 8-bit step (1/255) times the
+	// strength, so a strength of 1 dithers by +/- one LSB. One dither value drives all
+	// three channels: the visible banding is luminance contouring, a monochrome dither
+	// erases it, and this keeps the cost to two ALU hashes with no texture taps and no
+	// gradient-detection kernel (uniform dither is invisible on flat areas and
+	// imperceptible on detailed ones, so the extra taps to gate it are not worth it).
+	if (deband.x > 0.0)
+	{
+		vec2 c = gl_FragCoord.xy;
+		float n = dither_noise(c) - dither_noise(c + vec2(37.0, 17.0));
+		vec3 d = vec3(n * deband.x * (1.0 / 255.0));
+
+		// Colour channels only, never the alpha that carries passthrough transparency.
+		// On the alpha path the colour is premultiplied, so scaling the dither by the
+		// coverage keeps a fully transparent (a == 0) periphery exactly transparent and
+		// never tints the passthrough; opaque content (a == 1) gets the full dither.
+		if (alpha == 1)
+			outColor.rgb += d * outColor.a;
+		else
+			outColor.rgb += d;
 	}
 }
 

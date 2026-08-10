@@ -160,6 +160,7 @@ private:
 		bool cas_full = false;
 		float vignette = 0;
 		float glow = 0;
+		float deband = 0;
 		// Motion smoothing: whether it warps this refresh, how far, along which field
 		bool motion_on = false;
 		float motion_step = 0;

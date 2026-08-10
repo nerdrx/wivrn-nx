@@ -1176,6 +1176,10 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		                        ? std::clamp<float>(config.ambient_glow_intensity, 0, 1) * constants::stream::ambient_glow_strength
 		                        : 0.f,
 		        .glow_margin = constants::stream::ambient_glow_margin,
+		        // Debanding dither, in units of one 8-bit step (1/255). Static, so it is
+		        // part of the cached image: a cache hit re-presents the same dithered
+		        // frame, with no temporal shimmer.
+		        .deband = config.deband ? std::clamp<float>(config.deband_strength, 0, 4) : 0.f,
 		};
 
 		// Whether this refresh can re-present the image already in the swapchain
@@ -1224,6 +1228,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			state.cas_full = config.cas_full_kernel;
 			state.vignette = post.vignette;
 			state.glow = post.glow;
+			state.deband = post.deband;
 			state.motion_on = motion.field != nullptr and motion.step > 0;
 			state.motion_step = motion.step;
 			state.motion_frame = motion.field ? motion.field->frame_idx : uint64_t(-1);

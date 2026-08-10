@@ -337,6 +337,8 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("cas_full_kernel", &configuration::cas_full_kernel),
 	        scalar("ambient_glow", &configuration::ambient_glow),
 	        scalar("ambient_glow_intensity", &configuration::ambient_glow_intensity),
+	        scalar("deband", &configuration::deband),
+	        scalar("deband_strength", &configuration::deband_strength),
 	        scalar("reduce_gpu_load", &configuration::reduce_gpu_load),
 	        scalar("enable_stream_gui", &configuration::enable_stream_gui),
 	        scalar("app_list_view", &configuration::app_list_view),

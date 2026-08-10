@@ -48,6 +48,7 @@ struct vert_pc
 	std::array<float, 4> post;
 	std::array<float, 4> motion;
 	std::array<float, 4> glow;
+	std::array<float, 4> deband;
 };
 
 // The motion field is stored as one signed byte per axis, scaled by the longest
@@ -630,6 +631,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		        .post = {post.sharpness, post.vignette, post.vignette_inner, post.vignette_outer},
 		        .motion = {motion_step, motion_scale, 0, 0},
 		        .glow = {post.glow, post.glow_margin, 0, 0},
+		        .deband = {post.deband, 0, 0, 0},
 		};
 
 		device.updateDescriptorSets(descriptor_writes, {});

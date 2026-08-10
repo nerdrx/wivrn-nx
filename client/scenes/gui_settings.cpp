@@ -739,6 +739,31 @@ void settings_post_processing(const settings_context & ctx)
 	});
 
 	list.push_back({
+	        .id = "##deband",
+	        .label = _("Debanding"),
+	        .description = _("Dither the decoded video to break up the colour banding that 8-bit output and video compression leave in smooth gradients, such as skyboxes, fog and dark rooms. Especially visible on OLED. Nearly free and on by default."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.deband; },
+	        .set_bool = [&config](bool v) { config.deband = v; config.save(); },
+	        .default_bool = default_config.deband,
+	});
+
+	list.push_back({
+	        .id = "##deband_strength",
+	        .label = _C("setting name", "Debanding strength"),
+	        .description = _("How strongly the debanding dither is applied, as a fraction of one 8-bit step. 100% dithers by one step, which removes most banding; raise it if banding is still visible on a dark OLED gradient."),
+	        .ui = ui_kind::slider,
+	        .get_int = [&config] { return int(std::lround(config.deband_strength * 100)); },
+	        .set_int = [&config](int v) { config.deband_strength = v * 0.01f; config.save(); },
+	        .v_min = 0,
+	        .v_max = 200,
+	        .fmt = "%d%%",
+	        .default_int = int(std::lround(default_config.deband_strength * 100)),
+	        .enabled = [&config] { return config.deband; },
+	        .disabled_tooltip = _("Enable debanding to change this setting."),
+	});
+
+	list.push_back({
 	        .id = "##reduce_gpu_load",
 	        .label = _("Reduce GPU load (experimental)"),
 	        .description = _("Skip re-rendering the streamed image on refreshes where nothing has changed, re-presenting the previous one instead. Saves GPU power when the application runs below the display rate; head tracking stays responsive because the runtime still reprojects every refresh. Watch the Defoveate meter in the Statistics tab to see the effect."),

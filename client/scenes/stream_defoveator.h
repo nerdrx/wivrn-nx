@@ -113,6 +113,8 @@ public:
 		// and the fraction of the half image, from each edge inward, it covers
 		float glow = 0;
 		float glow_margin = 0;
+		// Debanding: dither strength in units of one 8-bit step (1/255), 0 disables it
+		float deband = 0;
 	};
 
 	// Motion smoothing. Neutral by default: with a null field, or a zero step, the

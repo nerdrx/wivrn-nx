@@ -173,6 +173,15 @@ public:
 	bool ambient_glow = true;
 	float ambient_glow_intensity = 0.4;
 
+	// Debanding: dither the decoded image just before it is quantized to the 8-bit panel,
+	// breaking the colour contours 8-bit output plus video compression leaves in smooth
+	// gradients (skyboxes, fog, dark rooms) into imperceptible noise. Cheap (pure ALU, no
+	// extra texture taps) and broadly beneficial, especially on OLED, so on by default.
+	// Applied by the reprojection pass, client side, in stream. deband_strength is in
+	// units of one 8-bit step (1/255) of triangular-PDF dither; 1.0 is +/- one LSB.
+	bool deband = true;
+	float deband_strength = 1.0;
+
 	// Skip re-running the in-stream defoveation pass on the refreshes where nothing it
 	// draws has changed, re-presenting the last result instead. Off by default. Meant
 	// for headsets that never discard a refresh (Pico), where the pass would otherwise

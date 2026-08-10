@@ -1528,7 +1528,14 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 	}
 
 	if (defoveator)
+	{
+		// reset_pipelines resets the descriptor pool; the last submitted frame
+		// may still be using its sets, so wait for it (setup runs on the network
+		// thread; decoder_mutex only excludes concurrent recording).
+		if (device.waitForFences(*fence, VK_TRUE, UINT64_MAX) == vk::Result::eTimeout)
+			throw std::runtime_error("Vulkan fence timeout");
 		defoveator->reset_pipelines();
+	}
 
 	// Belongs to the decoder that has just been replaced
 	quad_blitter.reset();

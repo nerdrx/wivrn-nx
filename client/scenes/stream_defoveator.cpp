@@ -318,6 +318,10 @@ void stream_defoveator::reset_pipelines()
 		p = {};
 	for (auto & p: pipeline_a)
 		p = {};
+	// Reclaim the descriptor sets; the pool is sized for one generation and has
+	// no free-flag, so without this a rebuild (resolution/codec change, or the
+	// CAS full-kernel toggle) exhausts it and allocateDescriptorSets throws.
+	ds_pool.reset();
 }
 
 // Makes sure the motion texture exists at the requested size and is readable by the

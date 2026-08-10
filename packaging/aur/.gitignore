@@ -1,0 +1,5 @@
+/wivrn-nx-git/
+/src/
+/pkg/
+/*.pkg.tar.*
+/*.log

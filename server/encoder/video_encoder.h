@@ -23,6 +23,7 @@
 #include "encoder_watchdog.h"
 #include "fec.h"
 #include "idr_handler.h"
+#include "shard_history.h"
 #include "shard_pacer.h"
 #include "wivrn_packets.h"
 
@@ -171,10 +172,6 @@ private:
 	// is compared against. Reset at the first shard of a frame, like frame_bytes, and
 	// deliberately counting data payload only — parity never enters the split.
 	size_t frame_offset = 0;
-	// Whether any shard of the open FEC group went out on the primary (lossy) path. A
-	// group that spilled whole needs no parity: nothing can drop it on a TCP socket,
-	// and the shard would only take Wi-Fi bandwidth away from the shards that can.
-	bool group_on_primary = false;
 
 	std::ofstream video_dump;
 
@@ -184,17 +181,75 @@ private:
 	// Headset toggle, read by the sender thread. Parity is only ever produced for
 	// shards that actually ride the UDP stream socket, see SendData.
 	std::atomic<bool> fec_enabled = false;
-	// Open group of the frame being sent. Only touched under `mutex`.
+	// Whether the parity ratio follows the measured loss and the groups are
+	// interleaved, rather than being the fixed contiguous 8+1. Only meaningful with
+	// fec_enabled.
+	std::atomic<bool> fec_adaptive = false;
+	// Open block of the frame being sent. Only touched under `mutex`.
 	fec::group_builder fec_group;
+	// Group size the next frame will be sharded and protected with. Written by the
+	// network thread from the loss measurement, read by the sender thread at the
+	// first shard of a frame — a frame is sharded to one size throughout, because
+	// the shard payload budget is derived from it (see fec::payload_reserve).
+	std::atomic<uint16_t> fec_group_size = fec::group_size;
+	// The loss measurement itself, fed one sample per frame from the feedback.
+	// Network thread only, but under its own lock so that a status read can join.
+	std::mutex fec_rate_mutex;
+	fec::rate_controller fec_rate;
+	// Highest frame index the rate controller has already taken a sample from: the
+	// headset sends several feedback packets per frame as it works its way through
+	// the decoder, and they all carry the same loss counts.
+	uint64_t fec_rate_frame = 0;
 	// Bitrate the controller last asked for, before the encoder's share and the
 	// parity overhead are taken out of it. Kept so that toggling FEC can re-derive
 	// the encoder bitrate without waiting for the controller to move.
 	std::atomic_uint32_t requested_bitrate = 0;
 
 	void apply_bitrate();
-	// Send the open group's parity shard, if there is one, and open the next group.
-	// Called with `mutex` held.
+	// Send the parity shards the open block owes and open the next one. Called with
+	// `mutex` held.
 	void send_parity();
+
+	// --- Shard retransmission -----------------------------------------------
+	// What this stream has just sent, and the per-frame shard counts the loss
+	// measurement above is a fraction of. Thread safe in its own right.
+	shard_history history;
+	// Recovery blob of the shard going out, so that pushing it into the history does
+	// not allocate per shard. Only touched under `mutex`.
+	std::vector<uint8_t> history_blob;
+	// Retransmissions this stream has sent, monotonic, for a status read
+	std::atomic<uint64_t> retransmitted = 0;
+	// Token bucket over the retransmissions, so that a headset asking for the world —
+	// a link that has collapsed, or simply a bug — cannot turn into a second video
+	// stream's worth of traffic on the path that is already losing packets.
+	std::mutex retransmit_mutex;
+	int64_t retransmit_window_ns = 0;
+	uint32_t retransmit_in_window = 0;
+	// Rate-limited reporting of the above
+	uint64_t retransmit_reported = 0;
+	int64_t retransmit_last_report = 0;
+
+	// One line every retransmit_report_period at most, whatever the loss rate.
+	// Takes retransmit_mutex.
+	void report_retransmissions();
+
+	// Shards one request may be answered with, and shards a second may
+	static constexpr size_t max_retransmit_per_nack = 64;
+	static constexpr uint32_t max_retransmit_per_second = 2000;
+	// One line at most every this many nanoseconds, whatever the loss rate
+	static constexpr int64_t retransmit_report_period = 10'000'000'000;
+
+	// --- Intra refresh loss recovery ----------------------------------------
+	// Whether this encoder was built with a refresh mechanism at all. Fixed for the
+	// encode session: every backend that has one has to configure it when the session
+	// is created, so a stream that started without it cannot gain it before a
+	// reconnect. Set by the backend through enable_intra_refresh().
+	bool intra_refresh_supported = false;
+	// Sweep length the backend was configured for, in frames
+	uint32_t intra_refresh_sweep = 0;
+	// Headset toggle ANDed with the server switch, from the session. Written by the
+	// network thread; only ever narrows what the backend can do.
+	std::atomic<bool> intra_refresh_enabled = true;
 
 	// --- Packet pacing ------------------------------------------------------
 	// Effective state: the headset toggle and the server configuration must
@@ -249,6 +304,47 @@ public:
 	// for and the total on the wire is unchanged.
 	void set_fec(bool enabled);
 
+	// Let the parity ratio follow the loss the headset reports (16+1 on a clean link,
+	// 8+1, 4+1 under heavy loss) and interleave the groups so a burst of consecutive
+	// datagrams costs one erasure in several groups instead of several in one. Live;
+	// off is the fixed contiguous 8+1. Only does anything with FEC on.
+	void set_fec_adaptive(bool enabled);
+
+	// Keep a short history of the shards this stream sends, so that one the headset
+	// says it never received can be sent again. Live; off releases the ring, so the
+	// feature costs no memory when it is not wanted.
+	void set_shard_retransmit(bool enabled);
+
+	// Rebuild the shards `n` asks for out of the history. Appended to `out` for the
+	// caller to put on the wire — the connection belongs to the session, and this runs
+	// on the network thread while the sender thread is inside SendData.
+	//
+	// Rate limited and bounded: at most max_retransmit_per_nack shards per request and
+	// max_retransmit_per_second overall. Shards that have aged out of the history, that
+	// went over the secondary (TCP) path, or that were never sent simply find nothing.
+	void collect_retransmits(const from_headset::nack & n,
+	                         std::vector<to_headset::video_stream_data_shard> & out);
+
+	// Video shards this stream has sent again on request since it was created
+	uint64_t retransmitted_shards() const
+	{
+		return retransmitted;
+	}
+
+	// Data shards per parity shard the next frame will use, and the loss rate that
+	// chose it. The fixed group size unless the adaptive ratio is on.
+	uint16_t fec_group_size_now() const
+	{
+		return fec_group_size;
+	}
+
+	// Repair unrecoverable loss with a rolling column of intra coded blocks spread over
+	// the next few dozen frames instead of a full keyframe. Only ever narrows: the refresh
+	// mechanism itself is part of the encode session's configuration and can only be turned
+	// on when the encoder is created, so turning this back on mid-session does nothing until
+	// the headset reconnects. Turning it off is live.
+	void set_intra_refresh(bool enabled);
+
 	void encode(wivrn_session & cnx,
 	            const to_headset::video_stream_data_shard::view_info_t & view_info,
 	            uint64_t frame_index);
@@ -262,6 +358,18 @@ protected:
 
 	// called when command buffer finished executing
 	virtual std::optional<data> encode(uint8_t slot, uint64_t frame_index) = 0;
+
+	// Called once by a backend that configured a rolling intra refresh over `sweep_frames`
+	// frames, from its constructor. From then on the IDR handler asks for a sweep rather
+	// than a keyframe when a frame is lost, until set_intra_refresh(false) says otherwise.
+	void enable_intra_refresh(uint32_t sweep_frames);
+
+	// The sweep length that was configured, for backends whose refresh has to be asked for
+	// again with a length on every frame that starts one. Zero if there is no refresh.
+	uint32_t intra_refresh_frames() const
+	{
+		return intra_refresh_sweep;
+	}
 
 	// `pacer` and `spill` are built by the sender thread for whole-frame sends on
 	// the stream socket; default constructed ones never sleep and never split, which

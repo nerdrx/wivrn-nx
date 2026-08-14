@@ -108,6 +108,10 @@ struct configuration
 	// Server side half of the hardware encoder failover switch, for a feature the
 	// headset also has a toggle for. Both must be on.
 	bool encoder_failover = true;
+	// Same shape again: the server side half of the intra refresh loss recovery switch.
+	// Recovery from unrecoverable loss sweeps a column of intra coded blocks across the
+	// picture instead of sending a keyframe, on the encoders that have the mechanism.
+	bool intra_refresh = true;
 	std::optional<uint8_t> bit_depth;
 	std::optional<std::array<float, 3>> grip_surface;
 	std::vector<std::string> application;

@@ -1,0 +1,520 @@
+// Intra refresh loss recovery: the IDR handler's decision core, driven frame by frame
+// with no encoder, no GPU and no headset.
+//
+// wivrn::default_idr_handler decides three things that matter here, and the whole point
+// of the feature is that they stopped being the same decision:
+//
+//   * a keyframe the headset needs because it has nothing to predict from at all — the
+//     first frame of a session, and every reset() (a reconnect, a rate reconfiguration,
+//     a failover swap) — which must stay a real IDR whatever the setting says;
+//   * a keyframe asked for because a frame was lost, which is the one that used to spike
+//     the bitrate exactly when the link could least carry it, and which now becomes a
+//     rolling intra refresh;
+//   * whether frames may be skipped while recovery is in flight — true while waiting for
+//     an IDR to be acknowledged, and necessarily false during a sweep, because the sweep
+//     is carried by the frames.
+//
+// Part A: session start and reset() are real IDRs, with or without intra refresh.
+// Part B: intra refresh off is the behaviour that was always there — loss asks for an IDR
+//         and frames are skipped until it is acknowledged.
+// Part C: intra refresh on — loss starts a sweep, nothing is skipped, and the stream comes
+//         back to plain P frames on its own.
+// Part D: loss inside a sweep never restarts it, but does condemn it: one more sweep runs.
+// Part E: sweeps that keep losing frames escalate to a real IDR rather than looping.
+// Part F: a clean sweep clears the tally, so the next loss is gentle again.
+// Part G: the live switch. Off before a sweep starts falls back to an IDR; off during one
+//         leaves it to finish, because it is already repairing the picture.
+// Part H: non-reference frames are not evidence of anything, refresh or not.
+//
+// Build:
+//   g++ -std=c++23 -I server -I common -I build-server/common \
+//       -I build-server/_deps/monado-src/src/xrt/include \
+//       -I build-server/_deps/monado-src/src/xrt/auxiliary \
+//       -I build-server/_deps/monado-src/src/external/openxr_includes \
+//       -isystem external -isystem build-server/_deps/boost-src/libs/pfr/include \
+//       -o intra_refresh_test tests/intra_refresh_test.cpp \
+//       server/encoder/idr_handler.cpp common/smp.cpp -lcrypto
+//   ./intra_refresh_test
+
+#include "encoder/idr_handler.h"
+#include "util/u_logging.h"
+
+#include <cstdarg>
+#include <cstdio>
+#include <string>
+
+using wivrn::default_idr_handler;
+using wivrn::intra_refresh_sweep_frames;
+using frame_type = default_idr_handler::frame_type;
+
+static int failures = 0;
+static int checks = 0;
+static bool verbose = false;
+
+#define CHECK(...)                                                                           \
+	do                                                                                   \
+	{                                                                                    \
+		++checks;                                                                    \
+		if (not(__VA_ARGS__))                                                        \
+		{                                                                            \
+			++failures;                                                          \
+			std::printf("  FAIL %s:%d: %s\n", __FILE__, __LINE__, #__VA_ARGS__); \
+		}                                                                            \
+	} while (0)
+
+namespace
+{
+
+// The handler waits a little longer than the nominal sweep before judging one, because the
+// encoders round the refresh column up to whole macroblock columns and overshoot. How much
+// longer is its own business, so nothing here counts frames to find the end of a sweep: the
+// harness drives frames until the handler asks for something, which is the only thing an
+// encoder can observe about it either.
+constexpr uint64_t max_sweep = 4 * intra_refresh_sweep_frames;
+
+const char * name(frame_type t)
+{
+	switch (t)
+	{
+		case frame_type::i:
+			return "I";
+		case frame_type::p:
+			return "P";
+		case frame_type::refresh:
+			return "R";
+	}
+	return "?";
+}
+
+// One frame through the handler, exactly as an encoder drives it: ask whether to skip it,
+// and if not ask what kind of frame it is. Returns nullopt for a skipped frame.
+struct step_result
+{
+	bool skipped;
+	frame_type type;
+};
+
+step_result step(default_idr_handler & h, uint64_t frame)
+{
+	if (h.should_skip(frame))
+		return {.skipped = true, .type = frame_type::p};
+	auto t = h.get_type(frame);
+	if (verbose)
+		std::printf("    frame %3llu -> %s\n", (unsigned long long)frame, name(t));
+	return {.skipped = false, .type = t};
+}
+
+// The headset's report for a frame that arrived whole, or one that did not. Only the three
+// fields the handler reads are filled in; everything else is timing the encoder never looks at.
+wivrn::from_headset::feedback report(uint64_t frame, bool delivered)
+{
+	wivrn::from_headset::feedback f{};
+	f.frame_index = frame;
+	f.stream_index = 0;
+	f.sent_to_decoder = delivered ? 1 : 0;
+	return f;
+}
+
+// Bring a handler up to a running stream: the opening IDR, its acknowledgement, and a few
+// good P frames. Returns the next frame index.
+uint64_t start_stream(default_idr_handler & h, uint64_t frame = 0)
+{
+	auto first = step(h, frame);
+	CHECK(not first.skipped);
+	CHECK(first.type == frame_type::i);
+	h.on_feedback(report(frame, true));
+	++frame;
+
+	for (int i = 0; i < 5; ++i, ++frame)
+	{
+		auto s = step(h, frame);
+		CHECK(not s.skipped);
+		CHECK(s.type == frame_type::p);
+		h.on_feedback(report(frame, true));
+	}
+	return frame;
+}
+
+// Run `count` frames that all arrive, from `frame`, checking none is skipped and none is a
+// keyframe. Returns the next frame index.
+uint64_t run_clean(default_idr_handler & h, uint64_t frame, uint64_t count)
+{
+	for (uint64_t i = 0; i < count; ++i, ++frame)
+	{
+		auto s = step(h, frame);
+		CHECK(not s.skipped);
+		CHECK(s.type != frame_type::i);
+		h.on_feedback(report(frame, true));
+	}
+	return frame;
+}
+
+// What the handler asked for next, and how many ordinary frames went by before it did.
+struct next_ask
+{
+	frame_type type;
+	uint64_t plain_frames;
+	bool skipped_any;
+};
+
+// Drive frames from `frame` until the handler asks for something other than an ordinary P
+// frame, or `cap` frames have gone by. `lost` says which frames the headset failed to
+// receive. `frame` is left on the one after whatever it asked for.
+//
+// This is how an encoder sees the handler — it never knows how long a sweep is, only that
+// one day it is told to start another one — so driving the tests this way keeps them from
+// depending on a number that belongs to the encoders rather than to the policy.
+template <typename Lost>
+next_ask advance(default_idr_handler & h, uint64_t & frame, Lost lost, uint64_t cap = max_sweep)
+{
+	next_ask r{.type = frame_type::p, .plain_frames = 0, .skipped_any = false};
+	for (uint64_t i = 0; i < cap; ++i)
+	{
+		if (h.should_skip(frame))
+		{
+			r.skipped_any = true;
+			++frame;
+			continue;
+		}
+		auto t = h.get_type(frame);
+		if (verbose)
+			std::printf("    frame %3llu -> %s\n", (unsigned long long)frame, name(t));
+		h.on_feedback(report(frame, not lost(frame)));
+		++frame;
+		if (t != frame_type::p)
+		{
+			r.type = t;
+			return r;
+		}
+		++r.plain_frames;
+	}
+	return r;
+}
+
+auto nothing_lost = [](uint64_t) { return false; };
+
+// --- Part A -----------------------------------------------------------------
+// The keyframes that are not loss recovery are the ones the headset's decoder cannot do
+// without: it holds nothing this encoder produced, so a refresh sweep predicted from that
+// nothing would decode to nothing. They stay real IDRs whether intra refresh is on or off.
+void part_a()
+{
+	std::printf("Part A: session start and reset stay real IDRs\n");
+
+	for (bool refresh: {false, true})
+	{
+		default_idr_handler h;
+		h.set_intra_refresh(refresh, intra_refresh_sweep_frames);
+
+		// Session start
+		auto first = step(h, 0);
+		CHECK(not first.skipped);
+		CHECK(first.type == frame_type::i);
+		h.on_feedback(report(0, true));
+
+		uint64_t frame = run_clean(h, 1, 3);
+
+		// A reconnect, a rate reconfiguration or a failover swap — all of them reset()
+		h.reset();
+		auto after = step(h, frame);
+		CHECK(not after.skipped);
+		CHECK(after.type == frame_type::i);
+	}
+}
+
+// --- Part B -----------------------------------------------------------------
+// Without intra refresh nothing changed: a lost frame asks for an IDR, and the stream is
+// held silent until the headset says that IDR arrived. That silence is the cost the feature
+// exists to remove, so it is worth pinning down that it is still exactly what happens when
+// the switch is off.
+void part_b()
+{
+	std::printf("Part B: intra refresh off asks for an IDR and skips until it lands\n");
+
+	default_idr_handler h;
+	uint64_t frame = start_stream(h);
+
+	// A frame does not make it
+	h.on_feedback(report(frame, false));
+	++frame;
+
+	auto idr = step(h, frame);
+	CHECK(not idr.skipped);
+	CHECK(idr.type == frame_type::i);
+	const uint64_t idr_frame = frame;
+	++frame;
+
+	// Everything behind it is skipped while the handler waits
+	for (int i = 0; i < 4; ++i, ++frame)
+		CHECK(step(h, frame).skipped);
+
+	h.on_feedback(report(idr_frame, true));
+
+	auto resumed = step(h, frame);
+	CHECK(not resumed.skipped);
+	CHECK(resumed.type == frame_type::p);
+}
+
+// --- Part C -----------------------------------------------------------------
+// The feature itself. The same loss now starts a sweep, and — the part that matters most —
+// not one frame is skipped while it runs: the intra blocks that repair the picture ride
+// those frames, so skipping them would be skipping the repair. When the sweep is over the
+// stream is back to ordinary P frames with no keyframe having been sent at all.
+void part_c()
+{
+	std::printf("Part C: intra refresh on repairs without a keyframe and without skipping\n");
+
+	default_idr_handler h;
+	h.set_intra_refresh(true, intra_refresh_sweep_frames);
+	uint64_t frame = start_stream(h);
+
+	h.on_feedback(report(frame, false));
+	++frame;
+
+	auto sweep = step(h, frame);
+	CHECK(not sweep.skipped);
+	CHECK(sweep.type == frame_type::refresh);
+	h.on_feedback(report(frame, true));
+	++frame;
+
+	// The sweep is carried by ordinary frames, none of them skipped, none a keyframe, and
+	// it takes roughly the sweep length to cross the picture
+	const uint64_t sweep_start = frame;
+	frame = run_clean(h, frame, max_sweep);
+	CHECK(frame - sweep_start >= intra_refresh_sweep_frames);
+
+	// And it is over: no second sweep, no IDR, ever
+	auto after = advance(h, frame, nothing_lost);
+	CHECK(not after.skipped_any);
+	CHECK(after.type == frame_type::p);
+	CHECK(after.plain_frames == max_sweep);
+}
+
+// --- Part D -----------------------------------------------------------------
+// A link that drops a frame in the middle of a sweep took a slice of intra blocks with it,
+// so that column was never refreshed and the sweep has to be redone. What must NOT happen
+// is a restart on the report itself: restarting on every loss report from a link that is
+// still dropping frames would keep moving the column back to the left edge and the picture
+// would never come whole. The verdict is passed once, at the end.
+void part_d()
+{
+	std::printf("Part D: loss inside a sweep condemns it but does not restart it\n");
+
+	default_idr_handler h;
+	h.set_intra_refresh(true, intra_refresh_sweep_frames);
+	uint64_t frame = start_stream(h);
+
+	h.on_feedback(report(frame, false));
+	++frame;
+
+	CHECK(step(h, frame).type == frame_type::refresh);
+	h.on_feedback(report(frame, true));
+	const uint64_t sweep_start = frame;
+	++frame;
+
+	// Two losses well inside the sweep. Nothing may happen on either of them: the next
+	// thing the handler asks for has to be a whole sweep away, not a frame away.
+	auto lost_twice = [sweep_start](uint64_t f) {
+		return f == sweep_start + 5 or f == sweep_start + 12;
+	};
+	auto again = advance(h, frame, lost_twice);
+
+	// The verdict, once, at the end — and still not a keyframe
+	CHECK(not again.skipped_any);
+	CHECK(again.type == frame_type::refresh);
+	CHECK(again.plain_frames >= intra_refresh_sweep_frames);
+}
+
+// --- Part E -----------------------------------------------------------------
+// A link bad enough to spoil sweep after sweep is one a gentle repair cannot fix, and
+// sweeping forever would leave the user looking at a permanently broken picture. After a
+// few tries the handler gives up on being gentle and sends the keyframe after all.
+void part_e()
+{
+	std::printf("Part E: repeated failures escalate to a real IDR\n");
+
+	default_idr_handler h;
+	h.set_intra_refresh(true, intra_refresh_sweep_frames);
+	uint64_t frame = start_stream(h);
+
+	h.on_feedback(report(frame, false));
+	++frame;
+
+	// Every sweep loses one frame a little way in, which is enough to condemn it
+	uint64_t sweep_start = frame;
+	auto always_spoiled = [&sweep_start](uint64_t f) { return f == sweep_start + 7; };
+
+	int sweeps = 0;
+	int idrs = 0;
+	for (int attempt = 0; attempt < 8 and idrs == 0; ++attempt)
+	{
+		sweep_start = frame;
+		auto s = advance(h, frame, always_spoiled);
+		if (s.type == frame_type::refresh)
+			++sweeps;
+		else if (s.type == frame_type::i)
+			++idrs;
+		else
+			break; // ran out of frames without a verdict, which is its own failure
+	}
+
+	CHECK(idrs == 1);
+	// More than one attempt at the gentle path, but a bounded number of them
+	CHECK(sweeps >= 2);
+	CHECK(sweeps <= 4);
+}
+
+// --- Part F -----------------------------------------------------------------
+// The failure tally is about a link that is bad right now, not about the session. A sweep
+// that completes cleanly says the link is fine again, so the next loss — whenever it comes —
+// gets the gentle path from a clean slate rather than one attempt away from an IDR.
+void part_f()
+{
+	std::printf("Part F: a clean sweep clears the failure tally\n");
+
+	default_idr_handler h;
+	h.set_intra_refresh(true, intra_refresh_sweep_frames);
+	uint64_t frame = start_stream(h);
+
+	// One frame of every sweep goes missing, which is enough to condemn it. The lambda is
+	// rebased on each sweep, so `ask` below both runs a sweep out and reports the verdict
+	// passed on it — the first call returns straight away, on the frame that starts the
+	// first sweep, because that is the frame the handler speaks on.
+	uint64_t sweep_start = frame;
+	auto spoiled = [&sweep_start](uint64_t f) { return f == sweep_start + 7; };
+	auto ask = [&](auto lost) {
+		sweep_start = frame;
+		return advance(h, frame, lost).type;
+	};
+
+	// One spoiled sweep, then a clean one that finishes the repair
+	h.on_feedback(report(frame, false));
+	++frame;
+	CHECK(ask(spoiled) == frame_type::refresh); // the first sweep starts
+	CHECK(ask(spoiled) == frame_type::refresh); // it was spoiled, so a second one
+	CHECK(ask(nothing_lost) == frame_type::p);  // that one was clean, nothing more
+
+	// A fresh loss much later gets the gentle path from a clean slate: the full allowance
+	// of sweeps before an IDR, which it would not have if the tally had carried over
+	h.on_feedback(report(frame, false));
+	++frame;
+	CHECK(ask(spoiled) == frame_type::refresh);
+	CHECK(ask(spoiled) == frame_type::refresh);
+	CHECK(ask(spoiled) == frame_type::refresh);
+	CHECK(ask(spoiled) == frame_type::i);
+}
+
+// --- Part G -----------------------------------------------------------------
+// The headset can turn the feature off mid-session. Before a sweep has started that has to
+// take effect at once — the user asked for keyframe recovery and a keyframe is what the next
+// loss should produce. A sweep already in flight is a different matter: it is repairing the
+// picture right now, and an IDR on top of it would only spend bandwidth to arrive at the
+// same place.
+void part_g()
+{
+	std::printf("Part G: the live switch, before and during a sweep\n");
+
+	{
+		default_idr_handler h;
+		h.set_intra_refresh(true, intra_refresh_sweep_frames);
+		uint64_t frame = start_stream(h);
+
+		h.on_feedback(report(frame, false));
+		++frame;
+
+		// Turned off between the loss and the frame that would have carried the sweep
+		h.set_intra_refresh(false, intra_refresh_sweep_frames);
+
+		auto s = step(h, frame);
+		CHECK(not s.skipped);
+		CHECK(s.type == frame_type::i);
+	}
+
+	{
+		default_idr_handler h;
+		h.set_intra_refresh(true, intra_refresh_sweep_frames);
+		uint64_t frame = start_stream(h);
+
+		h.on_feedback(report(frame, false));
+		++frame;
+		CHECK(step(h, frame).type == frame_type::refresh);
+		h.on_feedback(report(frame, true));
+		++frame;
+
+		// Turned off with the column a quarter of the way across
+		frame = run_clean(h, frame, intra_refresh_sweep_frames / 4);
+		h.set_intra_refresh(false, intra_refresh_sweep_frames);
+
+		// It finishes on its own, and no keyframe comes out of it
+		auto after = advance(h, frame, nothing_lost);
+		CHECK(not after.skipped_any);
+		CHECK(after.type == frame_type::p);
+
+		// But the next loss is a keyframe again
+		h.on_feedback(report(frame, false));
+		++frame;
+		CHECK(step(h, frame).type == frame_type::i);
+	}
+}
+
+// --- Part H -----------------------------------------------------------------
+// A frame nothing predicts from can be lost without costing anything: no later frame
+// references it, so there is nothing to repair. That was true of the keyframe path and has
+// to stay true of the refresh one, or every dropped non-reference frame would start a sweep
+// and the stream would carry intra blocks forever.
+void part_h()
+{
+	std::printf("Part H: a lost non-reference frame starts nothing\n");
+
+	default_idr_handler h;
+	h.set_intra_refresh(true, intra_refresh_sweep_frames);
+	uint64_t frame = start_stream(h);
+
+	h.set_non_ref(frame);
+	CHECK(h.is_non_ref_frame(frame));
+	h.on_feedback(report(frame, false));
+	++frame;
+
+	auto s = step(h, frame);
+	CHECK(not s.skipped);
+	CHECK(s.type == frame_type::p);
+}
+
+} // namespace
+
+// The handler logs through Monado's u_log; standing in for it is all it takes to run the
+// policy on its own, with no encoder, no compositor and no headset.
+extern "C" void u_log(const char *, int, const char *, enum u_logging_level, const char * format, ...)
+{
+	if (not verbose)
+		return;
+
+	std::printf("    [log] ");
+	va_list args;
+	va_start(args, format);
+	std::vprintf(format, args);
+	va_end(args);
+	std::printf("\n");
+}
+
+extern "C" enum u_logging_level u_log_get_global_level(void)
+{
+	return U_LOGGING_INFO;
+}
+
+int main(int argc, char ** argv)
+{
+	verbose = argc > 1 and std::string(argv[1]) == "-v";
+
+	part_a();
+	part_b();
+	part_c();
+	part_d();
+	part_e();
+	part_f();
+	part_g();
+	part_h();
+
+	std::printf("\n%d checks, %d failures\n", checks, failures);
+	return failures ? 1 : 0;
+}

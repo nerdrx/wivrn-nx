@@ -17,6 +17,17 @@
 // Part D: dedup. A rebuilt shard goes in through the same door as a received one,
 // so the real copy arriving late is an ordinary duplicate; either arrival order has
 // to leave the frame identical.
+// Part E: variable group sizes. The adaptive ratio hands group_builder a K of 4, 8
+// or 16; every one of them has to cover the frame exactly once, keep the overhead at
+// 1/(K+1), keep a parity datagram no bigger than a data one — which is what makes
+// fec::payload_reserve scale with K — and round trip every position of every group.
+// Part F: interleaving. With the groups strided, a burst of consecutive datagrams
+// lost on the air lands one erasure in each of several groups, all of them
+// repairable; the same burst against contiguous groups is not. Both halves are
+// checked, because the second is what the first is for.
+// Part G: the ratio controller. Clean links buy the cheap ratio, loss buys the
+// protective one immediately, and the way back is slow enough that a link sitting on
+// a threshold cannot flap it.
 //
 // Build (the boost include is wherever the build fetched it):
 //   g++ -std=c++23 -I common -I build-client/common -I external \
@@ -98,7 +109,11 @@ struct frame
 	std::vector<std::vector<uint8_t>> parity_payloads;
 };
 
-frame make_frame(size_t bytes, uint8_t stream_idx = 0, uint64_t frame_idx = 42)
+frame make_frame(size_t bytes,
+                 uint8_t stream_idx = 0,
+                 uint64_t frame_idx = 42,
+                 uint16_t k = fec::group_size,
+                 uint16_t depth = 1)
 {
 	frame f;
 	f.encoded.resize(bytes);
@@ -106,6 +121,7 @@ frame make_frame(size_t bytes, uint8_t stream_idx = 0, uint64_t frame_idx = 42)
 		f.encoded[i] = uint8_t(i * 7 + (i >> 8) * 31 + 3);
 
 	fec::group_builder builder;
+	builder.set_layout(k, depth);
 	builder.reset(stream_idx, frame_idx);
 
 	data_shard shard;
@@ -114,8 +130,10 @@ frame make_frame(size_t bytes, uint8_t stream_idx = 0, uint64_t frame_idx = 42)
 	shard.shard_idx = 0;
 	shard.view_info = make_view_info();
 
+	// A block owes one parity per group of it, and it is the last, empty-handed take()
+	// that opens the next block: the sender drains, it does not take once.
 	auto take_parity = [&] {
-		if (auto p = builder.take())
+		while (auto p = builder.take())
 		{
 			// The builder's buffer is reused, so keep our own copy of the payload
 			f.parity_payloads.emplace_back(p->payload.begin(), p->payload.end());
@@ -127,7 +145,7 @@ frame make_frame(size_t bytes, uint8_t stream_idx = 0, uint64_t frame_idx = 42)
 	size_t offset = 0;
 	while (offset < bytes)
 	{
-		const size_t budget = fec::shard_payload_budget(true) - serialized_size(shard.view_info);
+		const size_t budget = fec::shard_payload_budget(true, k) - serialized_size(shard.view_info);
 		const size_t next = std::min(bytes, offset + budget);
 		if (next == bytes)
 			shard.timing_info = timing_info_t{1, 2, 3, 4};
@@ -135,7 +153,7 @@ frame make_frame(size_t bytes, uint8_t stream_idx = 0, uint64_t frame_idx = 42)
 
 		f.shards.push_back(shard);
 		builder.add(shard);
-		if (builder.full())
+		if (builder.block_full())
 			take_parity();
 
 		++shard.shard_idx;
@@ -255,11 +273,11 @@ void test_group_construction()
 		largest_data = std::max(largest_data, serialized_size(s));
 
 	// The same shard with FEC off would carry payload_reserve bytes more
-	CHECK(largest_parity <= largest_data + fec::payload_reserve);
+	CHECK(largest_parity <= largest_data + fec::payload_reserve(fec::group_size));
 	std::printf("  largest parity %zu B, largest data %zu B, reserve %zu B\n",
 	            largest_parity,
 	            largest_data,
-	            fec::payload_reserve);
+	            fec::payload_reserve(fec::group_size));
 
 	// The first shard is the one that carries the pose and the last one the
 	// timings, which is what makes them the two the frame cannot do without
@@ -479,6 +497,360 @@ void test_dedup()
 	          }).has_value());
 }
 
+// The headset's repair loop, as shard_accumulator::drain_parity runs it: every parity
+// still held is retried until a whole pass rebuilds nothing, because filling one hole
+// can be what puts another group's parity back in reach. Returns the shards still
+// missing at the end, and checks that everything it did rebuild is byte for byte the
+// shard that was lost.
+size_t repair(const frame & f, std::span<const size_t> dropped)
+{
+	std::vector<std::optional<data_shard>> slots(f.shards.size());
+	for (size_t i = 0; i < f.shards.size(); ++i)
+	{
+		bool gone = false;
+		for (size_t d: dropped)
+			gone = gone or d == i;
+		if (not gone)
+			slots[i] = f.shards[i];
+	}
+
+	auto present = [&slots](uint16_t idx) -> const data_shard * {
+		return (idx < slots.size() and slots[idx]) ? &*slots[idx] : nullptr;
+	};
+
+	for (bool progress = true; progress;)
+	{
+		progress = false;
+		for (const parity_shard & p: f.parity)
+		{
+			auto s = fec::reconstruct(p, present);
+			if (not s or s->shard_idx >= slots.size() or slots[s->shard_idx])
+				continue;
+			CHECK(same_shard(*s, f.shards[s->shard_idx]));
+			slots[s->shard_idx] = std::move(*s);
+			progress = true;
+		}
+	}
+
+	size_t missing = 0;
+	for (const auto & s: slots)
+		missing += s ? 0 : 1;
+	return missing;
+}
+
+void test_variable_group_sizes()
+{
+	std::printf("Part E: the ratios the adaptive scheme picks between\n");
+
+	for (uint16_t k: {fec::heavy_group_size, fec::moderate_group_size, fec::clean_group_size})
+	{
+		frame f = make_frame(200 * 1024, 0, 42, k, 1);
+
+		// Every shard covered exactly once, in order, no gap and no overlap
+		size_t expected_first = 0;
+		for (const parity_shard & p: f.parity)
+		{
+			CHECK(p.first_shard_idx == expected_first);
+			CHECK(p.shard_stride == 1);
+			CHECK(not p.blob_size.empty());
+			CHECK(p.blob_size.size() <= k);
+			if (&p != &f.parity.back())
+				CHECK(p.blob_size.size() == k);
+			expected_first += p.blob_size.size();
+		}
+		CHECK(expected_first == f.shards.size());
+		CHECK(f.parity.size() == (f.shards.size() + k - 1) / k);
+
+		// The overhead the bitrate accounting is scaled by: 1/(K+1) of the whole,
+		// i.e. 1/K of the data. fec::data_share is the other side of that sum.
+		size_t data_bytes = 0;
+		for (const data_shard & s: f.shards)
+			data_bytes += serialized_size(s);
+		size_t parity_bytes = 0;
+		for (const parity_shard & p: f.parity)
+			parity_bytes += serialized_size(p);
+		const double overhead = double(parity_bytes) / data_bytes;
+		const double nominal = 1.0 / k;
+		CHECK(overhead > nominal * 0.85 and overhead < nominal * 1.2);
+		CHECK(fec::data_share(k) > 1.0 / (1.0 + nominal * 1.2));
+
+		// And the property payload_reserve exists for, at every K: a parity
+		// datagram is never bigger than the data datagram the same encoder would
+		// have produced with FEC off. A group of 16 needs a longer length table
+		// than a group of 8, which is exactly why the reserve is not a constant.
+		size_t largest_parity = 0;
+		for (const parity_shard & p: f.parity)
+			largest_parity = std::max(largest_parity, serialized_size(p));
+		size_t largest_data = 0;
+		for (const data_shard & s: f.shards)
+			largest_data = std::max(largest_data, serialized_size(s));
+		CHECK(largest_parity <= largest_data + fec::payload_reserve(k));
+		CHECK(largest_parity <= data_shard::max_payload_size + fec::payload_reserve(k));
+
+		// Every position of every group still round trips, including the two the
+		// frame cannot do without
+		size_t rebuilt = 0;
+		for (const parity_shard & original: f.parity)
+		{
+			parity_shard p = round_trip(original);
+			CHECK(p.shard_stride == original.shard_stride);
+			for (size_t i = 0; i < p.blob_size.size(); ++i)
+			{
+				const size_t dropped = p.first_shard_idx + i;
+				auto shard = fec::reconstruct(p, lookup_without(f, std::span(&dropped, 1)));
+				CHECK(shard.has_value());
+				if (shard)
+				{
+					++rebuilt;
+					CHECK(same_shard(*shard, f.shards[dropped]));
+				}
+			}
+		}
+		CHECK(rebuilt == f.shards.size());
+
+		std::printf("  %u+1: %zu shards, %zu parity, %.1f%% overhead, reserve %zu B\n",
+		            unsigned(k),
+		            f.shards.size(),
+		            f.parity.size(),
+		            overhead * 100,
+		            fec::payload_reserve(k));
+	}
+
+	// The payload budget shrinks as the group grows, which is what keeps the parity
+	// datagram inside a data one, and it is unchanged for the ratio that was fixed
+	CHECK(fec::payload_reserve(fec::group_size) == 64);
+	CHECK(fec::shard_payload_budget(true, fec::clean_group_size) <
+	      fec::shard_payload_budget(true, fec::heavy_group_size));
+	CHECK(fec::shard_payload_budget(false, fec::clean_group_size) == data_shard::max_payload_size);
+}
+
+void test_interleaving()
+{
+	std::printf("Part F: striding, and the bursts it is for\n");
+
+	const uint16_t k = fec::group_size;
+	const uint16_t d = fec::interleave_depth;
+	frame strided = make_frame(200 * 1024, 0, 42, k, d);
+	frame contiguous = make_frame(200 * 1024, 0, 42, k, 1);
+	CHECK(strided.shards.size() == contiguous.shards.size());
+
+	// Same protection budget either way: striding changes which shards a parity
+	// covers, not how many parities there are
+	CHECK(strided.parity.size() == contiguous.parity.size());
+
+	// The groups of one block are strided by the interleave depth, and together the
+	// parities still cover every shard exactly once
+	std::vector<int> covered(strided.shards.size(), 0);
+	for (const parity_shard & p: strided.parity)
+	{
+		CHECK(p.shard_stride == d);
+		for (size_t i = 0; i < p.blob_size.size(); ++i)
+		{
+			const size_t idx = size_t(p.first_shard_idx) + i * p.shard_stride;
+			CHECK(idx < covered.size());
+			if (idx < covered.size())
+				++covered[idx];
+		}
+	}
+	for (int c: covered)
+		CHECK(c == 1);
+
+	// The point of the whole thing. A run of consecutive datagrams goes into the air
+	// together and is lost together; strided, each of them is the only hole in its own
+	// group and every one comes back.
+	for (size_t burst = 2; burst <= d; ++burst)
+	{
+		// Start somewhere inside a block rather than on its boundary, which is the
+		// hard case: the run then spans two groups' worth of positions
+		for (size_t start: {size_t(5), size_t(17), size_t(33)})
+		{
+			std::vector<size_t> dropped;
+			for (size_t i = 0; i < burst; ++i)
+				dropped.push_back(start + i);
+
+			CHECK(repair(strided, dropped) == 0);
+			// And the same burst against contiguous groups is not repairable:
+			// two or more of the lost shards share a group, and a single parity
+			// recovers one erasure and no more.
+			CHECK(repair(contiguous, dropped) > 0);
+		}
+	}
+	std::printf("  bursts of 2..%u recovered strided, none of them contiguous\n", unsigned(d));
+
+	// A burst one longer than the stride is out of reach either way — the honest
+	// bound, and the reason the depth is a tuning knob rather than a promise
+	{
+		std::vector<size_t> dropped;
+		for (size_t i = 0; i <= d; ++i)
+			dropped.push_back(9 + i);
+		CHECK(repair(strided, dropped) > 0);
+	}
+
+	// Scattered single losses, which is the loss the contiguous scheme was sized for,
+	// are still repaired with striding on
+	{
+		std::vector<size_t> dropped = {1, 11, 26, 40, 57};
+		CHECK(repair(strided, dropped) == 0);
+		CHECK(repair(contiguous, dropped) == 0);
+	}
+
+	// The first and last shards of the frame, whose loss is otherwise fatal, come back
+	// out of a strided group like any other
+	{
+		std::vector<size_t> dropped = {0};
+		CHECK(repair(strided, dropped) == 0);
+	}
+	{
+		std::vector<size_t> dropped = {strided.shards.size() - 1};
+		CHECK(repair(strided, dropped) == 0);
+	}
+
+	// A frame shorter than one block: the last block is partial and every group of it
+	// is short, which must not change any of the above
+	{
+		frame small = make_frame(fec::shard_payload_budget(true, k) * 6, 0, 7, k, d);
+		CHECK(small.shards.size() >= 6);
+		CHECK(small.parity.size() == std::min<size_t>(d, small.shards.size()));
+		std::vector<size_t> dropped = {2, 3};
+		CHECK(repair(small, dropped) == 0);
+	}
+
+	// A stride of 0 never comes off the builder, and a corrupt one that arrives must
+	// be read as the contiguous 1 rather than dividing by it or spinning
+	{
+		parity_shard corrupt = contiguous.parity.front();
+		corrupt.shard_stride = 0;
+		const size_t dropped = 2;
+		auto shard = fec::reconstruct(corrupt, lookup_without(contiguous, std::span(&dropped, 1)));
+		CHECK(shard.has_value());
+		CHECK(shard and same_shard(*shard, contiguous.shards[2]));
+	}
+
+	// A stride that runs the group off the end of the index space is refused rather
+	// than wrapped into some other frame's shards
+	{
+		parity_shard corrupt = strided.parity.front();
+		corrupt.first_shard_idx = 65000;
+		corrupt.shard_stride = 4096;
+		const size_t dropped = 0;
+		CHECK(not fec::reconstruct(corrupt, lookup_without(strided, std::span(&dropped, 1))).has_value());
+	}
+}
+
+void test_rate_controller()
+{
+	std::printf("Part G: choosing the ratio from the loss\n");
+
+	fec::rate_controller rc;
+	CHECK(rc.group_size() == fec::moderate_group_size);
+
+	// A clean link settles on the cheap ratio, but not instantly: the way down is the
+	// slow one, and it is the dwell that makes it so.
+	for (unsigned i = 0; i < fec::rate_controller::relax_frames - 1; ++i)
+		rc.on_frame(200, 0, true);
+	CHECK(rc.group_size() == fec::moderate_group_size);
+	rc.on_frame(200, 0, true);
+	CHECK(rc.group_size() == fec::clean_group_size);
+	CHECK(rc.loss_rate() < fec::rate_controller::moderate_off);
+
+	// Loss arrives. Tightening happens the moment the measure crosses, with no dwell
+	// to wait out: one frame of 5% loss is already enough to leave the cheap ratio,
+	// and the attack is fast enough that sustained loss reaches the most protective
+	// one within a couple of frames — about 25 ms at 90 Hz.
+	rc.on_frame(200, 10, true); // 5%, well past the heavy threshold
+	CHECK(rc.group_size() == fec::moderate_group_size);
+	rc.on_frame(200, 10, true);
+	CHECK(rc.group_size() == fec::heavy_group_size);
+	CHECK(rc.loss_rate() > fec::rate_controller::heavy_on);
+
+	// A frame that never reached the decoder counts as heavy loss whatever its shard
+	// count says: FEC and retransmission together did not save it.
+	{
+		fec::rate_controller c;
+		for (unsigned i = 0; i < fec::rate_controller::relax_frames; ++i)
+			c.on_frame(200, 0, true);
+		CHECK(c.group_size() == fec::clean_group_size);
+		c.on_frame(200, 0, false);
+		CHECK(c.group_size() < fec::clean_group_size);
+	}
+
+	// Sitting exactly on a threshold must not flap the ratio, because a ratio change
+	// is a bitrate change and a bitrate that oscillates is worse than either value.
+	{
+		fec::rate_controller c;
+		// 0.5% of loss: past the moderate threshold, nowhere near the heavy one
+		for (unsigned i = 0; i < 400; ++i)
+			c.on_frame(200, 1, true);
+		CHECK(c.group_size() == fec::moderate_group_size);
+
+		uint16_t seen = c.group_size();
+		unsigned changes = 0;
+		for (unsigned i = 0; i < 600; ++i)
+		{
+			// Alternating either side of the threshold, which is what a link
+			// hovering there looks like
+			c.on_frame(200, i % 2 ? 1 : 0, true);
+			if (c.group_size() != seen)
+			{
+				++changes;
+				seen = c.group_size();
+			}
+		}
+		CHECK(changes == 0);
+		CHECK(c.group_size() == fec::moderate_group_size);
+	}
+
+	// And the way back up from heavy loss is one step at a time, never straight to the
+	// cheapest ratio
+	{
+		fec::rate_controller c;
+		c.on_frame(200, 20, true);
+		CHECK(c.group_size() == fec::heavy_group_size);
+		for (unsigned i = 0; i < fec::rate_controller::relax_frames * 3; ++i)
+			c.on_frame(200, 0, true);
+		// Two dwells of clean frames is enough for two steps, and no more than two
+		CHECK(c.group_size() == fec::clean_group_size);
+
+		// Half that is one step and no more. The dwell only counts frames the measure
+		// has already fallen under the off threshold for, so a step costs the decay
+		// plus the dwell, not the dwell alone — which is the point: the way down is
+		// slow on purpose.
+		fec::rate_controller c2;
+		c2.on_frame(200, 20, true);
+		for (unsigned i = 0; i < fec::rate_controller::relax_frames * 2; ++i)
+			c2.on_frame(200, 0, true);
+		CHECK(c2.group_size() == fec::moderate_group_size);
+	}
+
+	// A frame nothing is known about says nothing
+	{
+		fec::rate_controller c;
+		const double before = c.loss_rate();
+		c.on_frame(0, 0, true);
+		CHECK(c.loss_rate() == before);
+		CHECK(c.group_size() == fec::moderate_group_size);
+	}
+
+	// More loss reported than shards sent is a nonsense the headset could still send;
+	// it must saturate rather than run the ratio off the end
+	{
+		fec::rate_controller c;
+		c.on_frame(10, 1000, true);
+		CHECK(c.loss_rate() <= 1.0);
+		CHECK(c.group_size() == fec::heavy_group_size);
+	}
+
+	// Turning the switch off puts the ratio back where the fixed scheme has it
+	{
+		fec::rate_controller c;
+		c.on_frame(200, 20, true);
+		CHECK(c.group_size() == fec::heavy_group_size);
+		c.reset();
+		CHECK(c.group_size() == fec::group_size);
+		CHECK(c.loss_rate() == 0);
+	}
+}
+
 } // namespace
 
 int main()
@@ -487,6 +859,9 @@ int main()
 	test_round_trip();
 	test_graceful_failure();
 	test_dedup();
+	test_variable_group_sizes();
+	test_interleaving();
+	test_rate_controller();
 
 	std::printf("%d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;

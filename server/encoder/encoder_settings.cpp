@@ -316,6 +316,10 @@ std::array<encoder_settings, num_streams> get_encoder_settings(wivrn::vk_bundle 
 		dst.device = src.device;
 		dst.sharp_text = settings.sharp_text;
 		dst.foveation_foveal_qp = settings.foveation_foveal_qp;
+		// Both switches, like the encoder failover. The encoders that have a refresh
+		// mechanism can only configure it when their encode session is created, which
+		// is here, so this is the half that cannot be changed live.
+		dst.intra_refresh = config.intra_refresh and settings.intra_refresh;
 
 		std::tie(dst.encoder_name, dst.codec) = prober.select_encoder(src);
 	}

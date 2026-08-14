@@ -148,6 +148,30 @@ video_encoder_x264::video_encoder_x264(
 	param.b_aud = 0;
 	param.i_keyint_max = X264_KEYINT_MAX_INFINITE;
 
+	// Intra refresh loss recovery. x264 has it natively: with b_intra_refresh a column of
+	// intra coded macroblocks sweeps across the picture and the frames carry a recovery
+	// point SEI instead of an IDR, and x264_encoder_intra_refresh() starts an extra sweep
+	// on demand — which is exactly what a report of a lost frame should turn into.
+	//
+	// The sweep speed is not its own parameter: x264 advances the column by
+	// max((mb_width - 1) / i_keyint_max, 1) macroblocks per frame, so keyint is what sets
+	// it, and leaving keyint infinite would give the minimum of one macroblock column per
+	// frame — 120 frames to cross a 1920 wide eye, more than a second, far too slow to
+	// repair a loss with. Setting it to the sweep length gives a sweep of about that many
+	// frames at any width. The side effect is that x264 also starts a sweep of its own
+	// every keyint frames; that is welcome rather than not, it bounds how long any error
+	// the headset failed to report can persist, and it costs bitrate rather than adding
+	// it — the rate control has the same budget either way.
+	//
+	// Forcing an IDR still produces a real IDR under b_intra_refresh (verified against
+	// libx264: the forced frame carries SPS, PPS and IDR slices), so session start,
+	// reconnects and the failover swap are unaffected.
+	if (settings.intra_refresh)
+	{
+		param.b_intra_refresh = 1;
+		param.i_keyint_max = intra_refresh_sweep_frames;
+	}
+
 	// colour definitions, actually ignored by decoder
 	param.vui.b_fullrange = 1;
 	param.vui.i_colorprim = 1; // BT.709
@@ -199,6 +223,12 @@ video_encoder_x264::video_encoder_x264(
 	}
 
 	assert(x264_encoder_maximum_delayed_frames(enc) == 0);
+
+	if (settings.intra_refresh)
+	{
+		enable_intra_refresh(intra_refresh_sweep_frames);
+		U_LOG_I("x264 encoder %d: intra refresh loss recovery over %u frames", stream_idx, intra_refresh_sweep_frames);
+	}
 
 	for (auto & i: in)
 	{
@@ -355,6 +385,18 @@ std::optional<video_encoder::data> video_encoder_x264::encode(uint8_t slot, uint
 		case default_idr_handler::frame_type::p:
 			control = false;
 			pic.i_type = X264_TYPE_P;
+			break;
+		case default_idr_handler::frame_type::refresh:
+			// A P frame like any other — the repair is the column of intra macroblocks
+			// x264 puts in this frame and the next few dozen, and it goes out over the
+			// stream socket with everything else. Sending it over the control socket, as
+			// a keyframe would be, would defeat the point: no single frame here is worth
+			// waiting on a TCP retransmission for.
+			control = false;
+			pic.i_type = X264_TYPE_P;
+			// Must not be called from inside x264_encoder_encode, hence here rather than
+			// from a callback.
+			x264_encoder_intra_refresh(enc);
 			break;
 	}
 	next_mb = 0;

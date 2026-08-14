@@ -227,6 +227,20 @@ void scenes::stream::send_feedback(const wivrn::from_headset::feedback & feedbac
 	}
 }
 
+void scenes::stream::send_nack(const wivrn::from_headset::nack & nack)
+{
+	try
+	{
+		network_session->send_stream(wivrn::from_headset::nack{nack});
+	}
+	catch (std::exception & e)
+	{
+		// A request that could not be sent costs one round and nothing else: the
+		// frame falls back on the incomplete-frame path exactly as it always did.
+		spdlog::warn("Exception while sending shard retransmission request: {}", e.what());
+	}
+}
+
 void scenes::stream::operator()(to_headset::application_list && l)
 {
 	apps(std::move(l));

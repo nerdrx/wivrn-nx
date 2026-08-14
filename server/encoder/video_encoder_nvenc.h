@@ -59,6 +59,9 @@ private:
 	float fps;
 	uint64_t bitrate;
 	int bytesPerPixel = 1;
+	// Which member of NV_ENC_CODEC_PIC_PARAMS the per frame parameters go in. Only needed
+	// for forceIntraRefreshWithFrameCnt, which is codec specific.
+	video_codec codec;
 
 	NV_ENC_RC_PARAMS get_rc_params(uint64_t bitrate, float framerate);
 	void set_init_params_fps(float framerate);

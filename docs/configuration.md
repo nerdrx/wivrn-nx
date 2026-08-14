@@ -201,6 +201,45 @@ happened.
 ```
 Never fall back to software encoding: a failing hardware encoder freezes its stream, as it did before.
 
+## `intra-refresh`
+Default value: `true`
+
+Repairs loss that the error correction and the retransmissions could not with a rolling column of
+intra-coded blocks sweeping across the picture over the next half second, instead of asking the
+encoder for a full keyframe.
+
+A keyframe is the largest frame there is, and the request goes out exactly when the link has just
+proved it cannot carry the traffic it already had. Worse, the stream is held silent until the
+headset acknowledges that keyframe, and every frame skipped in the meantime is another frame the
+headset did not receive — which asks for another keyframe. Sweeping intra blocks across the picture
+instead repairs it gradually at a near-constant bitrate, with no frame skipped and nothing large
+ever sent.
+
+The keyframes that are **not** loss recovery stay real keyframes either way: the first frame of a
+session, and the one after a reconnect, a bitrate reconfiguration or an encoder failover swap. In
+all of those the headset's decoder holds nothing to repair, so only a keyframe will do.
+
+Supported on **x264** (`b_intra_refresh`, plus `x264_encoder_intra_refresh()` on demand) and on
+**NVENC** (`enableIntraRefresh`, plus `forceIntraRefreshWithFrameCnt` on demand). The Vulkan
+encoders do not need it — they recover by encoding against the newest reference the headset
+acknowledged, so they never asked for a recovery keyframe at all. The FFmpeg VAAPI encoders expose
+no intra refresh control and keep using keyframes; each logs one line saying so at startup.
+
+The headset has its own *Intra-refresh recovery* toggle in its streaming settings. Both switches
+must be enabled. The refresh mechanism is part of the encode session's configuration, so turning
+the feature **on** takes effect on the next connection; turning it off applies immediately.
+
+See [intra-refresh.md](intra-refresh.md) for the sweep length, the failure handling and the
+per-encoder details.
+
+### Example
+```json
+{
+	"intra-refresh": false
+}
+```
+Recover from unrecoverable loss with a full keyframe, as it did before.
+
 ## `encoder`
 The encoder to use, either a single string or object applied to all streams, or a list of string or objects with values for left, right and alpha.
 When a string it is used, it is equivalent to the `encoder` item of the object.

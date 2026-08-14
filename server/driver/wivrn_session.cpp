@@ -152,11 +152,22 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 	// paid out of the bitrate the headset already chose, so the headset toggle is
 	// the only thing worth having.
 	compositor.set_fec(get_info().settings.fec);
+	// Same story: the ratio is picked from a measurement and the history is bounded, so
+	// there is nothing for a server key to protect against and the headset toggle is
+	// the only switch worth having.
+	compositor.set_fec_adaptive(get_info().settings.fec_adaptive);
+	compositor.set_shard_retransmit(get_info().settings.shard_retransmit);
 
 	// Both switches again: a stream whose hardware encoder dies mid-session is handed
 	// to the software one instead of freezing
 	encoder_failover_conf = conf.encoder_failover;
 	compositor.set_encoder_failover(encoder_failover_conf and get_info().settings.encoder_failover);
+
+	// Both switches once more, for recovering from loss with a rolling intra refresh
+	// rather than a keyframe. The encoders were built from the same pair (see
+	// get_encoder_settings), this is what keeps the live half in step with it.
+	intra_refresh_conf = conf.intra_refresh;
+	compositor.set_intra_refresh(intra_refresh_conf and get_info().settings.intra_refresh);
 
 	// Whether a device that stops being tracked holds its last tracked pose. No server
 	// configuration key: it only ever describes what the headset's own runtime does with
@@ -556,7 +567,12 @@ void wivrn_session::operator()(const from_headset::settings_changed & settings)
 	// the IDR and the re-seeded bitrate control every posture change gets
 	connection->set_multipath_mode(effective_multipath_mode(settings));
 	compositor.set_fec(settings.fec);
+	compositor.set_fec_adaptive(settings.fec_adaptive);
+	compositor.set_shard_retransmit(settings.shard_retransmit);
 	compositor.set_encoder_failover(encoder_failover_conf and settings.encoder_failover);
+	// Live only downwards: an encoder that was not built with a refresh mechanism cannot
+	// grow one, so turning this back on mid-session waits for the next connection.
+	compositor.set_intra_refresh(intra_refresh_conf and settings.intra_refresh);
 
 	// Live, and safe either way: the per component tracking state is maintained whatever
 	// the setting says, and the interpolator drops samples older than a second from its
@@ -981,6 +997,34 @@ void wivrn_session::operator()(from_headset::feedback && feedback)
 		dump_time("blit", feedback.frame_index, o.from_headset(feedback.blitted), feedback.stream_index);
 	if (feedback.displayed)
 		dump_time("display", feedback.frame_index, o.from_headset(feedback.displayed), feedback.stream_index);
+}
+
+void wivrn_session::operator()(from_headset::nack && nack)
+{
+	// Only the UDP stream socket can lose a shard, and only shards that went out on it
+	// are in the history. With everything on a TCP path there is nothing to answer:
+	// nothing was dropped, and a shard the headset has not seen yet is one still in
+	// flight, which a duplicate would not make arrive any sooner.
+	if (not connection->has_stream() or connection->video_on_secondary())
+		return;
+
+	// Built here, sent here: the compositor owns the encoders and their history, the
+	// session owns the connection. Not paced — a retransmission is already overdue,
+	// and the whole point is that it lands before the frame's display deadline.
+	std::vector<to_headset::video_stream_data_shard> shards;
+	compositor.collect_retransmits(nack, shards);
+
+	for (auto & shard: shards)
+	{
+		try
+		{
+			connection->send_stream(std::move(shard));
+		}
+		catch (...)
+		{
+			// Same as for a first send: losing a datagram is not worth a teardown
+		}
+	}
 }
 
 void wivrn_session::operator()(from_headset::battery && battery)

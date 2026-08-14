@@ -170,7 +170,8 @@ video_encoder_nvenc::video_encoder_nvenc(
         cmd_pool{make_cmd_pool(vk, stream_idx)},
         shared_state(video_encoder_nvenc_shared_state::get()),
         fps(settings.fps),
-        bitrate(settings.bitrate)
+        bitrate(settings.bitrate),
+        codec(settings.codec)
 {
 	if (settings.bit_depth != 8 && settings.bit_depth != 10)
 		throw std::runtime_error("nvenc encoder only supports 8-bit and 10-bit encoding");
@@ -261,9 +262,19 @@ video_encoder_nvenc::video_encoder_nvenc(
 		}
 	}
 
-	const uint32_t intra_refresh_period = 100;
-	const uint32_t intra_refresh_cnt = 50;
-	auto set_intra_refresh = [&](auto & codec_config) {
+	// Intra refresh. NVENC runs it continuously once enabled: intraRefreshCnt is how many
+	// frames one sweep of intra coded blocks takes to cross the picture, intraRefreshPeriod
+	// how often a sweep starts on its own (it has to be the larger of the two). A sweep every
+	// other sweep-length keeps a bound on how long any error can persist without costing much,
+	// and on top of that a lost frame asks for a sweep of its own through
+	// NV_ENC_PIC_PARAMS_*::forceIntraRefreshWithFrameCnt, see encode().
+	const uint32_t intra_refresh_cnt = intra_refresh_sweep_frames;
+	const uint32_t intra_refresh_period = 2 * intra_refresh_sweep_frames;
+	bool intra_refresh_configured = false;
+	auto configure_intra_refresh = [&](auto & codec_config) {
+		if (not settings.intra_refresh)
+			return;
+
 		NV_ENC_CAPS_PARAM cap_param{
 		        .version = NV_ENC_CAPS_PARAM_VER,
 		        .capsToQuery = NV_ENC_CAPS_SUPPORT_INTRA_REFRESH,
@@ -273,12 +284,13 @@ video_encoder_nvenc::video_encoder_nvenc(
 		NVENC_CHECK(shared_state->fn.nvEncGetEncodeCaps(session_handle, encodeGUID, &cap_param, &res));
 		if (res != 1)
 		{
-			U_LOG_W("nvenc: intra refresh not supported, disabling feature");
+			U_LOG_W("nvenc: intra refresh not supported, a lost frame will ask for a keyframe instead");
 			return;
 		}
 		codec_config.enableIntraRefresh = 1;
 		codec_config.intraRefreshPeriod = intra_refresh_period;
 		codec_config.intraRefreshCnt = intra_refresh_cnt;
+		intra_refresh_configured = true;
 	};
 
 	switch (settings.codec)
@@ -291,7 +303,7 @@ video_encoder_nvenc::video_encoder_nvenc(
 			config.encodeCodecConfig.h264Config.maxNumRefFrames = 0;
 			config.encodeCodecConfig.h264Config.h264VUIParameters.videoFullRangeFlag = 1;
 			config.encodeCodecConfig.h264Config.idrPeriod = NVENC_INFINITE_GOPLENGTH;
-			set_intra_refresh(config.encodeCodecConfig.h264Config);
+			configure_intra_refresh(config.encodeCodecConfig.h264Config);
 
 			if (settings.sharp_text)
 				// The in-loop deblocking filter is the main source of blur on text,
@@ -313,7 +325,7 @@ video_encoder_nvenc::video_encoder_nvenc(
 			config.encodeCodecConfig.hevcConfig.maxNumRefFramesInDPB = 0;
 			config.encodeCodecConfig.hevcConfig.hevcVUIParameters.videoFullRangeFlag = 1;
 			config.encodeCodecConfig.hevcConfig.idrPeriod = NVENC_INFINITE_GOPLENGTH;
-			set_intra_refresh(config.encodeCodecConfig.hevcConfig);
+			configure_intra_refresh(config.encodeCodecConfig.hevcConfig);
 
 			if (settings.sharp_text)
 				config.encodeCodecConfig.hevcConfig.disableDeblockingFilterIDC = 1;
@@ -332,7 +344,7 @@ video_encoder_nvenc::video_encoder_nvenc(
 			config.encodeCodecConfig.av1Config.repeatSeqHdr = 1;
 			config.encodeCodecConfig.av1Config.maxNumRefFramesInDPB = 0;
 			config.encodeCodecConfig.av1Config.idrPeriod = NVENC_INFINITE_GOPLENGTH;
-			set_intra_refresh(config.encodeCodecConfig.av1Config);
+			configure_intra_refresh(config.encodeCodecConfig.av1Config);
 
 			if (settings.sharp_text)
 				U_LOG_I("nvenc: AV1 exposes no loop filter control, text clarity mode only tunes adaptive quantisation");
@@ -358,6 +370,15 @@ video_encoder_nvenc::video_encoder_nvenc(
 	set_init_params_fps(fps);
 
 	NVENC_CHECK(shared_state->fn.nvEncInitializeEncoder(session_handle, &init_params));
+
+	if (intra_refresh_configured)
+	{
+		enable_intra_refresh(intra_refresh_cnt);
+		U_LOG_I("nvenc encoder %d: intra refresh loss recovery over %u frames, automatic sweep every %u",
+		        stream_idx,
+		        intra_refresh_cnt,
+		        intra_refresh_period);
+	}
 
 	NV_ENC_CREATE_BITSTREAM_BUFFER out_buf_params{
 	        .version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER,
@@ -598,6 +619,28 @@ std::optional<video_encoder::data> video_encoder_nvenc::encode(uint8_t slot, uin
 			break;
 		case default_idr_handler::frame_type::p:
 			frame_params.pictureType = NV_ENC_PIC_TYPE_UNKNOWN;
+			break;
+		case default_idr_handler::frame_type::refresh:
+			// An ordinary P frame that also starts a sweep. forceIntraRefreshWithFrameCnt
+			// lives in the codec specific half of the picture parameters, which nothing
+			// else here fills in, so the union member has to be picked by hand. Only
+			// reachable when the encoder was built with intra refresh enabled — nothing
+			// else ever turns this frame type on — so the field is always honoured.
+			frame_params.pictureType = NV_ENC_PIC_TYPE_UNKNOWN;
+			switch (codec)
+			{
+				case video_codec::h264:
+					frame_params.codecPicParams.h264PicParams.forceIntraRefreshWithFrameCnt = intra_refresh_frames();
+					break;
+				case video_codec::h265:
+					frame_params.codecPicParams.hevcPicParams.forceIntraRefreshWithFrameCnt = intra_refresh_frames();
+					break;
+				case video_codec::av1:
+					frame_params.codecPicParams.av1PicParams.forceIntraRefreshWithFrameCnt = intra_refresh_frames();
+					break;
+				case video_codec::raw:
+					break;
+			}
 			break;
 	}
 	NV_ENC_LOCK_BITSTREAM buf_lock_params{

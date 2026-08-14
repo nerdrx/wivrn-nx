@@ -91,6 +91,8 @@ class wivrn_session : public xrt_system_devices
 	configuration::pacing_config pacing_conf;
 	// Same story for the hardware encoder failover
 	bool encoder_failover_conf = true;
+	// And for intra refresh loss recovery
+	bool intra_refresh_conf = true;
 	pacing_app_factory app_pacers;
 
 	b_system & xrt_system;
@@ -222,6 +224,7 @@ public:
 	void operator()(from_headset::hid::input && e);
 	void operator()(from_headset::timesync_response &&);
 	void operator()(from_headset::feedback &&);
+	void operator()(from_headset::nack &&);
 	void operator()(from_headset::battery &&);
 	void operator()(from_headset::wifi_state &&);
 	void operator()(from_headset::visibility_mask_changed &&);

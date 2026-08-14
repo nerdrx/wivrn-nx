@@ -361,6 +361,11 @@ public:
 
 	void send_feedback(const wivrn::from_headset::feedback & feedback);
 
+	// Ask the server for video shards this headset never received. On the stream
+	// socket, not the control one: a request that misses the frame's display deadline
+	// is worth nothing, and head-of-line blocking is what would make it miss.
+	void send_nack(const wivrn::from_headset::nack & nack);
+
 	state current_state() const
 	{
 		return state_;

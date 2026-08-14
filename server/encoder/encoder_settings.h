@@ -56,6 +56,13 @@ struct encoder_settings
 	// Only NVENC and x264 have a path for it (still a TODO there); VAAPI and Vulkan log once
 	// that they cannot honour it. Only read when the encoder is created.
 	bool foveation_foveal_qp = false;
+	// Recover from unrecoverable loss with a rolling intra refresh instead of a keyframe.
+	// Both switches (server configuration and headset toggle) ANDed. The refresh mechanism
+	// is part of the encode session's configuration on every encoder that has one, so this
+	// can only be read when the encoder is created; the live half of the switch goes through
+	// video_encoder::set_intra_refresh. x264 and NVENC honour it, VAAPI has no such control
+	// and the Vulkan encoders already recover without keyframes.
+	bool intra_refresh = true;
 	std::optional<std::string> device;
 };
 

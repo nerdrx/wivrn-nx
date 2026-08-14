@@ -561,6 +561,12 @@ bool compositor::fail_over_encoder(size_t idx, const std::string & reason)
 	replacement->set_framerate(frame_rate);
 	replacement->set_pacing(pacing_enabled, pacing_window);
 	replacement->set_fec(fec_enabled);
+	replacement->set_fec_adaptive(fec_adaptive_enabled);
+	replacement->set_shard_retransmit(retransmit_enabled);
+	// x264 has a refresh mechanism of its own, and `conf` carries the same intra_refresh
+	// the failed encoder was built from, so the replacement configures one; this hands it
+	// whatever the live half of the switch has since become.
+	replacement->set_intra_refresh(intra_refresh_enabled);
 	replacement->watchdog.set_enabled(failover_enabled);
 	// A fresh IDR handler already asks for a keyframe on its first frame; say so
 	// rather than leaving it implicit. The headset needs it: everything it holds
@@ -1761,6 +1767,90 @@ void compositor::set_fec(bool enabled)
 	{
 		if (encoder)
 			encoder->set_fec(enabled);
+	}
+}
+
+void compositor::set_fec_adaptive(bool enabled)
+{
+	if (fec_adaptive_enabled == enabled)
+		return;
+
+	fec_adaptive_enabled = enabled;
+
+	if (enabled)
+		U_LOG_I("Adaptive error correction enabled, parity ratio between %d+1 and %d+1 with interleaved groups",
+		        int(wivrn::fec::clean_group_size),
+		        int(wivrn::fec::heavy_group_size));
+	else
+		U_LOG_I("Adaptive error correction disabled, parity ratio fixed at %d+1", int(wivrn::fec::group_size));
+
+	for (auto & encoder: get_encoders())
+	{
+		if (encoder)
+			encoder->set_fec_adaptive(enabled);
+	}
+}
+
+void compositor::set_shard_retransmit(bool enabled)
+{
+	if (retransmit_enabled == enabled)
+		return;
+
+	retransmit_enabled = enabled;
+
+	if (enabled)
+		U_LOG_I("Shard retransmission enabled, keeping %zu kB of recently sent shards per stream",
+		        wivrn::shard_history::capacity / 1024);
+	else
+		U_LOG_I("Shard retransmission disabled");
+
+	for (auto & encoder: get_encoders())
+	{
+		if (encoder)
+			encoder->set_shard_retransmit(enabled);
+	}
+}
+
+void compositor::collect_retransmits(const from_headset::nack & n,
+                                     std::vector<to_headset::video_stream_data_shard> & out)
+{
+	if (not retransmit_enabled)
+		return;
+
+	auto snapshot = get_encoders();
+	if (n.stream_index >= snapshot.size() or not snapshot[n.stream_index])
+		return;
+
+	snapshot[n.stream_index]->collect_retransmits(n, out);
+}
+
+uint64_t compositor::retransmitted_shards() const
+{
+	uint64_t total = 0;
+	for (const auto & encoder: get_encoders())
+	{
+		if (encoder)
+			total += encoder->retransmitted_shards();
+	}
+	return total;
+}
+
+void compositor::set_intra_refresh(bool enabled)
+{
+	if (intra_refresh_enabled == enabled)
+		return;
+
+	intra_refresh_enabled = enabled;
+
+	if (enabled)
+		U_LOG_I("Intra refresh loss recovery enabled, on the streams whose encoder was built with it");
+	else
+		U_LOG_I("Intra refresh loss recovery disabled, a lost frame now asks for a keyframe again");
+
+	for (auto & encoder: get_encoders())
+	{
+		if (encoder)
+			encoder->set_intra_refresh(enabled);
 	}
 }
 

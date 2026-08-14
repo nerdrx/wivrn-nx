@@ -29,6 +29,7 @@
 #include "wivrn_config.h"
 
 #include <algorithm>
+#include <bit>
 #include <cerrno>
 #include <ctime>
 #include <string>
@@ -349,6 +350,43 @@ void video_encoder::on_feedback(const from_headset::feedback & feedback)
 {
 	assert(feedback.stream_index == stream_idx);
 	idr->on_feedback(feedback);
+
+	if (not fec_enabled or not fec_adaptive)
+		return;
+
+	// The headset reports a frame several times over as it works its way through the
+	// decoder and the compositor, and every one of those copies carries the same loss
+	// counts. Only the first is evidence. A frame index far *behind* the cursor is a
+	// stream that started over, which must not wedge the measurement for good.
+	if (fec_rate_frame and feedback.frame_index + 64 < fec_rate_frame)
+		fec_rate_frame = 0;
+	if (fec_rate_frame and feedback.frame_index <= fec_rate_frame)
+		return;
+
+	auto cost = history.frame_cost(feedback.frame_index);
+	if (not cost or cost->shards_sent == 0)
+		return;
+	fec_rate_frame = feedback.frame_index;
+
+	// The two are disjoint by construction: the headset only ever asks for shards its
+	// parity cannot rebuild, so a shard is counted here as reconstructed or as asked
+	// for, never as both.
+	const uint32_t lost = uint32_t(feedback.reconstructed_shards) + cost->shards_nacked;
+
+	uint16_t k;
+	{
+		std::lock_guard lock(fec_rate_mutex);
+		fec_rate.on_frame(cost->shards_sent, lost, feedback.sent_to_decoder != 0);
+		k = fec_rate.group_size();
+	}
+
+	// The parity overhead is part of the link budget, so a ratio change is a bitrate
+	// change: see apply_bitrate.
+	if (fec_group_size.exchange(k) != k)
+	{
+		U_LOG_D("Stream %d: parity ratio now %u+1", (int)stream_idx, (unsigned)k);
+		apply_bitrate();
+	}
 }
 
 void video_encoder::reset()
@@ -373,7 +411,10 @@ void video_encoder::apply_bitrate()
 	// number would put 12.5% more than the budget on the wire and the controller
 	// would then spend its time chasing the loss it caused itself. So the encoder
 	// gets the data share and the parity gets the rest.
-	const double share = fec_enabled ? fec::data_share : 1.0;
+	//
+	// The share is not a constant once the ratio is adaptive — 6% of overhead at 16+1,
+	// 25% at 4+1 — so every move of the ratio comes back through here.
+	const double share = fec_enabled ? fec::data_share(fec_group_size) : 1.0;
 	pending_bitrate = uint32_t(requested * bitrate_multiplier * share);
 }
 
@@ -382,6 +423,132 @@ void video_encoder::set_fec(bool enabled)
 	if (fec_enabled.exchange(enabled) == enabled)
 		return;
 	apply_bitrate();
+}
+
+void video_encoder::set_fec_adaptive(bool enabled)
+{
+	if (fec_adaptive.exchange(enabled) == enabled)
+		return;
+
+	if (not enabled)
+	{
+		// Back to the fixed ratio, and back to the bitrate that goes with it
+		{
+			std::lock_guard lock(fec_rate_mutex);
+			fec_rate.reset();
+		}
+		if (fec_group_size.exchange(fec::group_size) != fec::group_size)
+			apply_bitrate();
+	}
+}
+
+void video_encoder::set_shard_retransmit(bool enabled)
+{
+	history.set_enabled(enabled);
+}
+
+void video_encoder::collect_retransmits(const from_headset::nack & n,
+                                        std::vector<to_headset::video_stream_data_shard> & out)
+{
+	if (not history.enabled())
+		return;
+
+	// Whatever the headset says is missing is loss the parity did not absorb, and it
+	// counts towards the ratio whether or not the shards are still here to send.
+	uint32_t asked = 0;
+	for (uint8_t byte: n.bitmap)
+		asked += uint32_t(std::popcount(byte));
+	history.note_nacked(n.frame_idx, asked);
+
+	size_t budget = max_retransmit_per_nack;
+	{
+		std::lock_guard lock(retransmit_mutex);
+		const int64_t now = os_monotonic_get_ns();
+		if (now - retransmit_window_ns >= 1'000'000'000)
+		{
+			retransmit_window_ns = now;
+			retransmit_in_window = 0;
+		}
+		if (retransmit_in_window >= max_retransmit_per_second)
+			return;
+		budget = std::min(budget, size_t(max_retransmit_per_second - retransmit_in_window));
+	}
+
+	thread_local std::vector<shard_history::hit> hits;
+	hits.clear();
+	const size_t found = history.collect(n.frame_idx, n.first_shard_idx, n.bitmap, budget, hits);
+	if (found == 0)
+		return;
+
+	for (shard_history::hit & h: hits)
+	{
+		try
+		{
+			// Back through the ordinary send path, which is what gives the
+			// datagram a fresh IV off the global counter. Re-sending stored
+			// ciphertext would reuse one, and an AES-CTR keystream reused is
+			// no keystream at all.
+			out.push_back(fec::decode_blob(stream_idx, n.frame_idx, h.shard_idx, h.blob));
+		}
+		catch (...)
+		{
+			// A blob that no longer decodes is one the ring overwrote under us;
+			// there is nothing to send and nothing to report.
+		}
+	}
+
+	retransmitted += out.size();
+	{
+		std::lock_guard lock(retransmit_mutex);
+		retransmit_in_window += uint32_t(out.size());
+	}
+
+	report_retransmissions();
+}
+
+void video_encoder::report_retransmissions()
+{
+	std::lock_guard lock(retransmit_mutex);
+
+	const uint64_t total = retransmitted;
+	if (total == retransmit_reported)
+		return;
+
+	const int64_t now = os_monotonic_get_ns();
+	if (retransmit_last_report == 0)
+	{
+		// First one: open the window rather than log a report covering no time
+		retransmit_last_report = now;
+		retransmit_reported = total;
+		return;
+	}
+	if (now - retransmit_last_report < retransmit_report_period)
+		return;
+
+	U_LOG_I("Stream %d: sent %lu video shard(s) again on request over the last %.0f s",
+	        (int)stream_idx,
+	        (unsigned long)(total - retransmit_reported),
+	        (now - retransmit_last_report) / 1e9);
+
+	retransmit_reported = total;
+	retransmit_last_report = now;
+}
+
+void video_encoder::enable_intra_refresh(uint32_t sweep_frames)
+{
+	intra_refresh_supported = true;
+	intra_refresh_sweep = sweep_frames;
+	idr->set_intra_refresh(intra_refresh_enabled, sweep_frames);
+}
+
+void video_encoder::set_intra_refresh(bool enabled)
+{
+	intra_refresh_enabled = enabled;
+	// No refresh mechanism on this encoder: the handler stays on keyframes whatever the
+	// switch says, and would have nothing to drive if it did not.
+	if (not intra_refresh_supported)
+		return;
+	idr->set_intra_refresh(enabled, intra_refresh_sweep);
 }
 
 void video_encoder::set_framerate(float framerate)
@@ -496,38 +663,33 @@ void video_encoder::encode(wivrn_session & cnx,
 
 void video_encoder::send_parity()
 {
-	auto parity = fec_group.take();
-
-	// The group is always closed, whether or not its parity is worth sending: the
-	// builder's next group has to start at the next shard either way.
-	const bool useful = group_on_primary;
-	group_on_primary = false;
-
-	if (not parity)
-		return;
-
+	// One parity per group of the block that has just closed — one of them with the
+	// contiguous scheme, fec::interleave_depth of them with the interleaved one. The
+	// loop runs to the end whatever it finds: it is the last, empty-handed take() that
+	// opens the next block.
+	//
 	// A group every shard of which spilled to the secondary (TCP) path cannot lose
 	// anything, so its parity would repair nothing — and it would be spent on the
 	// primary path, taking Wi-Fi bandwidth away from the shards that *can* be lost.
-	// Groups straddling the split keep theirs: the shards that went over UDP are
-	// exactly the ones at risk, and the ones that went over TCP are as good as
-	// received for the purpose of rebuilding them.
-	if (not useful)
-		return;
-
-	// Parity is on the link like everything else, and the bitrate the controller decides is
-	// a budget for the link (see apply_bitrate), so it counts. It always rides the primary
-	// path, which is the only one that can drop a packet.
-	frame_bytes += uint32_t(parity->payload.size());
-	frame_bytes_primary += uint32_t(parity->payload.size());
-
-	try
+	// group_builder skips those. Groups straddling the split keep theirs: the shards
+	// that went over UDP are exactly the ones at risk, and the ones that went over TCP
+	// are as good as received for the purpose of rebuilding them.
+	while (auto parity = fec_group.take())
 	{
-		cnx->send_stream(std::move(*parity));
-	}
-	catch (...)
-	{
-		// Ignore network errors, same as for the data shards
+		// Parity is on the link like everything else, and the bitrate the controller
+		// decides is a budget for the link (see apply_bitrate), so it counts. It
+		// always rides the primary path, which is the only one that can drop a packet.
+		frame_bytes += uint32_t(parity->payload.size());
+		frame_bytes_primary += uint32_t(parity->payload.size());
+
+		try
+		{
+			cnx->send_stream(std::move(*parity));
+		}
+		catch (...)
+		{
+			// Ignore network errors, same as for the data shards
+		}
 	}
 }
 
@@ -540,12 +702,17 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		wivrn::trace::cpu_begin(wivrn::trace::cpu_track::network, stream_idx, shard.frame_idx, "SendData");
 		cnx->dump_time("send_begin", shard.frame_idx, os_monotonic_get_ns(), stream_idx);
 		timing_info.send_begin = clock.to_headset(os_monotonic_get_ns());
+		// The layout the whole frame is protected with, fixed here: the shard payload
+		// budget below is derived from the group size (see fec::payload_reserve) and a
+		// frame has to be sharded to one size throughout. Depth 1 is the contiguous
+		// scheme; interleaving is what the adaptive switch adds on top of the ratio.
+		fec_group.set_layout(fec_adaptive ? fec_group_size.load() : fec::group_size,
+		                     fec_adaptive ? fec::interleave_depth : 1);
 		fec_group.reset(stream_idx, shard.frame_idx);
 		frame_bytes = 0;
 		frame_bytes_primary = 0;
 		frame_bytes_secondary = 0;
 		frame_offset = 0;
-		group_on_primary = false;
 	}
 	if (end_of_frame)
 	{
@@ -562,7 +729,7 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 	// exactly the frame that must not be made larger.
 	const bool fec_active = fec_enabled and not control and cnx->has_stream() and not cnx->video_on_secondary();
 
-	ssize_t max_payload_size = (cnx->has_stream() and not control) ? ssize_t(fec::shard_payload_budget(fec_active)) : std::numeric_limits<uint32_t>::max();
+	ssize_t max_payload_size = (cnx->has_stream() and not control) ? ssize_t(fec::shard_payload_budget(fec_active, fec_group.group_size())) : std::numeric_limits<uint32_t>::max();
 
 	auto begin = data.begin();
 	auto end = data.end();
@@ -651,10 +818,22 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		// the tunnel.
 		if (fec_active)
 		{
-			fec_group.add(shard);
-			group_on_primary = group_on_primary or on_primary;
-			if (fec_group.full())
+			fec_group.add(shard, on_primary);
+			if (fec_group.block_full())
 				send_parity();
+		}
+
+		// What the headset may ask to have sent again. Deliberately outside the FEC
+		// gate — a shard is worth remembering whether or not a parity covers it — and
+		// deliberately only the shards that went over the path that can lose one: a
+		// hole where a TCP shard should be is the two paths arriving out of order, and
+		// answering that over Wi-Fi would spend the lossy path's bandwidth on a shard
+		// already in flight over the other. The blob is the same encoding the parity
+		// scheme uses, so a retransmission is a decode_blob and nothing more.
+		if (history.enabled() and not control)
+		{
+			fec::encode_blob(shard, history_blob);
+			history.push(shard.frame_idx, shard.shard_idx, history_blob, on_primary);
 		}
 
 		++shard.shard_idx;
@@ -674,7 +853,7 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 			sleep_until_ns(*at);
 	}
 
-	// Last group of the frame, usually a partial one. Emitted even for a group of
+	// Last block of the frame, usually a partial one. Emitted even for a group of
 	// a single shard: a one-shard frame is cheap to duplicate in absolute bytes and
 	// losing it costs exactly as much as losing a big one — a frame plus the IDR
 	// round trip it triggers.
@@ -683,6 +862,11 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 
 	if (end_of_frame)
 	{
+		// How long the frame was, which is what the loss the headset reports is a
+		// fraction of. Kept whether or not retransmission is on: the adaptive parity
+		// ratio needs it either way.
+		history.end_frame(shard.frame_idx, shard.shard_idx);
+
 		cnx->dump_time("send_end", shard.frame_idx, os_monotonic_get_ns(), stream_idx);
 		wivrn::trace::cpu_end(wivrn::trace::cpu_track::network, stream_idx, shard.frame_idx, "SendData");
 

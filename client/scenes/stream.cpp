@@ -272,9 +272,12 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 		info.settings.radio_aware = config.radio_aware;
 		info.settings.smooth_pacing = config.smooth_pacing;
 		info.settings.fec = config.fec;
+		info.settings.fec_adaptive = config.fec_adaptive;
+		info.settings.shard_retransmit = config.shard_retransmit;
 		info.settings.wifi_qos = config.wifi_qos;
 		info.settings.sharp_text = config.sharp_text;
 		info.settings.encoder_failover = config.encoder_failover;
+		info.settings.intra_refresh = config.intra_refresh;
 		info.settings.motion_smoothing = config.motion_smoothing;
 		info.settings.motion_smoothing_mode = config.motion_mode();
 		info.settings.multipath = config.multipath_mode();

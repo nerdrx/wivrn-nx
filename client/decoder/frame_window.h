@@ -189,6 +189,15 @@ public:
 		}
 	}
 
+	// Every frame the window holds, oldest first. Slots nothing has arrived for yet are
+	// handed over too — they are simply empty, and the caller can see that.
+	template <typename F>
+	void for_each(F && f)
+	{
+		for (size_t i = 0; i < depth; ++i)
+			f(sets[(front_ + i) % depth]);
+	}
+
 	// Done with the oldest frame, whichever way it went. Its slot becomes the newest
 	// one in the window, which is what frees the shards it was holding.
 	void advance()

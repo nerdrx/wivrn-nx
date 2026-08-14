@@ -172,6 +172,19 @@ wivrn::video_encoder_vulkan::video_encoder_vulkan(
         encode_caps(patch_capabilities(in_encode_caps)),
         num_dpb_slots(std::min(video_caps.maxDpbSlots, 16u))
 {
+	if (settings.intra_refresh)
+	{
+		// Nothing to do, and nothing missing either. The Vulkan encoders do not answer a lost
+		// frame with a keyframe in the first place: dpb_state above keeps every reference slot
+		// the headset has acknowledged and encodes the next frame against the newest of them,
+		// so loss costs a slightly older reference rather than a full IDR, and the keyframe
+		// doom loop intra refresh exists to break never starts. A rolling refresh would need
+		// per-block intra control that the Vulkan video encode extension WiVRn targets does
+		// not expose; VK_KHR_video_encode_intra_refresh would, but is not required here and
+		// would buy nothing over the reference selection already in place.
+		U_LOG_I("vulkan: intra refresh loss recovery is not needed, this encoder recovers by encoding against the newest reference the headset acknowledged");
+	}
+
 	if (settings.foveation_foveal_qp)
 	{
 		// Foveation v2 lever 3: the Vulkan video encode extension has no portable per-region QP

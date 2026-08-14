@@ -549,6 +549,28 @@ void settings_streaming(const settings_context & ctx)
 	});
 
 	list.push_back({
+	        .id = "##fec_adaptive",
+	        .label = _("Adaptive error correction"),
+	        .description = _("Let the computer decide how much redundant data to send from how much is actually going missing: barely any on a clean connection, a lot more when packets start dropping. It also spreads each protected group out over the stream, so that a burst of packets lost together costs one repairable hole in several groups rather than wiping out one of them. Costs nothing extra on a good connection and protects better on a bad one."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.fec_adaptive; },
+	        .set_bool = [&ctx, &config](bool v) { config.fec_adaptive = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.fec_adaptive,
+	        .enabled = [&config] { return config.fec; },
+	        .disabled_tooltip = _("Enable error correction to change this setting."),
+	});
+
+	list.push_back({
+	        .id = "##shard_retransmit",
+	        .label = _("Shard retransmission"),
+	        .description = _("When a video packet goes missing and the redundant data cannot rebuild it, ask the computer to send that one packet again. On a home network the answer comes back in two or three milliseconds, which is well inside the time the frame has to be shown, so the frame is finished instead of being thrown away and a fresh keyframe requested."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.shard_retransmit; },
+	        .set_bool = [&ctx, &config](bool v) { config.shard_retransmit = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.shard_retransmit,
+	});
+
+	list.push_back({
 	        .id = "##wifi_qos",
 	        .label = _("Wi-Fi QoS priority"),
 	        .description = _("Tag the streaming traffic so that the access point puts it in its high priority queues ahead of everything else on the network. A few networks mangle or drop tagged traffic instead; turn this off if the connection is worse with it on."),
@@ -566,6 +588,16 @@ void settings_streaming(const settings_context & ctx)
 	        .get_bool = [&config] { return config.encoder_failover; },
 	        .set_bool = [&ctx, &config](bool v) { config.encoder_failover = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
 	        .default_bool = default_config.encoder_failover,
+	});
+
+	list.push_back({
+	        .id = "##intra_refresh",
+	        .label = _("Intra-refresh recovery"),
+	        .description = _("When part of a frame is lost for good, let the computer repair the picture gradually over the next half second instead of resending a whole fresh image at once. The full image is the biggest thing the connection ever has to carry, and it is asked for exactly when the connection is at its worst, which is how one glitch turns into several. The gradual repair keeps the data rate steady instead. Turning it on takes effect on the next connection; not all encoders can do it."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.intra_refresh; },
+	        .set_bool = [&ctx, &config](bool v) { config.intra_refresh = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.intra_refresh,
 	});
 
 	// Off / Backup only / Combine. multipath_usb stays the switch it always was —

@@ -160,6 +160,19 @@ public:
 	// bandwidth, which the server takes out of the encoder rather than adding on top.
 	bool fec = true;
 
+	// Let the server size that redundancy to the loss it is measuring rather than
+	// always sending the same amount, and spread each group's shards out so that a
+	// burst of consecutive packets lost on the air costs one recoverable hole in
+	// several groups instead of several in one. Extends the switch above: with error
+	// correction off this does nothing at all.
+	bool fec_adaptive = true;
+
+	// Ask the server to send a video packet again when one goes missing that the
+	// redundancy cannot rebuild, instead of losing the frame. On a LAN the round trip
+	// is a couple of milliseconds against an 11 ms frame, so the answer still arrives
+	// in time; off, the server keeps no history and nothing is ever asked for.
+	bool shard_retransmit = true;
+
 	// Mark both ends' sockets with a DSCP class, which access points map to the
 	// WMM access categories. Off is for the networks that mangle marked traffic.
 	bool wifi_qos = true;
@@ -168,6 +181,12 @@ public:
 	// driver's encoder dies or stops answering, instead of that eye freezing for
 	// the rest of the session. Costs CPU on the PC while it lasts.
 	bool encoder_failover = true;
+
+	// Repair loss the error correction and the retransmissions could not with a rolling
+	// sweep of intra coded blocks over the next half second, instead of a full keyframe.
+	// A keyframe is the largest frame there is and it is asked for exactly when the link
+	// is worst, which is how one lost frame turns into several.
+	bool intra_refresh = true;
 
 	// Let a controller that goes to sleep hold its last tracked pose on the PC instead of
 	// following whatever pose the runtime keeps reporting for it. On by default: it is what

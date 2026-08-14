@@ -18,6 +18,8 @@
  */
 
 #include "shard_accumulator.h"
+#include "application.h"
+#include "configuration.h"
 #include "fec.h"
 #include "scenes/stream.h" // IWYU pragma: keep
 #include "spdlog/spdlog.h"
@@ -88,13 +90,18 @@ void shard_accumulator::push_shard(video_stream_data_shard && shard)
 		return;
 	}
 
-	set->insert(std::move(shard), instance.now());
+	const XrTime now = instance.now();
+	set->insert(std::move(shard), now);
 	// The shard that just landed may have been the last one a group was short of
 	// bar one, which is the point at which its parity becomes usable.
 	drain_parity(*set);
 
 	if (set->complete())
 		window.note_complete(frame_idx);
+
+	// After the parity drain, never before it: what the parity is about to rebuild
+	// must not be asked for again.
+	try_nack(now);
 
 	// Only the oldest frame is ever handed to the decoder, and the pump is what
 	// does it; a shard for a newer one can only ever change whether the oldest is
@@ -127,6 +134,8 @@ void shard_accumulator::push_parity(video_stream_parity_shard && parity)
 
 	if (set->complete())
 		window.note_complete(frame_idx);
+
+	try_nack(instance.now());
 
 	pump();
 }
@@ -199,6 +208,116 @@ void shard_accumulator::report_reconstructions()
 
 	fec_reconstructed = 0;
 	fec_last_report = now;
+}
+
+void shard_accumulator::try_nack(XrTime now)
+{
+	// Read live rather than plumbed through: the headset sends its whole settings
+	// block on every change and this is one bool on a path that already reads the
+	// frame's worth of state around it.
+	if (not application::get_config().shard_retransmit)
+		return;
+
+	// The newest frame anything has arrived for. Everything older than it has stopped
+	// arriving in its own right — a hole in it is loss, not a shard still in the air —
+	// and, more to the point, the shard past the highest one it holds is known to
+	// exist, which is the one case where the frame length can be guessed at.
+	uint64_t newest = 0;
+	bool any = false;
+	window.for_each([&](shard_set & set) {
+		if (set.empty())
+			return;
+		if (not any or set.frame_index() > newest)
+		{
+			newest = set.frame_index();
+			any = true;
+		}
+	});
+	if (not any)
+		return;
+
+	window.for_each([&](shard_set & set) {
+		// The clock first, because it is the cheap test and it is the one that
+		// answers "no" for almost every frame: this runs on every shard arrival, and
+		// the frame the shards belong to has by definition just been heard from.
+		//
+		// It is also the rate limit. One round in flight at a time: a request sent
+		// less than the delay ago has not had the chance to be answered yet, and a
+		// second copy of it would only spend bandwidth on the path that is already
+		// dropping packets.
+		const XrTime since = std::max(set.last_shard, set.nack_last);
+		if (since == 0 or now - since < nack_delay_ns)
+			return;
+		if (set.nack_rounds >= max_nack_rounds or set.empty() or set.complete())
+			return;
+
+		set.missing_shards(nack_scratch, set.frame_index() < newest);
+		if (nack_scratch.empty())
+			return;
+
+		auto scene = weak_scene.lock();
+		if (not scene)
+			return;
+
+		const uint16_t first = nack_scratch.front();
+		wivrn::from_headset::nack request{
+		        .stream_index = set.feedback.stream_index,
+		        .frame_idx = set.frame_index(),
+		        .first_shard_idx = first,
+		        .bitmap = {},
+		};
+
+		size_t asked = 0;
+		for (uint16_t idx: nack_scratch)
+		{
+			const size_t bit = size_t(idx) - first;
+			const size_t byte = bit / 8;
+			// Past the window one request can name. A frame missing more than
+			// 256 shards from its first hole is not one a retransmission round
+			// is going to save.
+			if (byte >= wivrn::from_headset::max_nack_bitmap_bytes)
+				break;
+			if (request.bitmap.size() <= byte)
+				request.bitmap.resize(byte + 1, 0);
+			request.bitmap[byte] |= uint8_t(1u << (bit % 8));
+			++asked;
+		}
+
+		++set.nack_rounds;
+		set.nack_last = now;
+		++nack_requests;
+		nack_shards += asked;
+		nack_shards_total += asked;
+
+		scene->send_nack(request);
+	});
+
+	report_nacks(now);
+}
+
+void shard_accumulator::report_nacks(XrTime now)
+{
+	if (nack_requests == 0)
+		return;
+
+	if (nack_last_report == 0)
+	{
+		// First one: open the window rather than log a report covering no time
+		nack_last_report = now;
+		return;
+	}
+	if (now - nack_last_report < nack_report_period)
+		return;
+
+	spdlog::info("Stream {}: asked for {} lost video shard(s) again over {} request(s) in the last {:.0f} s",
+	             window.front().feedback.stream_index,
+	             nack_shards,
+	             nack_requests,
+	             (now - nack_last_report) / 1e9);
+
+	nack_requests = 0;
+	nack_shards = 0;
+	nack_last_report = now;
 }
 
 shard_accumulator::window_t::step shard_accumulator::try_submit_front(shard_set & current)

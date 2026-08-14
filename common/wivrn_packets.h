@@ -431,6 +431,18 @@ struct settings_changed
 	// 12% of the video bandwidth, which the server takes out of the encoder bitrate so
 	// that the total on the wire stays where the bitrate controller put it.
 	bool fec = true;
+	// Whether the server may size the parity ratio to the loss it is measuring instead of
+	// always sending one parity per eight shards, and interleave the groups so that a burst
+	// of consecutive datagrams costs one erasure in several groups rather than several in
+	// one. Extends the fec switch above rather than replacing it: with fec off this does
+	// nothing, with fec on and this off the ratio is the fixed 8+1 it has always been.
+	bool fec_adaptive = true;
+	// Whether the headset may ask the server to send a video shard again when it notices one
+	// missing that the parity cannot rebuild, and the server keep a short history of what it
+	// sent so that it can. On a LAN the round trip is a couple of milliseconds against an
+	// 11 ms frame budget, so a shard asked for still arrives in time to finish the frame; off,
+	// the server keeps no history at all and the headset sends nothing.
+	bool shard_retransmit = true;
 	// Whether both ends should mark their sockets with a DSCP class, which maps to the WMM
 	// access categories on Wi-Fi. Each end applies it to its own sockets; some networks
 	// mangle or drop marked traffic, hence the switch.
@@ -443,6 +455,17 @@ struct settings_changed
 	// Only possible within one codec (the headset's decoder cannot be changed without a
 	// reconnect), so it applies to H.264 streams. The server also has its own switch.
 	bool encoder_failover = true;
+	// Whether loss the forward error correction and the retransmissions could not repair
+	// should be recovered from with a rolling column of intra coded blocks sweeping across
+	// the next few dozen frames, rather than with a full keyframe. A keyframe is a huge
+	// frame that arrives exactly when the link is least able to carry it, and losing it in
+	// turn asks for another one; the sweep repairs the picture over about half a second at
+	// a near constant bitrate instead. The keyframes that are not loss recovery — the first
+	// of a session, and the one after a reconnect — stay keyframes either way. Needs an
+	// encoder that has the mechanism (x264 and NVENC do), and the server also has its own
+	// switch. Read when the encoders are created, so turning it on takes effect on the next
+	// connection; turning it off applies immediately.
+	bool intra_refresh = true;
 	// Whether the server should estimate a motion field between consecutive application
 	// frames so that the headset can warp the last decoded frame on repeat refreshes.
 	// The server only does the work while the application is actually below the stream
@@ -864,6 +887,36 @@ struct feedback
 	uint8_t reconstructed_shards;
 };
 
+// Data shards of one video frame the headset is missing and would like sent again.
+//
+// Sent on the stream (UDP) socket, because a request that arrives after the frame's
+// display deadline is worth nothing and the control socket's head-of-line blocking is
+// exactly what would make it late. Losing one costs a retransmission round, no more:
+// the headset gives up cleanly after a couple of rounds and the frame then takes the
+// incomplete-frame path it always did.
+//
+// Only ever describes shards the parity cannot already rebuild. A group with one hole
+// and its parity in hand repairs itself, so those indices are left out; a group with
+// two holes has all but one of them nacked, since repairing the rest is what puts the
+// parity back in reach.
+struct nack
+{
+	uint8_t stream_index;
+	uint64_t frame_idx;
+	// Lowest missing shard index this request covers, and always the first bit set
+	// in the bitmap below.
+	uint16_t first_shard_idx;
+	// Bit (8 * b + i) of bitmap, LSB first within a byte, asks for shard
+	// first_shard_idx + 8 * b + i. Capped at max_nack_bitmap_bytes, i.e. a window of
+	// 256 shards from the first missing one — past that the frame is too far gone
+	// for a retransmission to save it anyway.
+	std::vector<uint8_t> bitmap;
+};
+
+// Longest bitmap a nack may carry, and therefore the widest window of shard indices
+// one request can name.
+inline constexpr size_t max_nack_bitmap_bytes = 32;
+
 struct battery
 {
 	float charge;
@@ -981,6 +1034,7 @@ using packets = std::variant<
         htc_body,
         inputs,
         timesync_response,
+        nack,
         battery,
         wifi_state,
         visibility_mask_changed,
@@ -1235,9 +1289,16 @@ public:
 	uint8_t stream_item_idx;
 	// Frame the covered data shards belong to
 	uint64_t frame_idx;
-	// shard_idx of the first data shard of the group. The group is
-	// [first_shard_idx, first_shard_idx + blob_size.size()), always contiguous.
+	// shard_idx of the first data shard of the group. With shard_stride below, the
+	// group is first_shard_idx, first_shard_idx + shard_stride, and so on for
+	// blob_size.size() entries.
 	uint16_t first_shard_idx;
+	// Gap between two consecutive shards of the group. 1 is the contiguous group,
+	// which is what the fixed 8+1 scheme emits; the adaptive scheme interleaves,
+	// so that a burst of consecutive datagrams lost on the air lands one erasure in
+	// each of `shard_stride` different groups instead of killing one of them
+	// outright. 0 never appears on the wire and is read as 1.
+	uint16_t shard_stride;
 	// Recovery blob length of each covered data shard, in shard_idx order. Its
 	// size is the group size: the configured K for a full group, less for the
 	// last group of a frame. Also tells the headset that those shard indices

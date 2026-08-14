@@ -69,6 +69,25 @@ headset WiVRn supports.
   the total on the wire stays exactly where the bitrate controller put it, and a rebuilt frame is
   never counted as lost. XOR recovers one loss per group, which is the common case; a burst-
   tolerant code over the same groups is a v2 item. No server configuration.
+- **Intra-refresh recovery** *(toggle, default on)* — the loss the error correction could not
+  repair used to cost a full keyframe: ten to thirty times a normal frame, requested at the exact
+  moment the link had just proved it could not carry what it already had, with the whole stream
+  held silent until the headset acknowledged it — and every frame skipped in the meantime is one
+  more frame the headset did not get, asking for another keyframe. Loss → keyframe → more loss.
+  NX repairs the picture instead with a rolling column of intra-coded blocks that sweeps across it
+  over the next 48 frames (half a second at 90 Hz): nothing large is ever sent, no frame is
+  skipped, and the headset watches the damaged region shrink from one edge to the other rather
+  than seeing nothing and then a perfect frame. The keyframes that are *not* loss recovery — the
+  first of a session, and the one after a reconnect, a bitrate reconfiguration or an encoder
+  failover swap — stay real keyframes, because there the headset's decoder holds nothing to
+  repair. Loss inside a sweep never restarts it (that would leave a bad link permanently half
+  repaired) but does condemn it, and three spoiled sweeps in a row fall back to a keyframe after
+  all. Native on x264 (`b_intra_refresh` + `x264_encoder_intra_refresh`) and NVENC
+  (`enableIntraRefresh` + `forceIntraRefreshWithFrameCnt`); the Vulkan encoders never needed it,
+  since they already recover by encoding against the newest reference the headset acknowledged,
+  and VAAPI has no such control and says so once. Costs a little steady-state quality, not extra
+  bytes — the rate control has the same budget either way. Toggle: headset (*Intra-refresh
+  recovery*); config key `intra-refresh`. [Details](docs/intra-refresh.md).
 - **Wi-Fi QoS priority** *(toggle, default on)* — both ends mark their sockets with a DSCP class,
   which access points map to the WMM access categories: the server's video stream gets AF41 (AC_VI),
   every socket carrying control, tracking, inputs and feedback gets EF (AC_VO), so a tracking packet

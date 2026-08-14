@@ -294,6 +294,22 @@ configuration::configuration()
 			U_LOG_W("Ignoring invalid \"encoder-failover\" configuration: %s", e.what());
 		}
 
+		// "intra-refresh": true/false
+		try
+		{
+			if (auto it = json.find("intra-refresh"); it != json.end())
+			{
+				if (it->is_boolean())
+					intra_refresh = *it;
+				else
+					throw std::runtime_error("invalid intra-refresh value, expected a boolean");
+			}
+		}
+		catch (const std::exception & e)
+		{
+			U_LOG_W("Ignoring invalid \"intra-refresh\" configuration: %s", e.what());
+		}
+
 		// "multipath": {"usb-max-bitrate": bits/s}
 		try
 		{

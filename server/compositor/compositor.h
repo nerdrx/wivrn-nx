@@ -230,8 +230,15 @@ private:
 	// and the status is assembled on the worker thread.
 	std::atomic<bool> pacing_enabled = false;
 	std::atomic<float> pacing_window = 0;
-	// Same story for forward error correction
+	// Same story for forward error correction, the adaptive parity ratio that extends
+	// it, and the shard retransmission that shares its loss measurement
 	std::atomic<bool> fec_enabled = false;
+	std::atomic<bool> fec_adaptive_enabled = false;
+	std::atomic<bool> retransmit_enabled = false;
+	// And for intra refresh loss recovery. Starts true because that is the default at
+	// both ends: the first call from the session is what makes it real, and it must be
+	// able to tell "already on" from a change.
+	std::atomic<bool> intra_refresh_enabled = true;
 
 	// Separate streaming of one overlay quad layer. Null unless the headset asked
 	// for it when the session was set up, in which case the layer is picked afresh
@@ -414,10 +421,34 @@ public:
 	// that the headset rebuilds a lost one. Logs state changes.
 	void set_fec(bool enabled);
 
+	// Let that parity ratio follow the measured loss instead of being the fixed 8+1,
+	// and interleave the groups so a burst of consecutive datagrams costs one erasure
+	// in several groups rather than several in one. Logs state changes.
+	void set_fec_adaptive(bool enabled);
+
+	// Keep a short history of the shards each stream sends, so that one the headset
+	// says it never received can be sent again. Logs state changes; off releases the
+	// memory.
+	void set_shard_retransmit(bool enabled);
+
+	// Rebuild the shards a headset request asks for. Appended to `out` for the session
+	// to put on the wire: the connection is the session's, not the compositor's.
+	void collect_retransmits(const from_headset::nack &,
+	                         std::vector<to_headset::video_stream_data_shard> & out);
+
+	// Video shards sent again on request over every stream, monotonic
+	uint64_t retransmitted_shards() const;
+
 	// Hardware encoder failover: hand a stream whose hardware encoder died or went
 	// quiet to the software encoder rather than letting it freeze. Logs state
 	// changes; turning it off never undoes a swap that already happened.
 	void set_encoder_failover(bool enabled);
+
+	// Intra refresh loss recovery: repair a lost frame with a rolling sweep of intra
+	// coded blocks rather than with a keyframe. Logs state changes. Only ever narrows
+	// live — the mechanism itself is configured when an encoder is created, so turning
+	// it back on only takes effect on the next connection.
+	void set_intra_refresh(bool enabled);
 
 	// Whether any stream is running on the software encoder after a failover
 	bool on_software_encoder() const

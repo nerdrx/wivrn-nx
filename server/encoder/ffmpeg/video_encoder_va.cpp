@@ -269,6 +269,17 @@ video_encoder_va::video_encoder_va(wivrn::vk_bundle & vk,
 		// tune here. Encoder specific options from the configuration file still apply.
 		U_LOG_I("vaapi: text clarity mode has no effect, the VAAPI encoders expose no detail retention setting");
 	}
+	if (settings.intra_refresh)
+	{
+		// The FFmpeg VAAPI encoders expose no intra refresh control: the only key frame
+		// related AVOption any of h264_vaapi, hevc_vaapi and av1_vaapi has is idr_interval,
+		// which sets how often a whole IDR is emitted, and there is no per-frame way to ask
+		// for a rolling refresh. VAAPI itself has an intra refresh parameter for some
+		// drivers, but nothing in libavcodec plumbs it through, so honouring this would mean
+		// bypassing the encoder FFmpeg owns. A lost frame therefore still asks for a
+		// keyframe here; FEC and the retransmissions are what keep that rare.
+		U_LOG_I("vaapi: intra refresh loss recovery has no effect, the VAAPI encoders expose no intra refresh control; lost frames still ask for a keyframe");
+	}
 	if (settings.foveation_foveal_qp)
 	{
 		// Foveation v2 lever 3: the FFmpeg VAAPI encoders expose no per-region QP map, so the

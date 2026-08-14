@@ -61,6 +61,17 @@ struct shard_set
 	// makes reachable in a way the old two-deep one never did.
 	uint16_t submitted = 0;
 
+	// When something last arrived for this frame, in headset time. A frame that has
+	// been quiet for longer than the reordering the two paths can produce is a frame
+	// with holes rather than one still arriving, which is what the retransmission
+	// request timer is measured against.
+	XrTime last_shard = 0;
+	// Retransmission rounds already spent on this frame, and when the last one went
+	// out. Bounded by shard_accumulator so that a frame the link is not going to
+	// deliver costs a fixed, small number of requests and no more.
+	uint8_t nack_rounds = 0;
+	XrTime nack_last = 0;
+
 	wivrn::from_headset::feedback feedback{};
 
 	explicit shard_set(uint8_t stream_index = 0)
@@ -79,6 +90,9 @@ struct shard_set
 		data.clear();
 		parity.clear();
 		submitted = 0;
+		last_shard = 0;
+		nack_rounds = 0;
+		nack_last = 0;
 
 		uint8_t stream_index = feedback.stream_index;
 		feedback = {};
@@ -119,6 +133,7 @@ struct shard_set
 		if (data[idx])
 			return {};
 		data[idx] = std::move(shard);
+		last_shard = now;
 		return idx;
 	}
 
@@ -130,7 +145,10 @@ struct shard_set
 		if (n == 0)
 			return {};
 
-		const size_t last = size_t(p.first_shard_idx) + n;
+		// One past the highest index the group covers, striding included
+		const size_t last = wivrn::fec::group_end(p);
+		if (last > max_shards_per_frame)
+			return {};
 
 		// A group needs all but one of its shards to be rebuildable, so a parity shard
 		// may only ever tell us about one index past what we already hold. That is also
@@ -156,13 +174,63 @@ struct shard_set
 	// Whether every data shard `p` covers has arrived, which makes `p` useless
 	bool group_complete(const parity_shard & p) const
 	{
-		const size_t last = size_t(p.first_shard_idx) + p.blob_size.size();
-		if (data.size() < last)
+		const size_t n = p.blob_size.size();
+		if (data.size() < wivrn::fec::group_end(p))
 			return false;
-		for (size_t i = p.first_shard_idx; i < last; ++i)
-			if (not data[i])
+		const uint16_t stride = wivrn::fec::group_stride(p);
+		for (size_t i = 0; i < n; ++i)
+			if (not data[size_t(p.first_shard_idx) + i * stride])
 				return false;
 		return true;
+	}
+
+	// Shard indices this frame is missing and that a retransmission is the only way
+	// back for. Appended to `out`, which is cleared first.
+	//
+	// Only holes below the highest index seen: what is past it is unknown territory,
+	// since only the shard carrying timing_info says how long the frame is. The one
+	// exception is `frame_over`, which says the caller has decided nothing more is
+	// coming on its own — the next index after the highest one held is then known to
+	// exist (the highest one is not the last), and asking for a shard the server
+	// never sent costs nothing, it is simply ignored there.
+	//
+	// Requests are deduplicated against the parity in hand. Every parity still held
+	// covers a group with at least two holes — one hole and it repairs itself the
+	// moment it lands, see shard_accumulator::drain_parity — so filling all but one
+	// of them is what brings the last back into the parity's reach, and that one is
+	// left out of the request.
+	void missing_shards(std::vector<uint16_t> & out, bool frame_over) const
+	{
+		out.clear();
+		if (data.empty())
+			return;
+
+		for (size_t i = 0; i < data.size(); ++i)
+			if (not data[i])
+				out.push_back(uint16_t(i));
+
+		if (frame_over and data.back() and not data.back()->timing_info and
+		    data.size() < max_shards_per_frame)
+			out.push_back(uint16_t(data.size()));
+
+		if (out.empty())
+			return;
+
+		for (const parity_shard & p: parity)
+		{
+			const uint16_t stride = wivrn::fec::group_stride(p);
+			std::optional<uint16_t> spare;
+			for (size_t i = 0; i < p.blob_size.size(); ++i)
+			{
+				const size_t idx = size_t(p.first_shard_idx) + i * stride;
+				if (idx >= max_shards_per_frame)
+					break;
+				if (idx >= data.size() or not data[idx])
+					spare = uint16_t(idx);
+			}
+			if (spare)
+				std::erase(out, *spare);
+		}
 	}
 };
 

@@ -70,6 +70,7 @@ enum class ui_kind
 	combo,
 	combo_multi,
 	button,
+	section, // a labeled group divider, not an actual setting
 };
 
 // one declarative setting, `enabled` greys the row out without hiding it
@@ -106,6 +107,43 @@ struct setting
 	std::string disabled_tooltip; // shown on a disabled row
 };
 
+// a group divider inside a settings card: accent-tinted heading, optional muted subtitle,
+// and a separator above every section but the first so the groups read as distinct without
+// splitting the page into a card per group. purely visual, holds no binding.
+setting section(const char * id, std::string label, std::string description = {})
+{
+	return {.id = id, .label = std::move(label), .description = std::move(description), .ui = ui_kind::section};
+}
+
+void render_section_header(const setting & s, bool first)
+{
+	const ui::theme & t = ui::current();
+	const ImGuiStyle & style = ImGui::GetStyle();
+
+	if (not first)
+	{
+		ImGui::Dummy({0, ui::metrics::card_item_spacing.y});
+		ui::row_separator();
+	}
+	ImGui::Dummy({0, ui::metrics::card_item_spacing.y});
+
+	ImGui::PushStyleColor(ImGuiCol_Text, t.accent);
+	ImGui::TextUnformatted(s.label.c_str());
+	ImGui::PopStyleColor();
+
+	if (not s.description.empty())
+	{
+		ImGui::PushFont(nullptr, style.FontSizeBase * ui::metrics::font_description);
+		ImGui::PushStyleColor(ImGuiCol_Text, t.text_muted);
+		ImGui::PushTextWrapPos(0);
+		ImGui::TextUnformatted(s.description.c_str());
+		ImGui::PopTextWrapPos();
+		ImGui::PopStyleColor();
+		ImGui::PopFont();
+	}
+	ImGui::Dummy({0, ui::metrics::label_line_gap});
+}
+
 void render_settings(const wivrn::gui::settings_context & ctx, const char * card_id, const std::vector<setting> & list)
 {
 	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ui::metrics::card_item_spacing);
@@ -113,6 +151,12 @@ void render_settings(const wivrn::gui::settings_context & ctx, const char * card
 
 	for (const auto & s: list)
 	{
+		if (s.ui == ui_kind::section)
+		{
+			render_section_header(s, &s == &list.front());
+			continue;
+		}
+
 		const bool enabled = s.enabled ? s.enabled() : true;
 		ImGui::BeginDisabled(not enabled);
 
@@ -181,6 +225,8 @@ void render_settings(const wivrn::gui::settings_context & ctx, const char * card
 					s.on_click();
 				break;
 			}
+			case ui_kind::section: // drawn above via continue, never reaches the switch
+				break;
 		}
 
 		ImGui::EndDisabled();
@@ -307,111 +353,6 @@ void settings_streaming(const settings_context & ctx)
 	const std::string disconnect_tip = ctx.in_game ? _C("tooltip for disabled settings", "Disconnect to change this setting.") : std::string{};
 	std::vector<setting> list;
 
-	list.push_back({
-	        .id = "##standby_freeze",
-	        .label = _("Freeze sleeping controllers"),
-	        .description = _("Some controllers, Pico's in particular, go to sleep on their own and keep reporting a pose the headset knows is no longer being tracked. On, the computer holds the controller at the last pose it was really tracked at until it wakes up. Off, the computer uses whatever pose the headset reports, which is what WiVRn has always done and which can make a sleeping controller jump across the room."),
-	        .ui = ui_kind::toggle,
-	        .get_bool = [&config] { return config.standby_freeze; },
-	        .set_bool = [&ctx, &config](bool v) { config.standby_freeze = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
-	        .default_bool = default_config.standby_freeze,
-	});
-
-	list.push_back({
-	        .id = "##foveation",
-	        .label = _("Foveated encoding"),
-	        .description = config.check_feature(feature::eye_gaze)
-	                               ? _("Higher values focus image quality where you look at, improving latency, power efficiency and quality.")
-	                               : _("Higher values focus image quality at the center, improving latency, power efficiency and quality."),
-	        .ui = ui_kind::slider,
-	        .get_int = [&config] { return int(std::lround((1 - config.get_stream_scale()) * 100)); },
-	        .set_int = [&config](int v) {
-		        if (not config.extended_config)
-			        v = std::clamp(v, 30, 80);
-		        config.set_stream_scale(1 - v * 0.01);
-		        config.save(); },
-	        .v_min = 0,
-	        .v_max = 80,
-	        .fmt = "%d%%",
-	        .default_int = int(std::lround((1 - default_config.get_stream_scale()) * 100)),
-	        .enabled = [&ctx] { return not ctx.in_game; },
-	        .disabled_tooltip = disconnect_tip,
-	});
-
-	list.push_back({
-	        .id = "##reduced_resolution",
-	        .label = _("Reduced resolution streaming"),
-	        .description = _("Encode, transmit and decode the video at a fraction of the normal resolution to save bitrate, encode and decode cost. The display resolution is unchanged; the smaller image is reconstructed on the headset when it is drawn. Pairs with FSR upscaling on the Post-processing page for sharpness (without it the reconstruction is a plain bilinear stretch). Takes effect on the next connection."),
-	        .ui = ui_kind::toggle,
-	        .get_bool = [&config] { return config.reduced_resolution; },
-	        .set_bool = [&ctx, &config](bool v) { config.reduced_resolution = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
-	        .default_bool = default_config.reduced_resolution,
-	});
-
-	list.push_back({
-	        .id = "##render_scale",
-	        .label = _C("setting name", "Streaming resolution"),
-	        .description = _("Fraction of the normal encode resolution the video is streamed at. Lower saves more bandwidth and power but softens the image; pair it with FSR upscaling. Takes effect on the next connection."),
-	        .ui = ui_kind::slider,
-	        .get_int = [&config] { return int(std::lround(config.render_scale * 100)); },
-	        .set_int = [&ctx, &config](int v) { config.render_scale = std::clamp(v, 50, 100) * 0.01f; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
-	        .v_min = 50,
-	        .v_max = 100,
-	        .fmt = "%d%%",
-	        .default_int = int(std::lround(default_config.render_scale * 100)),
-	        .enabled = [&config] { return config.reduced_resolution; },
-	        .disabled_tooltip = _("Enable reduced resolution streaming to change this setting."),
-	});
-
-	list.push_back({
-	        .id = "##sharper_center",
-	        .label = _("Sharper center (foveation)"),
-	        .description = _("Reshape the foveation curve so the center of the image stays full resolution over a wider area and the periphery falls off more steeply, spending more of the same encoded size on where you are looking. The encoded size, bitrate and display resolution are unchanged, so it costs nothing extra and takes effect immediately without reconnecting. Best on headsets without eye tracking, where the sharp region is fixed at the center."),
-	        .ui = ui_kind::toggle,
-	        .get_bool = [&config] { return config.sharper_center; },
-	        .set_bool = [&ctx, &config](bool v) { config.sharper_center = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
-	        .default_bool = default_config.sharper_center,
-	});
-
-	list.push_back({
-	        .id = "##foveation_strength",
-	        .label = _C("setting name", "Sharper center strength"),
-	        .description = _("How much the center is favored. Higher widens the full-resolution center and steepens the periphery falloff. The server clamps the steepest periphery when the streaming resolution is low so the edges do not collapse into a blocky upscale."),
-	        .ui = ui_kind::slider,
-	        .get_int = [&config] { return int(std::lround(config.foveation_strength * 100)); },
-	        .set_int = [&ctx, &config](int v) { config.foveation_strength = std::clamp(v, 0, 100) * 0.01f; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
-	        .v_min = 0,
-	        .v_max = 100,
-	        .fmt = "%d%%",
-	        .default_int = int(std::lround(default_config.foveation_strength * 100)),
-	        .enabled = [&config] { return config.sharper_center; },
-	        .disabled_tooltip = _("Enable sharper center to change this setting."),
-	});
-
-	list.push_back({
-	        .id = "##foveation_adaptive",
-	        .label = _("Adaptive foveation"),
-	        .description = _("Let the server steepen the center-sharpening curve on its own when the link degrades, so the periphery compresses under a Wi-Fi dip instead of the whole image losing quality. Only the curve shape changes, never the encoded size, so it stays live. Needs the automatic bitrate."),
-	        .ui = ui_kind::toggle,
-	        .get_bool = [&config] { return config.foveation_adaptive; },
-	        .set_bool = [&ctx, &config](bool v) { config.foveation_adaptive = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
-	        .default_bool = default_config.foveation_adaptive,
-	        .enabled = [&config] { return config.sharper_center and config.bitrate_auto; },
-	        .disabled_tooltip = _("Enable sharper center and the automatic bitrate to use adaptive foveation."),
-	});
-
-	list.push_back({
-	        .id = "##foveation_foveal_qp",
-	        .label = _("Protect foveal quality (NVENC/x264)"),
-	        .description = _("Bias the encoder to spend fewer bits compressing the fixed central region, where the encoder exposes a per-region quality map. Only NVENC and x264 have such a path; VAAPI and Vulkan encoders ignore it. Takes effect on the next connection."),
-	        .ui = ui_kind::toggle,
-	        .get_bool = [&config] { return config.foveation_foveal_qp; },
-	        .set_bool = [&ctx, &config](bool v) { config.foveation_foveal_qp = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
-	        .default_bool = default_config.foveation_foveal_qp,
-	        .enabled = [&config] { return config.sharper_center; },
-	        .disabled_tooltip = _("Enable sharper center to change this setting."),
-	});
-
 	auto codec_name = [](std::optional<wivrn::video_codec> codec) -> std::string {
 		if (not codec)
 			return _C("Codec", "Automatic");
@@ -433,6 +374,74 @@ void settings_streaming(const settings_context & ctx)
 	for (auto c: wivrn::decoder::supported_codecs())
 		if (c != wivrn::raw)
 			codecs.push_back(c);
+
+	// Manual / Adaptive / Adaptive v2. bitrate_auto stays the switch it always was — the
+	// dashboard and the server both still read it — and bitrate_bbr only says which control
+	// law the adaptive entries mean. Leaving bitrate_bbr empty (nobody ever touched this)
+	// hands the choice to the server's own configuration, which is why picking "Adaptive"
+	// explicitly is not the same as never having picked anything.
+	const auto bitrate_control_index = [](const configuration & c) {
+		if (not c.bitrate_auto)
+			return 0;
+		return c.bitrate_bbr.value_or(false) ? 2 : 1;
+	};
+
+	// Off / Backup only / Combine. multipath_usb stays the switch it always was —
+	// off is the one state that means "never attach a path at all" — and
+	// multipath_combine only says what the path is for once there is one, the same
+	// shape as bitrate_auto and bitrate_bbr above.
+	const auto multipath_index = [](const configuration & c) {
+		if (not c.multipath_usb)
+			return 0;
+		return c.multipath_combine ? 2 : 1;
+	};
+
+	// Off / Headset / Server. motion_smoothing stays the switch it always was, and
+	// motion_smoothing_server only says which end does the warping when it is on —
+	// the same shape as bitrate_auto and bitrate_bbr above.
+	const auto motion_smoothing_index = [](const configuration & c) {
+		if (not c.motion_smoothing)
+			return 0;
+		return c.motion_smoothing_server ? 2 : 1;
+	};
+
+	const int mb = 1'000'000;
+
+	list.push_back(section("sec_quality", _cS("settings section", "Streaming quality")));
+
+	list.push_back({
+	        .id = "##bitrate_control",
+	        .label = _C("setting name", "Bitrate control"),
+	        .description = _("Manual keeps the bitrate below exactly where you set it. Adaptive lets the server lower it when the connection cannot keep up, using that bitrate as the maximum. Adaptive v2 is experimental: instead of reacting to congestion it measures how fast frames are actually being delivered and aims just under that."),
+	        .ui = ui_kind::combo,
+	        .get_int = [&config, bitrate_control_index] { return bitrate_control_index(config); },
+	        .set_int = [&ctx, &config](int v) {
+		        config.bitrate_auto = v != 0;
+		        if (v != 0)
+			        config.bitrate_bbr = v == 2;
+		        config.save();
+		        if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .options = [] { return std::vector<std::string>{
+		                        _C("Bitrate control", "Manual"),
+		                        _C("Bitrate control", "Adaptive"),
+		                        _C("Bitrate control", "Adaptive v2 (experimental)"),
+		                }; },
+	        .title = _C("setting name", "Bitrate control"),
+	        .default_int = bitrate_control_index(default_config),
+	});
+
+	list.push_back({
+	        .id = "##bitrate",
+	        .label = _("Bitrate"),
+	        .description = _("Video data rate sent to the headset."),
+	        .ui = ui_kind::slider,
+	        .get_int = [&config] { return int(config.bitrate_bps / mb); },
+	        .set_int = [&ctx, &config](int v) { config.bitrate_bps = uint32_t(v) * mb; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .v_min = 5,
+	        .v_max = int(config.max_bitrate() / mb),
+	        .fmt = "%d Mbit/s",
+	        .default_int = int(default_config.bitrate_bps / mb),
+	});
 
 	list.push_back({
 	        .id = "##codec",
@@ -470,37 +479,98 @@ void settings_streaming(const settings_context & ctx)
 		});
 	}
 
-	// Manual / Adaptive / Adaptive v2. bitrate_auto stays the switch it always was — the
-	// dashboard and the server both still read it — and bitrate_bbr only says which control
-	// law the adaptive entries mean. Leaving bitrate_bbr empty (nobody ever touched this)
-	// hands the choice to the server's own configuration, which is why picking "Adaptive"
-	// explicitly is not the same as never having picked anything.
-	const auto bitrate_control_index = [](const configuration & c) {
-		if (not c.bitrate_auto)
-			return 0;
-		return c.bitrate_bbr.value_or(false) ? 2 : 1;
-	};
+	list.push_back({
+	        .id = "##reduced_resolution",
+	        .label = _("Reduced resolution streaming"),
+	        .description = _("Encode, transmit and decode the video at a fraction of the normal resolution to save bitrate, encode and decode cost. The display resolution is unchanged; the smaller image is reconstructed on the headset when it is drawn. Pairs with FSR upscaling on the Post-processing page for sharpness (without it the reconstruction is a plain bilinear stretch). Takes effect on the next connection."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.reduced_resolution; },
+	        .set_bool = [&ctx, &config](bool v) { config.reduced_resolution = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.reduced_resolution,
+	});
 
 	list.push_back({
-	        .id = "##bitrate_control",
-	        .label = _C("setting name", "Bitrate control"),
-	        .description = _("Manual keeps the bitrate below exactly where you set it. Adaptive lets the server lower it when the connection cannot keep up, using that bitrate as the maximum. Adaptive v2 is experimental: instead of reacting to congestion it measures how fast frames are actually being delivered and aims just under that."),
-	        .ui = ui_kind::combo,
-	        .get_int = [&config, bitrate_control_index] { return bitrate_control_index(config); },
-	        .set_int = [&ctx, &config](int v) {
-		        config.bitrate_auto = v != 0;
-		        if (v != 0)
-			        config.bitrate_bbr = v == 2;
-		        config.save();
-		        if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
-	        .options = [] { return std::vector<std::string>{
-		                        _C("Bitrate control", "Manual"),
-		                        _C("Bitrate control", "Adaptive"),
-		                        _C("Bitrate control", "Adaptive v2 (experimental)"),
-		                }; },
-	        .title = _C("setting name", "Bitrate control"),
-	        .default_int = bitrate_control_index(default_config),
+	        .id = "##render_scale",
+	        .label = _C("setting name", "Streaming resolution"),
+	        .description = _("Fraction of the normal encode resolution the video is streamed at. Lower saves more bandwidth and power but softens the image; pair it with FSR upscaling. Takes effect on the next connection."),
+	        .ui = ui_kind::slider,
+	        .get_int = [&config] { return int(std::lround(config.render_scale * 100)); },
+	        .set_int = [&ctx, &config](int v) { config.render_scale = std::clamp(v, 50, 100) * 0.01f; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .v_min = 50,
+	        .v_max = 100,
+	        .fmt = "%d%%",
+	        .default_int = int(std::lround(default_config.render_scale * 100)),
+	        .enabled = [&config] { return config.reduced_resolution; },
+	        .disabled_tooltip = _("Enable reduced resolution streaming to change this setting."),
 	});
+
+	list.push_back({
+	        .id = "##foveation",
+	        .label = _("Foveated encoding"),
+	        .description = config.check_feature(feature::eye_gaze)
+	                               ? _("Higher values focus image quality where you look at, improving latency, power efficiency and quality.")
+	                               : _("Higher values focus image quality at the center, improving latency, power efficiency and quality."),
+	        .ui = ui_kind::slider,
+	        .get_int = [&config] { return int(std::lround((1 - config.get_stream_scale()) * 100)); },
+	        .set_int = [&config](int v) {
+		        if (not config.extended_config)
+			        v = std::clamp(v, 30, 80);
+		        config.set_stream_scale(1 - v * 0.01);
+		        config.save(); },
+	        .v_min = 0,
+	        .v_max = 80,
+	        .fmt = "%d%%",
+	        .default_int = int(std::lround((1 - default_config.get_stream_scale()) * 100)),
+	        .enabled = [&ctx] { return not ctx.in_game; },
+	        .disabled_tooltip = disconnect_tip,
+	});
+
+	list.push_back({
+	        .id = "##sharper_center",
+	        .label = _("Sharper center (foveation)"),
+	        .description = _("Reshape the foveation curve so the center of the image stays full resolution over a wider area and the periphery falls off more steeply, spending more of the same encoded size on where you are looking. The encoded size, bitrate and display resolution are unchanged, so it costs nothing extra and takes effect immediately without reconnecting. Best on headsets without eye tracking, where the sharp region is fixed at the center."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.sharper_center; },
+	        .set_bool = [&ctx, &config](bool v) { config.sharper_center = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.sharper_center,
+	});
+
+	list.push_back({
+	        .id = "##foveation_strength",
+	        .label = _C("setting name", "Sharper center strength"),
+	        .description = _("How much the center is favored. Higher widens the full-resolution center and steepens the periphery falloff. The server clamps the steepest periphery when the streaming resolution is low so the edges do not collapse into a blocky upscale."),
+	        .ui = ui_kind::slider,
+	        .get_int = [&config] { return int(std::lround(config.foveation_strength * 100)); },
+	        .set_int = [&ctx, &config](int v) { config.foveation_strength = std::clamp(v, 0, 100) * 0.01f; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .v_min = 0,
+	        .v_max = 100,
+	        .fmt = "%d%%",
+	        .default_int = int(std::lround(default_config.foveation_strength * 100)),
+	        .enabled = [&config] { return config.sharper_center; },
+	        .disabled_tooltip = _("Enable sharper center to change this setting."),
+	});
+
+	list.push_back({
+	        .id = "##sharp_text",
+	        .label = _("Text clarity mode"),
+	        .description = _("Optimise the encoder for fine detail such as text and user interfaces, at the expense of a slightly noisier image. Takes effect on the next connection."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.sharp_text; },
+	        .set_bool = [&ctx, &config](bool v) { config.sharp_text = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.sharp_text,
+	});
+
+	list.push_back({
+	        .id = "##quad_layers",
+	        .label = _("Sharp overlay layers"),
+	        .description = _("Stream overlay panels such as WayVR windows as their own layer instead of mixing them into the game image: they come out sharper, and stay perfectly still when you move your head. Takes effect on the next connection."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.quad_layers; },
+	        .set_bool = [&ctx, &config](bool v) { config.quad_layers = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.quad_layers,
+	});
+
+	list.push_back(section("sec_network", _cS("settings section", "Network resilience"), _cS("settings section subtitle", "Keep the picture together when Wi-Fi gets rough.")));
 
 	list.push_back({
 	        .id = "##radio_aware",
@@ -514,20 +584,6 @@ void settings_streaming(const settings_context & ctx)
 	        .disabled_tooltip = _("Enable automatic bitrate to change this setting."),
 	});
 
-	const int mb = 1'000'000;
-	list.push_back({
-	        .id = "##bitrate",
-	        .label = _("Bitrate"),
-	        .description = _("Video data rate sent to the headset."),
-	        .ui = ui_kind::slider,
-	        .get_int = [&config] { return int(config.bitrate_bps / mb); },
-	        .set_int = [&ctx, &config](int v) { config.bitrate_bps = uint32_t(v) * mb; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
-	        .v_min = 5,
-	        .v_max = int(config.max_bitrate() / mb),
-	        .fmt = "%d Mbit/s",
-	        .default_int = int(default_config.bitrate_bps / mb),
-	});
-
 	list.push_back({
 	        .id = "##smooth_pacing",
 	        .label = _("Smooth packet pacing"),
@@ -536,6 +592,16 @@ void settings_streaming(const settings_context & ctx)
 	        .get_bool = [&config] { return config.smooth_pacing; },
 	        .set_bool = [&ctx, &config](bool v) { config.smooth_pacing = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
 	        .default_bool = default_config.smooth_pacing,
+	});
+
+	list.push_back({
+	        .id = "##wifi_qos",
+	        .label = _("Wi-Fi QoS priority"),
+	        .description = _("Tag the streaming traffic so that the access point puts it in its high priority queues ahead of everything else on the network. A few networks mangle or drop tagged traffic instead; turn this off if the connection is worse with it on."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.wifi_qos; },
+	        .set_bool = [&ctx, &config](bool v) { config.wifi_qos = v; config.save(); if (ctx.on_qos_changed) ctx.on_qos_changed(); },
+	        .default_bool = default_config.wifi_qos,
 	});
 
 	list.push_back({
@@ -571,13 +637,13 @@ void settings_streaming(const settings_context & ctx)
 	});
 
 	list.push_back({
-	        .id = "##wifi_qos",
-	        .label = _("Wi-Fi QoS priority"),
-	        .description = _("Tag the streaming traffic so that the access point puts it in its high priority queues ahead of everything else on the network. A few networks mangle or drop tagged traffic instead; turn this off if the connection is worse with it on."),
+	        .id = "##intra_refresh",
+	        .label = _("Intra-refresh recovery"),
+	        .description = _("When part of a frame is lost for good, let the computer repair the picture gradually over the next half second instead of resending a whole fresh image at once. The full image is the biggest thing the connection ever has to carry, and it is asked for exactly when the connection is at its worst, which is how one glitch turns into several. The gradual repair keeps the data rate steady instead. Turning it on takes effect on the next connection; not all encoders can do it."),
 	        .ui = ui_kind::toggle,
-	        .get_bool = [&config] { return config.wifi_qos; },
-	        .set_bool = [&ctx, &config](bool v) { config.wifi_qos = v; config.save(); if (ctx.on_qos_changed) ctx.on_qos_changed(); },
-	        .default_bool = default_config.wifi_qos,
+	        .get_bool = [&config] { return config.intra_refresh; },
+	        .set_bool = [&ctx, &config](bool v) { config.intra_refresh = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.intra_refresh,
 	});
 
 	list.push_back({
@@ -588,16 +654,6 @@ void settings_streaming(const settings_context & ctx)
 	        .get_bool = [&config] { return config.encoder_failover; },
 	        .set_bool = [&ctx, &config](bool v) { config.encoder_failover = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
 	        .default_bool = default_config.encoder_failover,
-	});
-
-	list.push_back({
-	        .id = "##intra_refresh",
-	        .label = _("Intra-refresh recovery"),
-	        .description = _("When part of a frame is lost for good, let the computer repair the picture gradually over the next half second instead of resending a whole fresh image at once. The full image is the biggest thing the connection ever has to carry, and it is asked for exactly when the connection is at its worst, which is how one glitch turns into several. The gradual repair keeps the data rate steady instead. Turning it on takes effect on the next connection; not all encoders can do it."),
-	        .ui = ui_kind::toggle,
-	        .get_bool = [&config] { return config.intra_refresh; },
-	        .set_bool = [&ctx, &config](bool v) { config.intra_refresh = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
-	        .default_bool = default_config.intra_refresh,
 	});
 
 	list.push_back({
@@ -620,16 +676,6 @@ void settings_streaming(const settings_context & ctx)
 	        .default_bool = default_config.emergency_framerate,
 	});
 
-	// Off / Backup only / Combine. multipath_usb stays the switch it always was —
-	// off is the one state that means "never attach a path at all" — and
-	// multipath_combine only says what the path is for once there is one, the same
-	// shape as bitrate_auto and bitrate_bbr above.
-	const auto multipath_index = [](const configuration & c) {
-		if (not c.multipath_usb)
-			return 0;
-		return c.multipath_combine ? 2 : 1;
-	};
-
 	list.push_back({
 	        .id = "##multipath_usb",
 	        .label = _("USB connection"),
@@ -651,25 +697,7 @@ void settings_streaming(const settings_context & ctx)
 	        .default_int = multipath_index(default_config),
 	});
 
-	list.push_back({
-	        .id = "##sharp_text",
-	        .label = _("Text clarity mode"),
-	        .description = _("Optimise the encoder for fine detail such as text and user interfaces, at the expense of a slightly noisier image. Takes effect on the next connection."),
-	        .ui = ui_kind::toggle,
-	        .get_bool = [&config] { return config.sharp_text; },
-	        .set_bool = [&ctx, &config](bool v) { config.sharp_text = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
-	        .default_bool = default_config.sharp_text,
-	});
-
-	list.push_back({
-	        .id = "##quad_layers",
-	        .label = _("Sharp overlay layers"),
-	        .description = _("Stream overlay panels such as WayVR windows as their own layer instead of mixing them into the game image: they come out sharper, and stay perfectly still when you move your head. Takes effect on the next connection."),
-	        .ui = ui_kind::toggle,
-	        .get_bool = [&config] { return config.quad_layers; },
-	        .set_bool = [&ctx, &config](bool v) { config.quad_layers = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
-	        .default_bool = default_config.quad_layers,
-	});
+	list.push_back(section("sec_comfort", _cS("settings section", "Comfort & motion")));
 
 	list.push_back({
 	        .id = "##comfort_vignette",
@@ -680,15 +708,6 @@ void settings_streaming(const settings_context & ctx)
 	        .set_bool = [&config](bool v) { config.comfort_vignette = v; config.save(); },
 	        .default_bool = default_config.comfort_vignette,
 	});
-
-	// Off / Headset / Server. motion_smoothing stays the switch it always was, and
-	// motion_smoothing_server only says which end does the warping when it is on —
-	// the same shape as bitrate_auto and bitrate_bbr above.
-	const auto motion_smoothing_index = [](const configuration & c) {
-		if (not c.motion_smoothing)
-			return 0;
-		return c.motion_smoothing_server ? 2 : 1;
-	};
 
 	list.push_back({
 	        .id = "##motion_smoothing",
@@ -709,6 +728,42 @@ void settings_streaming(const settings_context & ctx)
 		                }; },
 	        .title = _("Motion smoothing"),
 	        .default_int = motion_smoothing_index(default_config),
+	});
+
+	list.push_back(section("sec_advanced", _cS("settings section", "Advanced"), _cS("settings section subtitle", "Niche and experimental options.")));
+
+	list.push_back({
+	        .id = "##foveation_adaptive",
+	        .label = _("Adaptive foveation"),
+	        .description = _("Let the server steepen the center-sharpening curve on its own when the link degrades, so the periphery compresses under a Wi-Fi dip instead of the whole image losing quality. Only the curve shape changes, never the encoded size, so it stays live. Needs the automatic bitrate."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.foveation_adaptive; },
+	        .set_bool = [&ctx, &config](bool v) { config.foveation_adaptive = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.foveation_adaptive,
+	        .enabled = [&config] { return config.sharper_center and config.bitrate_auto; },
+	        .disabled_tooltip = _("Enable sharper center and the automatic bitrate to use adaptive foveation."),
+	});
+
+	list.push_back({
+	        .id = "##foveation_foveal_qp",
+	        .label = _("Protect foveal quality (NVENC/x264)"),
+	        .description = _("Bias the encoder to spend fewer bits compressing the fixed central region, where the encoder exposes a per-region quality map. Only NVENC and x264 have such a path; VAAPI and Vulkan encoders ignore it. Takes effect on the next connection."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.foveation_foveal_qp; },
+	        .set_bool = [&ctx, &config](bool v) { config.foveation_foveal_qp = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.foveation_foveal_qp,
+	        .enabled = [&config] { return config.sharper_center; },
+	        .disabled_tooltip = _("Enable sharper center to change this setting."),
+	});
+
+	list.push_back({
+	        .id = "##standby_freeze",
+	        .label = _("Freeze sleeping controllers"),
+	        .description = _("Some controllers, Pico's in particular, go to sleep on their own and keep reporting a pose the headset knows is no longer being tracked. On, the computer holds the controller at the last pose it was really tracked at until it wakes up. Off, the computer uses whatever pose the headset reports, which is what WiVRn has always done and which can make a sleeping controller jump across the room."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.standby_freeze; },
+	        .set_bool = [&ctx, &config](bool v) { config.standby_freeze = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.standby_freeze,
 	});
 
 	// in-stream: steer where foveation focuses quality
@@ -760,6 +815,8 @@ void settings_post_processing(const settings_context & ctx)
 	auto & config = ctx.config;
 	auto & default_config = ctx.default_config;
 	std::vector<setting> list;
+
+	list.push_back(section("pp_sharpening", _cS("settings section", "Sharpening & upscaling"), _cS("settings section subtitle", "These effects run on the headset GPU and cost power on standalone headsets.")));
 
 	if (application::get_openxr_post_processing_supported())
 	{
@@ -866,6 +923,8 @@ void settings_post_processing(const settings_context & ctx)
 	        .disabled_tooltip = config.fsr ? _("FSR upscaling already sharpens the image; turn it off to use contrast adaptive sharpening instead.") : _("Enable contrast adaptive sharpening to change this setting."),
 	});
 
+	list.push_back(section("pp_ambient", _cS("settings section", "Ambient & color")));
+
 	list.push_back({
 	        .id = "##ambient_glow",
 	        .label = _("Ambient glow"),
@@ -915,6 +974,8 @@ void settings_post_processing(const settings_context & ctx)
 	        .enabled = [&config] { return config.deband; },
 	        .disabled_tooltip = _("Enable debanding to change this setting."),
 	});
+
+	list.push_back(section("pp_advanced", _cS("settings section", "Advanced")));
 
 	list.push_back({
 	        .id = "##reduce_gpu_load",

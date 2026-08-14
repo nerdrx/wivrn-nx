@@ -144,6 +144,8 @@ bitrate_controller::status bitrate_controller::snapshot() const
 	// back while the switch is on, so that is what the page is told.
 	s.radio_hold = radio_hold and radio_aware;
 
+	s.emergency = emergency_active;
+
 	return s;
 }
 
@@ -374,6 +376,13 @@ std::optional<uint32_t> bitrate_controller::reset_locked()
 	radio_hold = false;
 	radio_stable_since.reset();
 	last_radio_step = {};
+
+	// Forget the emergency half-rate mode too: the measurements that engaged it say nothing
+	// about the link the caller is re-seeding for. The session mirrors emergency_framerate_active()
+	// onto the compositor, so this clear is what restores the full framerate through that path.
+	emergency_active = false;
+	emergency_severe_since = {};
+	emergency_clean_since = {};
 
 	return bitrate;
 }
@@ -764,7 +773,102 @@ std::optional<uint32_t> bitrate_controller::evaluate(clock::time_point now)
 	if (s.count < min_samples)
 		return {};
 
+	// The last-resort rung, evaluated from the same window: it reads the bitrate reached by
+	// the previous evaluations, so it sees "pinned at the floor" only once the ordinary
+	// control has actually taken the bitrate all the way down and it is still not enough.
+	update_emergency(now, s);
+
 	return mode_locked() == mode::bbr ? evaluate_bbr(now, s) : evaluate_aimd(now, s);
+}
+
+void bitrate_controller::update_emergency(clock::time_point now, const stats & s)
+{
+	if (not emergency_enabled)
+	{
+		// Feature off (either switch): make sure the mode is not latched on. The session
+		// mirrors emergency_framerate_active() onto the compositor, so clearing it here is
+		// enough to restore the full framerate.
+		if (emergency_active)
+		{
+			emergency_active = false;
+			emergency_last_change = now;
+			U_LOG_I("Emergency half-rate: disabled mid-session, restoring full framerate");
+		}
+		emergency_severe_since = {};
+		emergency_clean_since = {};
+		return;
+	}
+
+	// Same verdicts the AIMD law uses, kept mode independent here so the last resort behaves
+	// the same whichever control law is in force.
+	const bool severe = s.utilisation > utilisation_severe or
+	                    s.lost >= lost_frames_severe or
+	                    s.late >= late_frames_severe;
+	const bool healthy = s.utilisation < utilisation_increase and s.lost == 0 and s.late == 0;
+	const bool at_floor = bitrate <= min_bitrate;
+
+	if (not emergency_active)
+	{
+		// Engage only while pinned at the floor and still severely congested: by this point
+		// the error correction, the retransmissions, the intra refresh and every bitrate drop
+		// have already been tried and the link is still not keeping up.
+		if (at_floor and severe)
+		{
+			if (emergency_severe_since == clock::time_point{})
+				emergency_severe_since = now;
+			else if (now - emergency_severe_since >= emergency_trigger_duration and
+			         now - emergency_last_change >= emergency_min_dwell)
+			{
+				emergency_active = true;
+				emergency_last_change = now;
+				emergency_clean_since = {};
+				U_LOG_I("Emergency half-rate: engaging, halving the stream framerate (pinned at %u bps, sustained loss)", bitrate);
+			}
+		}
+		else
+			emergency_severe_since = {};
+	}
+	else
+	{
+		// Restore once the link has been clean for the whole hysteresis window.
+		if (healthy)
+		{
+			if (emergency_clean_since == clock::time_point{})
+				emergency_clean_since = now;
+			else if (now - emergency_clean_since >= emergency_clear_duration and
+			         now - emergency_last_change >= emergency_min_dwell)
+			{
+				emergency_active = false;
+				emergency_last_change = now;
+				emergency_severe_since = {};
+				U_LOG_I("Emergency half-rate: link clean for %d ms, restoring full framerate", int(emergency_clear_duration.count()));
+			}
+		}
+		else
+			emergency_clean_since = {};
+	}
+}
+
+void bitrate_controller::set_emergency_enabled(bool enabled)
+{
+	std::lock_guard lock(mutex);
+	if (emergency_enabled == enabled)
+		return;
+	emergency_enabled = enabled;
+	emergency_severe_since = {};
+	emergency_clean_since = {};
+	if (not enabled and emergency_active)
+	{
+		emergency_active = false;
+		emergency_last_change = clock::now();
+		U_LOG_I("Emergency half-rate: disabled, restoring full framerate");
+	}
+}
+
+bool bitrate_controller::emergency_framerate_active() const
+{
+	std::lock_guard lock(mutex);
+	return emergency_active;
 }
 
 std::optional<uint32_t> bitrate_controller::evaluate_aimd(clock::time_point now, const stats & s)

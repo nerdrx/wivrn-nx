@@ -62,6 +62,9 @@ class lobby : public scene_impl<lobby>
 	std::optional<std::string> async_error;
 	std::shared_ptr<stream> next_scene;
 	std::string server_name;
+	// The service of the connection in flight, kept so the stream scene can rebuild a
+	// session to the same server for a seamless reconnect without going back here.
+	wivrn_discover::service connecting_service;
 	bool autoconnect_enabled = true;
 
 	// Last known uinput forwarding state of the connected server, kept after disconnection so the

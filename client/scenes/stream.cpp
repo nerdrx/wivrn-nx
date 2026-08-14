@@ -211,204 +211,14 @@ static from_headset::visibility_mask_changed::masks get_visibility_mask(xr::inst
 	return res;
 }
 
-std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_session> network_session, float guessed_fps, std::string server_name, scene & parent_scene)
+std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_session> network_session, float guessed_fps, std::string server_name, scene & parent_scene, std::optional<reconnect_info> reconnect_target)
 {
 	std::shared_ptr<stream> self{new stream{std::move(server_name), parent_scene}};
 	self->network_session = std::move(network_session);
+	self->guessed_fps = guessed_fps;
+	self->reconnect_target = std::move(reconnect_target);
 
-	self->network_session->send_control([&]() {
-		from_headset::headset_info_packet info{
-		        .language = application::get_messages_info().language,
-		        .country = application::get_messages_info().country,
-		        .variant = application::get_messages_info().variant,
-		};
-
-		{
-			auto [flags, views] = self->session.locate_views(
-			        XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
-			        self->instance.now(),
-			        application::space(xr::spaces::view));
-
-			assert(views.size() == info.fov.size());
-
-			for (auto [i, j]: std::views::zip(views, info.fov))
-				j = i.fov;
-		}
-
-		const auto & config = application::get_config();
-
-		{
-			auto view = self->system.view_configuration_views(self->viewconfig)[0];
-			view = application::get_hmd_traits().override_view(view);
-
-			info.render_eye_width = view.recommendedImageRectWidth * config.resolution_scale;
-			info.render_eye_height = view.recommendedImageRectHeight * config.resolution_scale;
-		}
-
-		{
-			auto scale = config.get_stream_scale();
-			info.stream_eye_width = info.render_eye_width * scale;
-			info.stream_eye_height = info.render_eye_height * scale;
-		}
-
-		if (self->instance.has_extension(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME))
-		{
-			info.available_refresh_rates = self->session.get_refresh_rates();
-			info.settings.preferred_refresh_rate = config.preferred_refresh_rate;
-			info.settings.minimum_refresh_rate = config.minimum_refresh_rate.value_or(0);
-		}
-		info.settings.fps_divider = config.fps_divider;
-
-		if (info.available_refresh_rates.empty())
-		{
-			spdlog::warn("Unable to detect refresh rates");
-			info.available_refresh_rates = {guessed_fps};
-			info.settings.preferred_refresh_rate = guessed_fps;
-		}
-
-		info.settings.bitrate_bps = config.bitrate_bps;
-		info.settings.bitrate_auto = config.bitrate_auto;
-		info.settings.bitrate_control = config.bitrate_control();
-		info.settings.radio_aware = config.radio_aware;
-		info.settings.smooth_pacing = config.smooth_pacing;
-		info.settings.fec = config.fec;
-		info.settings.fec_adaptive = config.fec_adaptive;
-		info.settings.shard_retransmit = config.shard_retransmit;
-		info.settings.wifi_qos = config.wifi_qos;
-		info.settings.sharp_text = config.sharp_text;
-		info.settings.encoder_failover = config.encoder_failover;
-		info.settings.intra_refresh = config.intra_refresh;
-		info.settings.motion_smoothing = config.motion_smoothing;
-		info.settings.motion_smoothing_mode = config.motion_mode();
-		info.settings.multipath = config.multipath_mode();
-		info.settings.quad_layers = config.quad_layers;
-		info.settings.low_latency_audio = config.low_latency_audio;
-		info.settings.standby_freeze = config.standby_freeze;
-		info.settings.mirror_gamepad = config.forward_gamepad;
-		info.settings.enabled_body_parts = config.body_part_mask;
-		// Reduced resolution streaming: the server reads this when it builds the encoders,
-		// so it only takes effect on connection (this is that connection).
-		info.settings.render_scale = config.effective_render_scale();
-		// Fixed-foveation "sharper center": reshapes the foveation curve live, no reconnect.
-		info.settings.foveation_strength = config.effective_foveation_strength();
-		info.settings.foveation_adaptive = config.foveation_adaptive;
-		info.settings.foveation_foveal_qp = config.foveation_foveal_qp;
-
-		info.hand_tracking = config.check_feature(feature::hand_tracking);
-		info.eye_gaze = config.check_feature(feature::eye_gaze);
-
-		if (self->instance.has_extension(XR_EXT_USER_PRESENCE_EXTENSION_NAME))
-		{
-			info.user_presence = self->system.user_presence_properties().supportsUserPresence;
-		}
-
-		if (config.check_feature(feature::face_tracking))
-		{
-			switch (self->system.face_tracker_supported())
-			{
-				case xr::face_tracker_type::none:
-					info.face_tracking = from_headset::face_type::none;
-					break;
-				case xr::face_tracker_type::android:
-					info.face_tracking = from_headset::face_type::android;
-					break;
-				case xr::face_tracker_type::fb:
-				case xr::face_tracker_type::pico:
-					info.face_tracking = from_headset::face_type::fb2;
-					break;
-				case xr::face_tracker_type::htc:
-					info.face_tracking = from_headset::face_type::htc;
-					break;
-			}
-		}
-
-		if (config.check_feature(feature::body_tracking))
-		{
-			switch (self->system.body_tracker_supported())
-			{
-				case xr::body_tracker_type::none:
-					info.body_tracking = from_headset::body_type::none;
-					break;
-				case xr::body_tracker_type::fb:
-					info.body_tracking = from_headset::body_type::fb;
-					break;
-				case xr::body_tracker_type::meta:
-					info.body_tracking = from_headset::body_type::meta;
-					break;
-				case xr::body_tracker_type::pico:
-					info.body_tracking = from_headset::body_type::bd;
-					break;
-				case xr::body_tracker_type::htc:
-					info.body_tracking = from_headset::body_type::htc;
-					info.num_generic_trackers = application::get_generic_trackers().size();
-					break;
-			}
-		}
-
-		info.palm_pose = application::space(xr::spaces::palm_left) or application::space(xr::spaces::palm_right);
-		info.passthrough = self->system.passthrough_supported() != xr::passthrough_type::none;
-		info.system_name = std::string(self->system.properties().systemName);
-
-		audio::get_audio_description(info);
-		if (not(config.check_feature(feature::microphone)))
-			info.microphone = {};
-
-		if (config.codec)
-		{
-			info.supported_codecs = {*config.codec};
-			switch (*config.codec)
-			{
-				case h264:
-				case raw:
-					break;
-				case h265:
-				case av1:
-					info.bit_depth = config.bit_depth;
-			}
-		}
-		else
-			info.supported_codecs = decoder::supported_codecs();
-
-		return info;
-	}());
-
-	self->network_session->send_control(from_headset::session_state_changed{
-	        .state = application::get_session_state(),
-	});
-	self->network_session->send_control(from_headset::stream_tab_changed{
-	        .tab = self->gui_status,
-	});
-
-	if (self->instance.has_extension(XR_KHR_VISIBILITY_MASK_EXTENSION_NAME))
-	{
-		for (uint8_t view = 0; view < view_count; ++view)
-		{
-			try
-			{
-				self->network_session->send_control(from_headset::visibility_mask_changed{
-				        .data = get_visibility_mask(self->instance, self->session, view),
-				        .view_index = view});
-			}
-			catch (std::exception & e)
-			{
-				spdlog::warn("Failed to get visibility mask: ", e.what());
-			}
-		}
-	}
-
-	{
-		const auto & config = application::get_config();
-		self->override_foveation_enable = config.override_foveation_enable;
-		self->override_foveation_pitch = config.override_foveation_pitch;
-		self->override_foveation_distance = config.override_foveation_distance;
-
-		if (self->override_foveation_enable)
-			self->network_session->send_control(from_headset::override_foveation_center{
-			        .enabled = self->override_foveation_enable,
-			        .pitch = self->override_foveation_pitch,
-			        .distance = self->override_foveation_distance,
-			});
-	}
+	self->send_initial_control_packets(*self->network_session, guessed_fps);
 
 	self->network_thread = utils::named_thread("network_thread", &stream::process_packets, self.get());
 
@@ -480,6 +290,204 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 	self->wifi = application::get_wifi_lock().get_wifi_lock();
 
 	return self;
+}
+
+void scenes::stream::send_initial_control_packets(wivrn_session & net, float guessed_fps)
+{
+	net.send_control([&]() {
+		from_headset::headset_info_packet info{
+		        .language = application::get_messages_info().language,
+		        .country = application::get_messages_info().country,
+		        .variant = application::get_messages_info().variant,
+		};
+
+		{
+			auto [flags, views] = session.locate_views(
+			        XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+			        instance.now(),
+			        application::space(xr::spaces::view));
+
+			assert(views.size() == info.fov.size());
+
+			for (auto [i, j]: std::views::zip(views, info.fov))
+				j = i.fov;
+		}
+
+		const auto & config = application::get_config();
+
+		{
+			auto view = system.view_configuration_views(viewconfig)[0];
+			view = application::get_hmd_traits().override_view(view);
+
+			info.render_eye_width = view.recommendedImageRectWidth * config.resolution_scale;
+			info.render_eye_height = view.recommendedImageRectHeight * config.resolution_scale;
+		}
+
+		{
+			auto scale = config.get_stream_scale();
+			info.stream_eye_width = info.render_eye_width * scale;
+			info.stream_eye_height = info.render_eye_height * scale;
+		}
+
+		if (instance.has_extension(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME))
+		{
+			info.available_refresh_rates = session.get_refresh_rates();
+			info.settings.preferred_refresh_rate = config.preferred_refresh_rate;
+			info.settings.minimum_refresh_rate = config.minimum_refresh_rate.value_or(0);
+		}
+		info.settings.fps_divider = config.fps_divider;
+
+		if (info.available_refresh_rates.empty())
+		{
+			spdlog::warn("Unable to detect refresh rates");
+			info.available_refresh_rates = {guessed_fps};
+			info.settings.preferred_refresh_rate = guessed_fps;
+		}
+
+		info.settings.bitrate_bps = config.bitrate_bps;
+		info.settings.bitrate_auto = config.bitrate_auto;
+		info.settings.bitrate_control = config.bitrate_control();
+		info.settings.radio_aware = config.radio_aware;
+		info.settings.smooth_pacing = config.smooth_pacing;
+		info.settings.fec = config.fec;
+		info.settings.fec_adaptive = config.fec_adaptive;
+		info.settings.shard_retransmit = config.shard_retransmit;
+		info.settings.wifi_qos = config.wifi_qos;
+		info.settings.sharp_text = config.sharp_text;
+		info.settings.encoder_failover = config.encoder_failover;
+		info.settings.intra_refresh = config.intra_refresh;
+		info.settings.emergency_framerate = config.emergency_framerate;
+		info.settings.motion_smoothing = config.motion_smoothing;
+		info.settings.motion_smoothing_mode = config.motion_mode();
+		info.settings.multipath = config.multipath_mode();
+		info.settings.quad_layers = config.quad_layers;
+		info.settings.low_latency_audio = config.low_latency_audio;
+		info.settings.standby_freeze = config.standby_freeze;
+		info.settings.mirror_gamepad = config.forward_gamepad;
+		info.settings.enabled_body_parts = config.body_part_mask;
+		// Reduced resolution streaming: the server reads this when it builds the encoders,
+		// so it only takes effect on connection (this is that connection).
+		info.settings.render_scale = config.effective_render_scale();
+		// Fixed-foveation "sharper center": reshapes the foveation curve live, no reconnect.
+		info.settings.foveation_strength = config.effective_foveation_strength();
+		info.settings.foveation_adaptive = config.foveation_adaptive;
+		info.settings.foveation_foveal_qp = config.foveation_foveal_qp;
+
+		info.hand_tracking = config.check_feature(feature::hand_tracking);
+		info.eye_gaze = config.check_feature(feature::eye_gaze);
+
+		if (instance.has_extension(XR_EXT_USER_PRESENCE_EXTENSION_NAME))
+		{
+			info.user_presence = system.user_presence_properties().supportsUserPresence;
+		}
+
+		if (config.check_feature(feature::face_tracking))
+		{
+			switch (system.face_tracker_supported())
+			{
+				case xr::face_tracker_type::none:
+					info.face_tracking = from_headset::face_type::none;
+					break;
+				case xr::face_tracker_type::android:
+					info.face_tracking = from_headset::face_type::android;
+					break;
+				case xr::face_tracker_type::fb:
+				case xr::face_tracker_type::pico:
+					info.face_tracking = from_headset::face_type::fb2;
+					break;
+				case xr::face_tracker_type::htc:
+					info.face_tracking = from_headset::face_type::htc;
+					break;
+			}
+		}
+
+		if (config.check_feature(feature::body_tracking))
+		{
+			switch (system.body_tracker_supported())
+			{
+				case xr::body_tracker_type::none:
+					info.body_tracking = from_headset::body_type::none;
+					break;
+				case xr::body_tracker_type::fb:
+					info.body_tracking = from_headset::body_type::fb;
+					break;
+				case xr::body_tracker_type::meta:
+					info.body_tracking = from_headset::body_type::meta;
+					break;
+				case xr::body_tracker_type::pico:
+					info.body_tracking = from_headset::body_type::bd;
+					break;
+				case xr::body_tracker_type::htc:
+					info.body_tracking = from_headset::body_type::htc;
+					info.num_generic_trackers = application::get_generic_trackers().size();
+					break;
+			}
+		}
+
+		info.palm_pose = application::space(xr::spaces::palm_left) or application::space(xr::spaces::palm_right);
+		info.passthrough = system.passthrough_supported() != xr::passthrough_type::none;
+		info.system_name = std::string(system.properties().systemName);
+
+		audio::get_audio_description(info);
+		if (not(config.check_feature(feature::microphone)))
+			info.microphone = {};
+
+		if (config.codec)
+		{
+			info.supported_codecs = {*config.codec};
+			switch (*config.codec)
+			{
+				case h264:
+				case raw:
+					break;
+				case h265:
+				case av1:
+					info.bit_depth = config.bit_depth;
+			}
+		}
+		else
+			info.supported_codecs = decoder::supported_codecs();
+
+		return info;
+	}());
+
+	net.send_control(from_headset::session_state_changed{
+	        .state = application::get_session_state(),
+	});
+	net.send_control(from_headset::stream_tab_changed{
+	        .tab = gui_status,
+	});
+
+	if (instance.has_extension(XR_KHR_VISIBILITY_MASK_EXTENSION_NAME))
+	{
+		for (uint8_t view = 0; view < view_count; ++view)
+		{
+			try
+			{
+				net.send_control(from_headset::visibility_mask_changed{
+				        .data = get_visibility_mask(instance, session, view),
+				        .view_index = view});
+			}
+			catch (std::exception & e)
+			{
+				spdlog::warn("Failed to get visibility mask: ", e.what());
+			}
+		}
+	}
+
+	{
+		const auto & config = application::get_config();
+		override_foveation_enable = config.override_foveation_enable;
+		override_foveation_pitch = config.override_foveation_pitch;
+		override_foveation_distance = config.override_foveation_distance;
+
+		if (override_foveation_enable)
+			net.send_control(from_headset::override_foveation_center{
+			        .enabled = override_foveation_enable,
+			        .pitch = override_foveation_pitch,
+			        .distance = override_foveation_distance,
+			});
+	}
 }
 
 void scenes::stream::on_focused()
@@ -878,6 +886,11 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	real_display_period = last_display_time ? frame_state.predictedDisplayTime - last_display_time : frame_state.predictedDisplayPeriod;
 	last_display_time = frame_state.predictedDisplayTime;
 
+	// While a seamless reconnect is in progress the "Reconnecting…" toast is kept from
+	// fading by holding its timestamp at the current frame.
+	if (state_ == state::reconnecting)
+		gui_status_last_change = frame_state.predictedDisplayTime;
+
 	std::shared_lock lock(decoder_mutex);
 	if (not frame_state.shouldRender or decoders[0].empty() or decoders[1].empty() or state_ == state::shutdown)
 	{
@@ -960,7 +973,12 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		}
 
 		blit_handle->feedback.blitted = instance.now();
-		if (blit_handle->feedback.blitted - blit_handle->feedback.received_from_decoder > 1'000'000'000)
+		// The 1 s "no decoded output" watchdog drops the scene to the lobby. It must not
+		// fire while a seamless reconnect is holding the last frame (state::reconnecting),
+		// nor in the brief window after a successful adopt before the first fresh frame
+		// arrives: only run it in the steady streaming state. refresh_reconnect_watchdog()
+		// also bumps the held frames' timestamps forward on resume as a second guard.
+		if (state_ == state::streaming and blit_handle->feedback.blitted - blit_handle->feedback.received_from_decoder > 1'000'000'000)
 			set_state(state::stalled);
 		++blit_handle->feedback.times_displayed;
 		blit_handle->feedback.displayed = frame_state.predictedDisplayTime;
@@ -1101,7 +1119,11 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	if ((not application::get_hmd_traits().discard_frame) or
 	    std::ranges::any_of(current_blit_handles, [](const auto & h) { return h and h->feedback.times_displayed < 2; }) or
 	    motion_available or
-	    is_gui_interactable())
+	    is_gui_interactable() or
+	    // While reconnecting, keep re-submitting the held frame every refresh (so the
+	    // compositor keeps a stable image the runtime can time warp) and keep drawing the
+	    // overlay, even on headsets that would otherwise discard a repeated frame.
+	    state_ == state::reconnecting)
 	{
 		XrExtent2Di extents[view_count];
 		{

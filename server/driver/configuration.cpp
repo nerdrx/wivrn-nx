@@ -310,6 +310,22 @@ configuration::configuration()
 			U_LOG_W("Ignoring invalid \"intra-refresh\" configuration: %s", e.what());
 		}
 
+		// "emergency-framerate": true/false
+		try
+		{
+			if (auto it = json.find("emergency-framerate"); it != json.end())
+			{
+				if (it->is_boolean())
+					emergency_framerate = *it;
+				else
+					throw std::runtime_error("invalid emergency-framerate value, expected a boolean");
+			}
+		}
+		catch (const std::exception & e)
+		{
+			U_LOG_W("Ignoring invalid \"emergency-framerate\" configuration: %s", e.what());
+		}
+
 		// "multipath": {"usb-max-bitrate": bits/s}
 		try
 		{

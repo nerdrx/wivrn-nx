@@ -169,6 +169,12 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 	intra_refresh_conf = conf.intra_refresh;
 	compositor.set_intra_refresh(intra_refresh_conf and get_info().settings.intra_refresh);
 
+	// Both switches once more, for the emergency half-rate mode: the last automatic resort
+	// below the bitrate floor. Only the detection is gated here; the framerate change goes
+	// through the compositor and is safe live.
+	emergency_framerate_conf = conf.emergency_framerate;
+	bitrate_ctl.set_emergency_enabled(emergency_framerate_conf and get_info().settings.emergency_framerate);
+
 	// Whether a device that stops being tracked holds its last tracked pose. No server
 	// configuration key: it only ever describes what the headset's own runtime does with
 	// its controllers, which is the headset's business. Process wide, see pose_list.
@@ -468,6 +474,11 @@ void wivrn_session::resume_session()
 	// what to forward. The OpenXR gamepad at /user/gamepad is always available regardless.
 	send_control(to_headset::feature_control{to_headset::feature_control::hid_input, bool(uinput_handler)});
 
+	// A resumed session starts at full rate: the emergency half-rate mode was a reaction to
+	// the link that just dropped, and the controller reset below forgets it too. Cleared
+	// before the framerate is re-applied so set_framerate does not divide the target.
+	compositor.set_emergency_framerate(false);
+
 	{
 		float target_fps = default_fps();
 		auto current_fps = compositor.get_framerate();
@@ -573,6 +584,11 @@ void wivrn_session::operator()(const from_headset::settings_changed & settings)
 	// Live only downwards: an encoder that was not built with a refresh mechanism cannot
 	// grow one, so turning this back on mid-session waits for the next connection.
 	compositor.set_intra_refresh(intra_refresh_conf and settings.intra_refresh);
+	// Live both ways: the detection just stops or starts. Mirror the (possibly just cleared)
+	// state onto the compositor now, since turning the automatic bitrate off in the same
+	// packet would stop on_feedback from doing it.
+	bitrate_ctl.set_emergency_enabled(emergency_framerate_conf and settings.emergency_framerate);
+	compositor.set_emergency_framerate(bitrate_ctl.emergency_framerate_active());
 
 	// Live, and safe either way: the per component tracking state is maintained whatever
 	// the setting says, and the interpolator drops samples older than a second from its
@@ -956,6 +972,14 @@ void wivrn_session::apply_auto_bitrate(std::optional<uint32_t> bitrate)
 {
 	if (bitrate)
 		compositor.set_bitrate(*bitrate);
+
+	// The single funnel for every automatic bitrate change is also where the emergency
+	// half-rate state is mirrored onto the compositor: a bitrate feedback that engages or
+	// restores it, a path switch or a reset that clears it, all pass through here (the
+	// controller reset that any of them may trigger has already updated the flag). Idempotent
+	// and cheap, so running it on every call — including the empty ones — keeps the framerate
+	// in lockstep with the controller without a dedicated notification path.
+	compositor.set_emergency_framerate(bitrate_ctl.emergency_framerate_active());
 }
 
 void wivrn_session::set_pacing(bool client_enabled)
@@ -978,6 +1002,8 @@ void wivrn_session::operator()(from_headset::feedback && feedback)
 {
 	// Frame delivery timings are in the headset clock on both ends, so the automatic bitrate
 	// needs no clock offset and can run before the estimator has converged
+	// on_feedback may engage or restore the emergency half-rate mode (the rung below the
+	// bitrate floor); apply_auto_bitrate mirrors that onto the compositor, always.
 	apply_auto_bitrate(bitrate_ctl.on_feedback(feedback, compositor.get_frame_duration(), connection->is_active()));
 
 	clock_offset o = offset_est.get_offset();
@@ -1156,6 +1182,7 @@ void wivrn_session::send_transport_status()
 	        .fec_active = compositor.fec_active(),
 	        .server_warping = compositor.motion_server_active(),
 	        .software_encoders = compositor.software_encoders(),
+	        .emergency_framerate = bitrate.emergency,
 	});
 }
 
@@ -1299,6 +1326,8 @@ void wivrn_session::operator()(to_monado::set_bitrate && data)
 	// A manual change (dashboard / D-Bus) becomes the new ceiling, and resets the controller to it
 	bitrate_ctl.set_ceiling(data.bitrate_bps);
 	compositor.set_bitrate(data.bitrate_bps);
+	// The reset above clears any engaged emergency half-rate; mirror that onto the compositor.
+	compositor.set_emergency_framerate(bitrate_ctl.emergency_framerate_active());
 }
 
 void wivrn_session::operator()(to_headset::stream_tab_change && data)

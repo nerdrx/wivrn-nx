@@ -215,6 +215,12 @@ private:
 	// calls a settings_changed packet produces. Atomic because unlike the other
 	// mirrors it is read on the present path, once per frame.
 	std::atomic<bool> failover_enabled = true;
+	// Emergency half-rate mode: the extra divider applied to the stream framerate below
+	// the bitrate floor. 1 normally, 2 while engaged. Kept separate from frame_rate so the
+	// panel refresh rate reported to the application (frame_rate * fps_divider) never
+	// changes: only the encode/pacer rate is halved, exactly as the manual half-rate does.
+	// Mutated only from the network thread, same as set_framerate.
+	std::atomic<uint32_t> emergency_divider = 1;
 	// A stream is running on the software encoder. Sticky for the session: the
 	// hardware is not trusted again before a reconnect. Read by the session (and
 	// whatever displays state in the headset), and exported to the debug GUI.
@@ -410,6 +416,16 @@ public:
 		return frame_rate;
 	}
 	void set_framerate(float hz);
+
+	// Emergency half-rate mode (the rung below the bitrate floor): halve the stream
+	// framerate to instantly halve bandwidth, and restore it. Live and idempotent, like
+	// set_framerate; does not touch resolution and needs no reconnect. Driven by the
+	// bitrate controller through wivrn_session. Network thread only.
+	void set_emergency_framerate(bool active);
+	bool emergency_framerate() const
+	{
+		return emergency_divider.load() != 1;
+	}
 
 	void set_bitrate(uint32_t);
 

@@ -20,10 +20,14 @@
 #include "stream.h"
 
 #include "application.h"
+#include "crypto.h"
 #include "utils/i18n.h"
 #include "utils/named_thread.h"
 
+#include <chrono>
+#include <fstream>
 #include <spdlog/spdlog.h>
+#include <thread>
 #include <uni_algo/case.h>
 
 void scenes::stream::process_packets()
@@ -42,10 +46,157 @@ void scenes::stream::process_packets()
 		}
 		catch (std::exception & e)
 		{
-			spdlog::info("Exception in network thread, exiting: {}", e.what());
-			exit();
+			spdlog::info("Exception in network thread: {}", e.what());
+
+			// Seamless reconnect: hold the stream scene alive and re-handshake in the
+			// background rather than dropping straight to the lobby. Returns false (and
+			// falls through to exit()) when the feature is off, the window is exhausted,
+			// or the user cancels, i.e. exactly the old behaviour.
+			if (not try_seamless_reconnect())
+			{
+				spdlog::info("Network thread exiting");
+				exit();
+			}
 		}
 	}
+}
+
+namespace
+{
+// How long, in total, a seamless reconnect keeps trying before giving up and falling
+// back to the lobby.
+constexpr std::chrono::seconds reconnect_window{30};
+// Backoff between attempts, doubling from the first to the second bound.
+constexpr std::chrono::milliseconds reconnect_backoff_min{500};
+constexpr std::chrono::milliseconds reconnect_backoff_max{2000};
+} // namespace
+
+std::unique_ptr<wivrn_session> scenes::stream::build_reconnect_session()
+{
+	if (not reconnect_target)
+		return nullptr;
+
+	// Reload the headset keypair from disk. crypto::key is move-only, so it is never
+	// copied into the scene; it is read back here exactly as the lobby first loaded it.
+	crypto::key keypair;
+	try
+	{
+		std::ifstream f{application::get_config_path() / "private_key.pem"};
+		std::string pem{std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
+		if (pem.empty())
+			throw std::runtime_error("private key is empty or missing");
+		keypair = crypto::key::from_private_key(pem);
+	}
+	catch (std::exception & e)
+	{
+		spdlog::warn("Seamless reconnect: cannot load the headset keypair: {}", e.what());
+		return nullptr;
+	}
+
+	const auto & target = *reconnect_target;
+	// A paired reconnect never triggers a PIN prompt (the server answers with
+	// client_already_paired or encryption_disabled), so the callback just hands back the
+	// stored PIN with no headset UI. If the server has genuinely forgotten the pairing it
+	// is no longer a short outage, and the handshake failing here drops us to the lobby.
+	auto pin_cb = [pin = target.pin](int) { return pin.empty() ? std::string("000000") : pin; };
+
+	return std::visit([&](auto address) -> std::unique_ptr<wivrn_session> {
+		return std::make_unique<wivrn_session>(address, target.port, target.tcp_only, keypair, pin_cb);
+	},
+	                  target.address);
+}
+
+void scenes::stream::refresh_reconnect_watchdog()
+{
+	// The held frames still carry the decoder-receipt time from before the outage. Once
+	// the state returns to streaming the 1 s output watchdog would compare that stale time
+	// against now and fire immediately, dumping to the lobby before the first fresh frame
+	// of the resumed stream can arrive. Bumping the timestamps forward gives the resumed
+	// stream a full second to deliver its IDR, which on a LAN it does in a few ms.
+	std::unique_lock lock(frames_mutex);
+	const XrTime now = instance.now();
+	for (auto & decoder: decoders)
+		for (auto & frame: decoder.latest_frames)
+			if (frame)
+				frame->feedback.received_from_decoder = now;
+}
+
+bool scenes::stream::try_seamless_reconnect()
+{
+	if (not application::get_config().seamless_reconnect or not reconnect_target or state_ == state::shutdown)
+		return false;
+
+	spdlog::info("Seamless reconnect: primary path lost, holding the stream and re-handshaking");
+	set_state(state::reconnecting);
+	reconnect_cancelled = false;
+	// The render and tracking threads keep sending on the dead primary until it is adopted;
+	// swallow those failures so they do not tear the session down mid-reconnect.
+	network_session->set_suppress_send_errors(true);
+
+	// Subtle overlay over the frozen frame. Refreshed each frame by render() so it does
+	// not fade while the reconnect is in progress.
+	{
+		auto toast = gui_toast.lock();
+		toast->emplace(_("Reconnecting…"), false);
+	}
+	gui_status_last_change = instance.now();
+
+	const auto deadline = std::chrono::steady_clock::now() + reconnect_window;
+	auto backoff = reconnect_backoff_min;
+
+	const auto interruptible_sleep = [this](std::chrono::milliseconds d) {
+		const auto wake = std::chrono::steady_clock::now() + d;
+		while (std::chrono::steady_clock::now() < wake and state_ != state::shutdown and not reconnect_cancelled)
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	};
+
+	while (std::chrono::steady_clock::now() < deadline and state_ != state::shutdown and not reconnect_cancelled)
+	{
+		std::unique_ptr<wivrn_session> fresh;
+		try
+		{
+			// Blocks for the handshake (fast when the server is already re-accepting,
+			// fails fast with ECONNREFUSED while it is still tearing the old one down).
+			fresh = build_reconnect_session();
+		}
+		catch (std::exception & e)
+		{
+			spdlog::warn("Seamless reconnect attempt failed: {}", e.what());
+		}
+
+		if (fresh)
+		{
+			try
+			{
+				// The headset info must be the first control packet the server reads on
+				// the new socket, so it goes out on the fresh session while no other
+				// thread can touch it, before the swap.
+				send_initial_control_packets(*fresh, guessed_fps);
+				network_session->adopt_primary(std::move(*fresh));
+				refresh_reconnect_watchdog();
+				// New sockets are live again: let send failures be fatal once more.
+				network_session->set_suppress_send_errors(false);
+				set_state(state::streaming);
+				gui_toast.lock()->reset();
+				gui_status_last_change = instance.now();
+				spdlog::info("Seamless reconnect: stream resumed");
+				return true;
+			}
+			catch (std::exception & e)
+			{
+				// The new session handshook but resending the headset info failed; treat
+				// it as a failed attempt and keep going.
+				spdlog::warn("Seamless reconnect: could not resume the stream: {}", e.what());
+			}
+		}
+
+		interruptible_sleep(backoff);
+		backoff = std::min(backoff * 2, reconnect_backoff_max);
+	}
+
+	spdlog::warn("Seamless reconnect: giving up, falling back to the lobby");
+	gui_toast.lock()->reset();
+	return false;
 }
 
 void scenes::stream::operator()(to_headset::server_message && message)

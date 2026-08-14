@@ -399,6 +399,7 @@ void scenes::lobby::update_server_list()
 void scenes::lobby::connect(const configuration::server_data & data)
 {
 	server_name = data.service.name;
+	connecting_service = data.service;
 	async_error.reset();
 
 	async_session = utils::async<std::unique_ptr<wivrn_session>, std::string>(
@@ -950,7 +951,18 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 		{
 			auto session = async_session.get();
 			if (session)
-				next_scene = stream::create(std::move(session), 1'000'000'000.f / frame_state.predictedDisplayPeriod, server_name, *this);
+			{
+				// Everything the stream scene needs to rebuild a session to the same
+				// server on a seamless reconnect: the address that actually connected,
+				// plus the port and transport flags from the service used.
+				scenes::stream::reconnect_info reconnect{
+				        .address = session->address,
+				        .port = connecting_service.port,
+				        .tcp_only = connecting_service.tcp_only,
+				        .pin = connecting_service.pin,
+				};
+				next_scene = stream::create(std::move(session), 1'000'000'000.f / frame_state.predictedDisplayPeriod, server_name, *this, std::move(reconnect));
+			}
 
 			async_session.reset();
 		}

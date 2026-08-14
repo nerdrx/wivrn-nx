@@ -112,6 +112,11 @@ struct configuration
 	// Recovery from unrecoverable loss sweeps a column of intra coded blocks across the
 	// picture instead of sending a keyframe, on the encoders that have the mechanism.
 	bool intra_refresh = true;
+	// Server side half of the emergency half-rate switch: when the automatic bitrate is
+	// already pinned at its floor and the link is still losing frames, halve the stream
+	// framerate to halve bandwidth, restoring it once the link recovers. Both switches must
+	// be on. It is the last automatic resort before a disconnect.
+	bool emergency_framerate = true;
 	std::optional<uint8_t> bit_depth;
 	std::optional<std::array<float, 3>> grip_surface;
 	std::vector<std::string> application;

@@ -88,6 +88,27 @@ headset WiVRn supports.
   and VAAPI has no such control and says so once. Costs a little steady-state quality, not extra
   bytes — the rate control has the same budget either way. Toggle: headset (*Intra-refresh
   recovery*); config key `intra-refresh`. [Details](docs/intra-refresh.md).
+- **Emergency framerate drop** *(toggle, default on)* — the last automatic rung, below the bitrate
+  floor. When the automatic bitrate is already pinned at its minimum and the link is *still* losing
+  frames — everything above it (FEC, retransmission, intra-refresh, the bitrate drops themselves)
+  having failed to stabilise the picture — the server halves the stream framerate, which instantly
+  halves the bandwidth without touching resolution or needing a reconnect, and restores full rate
+  once the link has been clean for a five-second hysteresis window. Detected from the same delivery
+  window the bitrate controller already keeps (pinned at floor plus sustained severe loss for three
+  seconds), rate-limited so it cannot oscillate, and independent of the manual *Half framerate mode*.
+  The panel refresh rate the game sees never changes — only the encode/pacing rate — exactly as the
+  manual half-rate does. Toggle: headset (*Emergency framerate drop*); config key `emergency-framerate`.
+- **Seamless client reconnect** *(toggle, default on)* — the server already survives a dropped
+  headset (it pauses and re-accepts), but the client used to tear the stream scene down and dump you
+  to the lobby on any network error, freezing the running game. NX instead holds the stream scene
+  alive across a short outage: the last frame is frozen (the runtime keeps time-warping it to your
+  head, so the world does not lock rigidly), a subtle *Reconnecting…* overlay comes up, and a
+  background worker re-handshakes to the same server with backoff for up to 30 s — the same headset
+  info, so the server's `validate_headset_info` still matches. On success the new sockets are swapped
+  in place (the `wivrn_session` object keeps its identity, so nothing else has to be rebuilt), the
+  fresh IDR resumes decoding and the overlay drops; the game never knew. Past the window, or with the
+  toggle off, it falls back to the old behaviour of returning to the lobby. Client-side only, no
+  protocol change. Toggle: headset (*Seamless reconnect*).
 - **Wi-Fi QoS priority** *(toggle, default on)* — both ends mark their sockets with a DSCP class,
   which access points map to the WMM access categories: the server's video stream gets AF41 (AC_VI),
   every socket carrying control, tracking, inputs and feedback gets EF (AC_VO), so a tracking packet

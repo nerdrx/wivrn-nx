@@ -1878,11 +1878,37 @@ void compositor::set_framerate(float hz)
 	if (frame_rate.exchange(hz) == hz)
 		return;
 	U_LOG_IFL_D(log_level, "Framerate change from %.0f to %.0f", frame_rate.load(), hz);
-	pacer.set_frame_duration(U_TIME_1S_IN_NS / hz);
+	// frame_rate keeps the normal (commanded) rate so the panel refresh rate reported by
+	// get_display_refresh_rate stays correct; the pacer and encoders get the effective rate,
+	// which the emergency divider may have halved.
+	const float eff = hz / float(emergency_divider.load());
+	pacer.set_frame_duration(U_TIME_1S_IN_NS / eff);
 	for (auto & encoder: get_encoders())
 	{
 		if (encoder)
-			encoder->set_framerate(hz);
+			encoder->set_framerate(eff);
+	}
+}
+
+void compositor::set_emergency_framerate(bool active)
+{
+	const uint32_t divider = active ? 2 : 1;
+	if (emergency_divider.exchange(divider) == divider)
+		return;
+
+	if (active)
+		U_LOG_I("Emergency half-rate engaged: streaming at half the framerate to halve bandwidth");
+	else
+		U_LOG_I("Emergency half-rate restored: streaming at full framerate again");
+
+	// Re-apply the effective rate through the new divider. frame_rate (the normal rate) is
+	// untouched, so the panel refresh rate the application sees does not change.
+	const float eff = frame_rate.load() / float(divider);
+	pacer.set_frame_duration(U_TIME_1S_IN_NS / eff);
+	for (auto & encoder: get_encoders())
+	{
+		if (encoder)
+			encoder->set_framerate(eff);
 	}
 }
 

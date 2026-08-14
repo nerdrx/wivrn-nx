@@ -39,6 +39,7 @@
 #include <queue>
 #include <shared_mutex>
 #include <thread>
+#include <variant>
 #include <vulkan/vulkan_core.h>
 
 namespace scenes
@@ -50,10 +51,27 @@ public:
 	{
 		initializing,
 		streaming,
+		// Seamless reconnect (config.seamless_reconnect): a network error tore the
+		// primary path down, the stream scene is held alive with the last frame frozen
+		// and the network thread is re-handshaking in the background. The 1 s output
+		// watchdog is suppressed in this state.
+		reconnecting,
 		stalled,
 		shutdown,
 	};
 	static const size_t image_buffer_size = 3;
+
+	// Enough to rebuild a session to the same server from the network thread, without
+	// going back to the lobby: the address that actually connected, the port, and the
+	// transport flags. The headset keypair is reloaded from disk at reconnect time, so
+	// nothing sensitive is copied into the scene. Built by the lobby at connection time.
+	struct reconnect_info
+	{
+		std::variant<in_addr, in6_addr> address;
+		int port = 0;
+		bool tcp_only = false;
+		std::string pin;
+	};
 
 	app_launcher apps;
 
@@ -81,6 +99,14 @@ private:
 
 	std::unique_ptr<wivrn_session> network_session;
 	std::thread network_thread;
+
+	// --- Seamless reconnect (config.seamless_reconnect) -------------------------------
+	std::optional<reconnect_info> reconnect_target;
+	// The display refresh guess passed at creation, reused when re-sending the headset
+	// info on reconnect (only matters on headsets that cannot enumerate refresh rates).
+	float guessed_fps = 60;
+	// Set by the user (Reconnecting overlay) to abandon a reconnect in progress.
+	std::atomic<bool> reconnect_cancelled = false;
 
 	// Declared after network_session so that it is stopped before the session is
 	// destroyed
@@ -318,7 +344,8 @@ public:
 	        std::unique_ptr<wivrn_session> session,
 	        float guessed_fps,
 	        std::string server_name,
-	        scene & parent_scene);
+	        scene & parent_scene,
+	        std::optional<reconnect_info> reconnect_target = std::nullopt);
 
 	void render(const XrFrameState &) override;
 	void on_focused() override;
@@ -386,6 +413,26 @@ public:
 
 private:
 	void process_packets();
+	// Send the initial batch of control packets the server reads to bring a stream up:
+	// the headset info, the session state, the current tab, the visibility masks and the
+	// foveation override. The headset info MUST be the first control packet on the socket
+	// (the server does std::get<headset_info_packet> on it during the handshake), so on a
+	// reconnect this is sent on the freshly handshaken session BEFORE it is adopted, while
+	// no other thread can touch it. Called once at creation and again after each seamless
+	// reconnect (the server re-reads the headset info when it re-accepts).
+	void send_initial_control_packets(wivrn_session & net, float guessed_fps);
+	// Called from the network thread when poll() throws. When seamless reconnect is on and
+	// this is not a shutdown, holds the scene alive, freezes the last frame, and retries the
+	// handshake with backoff for a bounded window. Returns true if the stream was resumed;
+	// false means fall back to the old behaviour (drop to the lobby).
+	bool try_seamless_reconnect();
+	// Build a fresh, fully handshaken session to the same server. Throws or returns nullptr
+	// (cancelled) on failure. Network thread only.
+	std::unique_ptr<wivrn_session> build_reconnect_session();
+	// Bump the held frames' decoder-receipt timestamps to now so the 1 s output watchdog
+	// does not fire on the stale held frame before the first fresh frame of the resumed
+	// stream is decoded. Taken under frames_mutex.
+	void refresh_reconnect_watchdog();
 	void tracking();
 	void read_actions();
 

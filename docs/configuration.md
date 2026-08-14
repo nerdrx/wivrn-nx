@@ -240,6 +240,36 @@ per-encoder details.
 ```
 Recover from unrecoverable loss with a full keyframe, as it did before.
 
+## `emergency-framerate`
+Default value: `true`
+
+The last automatic resort for a struggling link, the rung below the bitrate floor. When the
+automatic bitrate is already pinned at its minimum and the connection is **still** losing frames —
+so the error correction, the retransmissions, the intra-refresh recovery and the bitrate drops have
+all failed to stabilise the picture — the server halves the stream framerate, which halves the
+bandwidth at once. It does not change resolution and needs no reconnect: only the encode and pacing
+rate is halved, exactly like the manual *Half framerate mode*, and the panel refresh rate reported
+to the running application is unchanged.
+
+It is detected from the same delivery window the automatic bitrate already keeps: it engages after
+the bitrate has sat at the floor with sustained severe loss for about three seconds, and restores
+the full framerate once the link has been clean for a five-second hysteresis window. The transitions
+are rate-limited so a link hovering at the edge cannot oscillate between the two rates, and every
+transition is logged. It is independent of the manual *Half framerate mode*: either can be in force
+without the other.
+
+The headset has its own *Emergency framerate drop* toggle in its streaming settings. Both switches
+must be enabled. The detection is live both ways — turning it off while it is engaged restores the
+full framerate immediately.
+
+### Example
+```json
+{
+	"emergency-framerate": false
+}
+```
+Never automatically drop the framerate, even when the link is failing at the minimum bitrate.
+
 ## `encoder`
 The encoder to use, either a single string or object applied to all streams, or a list of string or objects with values for left, right and alpha.
 When a string it is used, it is equivalent to the `encoder` item of the object.

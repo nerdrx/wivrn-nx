@@ -93,6 +93,8 @@ class wivrn_session : public xrt_system_devices
 	bool encoder_failover_conf = true;
 	// And for intra refresh loss recovery
 	bool intra_refresh_conf = true;
+	// And for the emergency half-rate mode (auto framerate drop below the bitrate floor)
+	bool emergency_framerate_conf = true;
 	pacing_app_factory app_pacers;
 
 	b_system & xrt_system;

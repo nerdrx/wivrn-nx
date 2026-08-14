@@ -245,6 +245,33 @@ void wivrn_session::set_secondary(control_socket_t && socket)
 	spdlog::info("Secondary path attached");
 }
 
+void wivrn_session::adopt_primary(wivrn_session && fresh)
+{
+	// The old secondary path rode the link that just died; drop it before the swap so
+	// no thread keeps sending down it. The path manager re-establishes one over the USB
+	// tunnel once the stream is streaming again.
+	drop_secondary("reconnecting");
+
+	{
+		std::unique_lock lock(primary_mutex);
+		// Move the freshly handshaken sockets in. The old ones (dead, but still alive as
+		// objects while a concurrent send holds a reference to this session) are closed
+		// as they are overwritten.
+		control = std::move(fresh.control);
+		stream = std::move(fresh.stream);
+		session_token_ = fresh.session_token_;
+		address = fresh.address;
+		// New sockets: the QoS marks and the path state say nothing about them yet.
+		qos_enabled.reset();
+		selector.reset(std::chrono::steady_clock::now());
+	}
+
+	// Re-apply the QoS marks on the new sockets (takes primary_mutex in shared mode).
+	set_qos(application::get_config().wifi_qos);
+
+	spdlog::info("Primary path adopted after reconnect");
+}
+
 void wivrn_session::set_qos(bool enabled)
 {
 	if (qos_enabled == enabled)
@@ -252,6 +279,7 @@ void wivrn_session::set_qos(bool enabled)
 
 	const int mark = enabled ? wivrn::tos::dscp_ef : wivrn::tos::best_effort;
 
+	std::shared_lock lock(primary_mutex);
 	bool ok = true;
 	if (stream)
 		ok = stream.set_tos(mark) and ok;
@@ -344,6 +372,7 @@ void wivrn_session::send_primary_ping()
 	        .timestamp = steady_now_ns(),
 	};
 
+	std::shared_lock lock(primary_mutex);
 	try
 	{
 		// The stream socket is the one video comes back on, and it never blocks.

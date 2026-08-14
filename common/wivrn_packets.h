@@ -466,6 +466,11 @@ struct settings_changed
 	// switch. Read when the encoders are created, so turning it on takes effect on the next
 	// connection; turning it off applies immediately.
 	bool intra_refresh = true;
+	// Whether, as the last automatic resort below the bitrate floor, the server may halve the
+	// stream framerate to halve bandwidth when the automatic bitrate is already pinned at its
+	// minimum and the link is still losing frames, restoring the full rate once it recovers.
+	// Independent of the manual "Half framerate mode". The server also has its own switch.
+	bool emergency_framerate = true;
 	// Whether the server should estimate a motion field between consecutive application
 	// frames so that the headset can warp the last decoded frame on repeat refreshes.
 	// The server only does the work while the application is actually below the stream
@@ -1493,6 +1498,11 @@ struct transport_status
 	// hardware, which is also what a stream that does not exist reads as — the headset
 	// only draws a row for a stream it has a decoder for.
 	uint8_t software_encoders;
+
+	// Emergency half-rate mode is engaged: the automatic bitrate ran out of room at the
+	// floor and the stream framerate has been halved to keep the link alive. The last
+	// automatic rung before a disconnect.
+	bool emergency_framerate;
 };
 
 struct application_list

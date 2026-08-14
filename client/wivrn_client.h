@@ -48,11 +48,26 @@ public:
 	using stream_socket_t = typed_socket<UDP, to_headset::packets, from_headset::packets>;
 
 private:
+	// Primary path sockets. A seamless reconnect (adopt_primary) replaces both in
+	// place, keeping this wivrn_session object's identity so that every holder of it
+	// (the stream scene, the path manager, the audio handle) keeps its reference.
+	// Senders take primary_mutex in shared mode; the swap takes it exclusively. poll()
+	// does not lock: it and adopt_primary both run on the network thread and are
+	// mutually exclusive (adopt_primary is only ever called after poll() has thrown).
+	mutable std::shared_mutex primary_mutex;
 	control_socket_t control;
 	stream_socket_t stream;
 
 	std::atomic<uint64_t> bytes_sent_ = 0;
 	std::atomic<uint64_t> bytes_received_ = 0;
+
+	// Set while a seamless reconnect is in progress: the primary path is known dead and is
+	// being re-handshaked, so a control send that fails is expected and must be swallowed
+	// rather than thrown. Without this the render and tracking threads, which send on this
+	// session every frame and mostly do not catch, would tear the session down (the tracking
+	// loop calls exit() on any exception) and abort the reconnect. poll() is not running
+	// during that window, so nothing that should stay fatal is masked.
+	std::atomic<bool> suppress_send_errors_ = false;
 
 	// Secondary (multipath) path, attached at runtime by the path manager.
 	// Sending (tracking and keepalive threads) and receiving (network thread)
@@ -106,13 +121,14 @@ public:
 			return;
 		}
 
+		std::shared_lock lock(primary_mutex);
 		try
 		{
 			bytes_sent_ += control.send(std::forward<T>(packet));
 		}
 		catch (const std::exception & e)
 		{
-			if (on_control_send_error(e))
+			if (on_control_send_error(e) or suppress_send_errors_)
 				return;
 			throw;
 		}
@@ -129,6 +145,7 @@ public:
 			return;
 		}
 
+		std::shared_lock lock(primary_mutex);
 		try
 		{
 			if (stream)
@@ -154,7 +171,7 @@ public:
 				return;
 			}
 
-			if (on_control_send_error(e))
+			if (on_control_send_error(e) or suppress_send_errors_)
 				return;
 			throw;
 		}
@@ -197,6 +214,21 @@ public:
 	bool has_secondary() const
 	{
 		return secondary_up;
+	}
+
+	// Seamless reconnect: replace the primary path with the one from a freshly
+	// handshaken session, in place. The fresh session is built off to the side (its
+	// own sockets, its own handshake) while the old, now-dead sockets are still in
+	// use by concurrent senders; only the brief pointer/fd swap here is serialised
+	// against them, under primary_mutex. Called on the network thread once poll() has
+	// thrown, so it never races poll(). The fresh session is consumed.
+	void adopt_primary(wivrn_session && fresh);
+
+	// Swallow (true) or propagate (false) control send failures, for the duration of a
+	// seamless reconnect. See suppress_send_errors_.
+	void set_suppress_send_errors(bool suppress)
+	{
+		suppress_send_errors_ = suppress;
 	}
 
 	// Install an already attached (handshaken) secondary path

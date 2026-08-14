@@ -357,6 +357,21 @@ public:
 	// change in the link.
 	static constexpr double slowdown_backoff = 1.60;
 
+	// --- Emergency half-rate (last resort, below the bitrate floor) ----------------------
+	// The rung below everything else: when the bitrate is already pinned at the floor and
+	// the link is still severely congested, halving the stream framerate instantly halves
+	// the bandwidth. Detected here from the same window; applied by the session, which owns
+	// the compositor framerate and the "server config AND headset toggle" gate.
+	//
+	// Sustained severe congestion while pinned at the floor for this long engages it.
+	static constexpr std::chrono::milliseconds emergency_trigger_duration{3000};
+	// The link has to stay clean (healthy, no loss, no late frames) for this long before the
+	// full framerate is restored: a hysteresis window so a single good patch does not undo it.
+	static constexpr std::chrono::milliseconds emergency_clear_duration{5000};
+	// Neither engaging nor restoring may happen within this of the last transition, so the
+	// mode cannot oscillate on a link hovering at the edge.
+	static constexpr std::chrono::milliseconds emergency_min_dwell{4000};
+
 	bitrate_controller() = default;
 
 	// Set the configuration and the initial ceiling. The ceiling is the bitrate the client asked
@@ -400,8 +415,20 @@ public:
 		to_headset::transport_status::controller_state state =
 		        to_headset::transport_status::controller_state::off;
 		bool radio_hold = false;
+		// Emergency half-rate mode currently engaged (the stream framerate is halved).
+		bool emergency = false;
 	};
 	status snapshot() const;
+
+	// The "server config AND headset toggle" gate for the emergency half-rate mode. When it
+	// goes false the mode is released at once. Detection only runs while it is true.
+	void set_emergency_enabled(bool enabled);
+
+	// Whether the emergency half-rate mode is currently engaged. This is the source of truth
+	// the session mirrors onto the compositor (idempotently), so a change reached by any path
+	// — a normal transition, the gate flipping, or a reset that forgot the measurements — is
+	// always reflected. Also the HUD state.
+	bool emergency_framerate_active() const;
 
 	// The pacing window currently in force, as a fraction of a frame period, or 0 when the
 	// video shards are not paced. Only the v2 estimator uses it, to tell a frame that filled
@@ -708,6 +735,19 @@ private:
 	// release. Empty whenever the signal is falling, starved, or not being held.
 	std::optional<clock::time_point> radio_stable_since;
 
+	// --- Emergency half-rate state ------------------------------------------------------
+	// The gate (server config AND headset toggle), set by the session. Detection runs only
+	// while true.
+	bool emergency_enabled = false;
+	// Whether the mode is engaged right now.
+	bool emergency_active = false;
+	// When the pinned-at-floor severe condition began (engage timer), and when the clean
+	// condition began (restore timer). Default-constructed means "not currently counting".
+	clock::time_point emergency_severe_since{};
+	clock::time_point emergency_clean_since{};
+	// When the mode last flipped, for the anti-oscillation dwell.
+	clock::time_point emergency_last_change{};
+
 	// Ceiling actually in force: the client's, clamped by the current path's
 	uint32_t effective_ceiling() const;
 	// active_mode(), with the mutex already held
@@ -727,6 +767,8 @@ private:
 	std::optional<uint32_t> evaluate(clock::time_point now);
 	std::optional<uint32_t> evaluate_aimd(clock::time_point now, const stats &);
 	std::optional<uint32_t> evaluate_bbr(clock::time_point now, const stats &);
+	// Drive the emergency half-rate state machine off one analysed window. Mutex held.
+	void update_emergency(clock::time_point now, const stats &);
 	uint32_t clamp(uint64_t value) const;
 };
 

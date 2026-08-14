@@ -680,6 +680,16 @@ void scenes::stream::gui_transport()
 				                true);
 			}
 
+			// Last automatic resort below the bitrate floor: the stream framerate has been
+			// halved to keep the struggling link alive.
+			if (status and status->emergency_framerate)
+			{
+				ImGui::Dummy({0, 2});
+				wivrn::ui::chip(wivrn::ui::icon_label(ICON_FA_ARROW_DOWN, _("emergency half-rate")),
+				                wivrn::ui::chip_style::warning,
+				                true);
+			}
+
 			// Server setpoint against what actually arrived: the gap between them is
 			// the overhead, and a measured line that will not follow the setpoint up
 			// is the link refusing to carry it.
@@ -868,6 +878,7 @@ static void send_settings_changed_packet(xr::session & session, wivrn_session * 
 	                .sharp_text = config.sharp_text,
 	                .encoder_failover = config.encoder_failover,
 	                .intra_refresh = config.intra_refresh,
+	                .emergency_framerate = config.emergency_framerate,
 	                .motion_smoothing = config.motion_smoothing,
 	                .motion_smoothing_mode = config.motion_mode(),
 	                .multipath = config.multipath_mode(),

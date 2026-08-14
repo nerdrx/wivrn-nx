@@ -600,6 +600,26 @@ void settings_streaming(const settings_context & ctx)
 	        .default_bool = default_config.intra_refresh,
 	});
 
+	list.push_back({
+	        .id = "##seamless_reconnect",
+	        .label = _("Seamless reconnect"),
+	        .description = _("If the connection drops for a moment, hold the last image in place and quietly reconnect to the same computer in the background instead of throwing you back to the lobby. The application on the computer keeps running the whole time, so a brief Wi-Fi hiccup no longer means restarting what you were doing. Turn it off to go straight back to the lobby on any network error, as before. Takes effect only on the headset."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.seamless_reconnect; },
+	        .set_bool = [&config](bool v) { config.seamless_reconnect = v; config.save(); },
+	        .default_bool = default_config.seamless_reconnect,
+	});
+
+	list.push_back({
+	        .id = "##emergency_framerate",
+	        .label = _("Emergency framerate drop"),
+	        .description = _("A last resort for a badly struggling connection. When the automatic bitrate has already dropped as low as it will go and the picture is still breaking up, let the computer halve how often it sends a new image, which instantly halves the data rate, and go back to full speed once the connection recovers. This is separate from Half framerate mode, which you set by hand; this one only steps in on its own when nothing else has worked. The computer also has its own switch for it."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.emergency_framerate; },
+	        .set_bool = [&ctx, &config](bool v) { config.emergency_framerate = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.emergency_framerate,
+	});
+
 	// Off / Backup only / Combine. multipath_usb stays the switch it always was —
 	// off is the one state that means "never attach a path at all" — and
 	// multipath_combine only says what the path is for once there is one, the same

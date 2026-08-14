@@ -188,10 +188,24 @@ public:
 	// is worst, which is how one lost frame turns into several.
 	bool intra_refresh = true;
 
+	// Last automatic resort below the bitrate floor: when the server's automatic bitrate is
+	// already pinned at its minimum and the link is still losing frames, let it halve the
+	// stream framerate to instantly halve bandwidth, restoring the full rate once the link
+	// recovers. Independent of the manual "Half framerate mode". The server also has its own
+	// switch; both must be on. On by default.
+	bool emergency_framerate = true;
+
 	// Let a controller that goes to sleep hold its last tracked pose on the PC instead of
 	// following whatever pose the runtime keeps reporting for it. On by default: it is what
 	// stops a sleeping Pico controller from teleporting across the play space.
 	bool standby_freeze = true;
+
+	// Ride out a short network outage without dropping to the lobby: the stream scene is
+	// held alive with the last frame frozen while the client re-handshakes to the same
+	// server in the background (the server already pauses and re-accepts on its side). On
+	// by default. Off restores the old behaviour of returning to the lobby on any network
+	// error. Client-local: the server needs no knowledge of it.
+	bool seamless_reconnect = true;
 
 	// Darken the periphery of the streamed image when the application frame rate collapses
 	bool comfort_vignette = true;

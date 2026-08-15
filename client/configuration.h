@@ -314,11 +314,11 @@ public:
 	bool app_list_view = false;
 	uint32_t app_icon_size = 0;
 
-	// interface theme, defaults match the built-in "OLED" preset and "NX" accent
-	std::string theme_preset = "OLED";
+	// interface theme, defaults match the built-in "NX" preset and "NX" accent
+	std::string theme_preset = "NX";
 	std::string theme_accent = "NX";
-	float theme_rounding = 8;
-	float theme_card_rounding = 14;
+	float theme_rounding = 12;
+	float theme_card_rounding = 18;
 	float theme_font_scale = 1.0;
 	float theme_background_alpha = 0.75;
 

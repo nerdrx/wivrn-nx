@@ -280,6 +280,17 @@ video_encoder_va::video_encoder_va(wivrn::vk_bundle & vk,
 		// keyframe here; FEC and the retransmissions are what keep that rare.
 		U_LOG_I("vaapi: intra refresh loss recovery has no effect, the VAAPI encoders expose no intra refresh control; lost frames still ask for a keyframe");
 	}
+	if (settings.ref_invalidation)
+	{
+		// Nor is there anything one rung down. Invalidating a reference means editing the
+		// reference list of a single picture, and libavcodec's VAAPI encoders own their DPB
+		// completely: the AVCodecContext knobs are refs and max_b_frames, which say how many
+		// references there are, never which of them a given picture may use. VAAPI itself
+		// carries the reference lists in VAEncPictureParameterBuffer, but that structure is
+		// filled in by libavcodec's own reference management, below any interface an
+		// application has. So this too falls through to the keyframe.
+		U_LOG_I("vaapi: reference invalidation has no effect, libavcodec owns the VAAPI reference lists; lost frames still ask for a keyframe");
+	}
 	if (settings.foveation_foveal_qp)
 	{
 		// Foveation v2 lever 3: the FFmpeg VAAPI encoders expose no per-region QP map, so the

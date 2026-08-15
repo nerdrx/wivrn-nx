@@ -54,14 +54,48 @@ The reasoning for the first two rows is the same: the headset's decoder holds no
 produced, so there is no partially-correct picture to repair. A sweep predicted from nothing
 decodes to nothing. Those are the cases where a keyframe is not a cost but the only option.
 
+## The recovery ladder
+
+The sweep is the middle of three rungs. Reference invalidation was added below it (see
+[configuration.md](configuration.md#ref-invalidation)), and the keyframe remains above it, so a
+reported loss is answered by the cheapest repair that can still work:
+
+| Rung | Cost | Repaired by | Used when |
+|---|---|---|---|
+| **invalidate** | one ordinary P frame | the encoder predicting from an older acknowledged reference | always, if the encoder can and the loss is still inside its DPB |
+| **refresh** | a slice of the bit budget for ~48 frames | a column of intra blocks crossing the picture | the loss is out of DPB reach, invalidation is unavailable, or an invalidation was itself lost |
+| **IDR** | one frame ten to thirty times normal size | a clean decoder start | three spoiled sweeps, or there is no sweep to fall to |
+
+Two properties matter more than the rungs themselves.
+
+**Climbing is caused by failure, never by preference.** Each rung is judged on whether the frames
+carrying its repair reached the headset, and only a repair that demonstrably failed moves up.
+
+**Climbing is per recovery, not per session.** A fresh, independent loss always starts at the
+bottom. A link that drops one frame every few seconds gets the free repair every time and never
+climbs — which is the common case, and the one the old loss → keyframe → loss doom loop punished
+hardest.
+
 ## The state machine
 
-`default_idr_handler` gained two states next to the ones it always had:
+`default_idr_handler` gained four states next to the ones it always had:
 
+* **`need_invalidate`** — a loss was reported and is still within the encoder's DPB; the next frame
+  encoded carries the invalidation and is otherwise an ordinary P frame. It records *which* frame,
+  because the encoder has no idea — it only ever hears about frames it sent.
+* **`invalidated`** — the repair is in flight. The wait ends the moment the headset acknowledges the
+  frame that carried it, and no later than `ref_invalidation_probation_frames` (6). `should_skip`
+  is **false** throughout, as during a sweep.
 * **`need_refresh`** — a loss was reported, the next frame encoded starts a sweep.
 * **`refreshing`** — a sweep is crossing the picture. `should_skip` returns **false** throughout:
   the intra blocks that repair the picture ride these frames, so skipping them would be skipping
   the repair. This is the opposite of the `wait_idr_feedback` state, which skips everything.
+
+One decision inside `invalidated` is easy to get wrong. Feedback does **not** arrive in frame order,
+so a report that frame `N+1` was lost can land before the report that frame `N` (the repair) arrived.
+The loss is therefore checked first, and a recorded loss keeps the handler in probation until it
+expires. Checking the acknowledgement first would end the wait and quietly bury a hole with nothing
+scheduled to repair it — Part K of the test harness is that case.
 
 Two decisions inside `refreshing` are worth spelling out.
 
@@ -78,12 +112,23 @@ about the link right now and not about the session.
 
 ## Per-encoder support
 
+Intra refresh:
+
 | Encoder | Support | How |
 |---|---|---|
 | **x264** | Full, native | `param.b_intra_refresh = 1` with `i_keyint_max` set to the sweep length, and `x264_encoder_intra_refresh()` on demand |
 | **NVENC** | Full, native | `enableIntraRefresh` / `intraRefreshPeriod` / `intraRefreshCnt` in the codec config, and `forceIntraRefreshWithFrameCnt` in the per-frame codec picture parameters, on demand |
 | **Vulkan video encode** | Not needed | Recovers by encoding against the newest reference the headset acknowledged, so it never asked for a recovery keyframe in the first place |
 | **VAAPI (FFmpeg)** | Not available | libavcodec exposes no intra refresh control on `h264_vaapi` / `hevc_vaapi` / `av1_vaapi`; loss still asks for a keyframe |
+
+Reference invalidation, the rung below it:
+
+| Encoder | Support | How |
+|---|---|---|
+| **NVENC** | Full, native | `NvEncInvalidateRefFrames(frame_index + 1)`, with `NV_ENC_PIC_PARAMS::inputTimeStamp` carrying the frame index and `maxNumRefFrames` / `maxNumRefFramesInDPB` raised to 4. Gated on `NV_ENC_CAPS_SUPPORT_REF_PIC_INVALIDATION` |
+| **Vulkan video encode** | Inherent, unconditional | `dpb_state` only ever selects a reference slot the headset has acknowledged (`dpb_item::acked`), so a lost frame is structurally never predicted from. No switch, and no DPB-age limit beyond the slot count |
+| **x264** | Not available | No per-frame reference control in the public API — see below |
+| **VAAPI (FFmpeg)** | Not available | libavcodec owns the VAAPI reference lists — see below |
 
 ### x264
 
@@ -113,6 +158,31 @@ through `forceIntraRefreshWithFrameCnt` in `NV_ENC_PIC_PARAMS_H264` / `_HEVC` / 
 Support is queried with `NV_ENC_CAPS_SUPPORT_INTRA_REFRESH`; a GPU that says no falls back to
 keyframe recovery with one line in the log.
 
+For invalidation, `NvEncInvalidateRefFrames` addresses a reference by the timestamp its picture was
+submitted with. WiVRn submitted every picture with `inputTimeStamp = 0`, so there was no handle on a
+frame at all; it now carries `frame_index + 1` (offset so that frame 0 does not collide with "never
+submitted"). With no B-frames and `frameIntervalP = 1` the output order still matches the input
+order, and nothing else reads the field.
+
+The DPB is raised from the driver default to **four** frames. That number is a compromise in both
+directions. Deeper makes older losses repairable — the depth is exactly the bound on how late a loss
+report may be — but every reference is also a frame the *headset's* decoder must hold, and both
+H.264 and HEVC bound the decoded picture buffer by level (`MaxDpbMbs`), so a deep DPB at a large eye
+size produces a stream a headset may legitimately refuse to decode. Four is about 44 ms at 90 Hz,
+comfortably longer than a LAN feedback round trip, and small enough to stay within the DPB budget at
+every eye size WiVRn streams.
+
+The depth does **not** cost quality or bitrate. `numRefL0` is left at its preset value, so the
+encoder still predicts each frame from a single reference — the newest valid one — exactly as it did
+with a DPB of one. What the extra slots buy is that when that newest reference is struck out, there
+is an older one to fall back on rather than nothing. The cost is reference-frame memory on the GPU
+and in the headset's decoder.
+
+A failed `NvEncInvalidateRefFrames` is logged and not escalated on the spot: the frame still encodes,
+it simply predicts from the reference the headset is missing, so the picture stays broken, the next
+feedback asks for recovery again, and by then the loss is older than the DPB and the ladder moves up
+to the sweep on its own.
+
 ### Vulkan and VAAPI
 
 The Vulkan encoders use `dpb_state` rather than `default_idr_handler`: they keep every reference
@@ -126,6 +196,35 @@ option any of them exposes is `idr_interval`, which controls how often a *whole*
 VAAPI itself has an intra refresh parameter on some drivers, but nothing in libavcodec plumbs it
 through, so honouring the setting would mean going around the encoder FFmpeg owns. Both log one
 line at encoder creation saying what actually happens.
+
+For invalidation, the Vulkan encoders need nothing: `dpb_state::get_ref` picks the acknowledged slot
+with the highest frame index, and a slot is only marked acknowledged from `on_feedback` when the
+headset says the frame arrived. A lost frame is therefore never a candidate reference in the first
+place. This is invalidation done structurally rather than retroactively — there is nothing to switch
+on, nothing to switch off, and no DPB-age window to fall out of beyond the slot count itself
+(`num_dpb_slots`, up to 16).
+
+### Why x264 and VAAPI get no invalidation
+
+Not a gap in the wiring. Checked against the headers rather than assumed:
+
+**x264.** The public API has no way to say, for one frame, "predict from anything but that one".
+`x264_param_t::i_frame_reference` and `i_dpb_size` say how *many* references exist, are set at
+`x264_encoder_open` (changeable only through `x264_encoder_reconfig`), and are global. `x264_picture_t`
+carries `i_type`, `i_qpplus1`, `i_pic_struct`, `i_pts`, `prop` (`quant_offsets`, `mb_info`),
+`extra_sei`, `opaque` and a per-frame `param` override — not one field touches the reference list,
+and `b_keyframe` is an output. That per-frame `param` *can* change `i_frame_reference` from this
+frame on, but dropping the count to 1 makes the encoder predict from the **newest** reference, which
+on a loss is precisely the frame that must not be used: it is the wrong end of the list. The only
+loss-recovery lever x264 offers is `x264_encoder_intra_refresh()`, which is already wired. Reaching
+the reference list would mean patching libx264 or reaching into `x264_t`, which is neither stable nor
+this encoder's business — so x264 keeps to the rungs above and says so once at startup.
+
+**VAAPI.** Invalidating a reference means editing the reference list of a single picture. The
+`AVCodecContext` knobs are `refs` and `max_b_frames`, which again say how many references there are
+and never which of them a given picture may use. VAAPI itself carries the reference lists in
+`VAEncPictureParameterBuffer`, but libavcodec's own reference management fills that in, below any
+interface an application has. Same conclusion, same one-line log.
 
 ## Defaults and the sweep length
 
@@ -164,23 +263,32 @@ Server, in `~/.config/wivrn/config.json`:
 
 ```json
 {
-	"intra-refresh": false
+	"intra-refresh": false,
+	"ref-invalidation": false
 }
 ```
 
-Default `true`. Headset: *Intra-refresh recovery* in the streaming settings, default on.
+Both default `true`. Headset: *Intra-refresh recovery* and *Smart loss recovery* in the streaming
+settings, both default on.
 
-Both switches must be enabled, like `encoder-failover`. The refresh mechanism is part of the
-encode session's configuration on every encoder that has one, so it can only be set up when the
-encoder is created: **turning the feature on takes effect on the next connection**, while turning
-it off applies immediately.
+Both halves of each pair must be enabled, like `encoder-failover`. The refresh mechanism and the
+deeper reference buffer are alike part of the encode session's configuration on every encoder that
+has one, so they can only be set up when the encoder is created: **turning either feature on takes
+effect on the next connection**, while turning it off applies immediately.
+
+Turning `ref-invalidation` off leaves exactly the two-rung behaviour this document originally
+described; turning both off leaves the keyframe recovery WiVRn had before either.
 
 ## Tests
 
-`tests/intra_refresh_test.cpp` drives the handler frame by frame with no encoder and no headset,
-covering the start-versus-recovery split, the absence of skipping during a sweep, the
+`tests/intra_refresh_test.cpp` drives the handler frame by frame with no encoder and no headset.
+Parts A–H cover the start-versus-recovery split, the absence of skipping during a sweep, the
 no-restart-on-loss rule, the bounded escalation to an IDR, the failure tally, the live switch and
-non-reference frames.
+non-reference frames. Parts I–M cover the invalidation rung: that it is tried first and names the
+frame, that a loss older than the DPB skips it, that a spoiled repair escalates exactly one rung
+(and that a loss report overtaking an acknowledgement is not buried by it), that a fresh loss starts
+at the bottom again, and the live switch before and after the repair has gone out. Parts A–H are
+unchanged by the new rung, which is the check that the feature's "off" really is the old behaviour.
 
 ```
 g++ -std=c++23 -I server -I common -I build-server/common \

@@ -172,6 +172,32 @@ video_encoder_x264::video_encoder_x264(
 		param.i_keyint_max = intra_refresh_sweep_frames;
 	}
 
+	if (settings.ref_invalidation)
+	{
+		// Reference invalidation is the cheaper rung, and x264 does not have it. Not for want
+		// of references — i_frame_reference and i_dpb_size would happily keep several — but
+		// because there is no way to say, for one frame, "predict from anything but that one".
+		//
+		// What the public API offers, checked against x264.h:
+		//   * x264_param_t::i_frame_reference / i_dpb_size: how many references exist. Set at
+		//     x264_encoder_open, changeable only through x264_encoder_reconfig, and global —
+		//     it says how many, never which.
+		//   * x264_picture_t: i_type, i_qpplus1, i_pic_struct, i_pts, prop (quant_offsets,
+		//     mb_info), extra_sei, opaque, and a per-frame `param` override. Not one field
+		//     touches the reference list; b_keyframe is an output, not a request.
+		//   * that per-frame `param`: it can change i_frame_reference from this frame on, but
+		//     dropping the count to 1 makes the encoder predict from the *newest* reference,
+		//     which on a loss is precisely the frame that must not be used. It is the wrong
+		//     end of the list.
+		//   * x264_encoder_intra_refresh(): the one loss-recovery lever there is, and already
+		//     wired above.
+		//
+		// Reaching the reference list would mean patching libx264 or reaching into x264_t,
+		// which is neither this encoder's business nor stable. So x264 keeps to the rungs it
+		// has: the sweep, then the keyframe. Said once, at startup, rather than silently.
+		U_LOG_I("x264: reference invalidation has no effect, x264 exposes no per-frame reference control; lost frames use the intra refresh or a keyframe");
+	}
+
 	// colour definitions, actually ignored by decoder
 	param.vui.b_fullrange = 1;
 	param.vui.i_colorprim = 1; // BT.709
@@ -381,6 +407,13 @@ std::optional<video_encoder::data> video_encoder_x264::encode(uint8_t slot, uint
 		case default_idr_handler::frame_type::i:
 			control = true;
 			pic.i_type = X264_TYPE_IDR;
+			break;
+		case default_idr_handler::frame_type::invalidate:
+			// Cannot occur: nothing turns reference invalidation on for x264, because there
+			// is no way to ask for it. See the note in the constructor. Mapped to the plain
+			// P frame it would have been anyway.
+			control = false;
+			pic.i_type = X264_TYPE_P;
 			break;
 		case default_idr_handler::frame_type::p:
 			control = false;

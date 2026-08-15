@@ -41,6 +41,17 @@ namespace wivrn
 // the refresh is over long before a user notices the smeared region.
 inline constexpr uint32_t intra_refresh_sweep_frames = 48;
 
+// How long a reference invalidation is watched before it is judged, in frames.
+//
+// Invalidation repairs the picture on the very next frame — that frame simply predicts
+// from an older reference the headset still holds — so unlike a sweep there is nothing to
+// wait for except the headset's word that the repair itself arrived. That word takes an
+// encode, a transmit, a decode and a feedback packet, which on a link healthy enough to be
+// worth the gentle treatment is two or three frames. Six leaves room for a slow one without
+// letting a failed repair sit unnoticed for long; the acknowledgement ends the wait early
+// whenever it turns up, so this is only the pessimistic bound.
+inline constexpr uint32_t ref_invalidation_probation_frames = 6;
+
 class idr_handler
 {
 public:
@@ -55,6 +66,16 @@ public:
 	// frame the headset acknowledged rather than by sending a keyframe, and the raw
 	// "encoder" has no inter frame prediction to repair. Both ignore this.
 	virtual void set_intra_refresh(bool enabled, uint32_t sweep_frames) {}
+
+	// Repair loss by telling the encoder to stop predicting from the frame that was lost,
+	// so that the next P frame references an older one the headset acknowledged instead.
+	// `dpb_frames` is how many reference frames the encoder keeps: a loss older than that
+	// has already fallen out of the DPB and cannot be repaired this way.
+	//
+	// Ignored by the Vulkan handler for the same reason as the refresh above — its whole
+	// reference tracking already *is* this, slot by slot — and by the raw encoder, which
+	// has no references at all.
+	virtual void set_ref_invalidation(bool enabled, uint32_t dpb_frames) {}
 };
 
 // handler for unknown P-frames
@@ -68,6 +89,24 @@ public:
 // is what a reconnect, an encoder reconfiguration and a failover swap all go through —
 // stay real IDRs: they are the points at which the headset's decoder has nothing valid to
 // predict from, and only an IDR gives it a clean start.
+//
+// With reference invalidation on top (set_ref_invalidation) recovery becomes a ladder,
+// cheapest rung first:
+//
+//   1. invalidate. Tell the encoder not to predict from the frame that was lost. The next
+//      P frame references an older one the headset still holds, so the repair costs one
+//      ordinary P frame and lands on the very next frame. Free, and therefore always tried
+//      first — but only while the lost frame is still inside the encoder's DPB, since
+//      invalidating something older would take every reference with it and force the very
+//      keyframe this is all avoiding.
+//   2. refresh. The rolling sweep: no single large frame, but half a second of repair and
+//      a slice of the bit budget spent on intra blocks the whole way.
+//   3. IDR. The full keyframe, and the spike that goes with it.
+//
+// Escalation is by spoiling, not by preference: each rung is judged on whether the frames
+// that carried the repair reached the headset, and only a repair that failed moves up. A
+// fresh, independent loss always starts again at rung 1 — a link that drops one frame every
+// few seconds gets a free repair every time, and never climbs.
 class default_idr_handler : public idr_handler
 {
 	std::mutex mutex;
@@ -96,7 +135,23 @@ class default_idr_handler : public idr_handler
 		uint64_t until;
 		bool lost;
 	};
-	std::variant<need_idr, wait_idr_feedback, idr_received, running, need_refresh, refreshing> state;
+	// A reference invalidation has been asked for and goes out on the next frame encoded:
+	// `lost` is the frame the encoder must stop predicting from.
+	struct need_invalidate
+	{
+		uint64_t lost;
+	};
+	// An invalidation went out on `first`, which is therefore the frame that carries the
+	// repair. The wait ends the moment the headset acknowledges `first`, and no later than
+	// `until`. `lost` records that a frame went missing while it was in flight — the repair
+	// itself did not land, so this rung has failed and the next one is due.
+	struct invalidated
+	{
+		uint64_t first;
+		uint64_t until;
+		bool lost;
+	};
+	std::variant<need_idr, wait_idr_feedback, idr_received, running, need_refresh, refreshing, need_invalidate, invalidated> state;
 	std::vector<uint64_t> non_ref_frames{512, uint64_t(-1)};
 
 	// Effective intra refresh state: the two switches ANDed, and whether the encoder
@@ -114,6 +169,20 @@ class default_idr_handler : public idr_handler
 	// run a frame or two past the length that was asked for.
 	static constexpr uint32_t refresh_slack_frames = 4;
 
+	// Effective reference invalidation state: the switches ANDed with whether the encoder
+	// behind this handler has an invalidation call at all, and how deep its DPB is. A loss
+	// further back than that is out of reach — the frame is no longer a reference, and
+	// invalidating it would invalidate the whole chain built on it.
+	bool invalidate_enabled = false;
+	uint32_t invalidate_dpb = 0;
+	// Newest frame index get_type has been asked about, which is how old a reported loss is
+	// measured against. Monotonic, and deliberately not cleared by reset(): the frame counter
+	// it tracks is the compositor's and does not restart either.
+	uint64_t newest_frame = 0;
+	// The frame the last frame_type::invalidate referred to, for the backend to hand to its
+	// invalidation call.
+	uint64_t invalidate_frame = uint64_t(-1);
+
 public:
 	enum class frame_type
 	{
@@ -122,14 +191,23 @@ public:
 		// A P frame that also starts an intra refresh sweep. Backends that reach this
 		// have a refresh mechanism, because nothing else ever turns one on.
 		refresh,
+		// An ordinary P frame, encoded after the backend has told its encoder to stop
+		// predicting from invalidate_target(). Backends that reach this have an
+		// invalidation call, because nothing else ever turns one on.
+		invalidate,
 	};
 
 	void on_feedback(const from_headset::feedback &) override;
 	void reset() override;
 	bool should_skip(uint64_t frame_id) override;
 	void set_intra_refresh(bool enabled, uint32_t sweep_frames) override;
+	void set_ref_invalidation(bool enabled, uint32_t dpb_frames) override;
 	void set_non_ref(uint64_t frame_index);
 	bool is_non_ref_frame(uint64_t frame_index);
 	frame_type get_type(uint64_t frame_index);
+
+	// The frame the encoder must stop predicting from. Only meaningful immediately after
+	// get_type() returned frame_type::invalidate, which is the only place it is set.
+	uint64_t invalidate_target();
 };
 } // namespace wivrn

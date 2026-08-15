@@ -88,6 +88,46 @@ headset WiVRn supports.
   and VAAPI has no such control and says so once. Costs a little steady-state quality, not extra
   bytes — the rate control has the same budget either way. Toggle: headset (*Intra-refresh
   recovery*); config key `intra-refresh`. [Details](docs/intra-refresh.md).
+- **Smart loss recovery** *(reference invalidation; toggle, default on)* — a rung *below* the sweep,
+  and the cheapest repair there is. The sweep still spends half a second and a slice of every
+  frame's bit budget on intra blocks, for a hole that is really one broken link in a prediction
+  chain. So NX tells the encoder which frame the headset never got, and the encoder simply predicts
+  the next one from an older frame the headset *did* acknowledge. The repair is one ordinary P
+  frame, it lands on the very next frame, and it costs nothing: no keyframe, no sweep, no bitrate
+  spike, no skipped frames. Recovery becomes a ladder — invalidate, then refresh, then IDR — climbed
+  only by failure: a repair whose own frame goes missing escalates one rung, three spoiled sweeps
+  still fall back to a keyframe, and a fresh independent loss always starts at the bottom again, so
+  a link that drops one frame every few seconds gets the free repair every time and never climbs.
+  The one bound is the encoder's reference buffer: a loss reported later than that has already
+  fallen out of the DPB, invalidating it would take the whole chain with it, and the ladder skips
+  straight to the sweep. Wired on **NVENC** (`NvEncInvalidateRefFrames`, with the picture timestamp
+  now carrying the frame index so a reference can be named at all, and a four-frame DPB so there is
+  something older to fall back on — prediction still uses one reference, so the cost is reference
+  memory, not bitrate). The **Vulkan** encoders have always worked this way and need no switch:
+  a DPB slot only becomes eligible as a reference once the headset has acknowledged it, so a lost
+  frame is structurally never predicted from. **x264** and **VAAPI** have no per-frame reference
+  control at all — not a gap in the wiring, an absence in the APIs (x264's picture struct has no
+  reference-list field, and libavcodec fills VAAPI's reference lists itself) — and each says so once
+  at startup and keeps to the rungs above. Toggle: headset (*Smart loss recovery*); config key
+  `ref-invalidation`.
+- **De-jitter buffer** *(toggle, default off)* — everything above is about shards that never
+  arrived. This is about shards that all arrived, at the wrong times. A link can deliver every byte
+  and still look terrible: two frames miss their refresh, then three land in the same millisecond.
+  The headset shows the frame nearest the refresh it is rendering, so those two refreshes repeat the
+  previous picture and the clump is then thrown away down to its newest member — two frames encoded,
+  sent and decoded for nothing, and a visible stutter with zero loss to blame it on. NX can instead
+  run the playout on a clock a little behind: hold each frame for a delay *D* and release it on
+  schedule, so a clump comes out one frame per refresh instead of collapsing. *D* is measured, not
+  guessed — the 95th percentile, over a sliding 128-frame window, of how late frames are for the
+  display times the server stamped on them — and it rises to that in a single frame but drains back
+  over about eight seconds, because every step down costs a skipped frame. On a link with no jitter
+  every frame is ready early, the percentile is negative, and *D* clamps to zero: the frame
+  selection is then bit-for-bit the one that was there before the feature existed, which is why this
+  is safe to leave off *and* why "off" is honest. Clamped to 20 ms or two refresh periods, whichever
+  is lower — past that the headset's frame ring holds nothing older to show. Default **off**: the
+  latency is real, and it is only worth paying on a link that is actually erratic. Entirely
+  headset-side, no protocol change, live from the Transport page (*De-jitter: X ms*). Toggle:
+  headset (*De-jitter buffer*).
 - **Emergency framerate drop** *(toggle, default on)* — the last automatic rung, below the bitrate
   floor. When the automatic bitrate is already pinned at its minimum and the link is *still* losing
   frames — everything above it (FEC, retransmission, intra-refresh, the bitrate drops themselves)

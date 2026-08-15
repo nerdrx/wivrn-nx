@@ -169,6 +169,11 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 	intra_refresh_conf = conf.intra_refresh;
 	compositor.set_intra_refresh(intra_refresh_conf and get_info().settings.intra_refresh);
 
+	// And once more for the cheapest rung of that ladder, reference invalidation. Same
+	// pairing, same read-at-creation half in get_encoder_settings.
+	ref_invalidation_conf = conf.ref_invalidation;
+	compositor.set_ref_invalidation(ref_invalidation_conf and get_info().settings.ref_invalidation);
+
 	// Both switches once more, for the emergency half-rate mode: the last automatic resort
 	// below the bitrate floor. Only the detection is gated here; the framerate change goes
 	// through the compositor and is safe live.
@@ -584,6 +589,9 @@ void wivrn_session::operator()(const from_headset::settings_changed & settings)
 	// Live only downwards: an encoder that was not built with a refresh mechanism cannot
 	// grow one, so turning this back on mid-session waits for the next connection.
 	compositor.set_intra_refresh(intra_refresh_conf and settings.intra_refresh);
+	// Live only downwards for the same reason: an encoder built with a single reference has
+	// nothing older to fall back on, so turning this back on waits for the next connection.
+	compositor.set_ref_invalidation(ref_invalidation_conf and settings.ref_invalidation);
 	// Live both ways: the detection just stops or starts. Mirror the (possibly just cleared)
 	// state onto the compositor now, since turning the automatic bitrate off in the same
 	// packet would stop on_feedback from doing it.

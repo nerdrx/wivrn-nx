@@ -63,6 +63,13 @@ struct encoder_settings
 	// video_encoder::set_intra_refresh. x264 and NVENC honour it, VAAPI has no such control
 	// and the Vulkan encoders already recover without keyframes.
 	bool intra_refresh = true;
+	// Repair loss by invalidating the reference the headset never got, one rung cheaper than
+	// the refresh above. Both switches ANDed, and read only when the encoder is created for
+	// the same reason: the deeper reference buffer this needs is part of the encode session's
+	// configuration. NVENC honours it (NvEncInvalidateRefFrames); the Vulkan encoders already
+	// behave this way with no switch at all; x264 and the FFmpeg VAAPI encoders expose no
+	// per-frame reference control and keep to the rungs above.
+	bool ref_invalidation = true;
 	std::optional<std::string> device;
 };
 

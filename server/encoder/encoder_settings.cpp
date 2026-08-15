@@ -320,6 +320,10 @@ std::array<encoder_settings, num_streams> get_encoder_settings(wivrn::vk_bundle 
 		// mechanism can only configure it when their encode session is created, which
 		// is here, so this is the half that cannot be changed live.
 		dst.intra_refresh = config.intra_refresh and settings.intra_refresh;
+		// Same pair again, one rung down the ladder. Also fixed at creation: the encoders
+		// that can invalidate have to be told at session setup to keep more than one
+		// reference, or there is nothing older to fall back on.
+		dst.ref_invalidation = config.ref_invalidation and settings.ref_invalidation;
 
 		std::tie(dst.encoder_name, dst.codec) = prober.select_encoder(src);
 	}

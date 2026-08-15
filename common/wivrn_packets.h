@@ -466,6 +466,16 @@ struct settings_changed
 	// switch. Read when the encoders are created, so turning it on takes effect on the next
 	// connection; turning it off applies immediately.
 	bool intra_refresh = true;
+	// Whether a lost frame should first be repaired by telling the encoder to stop predicting
+	// from it — the next P frame then references an older frame the headset acknowledged, and
+	// the repair costs one ordinary P frame instead of a sweep or a keyframe. The cheapest rung
+	// of the recovery ladder, tried before intra_refresh above; a loss older than the encoder's
+	// reference buffer, or a repair that is itself lost, falls through to it. Needs an encoder
+	// with an invalidation call (NVENC has one; the Vulkan encoders do this inherently and
+	// always have; x264 and VAAPI have no such control), and the server also has its own
+	// switch. Read when the encoders are created, so turning it on takes effect on the next
+	// connection; turning it off applies immediately.
+	bool ref_invalidation = true;
 	// Whether, as the last automatic resort below the bitrate floor, the server may halve the
 	// stream framerate to halve bandwidth when the automatic bitrate is already pinned at its
 	// minimum and the link is still losing frames, restoring the full rate once it recovers.

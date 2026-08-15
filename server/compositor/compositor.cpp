@@ -567,6 +567,11 @@ bool compositor::fail_over_encoder(size_t idx, const std::string & reason)
 	// the failed encoder was built from, so the replacement configures one; this hands it
 	// whatever the live half of the switch has since become.
 	replacement->set_intra_refresh(intra_refresh_enabled);
+	// x264 has no reference invalidation call (see video_encoder_x264.cpp), so the
+	// replacement never configures one and this only records the live half for it. Said
+	// anyway rather than left out: the replacement must end up in the same state as any
+	// other encoder, whatever a future backend does with it.
+	replacement->set_ref_invalidation(ref_invalidation_enabled);
 	replacement->watchdog.set_enabled(failover_enabled);
 	// A fresh IDR handler already asks for a keyframe on its first frame; say so
 	// rather than leaving it implicit. The headset needs it: everything it holds
@@ -1851,6 +1856,25 @@ void compositor::set_intra_refresh(bool enabled)
 	{
 		if (encoder)
 			encoder->set_intra_refresh(enabled);
+	}
+}
+
+void compositor::set_ref_invalidation(bool enabled)
+{
+	if (ref_invalidation_enabled == enabled)
+		return;
+
+	ref_invalidation_enabled = enabled;
+
+	if (enabled)
+		U_LOG_I("Reference invalidation loss recovery enabled, on the streams whose encoder was built with it");
+	else
+		U_LOG_I("Reference invalidation loss recovery disabled, a lost frame now goes straight to the intra refresh or the keyframe");
+
+	for (auto & encoder: get_encoders())
+	{
+		if (encoder)
+			encoder->set_ref_invalidation(enabled);
 	}
 }
 

@@ -119,6 +119,12 @@ void scenes::stream::refresh_reconnect_watchdog()
 		for (auto & frame: decoder.latest_frames)
 			if (frame)
 				frame->feedback.received_from_decoder = now;
+
+	// The outage is not evidence about the link on the far side of it — the last samples in
+	// the de-jitter window are frames that were arriving as the connection died, all of them
+	// wildly late. Keeping them would peg the playout delay at its ceiling for the first
+	// seconds of the resumed stream. Start the measurement again instead.
+	dejitter.reset();
 }
 
 bool scenes::stream::try_seamless_reconnect()

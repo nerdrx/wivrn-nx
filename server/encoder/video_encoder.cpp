@@ -551,6 +551,23 @@ void video_encoder::set_intra_refresh(bool enabled)
 	idr->set_intra_refresh(enabled, intra_refresh_sweep);
 }
 
+void video_encoder::enable_ref_invalidation(uint32_t dpb_frames)
+{
+	ref_invalidation_supported = true;
+	ref_invalidation_dpb = dpb_frames;
+	idr->set_ref_invalidation(ref_invalidation_enabled, dpb_frames);
+}
+
+void video_encoder::set_ref_invalidation(bool enabled)
+{
+	ref_invalidation_enabled = enabled;
+	// No invalidation call on this encoder: the handler stays on the rungs above it whatever
+	// the switch says, and would have nothing to drive if it did not.
+	if (not ref_invalidation_supported)
+		return;
+	idr->set_ref_invalidation(enabled, ref_invalidation_dpb);
+}
+
 void video_encoder::set_framerate(float framerate)
 {
 	pending_framerate = framerate;

@@ -310,6 +310,22 @@ configuration::configuration()
 			U_LOG_W("Ignoring invalid \"intra-refresh\" configuration: %s", e.what());
 		}
 
+		// "ref-invalidation": true/false
+		try
+		{
+			if (auto it = json.find("ref-invalidation"); it != json.end())
+			{
+				if (it->is_boolean())
+					ref_invalidation = *it;
+				else
+					throw std::runtime_error("invalid ref-invalidation value, expected a boolean");
+			}
+		}
+		catch (const std::exception & e)
+		{
+			U_LOG_W("Ignoring invalid \"ref-invalidation\" configuration: %s", e.what());
+		}
+
 		// "emergency-framerate": true/false
 		try
 		{

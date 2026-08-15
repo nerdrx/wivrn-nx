@@ -338,6 +338,8 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("wifi_qos", &configuration::wifi_qos),
 	        scalar("encoder_failover", &configuration::encoder_failover),
 	        scalar("intra_refresh", &configuration::intra_refresh),
+	        scalar("ref_invalidation", &configuration::ref_invalidation),
+	        scalar("dejitter", &configuration::dejitter),
 	        scalar("emergency_framerate", &configuration::emergency_framerate),
 	        scalar("standby_freeze", &configuration::standby_freeze),
 	        scalar("seamless_reconnect", &configuration::seamless_reconnect),

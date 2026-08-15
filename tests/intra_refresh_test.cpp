@@ -26,6 +26,22 @@
 //         leaves it to finish, because it is already repairing the picture.
 // Part H: non-reference frames are not evidence of anything, refresh or not.
 //
+// Reference invalidation turned the two-rung choice above into a three-rung ladder:
+// invalidate (one ordinary P frame, predicted from an older acknowledged reference), then
+// refresh, then IDR. The parts below are that ladder.
+//
+// Part I: invalidation is the first rung, and it names the frame to invalidate. Nothing is
+//         skipped, and the stream is back to plain P frames as soon as the repair is
+//         acknowledged. With invalidation off, the ladder is exactly Parts A-H again.
+// Part J: the DPB bound. A loss older than the encoder's reference buffer cannot be repaired
+//         by invalidating it — there would be nothing older left — so it skips the rung.
+// Part K: a spoiled invalidation escalates one rung, to a sweep, or to an IDR when there is
+//         no sweep to escalate to.
+// Part L: escalation is per recovery, not permanent. A fresh, independent loss starts at the
+//         cheapest rung again.
+// Part M: the live switch, same shape as Part G: off before the invalidation goes out falls
+//         down the ladder; off after it has gone out leaves it to be judged.
+//
 // Build:
 //   g++ -std=c++23 -I server -I common -I build-server/common \
 //       -I build-server/_deps/monado-src/src/xrt/include \
@@ -82,9 +98,16 @@ const char * name(frame_type t)
 			return "P";
 		case frame_type::refresh:
 			return "R";
+		case frame_type::invalidate:
+			return "V";
 	}
 	return "?";
 }
+
+// Reference frames the invalidation tests tell the handler the encoder keeps. Any small
+// number will do — what is under test is that the bound exists and is applied to the age of
+// the loss, not the value NVENC happens to be configured with.
+constexpr uint32_t test_dpb = 4;
 
 // One frame through the handler, exactly as an encoder drives it: ask whether to skip it,
 // and if not ask what kind of frame it is. Returns nullopt for a skipped frame.
@@ -480,6 +503,274 @@ void part_h()
 	CHECK(s.type == frame_type::p);
 }
 
+// Encode one ordinary P frame at `frame`, tell the handler it never arrived, and leave
+// `frame` on the next index. Returns the index of the frame that was lost.
+uint64_t lose_one(default_idr_handler & h, uint64_t & frame)
+{
+	const uint64_t lost = frame;
+	auto s = step(h, frame);
+	CHECK(not s.skipped);
+	CHECK(s.type == frame_type::p);
+	++frame;
+	h.on_feedback(report(lost, false));
+	return lost;
+}
+
+// --- Part I -----------------------------------------------------------------
+// The cheapest rung. A lost frame becomes one ordinary P frame that predicts from an older
+// reference the headset acknowledged, instead of half a second of intra blocks or a
+// keyframe. The handler has to name the frame the encoder must strike out, because the
+// encoder has no idea which one went missing — it only ever hears about frames it sent.
+void part_i()
+{
+	std::printf("Part I: a lost frame is repaired by invalidating it\n");
+
+	// The rung has to be asked for. Without set_ref_invalidation the handler behaves exactly
+	// as Parts A-H describe, which is what makes the feature's "off" switch honest.
+	{
+		default_idr_handler h;
+		h.set_intra_refresh(true, intra_refresh_sweep_frames);
+		uint64_t frame = start_stream(h);
+		lose_one(h, frame);
+		CHECK(step(h, frame).type == frame_type::refresh);
+	}
+
+	default_idr_handler h;
+	h.set_intra_refresh(true, intra_refresh_sweep_frames);
+	h.set_ref_invalidation(true, test_dpb);
+	uint64_t frame = start_stream(h);
+
+	const uint64_t lost = lose_one(h, frame);
+
+	auto s = step(h, frame);
+	CHECK(not s.skipped);
+	CHECK(s.type == frame_type::invalidate);
+	// The whole point: the encoder is told *which* reference is unusable
+	CHECK(h.invalidate_target() == lost);
+
+	const uint64_t repair = frame;
+	++frame;
+
+	// The repair arrives. That ends the wait at once — there is nothing else to wait for,
+	// the picture is whole again the moment that one frame decodes.
+	h.on_feedback(report(repair, true));
+
+	for (int i = 0; i < 20; ++i, ++frame)
+	{
+		auto p = step(h, frame);
+		CHECK(not p.skipped);
+		CHECK(p.type == frame_type::p);
+		h.on_feedback(report(frame, true));
+	}
+}
+
+// --- Part J -----------------------------------------------------------------
+// Invalidating a frame invalidates everything predicted from it, so it only helps while
+// something older survives. Past the encoder's DPB depth nothing does, and asking for it
+// anyway would force the encoder to produce the keyframe this ladder exists to avoid. So
+// that rung is skipped rather than attempted.
+void part_j()
+{
+	std::printf("Part J: a loss older than the DPB skips the invalidation rung\n");
+
+	for (bool refresh: {true, false})
+	{
+		default_idr_handler h;
+		if (refresh)
+			h.set_intra_refresh(true, intra_refresh_sweep_frames);
+		h.set_ref_invalidation(true, test_dpb);
+		uint64_t frame = start_stream(h);
+
+		// The loss happens, but the report of it takes its time: by the time it lands, the
+		// encoder has moved a whole DPB's worth of frames past it.
+		const uint64_t lost = frame;
+		for (uint64_t i = 0; i <= test_dpb; ++i, ++frame)
+			CHECK(step(h, frame).type == frame_type::p);
+		h.on_feedback(report(lost, false));
+
+		auto s = step(h, frame);
+		CHECK(not s.skipped);
+		CHECK(s.type == (refresh ? frame_type::refresh : frame_type::i));
+	}
+
+	// And the boundary the other way: one frame younger is still in reach
+	default_idr_handler h;
+	h.set_intra_refresh(true, intra_refresh_sweep_frames);
+	h.set_ref_invalidation(true, test_dpb);
+	uint64_t frame = start_stream(h);
+
+	const uint64_t lost = frame;
+	for (uint64_t i = 0; i < test_dpb; ++i, ++frame)
+		CHECK(step(h, frame).type == frame_type::p);
+	h.on_feedback(report(lost, false));
+
+	CHECK(step(h, frame).type == frame_type::invalidate);
+	CHECK(h.invalidate_target() == lost);
+}
+
+// --- Part K -----------------------------------------------------------------
+// The repair is one frame, and one frame can be lost like any other. When it is, predicting
+// from an older reference plainly did not get the picture back, so the handler climbs: a
+// sweep if the encoder has one, a keyframe if it does not.
+void part_k()
+{
+	std::printf("Part K: a spoiled invalidation escalates one rung\n");
+
+	for (bool refresh: {true, false})
+	{
+		default_idr_handler h;
+		if (refresh)
+			h.set_intra_refresh(true, intra_refresh_sweep_frames);
+		h.set_ref_invalidation(true, test_dpb);
+		uint64_t frame = start_stream(h);
+
+		lose_one(h, frame);
+		CHECK(step(h, frame).type == frame_type::invalidate);
+		const uint64_t repair = frame;
+		++frame;
+
+		// The frame carrying the repair never arrived either
+		h.on_feedback(report(repair, false));
+
+		auto ask = advance(h, frame, nothing_lost);
+		CHECK(ask.type == (refresh ? frame_type::refresh : frame_type::i));
+		// Nothing is skipped on the way there: the frames in between are ordinary ones and
+		// the headset is better off with them than with silence.
+		CHECK(not ask.skipped_any);
+	}
+
+	// A report that overtakes the acknowledgement must not be buried by it. Feedback does not
+	// arrive in frame order, so a "frame N+1 was lost" that lands before "frame N arrived"
+	// would, if the acknowledgement were checked first, end the wait and leave the hole N+1
+	// opened with nothing at all scheduled to repair it.
+	default_idr_handler h;
+	h.set_intra_refresh(true, intra_refresh_sweep_frames);
+	h.set_ref_invalidation(true, test_dpb);
+	uint64_t frame = start_stream(h);
+
+	lose_one(h, frame);
+	CHECK(step(h, frame).type == frame_type::invalidate);
+	const uint64_t repair = frame;
+	++frame;
+
+	// One more frame goes out, and its loss is reported before the repair's success is
+	CHECK(step(h, frame).type == frame_type::p);
+	h.on_feedback(report(frame, false));
+	++frame;
+	h.on_feedback(report(repair, true));
+
+	auto ask = advance(h, frame, nothing_lost);
+	CHECK(ask.type == frame_type::refresh);
+}
+
+// --- Part L -----------------------------------------------------------------
+// Escalation belongs to one recovery, not to the stream. A link that drops a frame every few
+// seconds should get the free repair every time and never climb — otherwise the first
+// unlucky moment of a session would leave it paying for sweeps for the rest of it.
+void part_l()
+{
+	std::printf("Part L: a fresh loss starts at the cheapest rung again\n");
+
+	default_idr_handler h;
+	h.set_intra_refresh(true, intra_refresh_sweep_frames);
+	h.set_ref_invalidation(true, test_dpb);
+	uint64_t frame = start_stream(h);
+
+	for (int round = 0; round < 4; ++round)
+	{
+		lose_one(h, frame);
+
+		auto s = step(h, frame);
+		CHECK(s.type == frame_type::invalidate);
+		const uint64_t repair = frame;
+		++frame;
+		h.on_feedback(report(repair, true));
+
+		frame = run_clean(h, frame, 10);
+	}
+
+	// The same across an escalation: one spoiled repair costs one sweep, and the loss after
+	// that sweep is cheap again.
+	lose_one(h, frame);
+	CHECK(step(h, frame).type == frame_type::invalidate);
+	const uint64_t repair = frame;
+	++frame;
+	h.on_feedback(report(repair, false));
+
+	auto ask = advance(h, frame, nothing_lost);
+	CHECK(ask.type == frame_type::refresh);
+
+	// Let that sweep finish cleanly, then lose another frame
+	auto after = advance(h, frame, nothing_lost);
+	CHECK(after.type == frame_type::p);
+	frame = run_clean(h, frame, 5);
+
+	lose_one(h, frame);
+	CHECK(step(h, frame).type == frame_type::invalidate);
+}
+
+// --- Part M -----------------------------------------------------------------
+// The live switch, exactly the shape Part G gives the refresh: turning the rung off before
+// its frame has gone out falls down the ladder, turning it off afterwards leaves the repair
+// that is already in the encoder's hands to be judged on its merits.
+void part_m()
+{
+	std::printf("Part M: turning reference invalidation off, before and after\n");
+
+	// Off before it goes out, with a sweep below it to fall to
+	{
+		default_idr_handler h;
+		h.set_intra_refresh(true, intra_refresh_sweep_frames);
+		h.set_ref_invalidation(true, test_dpb);
+		uint64_t frame = start_stream(h);
+
+		lose_one(h, frame);
+		h.set_ref_invalidation(false, test_dpb);
+
+		auto s = step(h, frame);
+		CHECK(not s.skipped);
+		CHECK(s.type == frame_type::refresh);
+	}
+
+	// Off before it goes out, with nothing below it but the keyframe
+	{
+		default_idr_handler h;
+		h.set_ref_invalidation(true, test_dpb);
+		uint64_t frame = start_stream(h);
+
+		lose_one(h, frame);
+		h.set_ref_invalidation(false, test_dpb);
+
+		auto s = step(h, frame);
+		CHECK(not s.skipped);
+		CHECK(s.type == frame_type::i);
+	}
+
+	// Off after it has gone out: the frame is encoded, the repair may well have worked, and
+	// throwing a keyframe on top of it would cost bandwidth for nothing.
+	{
+		default_idr_handler h;
+		h.set_intra_refresh(true, intra_refresh_sweep_frames);
+		h.set_ref_invalidation(true, test_dpb);
+		uint64_t frame = start_stream(h);
+
+		lose_one(h, frame);
+		CHECK(step(h, frame).type == frame_type::invalidate);
+		const uint64_t repair = frame;
+		++frame;
+
+		h.set_ref_invalidation(false, test_dpb);
+		h.on_feedback(report(repair, true));
+
+		auto after = advance(h, frame, nothing_lost);
+		CHECK(after.type == frame_type::p);
+
+		// From here on the cheap rung is gone, so the next loss is a sweep
+		lose_one(h, frame);
+		CHECK(step(h, frame).type == frame_type::refresh);
+	}
+}
+
 } // namespace
 
 // The handler logs through Monado's u_log; standing in for it is all it takes to run the
@@ -514,6 +805,11 @@ int main(int argc, char ** argv)
 	part_f();
 	part_g();
 	part_h();
+	part_i();
+	part_j();
+	part_k();
+	part_l();
+	part_m();
 
 	std::printf("\n%d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;

@@ -730,6 +730,22 @@ void scenes::stream::gui_transport()
 			stat(_("Frames lost"), fmt::format("{}", uint64_t(incomplete_frames)), incomplete_frames > 0 ? t.warning : t.text_muted);
 			stat(_("Audio gaps concealed"), fmt::format("{}", transport_concealments), t.text_muted);
 			stat(_("Audio gaps now"), fmt::format("{:.1f} /min", latest.conceal_per_min), t.text_muted);
+
+			// Purely local: the server is never told about the playout delay and could not
+			// use it if it were. A value sitting above zero is the headset saying the frames
+			// are arriving unevenly — which nothing else on this page shows, because they
+			// all arrived.
+			if (config.dejitter)
+			{
+				const float ms = float(dejitter.delay_ns()) * 1e-6f;
+				stat(_("De-jitter buffer"),
+				     fmt::format("{:.1f} ms", ms),
+				     ms > 0.05f ? t.warning : t.text_muted);
+			}
+			else
+			{
+				stat(_("De-jitter buffer"), _("off"), t.text_muted);
+			}
 		}
 		wivrn::ui::end_card();
 
@@ -878,6 +894,7 @@ static void send_settings_changed_packet(xr::session & session, wivrn_session * 
 	                .sharp_text = config.sharp_text,
 	                .encoder_failover = config.encoder_failover,
 	                .intra_refresh = config.intra_refresh,
+	                .ref_invalidation = config.ref_invalidation,
 	                .emergency_framerate = config.emergency_framerate,
 	                .motion_smoothing = config.motion_smoothing,
 	                .motion_smoothing_mode = config.motion_mode(),

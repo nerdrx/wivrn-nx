@@ -185,6 +185,20 @@ wivrn::video_encoder_vulkan::video_encoder_vulkan(
 		U_LOG_I("vulkan: intra refresh loss recovery is not needed, this encoder recovers by encoding against the newest reference the headset acknowledged");
 	}
 
+	if (settings.ref_invalidation)
+	{
+		// Nothing to do here either, because this is already what dpb_state does — and does
+		// unconditionally, with no switch, which is why it does not go through
+		// enable_ref_invalidation(). Reference invalidation on the other backends means
+		// telling the encoder after the fact to strike a frame out of its DPB; here a slot
+		// only ever becomes eligible as a reference once the headset has said it arrived
+		// (dpb_item::acked, set from on_feedback), and get_ref picks the newest such slot.
+		// A frame that was lost is simply never acknowledged, so it is never chosen — the
+		// invalidation is structural rather than retroactive, and there is no DPB depth
+		// limit to fall foul of beyond the slot count itself (num_dpb_slots, up to 16).
+		U_LOG_I("vulkan: reference invalidation is inherent to this encoder, it only ever predicts from references the headset acknowledged");
+	}
+
 	if (settings.foveation_foveal_qp)
 	{
 		// Foveation v2 lever 3: the Vulkan video encode extension has no portable per-region QP

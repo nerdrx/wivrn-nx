@@ -647,6 +647,26 @@ void settings_streaming(const settings_context & ctx)
 	});
 
 	list.push_back({
+	        .id = "##ref_invalidation",
+	        .label = _("Smart loss recovery"),
+	        .description = _("Before repairing the picture gradually, try the cheap fix first: tell the computer which image never arrived, so that the next one it sends is built on an older image this headset still has instead of on the missing one. The repair costs one ordinary frame and lands immediately, with no gradual sweep and no fresh full image. If the loss is too old to reach, or the repair itself goes missing, it falls back to the gradual repair as before. Turning it on takes effect on the next connection; not all encoders can do it."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.ref_invalidation; },
+	        .set_bool = [&ctx, &config](bool v) { config.ref_invalidation = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.ref_invalidation,
+	});
+
+	list.push_back({
+	        .id = "##dejitter",
+	        .label = _("De-jitter buffer"),
+	        .description = _("Hold each image for a fraction of a second and show it on schedule, instead of showing whichever one is newest the instant it is ready. On a connection that delivers images in clumps — two late, then three at once — showing them as they land makes the world stutter even though nothing was lost; holding them smooths that out. The delay is measured from the connection itself and settles at zero on a steady one, so this costs nothing when it is not needed, but at worst it adds about two frames of lag. Turn it on if the picture judders on an otherwise clean connection."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.dejitter; },
+	        .set_bool = [&config](bool v) { config.dejitter = v; config.save(); },
+	        .default_bool = default_config.dejitter,
+	});
+
+	list.push_back({
 	        .id = "##encoder_failover",
 	        .label = _("Encoder failover"),
 	        .description = _("If the graphics card's video encoder stops working in the middle of a session, let the computer carry on encoding that eye in software instead of leaving it frozen until you reconnect. Costs CPU on the computer while it lasts, and only works for H.264."),

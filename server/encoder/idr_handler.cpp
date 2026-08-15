@@ -21,6 +21,8 @@
 #include "util/u_logging.h"
 #include "utils/overloaded.h"
 
+#include <algorithm>
+
 namespace wivrn
 {
 idr_handler::~idr_handler() = default;
@@ -56,10 +58,38 @@ void default_idr_handler::on_feedback(const from_headset::feedback & f)
 		                   if (not f.sent_to_decoder and f.frame_index >= r.first and not is_non_ref_frame(f.frame_index))
 			                   r.lost = true;
 	                   },
+	                   [this, &f](invalidated & r) {
+		                   // Order matters: a loss anywhere in the probation window condemns the
+		                   // repair even if the frame that carried it was itself acknowledged,
+		                   // and feedback does not arrive in frame order. Checking the loss
+		                   // first is what stops an acknowledgement that overtook it from
+		                   // quietly burying a hole nothing would then repair.
+		                   if (not f.sent_to_decoder and f.frame_index >= r.first and not is_non_ref_frame(f.frame_index))
+		                   {
+			                   r.lost = true;
+			                   return;
+		                   }
+		                   if (f.sent_to_decoder and f.frame_index == r.first and not r.lost)
+		                   {
+			                   U_LOG_D("Reference invalidation acknowledged, stream %d", f.stream_index);
+			                   state = running{r.first};
+		                   }
+	                   },
 	                   [this, &f](running r) {
 		                   if (not f.sent_to_decoder and f.frame_index >= r.first_p and not is_non_ref_frame(f.frame_index))
 		                   {
-			                   if (refresh_enabled)
+			                   // Cheapest rung first. The lost frame has to still be a
+			                   // reference the encoder holds: past the DPB depth there is
+			                   // nothing left to invalidate but the whole chain, which
+			                   // costs exactly the keyframe this is avoiding.
+			                   if (invalidate_enabled and f.frame_index <= newest_frame and newest_frame - f.frame_index < invalidate_dpb)
+			                   {
+				                   U_LOG_I("Reference invalidation of frame %lu on stream %d",
+				                           (unsigned long)f.frame_index,
+				                           f.stream_index);
+				                   state = need_invalidate{f.frame_index};
+			                   }
+			                   else if (refresh_enabled)
 			                   {
 				                   U_LOG_I("Intra refresh needed on stream %d", f.stream_index);
 				                   state = need_refresh{};
@@ -71,6 +101,7 @@ void default_idr_handler::on_feedback(const from_headset::feedback & f)
 			                   }
 		                   }
 	                   },
+	                   [](need_invalidate) {},
 	           },
 	           state);
 }
@@ -85,6 +116,7 @@ void default_idr_handler::reset()
 	// loss on an otherwise running stream takes the gentle path.
 	state = need_idr{};
 	failed_refreshes = 0;
+	invalidate_frame = uint64_t(-1);
 	non_ref_frames.assign(512, uint64_t(-1));
 }
 
@@ -100,6 +132,26 @@ void default_idr_handler::set_intra_refresh(bool enabled, uint32_t sweep_frames)
 	// picture, and an IDR on top of it would cost bandwidth for nothing.
 	if (not enabled and std::holds_alternative<need_refresh>(state))
 		state = need_idr{};
+}
+
+void default_idr_handler::set_ref_invalidation(bool enabled, uint32_t dpb_frames)
+{
+	std::unique_lock lock(mutex);
+	invalidate_enabled = enabled;
+	if (dpb_frames)
+		invalidate_dpb = dpb_frames;
+
+	// Turned off before the invalidation it asked for had gone out: fall down the ladder to
+	// whatever rung is still available. One already in flight is left to be judged — the
+	// frame carrying it has been encoded, and nothing is gained by throwing a keyframe on
+	// top of a repair that may well have worked.
+	if (not enabled and std::holds_alternative<need_invalidate>(state))
+	{
+		if (refresh_enabled)
+			state = need_refresh{};
+		else
+			state = need_idr{};
+	}
 }
 
 bool default_idr_handler::should_skip(uint64_t frame_id)
@@ -135,9 +187,19 @@ bool default_idr_handler::is_non_ref_frame(uint64_t frame_index)
 	return non_ref_frames[frame_index % non_ref_frames.size()] == frame_index;
 }
 
+uint64_t default_idr_handler::invalidate_target()
+{
+	std::unique_lock lock(mutex);
+	return invalidate_frame;
+}
+
 default_idr_handler::frame_type default_idr_handler::get_type(uint64_t frame_index)
 {
 	std::unique_lock lock(mutex);
+	// How old a reported loss is, is measured against this. Frames are handed to the
+	// encoders in order, but the streams do not all skip the same ones, so take the newest
+	// rather than assuming the argument is it.
+	newest_frame = std::max(newest_frame, frame_index);
 	return std::visit(utils::overloaded{
 	                          [this, frame_index](need_idr) {
 		                          U_LOG_D("IDR frame needed");
@@ -147,6 +209,50 @@ default_idr_handler::frame_type default_idr_handler::get_type(uint64_t frame_ind
 	                          [this, frame_index](idr_received) {
 		                          state = running{frame_index};
 		                          return frame_type::p;
+	                          },
+	                          [this, frame_index](need_invalidate s) {
+		                          U_LOG_D("Reference invalidation of frame %lu", (unsigned long)s.lost);
+		                          invalidate_frame = s.lost;
+		                          state = invalidated{
+		                                  .first = frame_index,
+		                                  .until = frame_index + ref_invalidation_probation_frames,
+		                                  .lost = false,
+		                          };
+		                          return frame_type::invalidate;
+	                          },
+	                          [this, frame_index](invalidated r) {
+		                          if (frame_index < r.until)
+			                          return frame_type::p;
+
+		                          if (not r.lost)
+		                          {
+			                          // Never acknowledged, but nothing was reported missing
+			                          // either. The headset only reports what it notices, and
+			                          // a repair nothing complained about is a repair that
+			                          // worked; treating silence as failure would spend a
+			                          // sweep on every stream whose feedback is simply late.
+			                          U_LOG_D("Reference invalidation complete");
+			                          state = running{frame_index};
+			                          return frame_type::p;
+		                          }
+
+		                          // The frame carrying the repair, or one right behind it, never
+		                          // arrived. Predicting from an older reference did not help, so
+		                          // climb: a sweep if this encoder has one, a keyframe if not.
+		                          if (refresh_enabled)
+		                          {
+			                          U_LOG_I("Reference invalidation lost frames, escalating to an intra refresh");
+			                          state = refreshing{
+			                                  .first = frame_index,
+			                                  .until = frame_index + refresh_frames + refresh_slack_frames,
+			                                  .lost = false,
+			                          };
+			                          return frame_type::refresh;
+		                          }
+
+		                          U_LOG_W("Reference invalidation lost frames, falling back to an IDR frame");
+		                          state = wait_idr_feedback{frame_index};
+		                          return frame_type::i;
 	                          },
 	                          [this, frame_index](need_refresh) {
 		                          U_LOG_D("Intra refresh started");

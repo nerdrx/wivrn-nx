@@ -22,6 +22,7 @@
 #include "app_launcher.h"
 #include "audio/audio.h"
 #include "constants.h"
+#include "decoder/dejitter.h"
 #include "decoder/shard_accumulator.h"
 #include "render/imgui_impl.h"
 #include "scene.h"
@@ -96,6 +97,13 @@ private:
 	// for frames inside accumulator images
 	std::mutex frames_mutex;
 	std::array<std::shared_ptr<wivrn::shard_accumulator::blit_handle>, decoder_count> common_frame(XrTime display_time);
+
+	// Adaptive playout delay (config.dejitter). Fed one sample per arriving eye-zero frame
+	// from the decoder thread, under frames_mutex; configured once per refresh from the
+	// render thread; read by both and by the Transport page. Its delay is zero whenever the
+	// setting is off, which is what makes common_frame's choice of frame identical to what
+	// it was before the buffer existed.
+	wivrn::dejitter_buffer dejitter;
 
 	std::unique_ptr<wivrn_session> network_session;
 	std::thread network_thread;

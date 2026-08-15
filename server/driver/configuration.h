@@ -112,6 +112,11 @@ struct configuration
 	// Recovery from unrecoverable loss sweeps a column of intra coded blocks across the
 	// picture instead of sending a keyframe, on the encoders that have the mechanism.
 	bool intra_refresh = true;
+	// And once more for the rung below it: repair a lost frame by having the encoder stop
+	// predicting from it and reference an older acknowledged frame instead, which costs one
+	// ordinary P frame. Tried before the sweep; falls through to it when the loss is out of
+	// the encoder's reference buffer or the repair is itself lost.
+	bool ref_invalidation = true;
 	// Server side half of the emergency half-rate switch: when the automatic bitrate is
 	// already pinned at its floor and the link is still losing frames, halve the stream
 	// framerate to halve bandwidth, restoring it once the link recovers. Both switches must

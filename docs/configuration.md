@@ -240,6 +240,63 @@ per-encoder details.
 ```
 Recover from unrecoverable loss with a full keyframe, as it did before.
 
+## `ref-invalidation`
+Default value: `true`
+
+Repairs loss one rung cheaper than the sweep above: instead of anything rolling across the picture,
+the encoder is told which frame the headset never received, and predicts the next one from an older
+frame the headset *did* acknowledge.
+
+The repair is a single ordinary P frame and it lands on the very next frame. Nothing large is sent,
+no frame is skipped, no bit budget is diverted into intra blocks, and the picture is whole again
+about as fast as the feedback round trip allows. It is free in a way neither of the other two rungs
+is, which is why it is tried first.
+
+Recovery is therefore a ladder, climbed only by failure:
+
+1. **invalidate** — one P frame predicted from an older reference;
+2. **refresh** — the rolling sweep, when the loss is out of reach or the invalidation was itself
+   lost;
+3. **IDR** — the full keyframe, when three sweeps in a row are spoiled or there is no sweep to fall
+   to.
+
+"Out of reach" is the one real limit. Invalidating a frame invalidates everything predicted from it,
+so it only helps while something older survives in the encoder's decoded picture buffer. A loss
+reported later than the DPB is deep would take the whole chain with it and force exactly the
+keyframe this avoids, so the ladder skips that rung instead. Escalation belongs to one recovery and
+not to the stream: a fresh, independent loss always starts at the bottom again.
+
+Supported on **NVENC** (`NvEncInvalidateRefFrames`). Two things change there when this is enabled:
+the picture timestamp now carries the frame index, since a timestamp is the only handle the
+invalidation call has on a reference, and the DPB is raised from the driver default to four frames
+so that there is something older to fall back on. Four is a deliberate compromise — deeper would
+make older losses repairable, but every reference is also a frame the *headset's* decoder must hold,
+and H.264/HEVC bound that by level, so a deep DPB at a large eye size is a stream a headset may
+legitimately refuse. Four is about 44 ms at 90 Hz, comfortably more than a LAN feedback round trip.
+Prediction quality is untouched: `numRefL0` is left alone, so the encoder still predicts from a
+single reference — the newest valid one — exactly as it did with a DPB of one. The cost is reference
+memory at both ends, not bitrate.
+
+The **Vulkan** encoders already behave this way and need no switch: a DPB slot only becomes eligible
+as a reference once the headset has acknowledged it, so a lost frame is never predicted from in the
+first place. **x264** and the FFmpeg **VAAPI** encoders have no per-frame reference control to reach
+— x264's `x264_picture_t` has no reference-list field (only `i_frame_reference`/`i_dpb_size`, which
+say how many references exist and never which one a frame may use), and libavcodec fills VAAPI's
+reference lists from its own reference management, below any application interface. Both log one
+line saying so at startup and keep to the rungs above.
+
+The headset has its own *Smart loss recovery* toggle in its streaming settings. Both switches must
+be enabled. The deeper reference buffer is part of the encode session's configuration, so turning
+the feature **on** takes effect on the next connection; turning it off applies immediately.
+
+### Example
+```json
+{
+	"ref-invalidation": false
+}
+```
+Go straight to the intra refresh or the keyframe on a lost frame, as it did before.
+
 ## `emergency-framerate`
 Default value: `true`
 

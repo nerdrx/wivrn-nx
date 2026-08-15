@@ -82,9 +82,10 @@ std::optional<wivrn::video_encoder::data> video_encoder_ffmpeg::encode(uint8_t s
 		encoder_ctx->framerate = AVRational{.num = int(framerate * 1000), .den = 1000};
 	}
 
-	// frame_type::refresh cannot occur here: nothing turns intra refresh on for the FFmpeg
-	// encoders, because none of them exposes a control for it (see video_encoder_va.cpp).
-	// It maps to a plain P frame anyway, which is what it is.
+	// Neither frame_type::refresh nor frame_type::invalidate can occur here: nothing turns
+	// intra refresh or reference invalidation on for the FFmpeg encoders, because none of
+	// them exposes a control for either (see video_encoder_va.cpp). Both map to a plain P
+	// frame anyway, which is what they are.
 	bool is_idr = idr_handler.get_type(frame_index) == default_idr_handler::frame_type::i;
 
 	std::shared_ptr<AVPacket> enc_pkt(av_packet_alloc(), [](AVPacket * d) { av_packet_free(&d); });

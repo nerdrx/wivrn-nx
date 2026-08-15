@@ -268,6 +268,47 @@ video_encoder_nvenc::video_encoder_nvenc(
 	// other sweep-length keeps a bound on how long any error can persist without costing much,
 	// and on top of that a lost frame asks for a sweep of its own through
 	// NV_ENC_PIC_PARAMS_*::forceIntraRefreshWithFrameCnt, see encode().
+	// Reference frame invalidation. NvEncInvalidateRefFrames marks a frame — and everything
+	// reconstructed from it — unusable for prediction, and the encoder falls back to an older
+	// reference on its own. That only works if there *is* an older reference, so the DPB has
+	// to be deep enough to hold a few, which is what nvenc_ref_dpb_frames buys and why this
+	// cannot be switched on mid-session: maxNumRefFrames is part of the encode session.
+	//
+	// The depth is a compromise. It bounds how old a reported loss may be and still be
+	// repairable this way (a loss further back has already fallen out of the DPB, and
+	// invalidating it would take the whole chain with it and force the keyframe this is
+	// avoiding) — which argues for more. Against it: every reference is a frame the *headset's*
+	// decoder must also hold, and H.264/HEVC bound the decoded picture buffer by level, so a
+	// deep DPB at a large eye size is a stream the headset can legitimately refuse. Four is
+	// about 44 ms at 90 Hz, comfortably longer than a LAN feedback round trip, and small
+	// enough to stay inside the DPB budget at every eye size WiVRn streams. Losses reported
+	// later than that fall through to the intra refresh, which is what the ladder is for.
+	//
+	// Prediction quality is untouched: numRefL0 is left alone, so the encoder still predicts
+	// from one reference — the newest valid one — exactly as with a DPB of one. The cost is
+	// reference-frame memory at both ends, not bitrate.
+	const uint32_t nvenc_ref_dpb_frames = 4;
+	bool ref_invalidation_configured = false;
+	auto configure_ref_invalidation = [&](auto & codec_config, auto member) {
+		if (not settings.ref_invalidation)
+			return;
+
+		NV_ENC_CAPS_PARAM cap_param{
+		        .version = NV_ENC_CAPS_PARAM_VER,
+		        .capsToQuery = NV_ENC_CAPS_SUPPORT_REF_PIC_INVALIDATION,
+		};
+
+		int res = 0;
+		NVENC_CHECK(shared_state->fn.nvEncGetEncodeCaps(session_handle, encodeGUID, &cap_param, &res));
+		if (res != 1)
+		{
+			U_LOG_W("nvenc: reference invalidation not supported, a lost frame will ask for an intra refresh or a keyframe instead");
+			return;
+		}
+		codec_config.*member = nvenc_ref_dpb_frames;
+		ref_invalidation_configured = true;
+	};
+
 	const uint32_t intra_refresh_cnt = intra_refresh_sweep_frames;
 	const uint32_t intra_refresh_period = 2 * intra_refresh_sweep_frames;
 	bool intra_refresh_configured = false;
@@ -303,6 +344,7 @@ video_encoder_nvenc::video_encoder_nvenc(
 			config.encodeCodecConfig.h264Config.maxNumRefFrames = 0;
 			config.encodeCodecConfig.h264Config.h264VUIParameters.videoFullRangeFlag = 1;
 			config.encodeCodecConfig.h264Config.idrPeriod = NVENC_INFINITE_GOPLENGTH;
+			configure_ref_invalidation(config.encodeCodecConfig.h264Config, &NV_ENC_CONFIG_H264::maxNumRefFrames);
 			configure_intra_refresh(config.encodeCodecConfig.h264Config);
 
 			if (settings.sharp_text)
@@ -325,6 +367,7 @@ video_encoder_nvenc::video_encoder_nvenc(
 			config.encodeCodecConfig.hevcConfig.maxNumRefFramesInDPB = 0;
 			config.encodeCodecConfig.hevcConfig.hevcVUIParameters.videoFullRangeFlag = 1;
 			config.encodeCodecConfig.hevcConfig.idrPeriod = NVENC_INFINITE_GOPLENGTH;
+			configure_ref_invalidation(config.encodeCodecConfig.hevcConfig, &NV_ENC_CONFIG_HEVC::maxNumRefFramesInDPB);
 			configure_intra_refresh(config.encodeCodecConfig.hevcConfig);
 
 			if (settings.sharp_text)
@@ -344,6 +387,7 @@ video_encoder_nvenc::video_encoder_nvenc(
 			config.encodeCodecConfig.av1Config.repeatSeqHdr = 1;
 			config.encodeCodecConfig.av1Config.maxNumRefFramesInDPB = 0;
 			config.encodeCodecConfig.av1Config.idrPeriod = NVENC_INFINITE_GOPLENGTH;
+			configure_ref_invalidation(config.encodeCodecConfig.av1Config, &NV_ENC_CONFIG_AV1::maxNumRefFramesInDPB);
 			configure_intra_refresh(config.encodeCodecConfig.av1Config);
 
 			if (settings.sharp_text)
@@ -370,6 +414,14 @@ video_encoder_nvenc::video_encoder_nvenc(
 	set_init_params_fps(fps);
 
 	NVENC_CHECK(shared_state->fn.nvEncInitializeEncoder(session_handle, &init_params));
+
+	if (ref_invalidation_configured)
+	{
+		enable_ref_invalidation(nvenc_ref_dpb_frames);
+		U_LOG_I("nvenc encoder %d: reference invalidation loss recovery, %u reference frames kept",
+		        stream_idx,
+		        nvenc_ref_dpb_frames);
+	}
 
 	if (intra_refresh_configured)
 	{
@@ -603,7 +655,18 @@ std::optional<video_encoder::data> video_encoder_nvenc::encode(uint8_t slot, uin
 	        .inputPitch = extent.width,
 	        .encodePicFlags = 0,
 	        .frameIdx = 0,
-	        .inputTimeStamp = 0,
+	        // NvEncInvalidateRefFrames addresses a reference by the timestamp its picture was
+	        // submitted with, so the frame index has to be carried here rather than left at
+	        // zero — it is the only handle the invalidation has on a frame. Offset by one so
+	        // that frame 0 does not share a timestamp with "nothing was ever submitted".
+	        //
+	        // Set unconditionally, not only when invalidation is configured, and that is safe:
+	        // nvEncodeAPI.h calls this field "opaque data which is associated with the encoded
+	        // frame, but not actually encoded in the output bitstream", and names identifying a
+	        // frame to invalidate as its example use. Frame duration is a separate field
+	        // (inputDuration), so nothing in the rate control reads this, and WiVRn ignores the
+	        // outputTimeStamp it comes back as.
+	        .inputTimeStamp = frame_index + 1,
 	        .inputBuffer = inp_resource_params.mappedResource,
 	        .outputBitstream = outputBuffer,
 	        .bufferFmt = inp_resource_params.mappedBufferFmt,
@@ -620,6 +683,29 @@ std::optional<video_encoder::data> video_encoder_nvenc::encode(uint8_t slot, uin
 		case default_idr_handler::frame_type::p:
 			frame_params.pictureType = NV_ENC_PIC_TYPE_UNKNOWN;
 			break;
+		case default_idr_handler::frame_type::invalidate: {
+			// An ordinary P frame, encoded after the reference the headset never received
+			// has been struck out of the DPB. NVENC does the rest: it marks that frame and
+			// everything reconstructed from it unusable, and predicts this one from the
+			// newest reference that survived. Only reachable when the encoder was built
+			// with a DPB deep enough for there to be one — nothing else turns this frame
+			// type on — and the handler has already checked that the loss is recent enough
+			// to still be in it.
+			frame_params.pictureType = NV_ENC_PIC_TYPE_UNKNOWN;
+			const uint64_t lost = idr_handler.invalidate_target();
+			NVENCSTATUS status = shared_state->fn.nvEncInvalidateRefFrames(session_handle, lost + 1);
+			if (status != NV_ENC_SUCCESS)
+				// Not fatal, and deliberately not escalated here: the frame still encodes,
+				// it just predicts from the reference the headset is missing, so the picture
+				// stays broken and the next feedback asks for recovery again — by which time
+				// the loss is older than the DPB and the ladder moves up to the sweep on its
+				// own.
+				U_LOG_W("nvenc: could not invalidate reference frame %lu: %d, %s",
+				        (unsigned long)lost,
+				        status,
+				        shared_state->fn.nvEncGetLastErrorString(session_handle));
+			break;
+		}
 		case default_idr_handler::frame_type::refresh:
 			// An ordinary P frame that also starts a sweep. forceIntraRefreshWithFrameCnt
 			// lives in the codec specific half of the picture parameters, which nothing

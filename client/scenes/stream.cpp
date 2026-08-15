@@ -356,6 +356,7 @@ void scenes::stream::send_initial_control_packets(wivrn_session & net, float gue
 		info.settings.sharp_text = config.sharp_text;
 		info.settings.encoder_failover = config.encoder_failover;
 		info.settings.intra_refresh = config.intra_refresh;
+		info.settings.ref_invalidation = config.ref_invalidation;
 		info.settings.emergency_framerate = config.emergency_framerate;
 		info.settings.motion_smoothing = config.motion_smoothing;
 		info.settings.motion_smoothing_mode = config.motion_mode();
@@ -663,6 +664,15 @@ void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_p
 			if (decoder != decoders[stream].decoder.get())
 				return;
 			handle->feedback.received_from_decoder = instance.now();
+
+			// One de-jitter sample per frame, not per stream: the eyes are encoded from
+			// the same composited image and stamped with the same display time, so
+			// sampling all of them would just weight the same arrival three times.
+			// Taken before the swap below, while `handle` is still the frame that
+			// arrived rather than the one it displaces.
+			if (stream == 0)
+				dejitter.sample(handle->feedback.received_from_decoder, handle->view_info.display_time);
+
 			std::swap(handle, decoders[stream].latest_frames[handle->feedback.frame_index % decoders[stream].latest_frames.size()]);
 		}
 
@@ -694,6 +704,19 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, scenes::stream::deco
 	if (decoders.empty())
 		return {};
 	std::unique_lock lock(frames_mutex);
+
+	// The whole of the de-jitter buffer, on the reading side. Choosing the frame nearest
+	// `display_time - D` rather than nearest `display_time` is what holding frames for D
+	// means here: the display times the server stamps are one refresh period apart, so
+	// walking the target back by D walks the choice back by D worth of frames, and
+	// successive refreshes still pick successive frames — which is exactly the even pacing
+	// the buffer exists for. A clump of three that all landed at once is then released one
+	// per refresh instead of collapsing to its newest member.
+	//
+	// With the setting off, dejitter.delay_ns() is zero unconditionally, `target` is
+	// `display_time`, and every comparison below is the one that was there before.
+	const XrTime target = display_time - dejitter.delay_ns();
+
 	inplace_vector<shard_accumulator::blit_handle *, decoder_count> common_frames;
 	const bool alpha = decoders[0].latest_frames[0] and decoders[0].latest_frames[0]->view_info.alpha;
 	for (size_t i = 0; i < view_count + alpha; ++i)
@@ -725,10 +748,10 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, scenes::stream::deco
 	{
 		auto min = std::ranges::min_element(common_frames,
 		                                    std::ranges::less{},
-		                                    [display_time](auto frame) {
+		                                    [target](auto frame) {
 			                                    if (not frame)
 				                                    return std::numeric_limits<XrTime>::max();
-			                                    return std::abs(frame->view_info.display_time - display_time);
+			                                    return std::abs(frame->view_info.display_time - target);
 		                                    });
 
 		assert(*min);
@@ -771,10 +794,10 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, scenes::stream::deco
 			{
 				auto min = std::ranges::min_element(decoder.latest_frames,
 				                                    std::ranges::less{},
-				                                    [display_time](auto frame) {
+				                                    [target](auto frame) {
 					                                    if (not frame)
 						                                    return std::numeric_limits<XrTime>::max();
-					                                    return std::abs(frame->view_info.display_time - display_time);
+					                                    return std::abs(frame->view_info.display_time - target);
 				                                    });
 				result[i] = *min;
 			}
@@ -885,6 +908,11 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	display_time_period = frame_state.predictedDisplayPeriod;
 	real_display_period = last_display_time ? frame_state.predictedDisplayTime - last_display_time : frame_state.predictedDisplayPeriod;
 	last_display_time = frame_state.predictedDisplayTime;
+
+	// The playout delay's switch and the refresh period it is bounded in terms of. Done here,
+	// before common_frame is reached below, so that a toggle takes effect on the refresh the
+	// user flipped it on rather than the next one.
+	dejitter.configure(application::get_config().dejitter, frame_state.predictedDisplayPeriod);
 
 	// While a seamless reconnect is in progress the "Reconnecting…" toast is kept from
 	// fading by holding its timestamp at the current frame.
@@ -1562,6 +1590,13 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 		return;
 	spdlog::info("Creating decoders, size {}x{}", description.width, description.height);
 	video_stream_description = description;
+
+	// New decoders mean new frame timings; whatever the window holds describes a stream that
+	// no longer exists (a different refresh rate, most of the time).
+	{
+		std::unique_lock frame_lock(frames_mutex);
+		dejitter.reset();
+	}
 
 	for (const auto & [stream_index, item]: utils::enumerate(decoders))
 	{

@@ -188,6 +188,22 @@ public:
 	// is worst, which is how one lost frame turns into several.
 	bool intra_refresh = true;
 
+	// Before that sweep, try the cheaper repair: tell the PC's encoder not to predict from the
+	// frame that never arrived, so the next one it sends is built on an older frame this
+	// headset still holds. Costs one ordinary frame and lands immediately. Falls back to the
+	// sweep when the loss is too old to reach or the repair is itself lost. Needs an encoder
+	// that can do it (NVIDIA can; the Vulkan encoders always have); the PC also has its own
+	// switch.
+	bool ref_invalidation = true;
+
+	// Hold decoded video frames for a short adaptive delay and release them on schedule,
+	// instead of showing whichever one is nearest the moment it is ready. Trades a little
+	// latency for even pacing on a link whose frames arrive in clumps; on a calm link the
+	// delay settles at zero and nothing changes at all. Off by default — the latency is real
+	// and only worth paying when the link is erratic. Headset-side only, the PC never hears
+	// about it.
+	bool dejitter = false;
+
 	// Last automatic resort below the bitrate floor: when the server's automatic bitrate is
 	// already pinned at its minimum and the link is still losing frames, let it halve the
 	// stream framerate to instantly halve bandwidth, restoring the full rate once the link

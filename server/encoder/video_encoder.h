@@ -251,6 +251,15 @@ private:
 	// network thread; only ever narrows what the backend can do.
 	std::atomic<bool> intra_refresh_enabled = true;
 
+	// --- Reference frame invalidation ---------------------------------------
+	// Same shape one rung down the recovery ladder: whether this encoder has an
+	// invalidation call at all (fixed for the encode session, since the DPB it needs
+	// is part of that session's configuration), how deep that DPB is, and the live
+	// half of the switch.
+	bool ref_invalidation_supported = false;
+	uint32_t ref_invalidation_dpb = 0;
+	std::atomic<bool> ref_invalidation_enabled = true;
+
 	// --- Packet pacing ------------------------------------------------------
 	// Effective state: the headset toggle and the server configuration must
 	// both allow it. Read by the sender thread, written by the network thread.
@@ -345,6 +354,13 @@ public:
 	// the headset reconnects. Turning it off is live.
 	void set_intra_refresh(bool enabled);
 
+	// Repair loss by telling the encoder not to predict from the frame that was lost, so
+	// that the next P frame references an older one the headset acknowledged. The rung
+	// below intra refresh in cost: one ordinary P frame, landing on the next frame. Only
+	// ever narrows, for the same reason as the refresh above — the deeper DPB it needs is
+	// part of the encode session's configuration.
+	void set_ref_invalidation(bool enabled);
+
 	void encode(wivrn_session & cnx,
 	            const to_headset::video_stream_data_shard::view_info_t & view_info,
 	            uint64_t frame_index);
@@ -370,6 +386,13 @@ protected:
 	{
 		return intra_refresh_sweep;
 	}
+
+	// Called once by a backend that configured its encode session with a reference DPB deep
+	// enough to invalidate into, from its constructor. From then on the IDR handler tries an
+	// invalidation before anything else when a frame is lost, until set_ref_invalidation(false)
+	// says otherwise. `dpb_frames` bounds how far back a loss may be and still be repairable
+	// this way.
+	void enable_ref_invalidation(uint32_t dpb_frames);
 
 	// `pacer` and `spill` are built by the sender thread for whole-frame sends on
 	// the stream socket; default constructed ones never sleep and never split, which

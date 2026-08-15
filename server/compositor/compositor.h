@@ -245,6 +245,8 @@ private:
 	// both ends: the first call from the session is what makes it real, and it must be
 	// able to tell "already on" from a change.
 	std::atomic<bool> intra_refresh_enabled = true;
+	// And for the rung below it, reference invalidation
+	std::atomic<bool> ref_invalidation_enabled = true;
 
 	// Separate streaming of one overlay quad layer. Null unless the headset asked
 	// for it when the session was set up, in which case the layer is picked afresh
@@ -465,6 +467,13 @@ public:
 	// live — the mechanism itself is configured when an encoder is created, so turning
 	// it back on only takes effect on the next connection.
 	void set_intra_refresh(bool enabled);
+
+	// Reference frame invalidation: repair a lost frame by telling the encoder to stop
+	// predicting from it, so the next P frame references an older acknowledged one. The
+	// cheapest rung of the recovery ladder, tried before the sweep above. Same live
+	// semantics: only ever narrows, because the DPB it needs is configured when an
+	// encoder is created.
+	void set_ref_invalidation(bool enabled);
 
 	// Whether any stream is running on the software encoder after a failover
 	bool on_software_encoder() const

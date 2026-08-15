@@ -4,8 +4,16 @@ import org.kde.kirigami as Kirigami
 import org.kde.coreaddons as KCoreAddons
 import org.kde.kirigamiaddons.formcard as FormCard
 
+import io.github.wivrn.wivrn
+
 FormCard.AboutPage {
 	aboutData: KCoreAddons.AboutData
+
+	// transparent over the NX nebula, stock look otherwise
+	background: Rectangle {
+		visible: !DashboardSettings.nx_theme
+		color: Kirigami.Theme.backgroundColor
+	}
 	donateUrl: "https://opencollective.com/wivrn"
 	getInvolvedUrl: ""
 

@@ -11,6 +11,12 @@ Kirigami.ScrollablePage {
     id: headsets
     title: i18n("Headsets")
 
+    // transparent over the NX nebula, stock look otherwise
+    background: Rectangle {
+        visible: !DashboardSettings.nx_theme
+        color: Kirigami.Theme.backgroundColor
+    }
+
     // flickable.interactive: false
 
     property date now: new Date()

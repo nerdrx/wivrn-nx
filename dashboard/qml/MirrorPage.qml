@@ -13,6 +13,12 @@ Kirigami.Page {
 
     padding: 0
 
+    // transparent over the NX nebula, stock look otherwise
+    background: Rectangle {
+        visible: !DashboardSettings.nx_theme
+        color: Kirigami.Theme.backgroundColor
+    }
+
     // The server only captures while somebody is connected to its PipeWire node,
     // so the stream is dropped as soon as the page is not on screen.
     readonly property bool should_run: mirror_page.visible

@@ -11,6 +11,12 @@ Kirigami.ScrollablePage {
     id: apk_install
     title: i18n("Install the WiVRn app on your headset")
 
+    // transparent over the NX nebula, stock look otherwise
+    background: Rectangle {
+        visible: !DashboardSettings.nx_theme
+        color: Kirigami.Theme.backgroundColor
+    }
+
     flickable.interactive: false
 
     Component.onCompleted: ApkInstaller.refreshLatestVersion()

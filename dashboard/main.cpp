@@ -14,6 +14,12 @@
 #include <QQuickWindow>
 #include <QStringLiteral>
 
+#ifdef WIVRN_HAVE_KCOLORSCHEME
+#include <KColorScheme>
+#include <KSharedConfig>
+#include <QSettings>
+#endif
+
 int main(int argc, char * argv[])
 {
 	KIconTheme::initTheme();
@@ -45,6 +51,18 @@ int main(int argc, char * argv[])
 
 	// Set aboutData as information about the app
 	KAboutData::setApplicationData(aboutData);
+
+#ifdef WIVRN_HAVE_KCOLORSCHEME
+	// NX design language: apply the deep-space color scheme app-locally, the
+	// same way KColorSchemeManager does, so the system scheme is untouched.
+	// The "NX look" toggle in the dashboard settings turns it off.
+	if (QSettings().value("nx_theme", true).toBool())
+	{
+		const auto scheme = QStringLiteral(":/nx.colors");
+		app.setProperty("KDE_COLOR_SCHEME_PATH", scheme);
+		app.setPalette(KColorScheme::createApplicationPalette(KSharedConfig::openConfig(scheme)));
+	}
+#endif
 
 	QCoro::Qml::registerTypes();
 

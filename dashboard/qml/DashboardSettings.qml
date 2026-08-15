@@ -5,6 +5,11 @@ import QtCore
 Settings {
 	property bool first_run: true
 	property bool show_system_checks: true
+
+	// NX design language: deep-space color scheme + nebula background.
+	// The color scheme part is applied from main.cpp before QML loads,
+	// so turning it off only fully applies after a restart.
+	property bool nx_theme: true
 	property string last_run_version: ""
 
 	property bool adb_custom: false

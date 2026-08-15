@@ -11,6 +11,16 @@ Kirigami.ApplicationWindow {
     id: root
     title: i18n("WiVRn dashboard")
 
+    // NX design language: the deep-space field lives on the window, pages are
+    // transparent so content floats on the nebula (glass stays on chrome).
+    background: Rectangle {
+        color: Kirigami.Theme.backgroundColor
+        NxBackground {
+            anchors.fill: parent
+            visible: DashboardSettings.nx_theme
+        }
+    }
+
     ConnectUsbDialog {
         id: select_usb_device
     }
@@ -144,6 +154,12 @@ Kirigami.ApplicationWindow {
     pageStack.interactive: false // Don't let the back/forward mouse button handle the pagestack
 
     pageStack.initialPage: Kirigami.ScrollablePage {
+        // transparent over the NX nebula, stock look otherwise
+        background: Rectangle {
+            visible: !DashboardSettings.nx_theme
+            color: Kirigami.Theme.backgroundColor
+        }
+
         ColumnLayout {
             anchors.fill: parent
             Repeater{

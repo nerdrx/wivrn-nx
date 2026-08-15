@@ -96,6 +96,42 @@ static theme slate_light()
 	return t;
 }
 
+// NX design language: liquid glass on deep space (nx-hub docs/DESIGN.md).
+// Violet-cast panels meant to sit translucent over the space lobby; violet
+// dominates, cyan marks live status, amber attention, red danger only.
+static theme nx()
+{
+	theme t = dark_default();
+	t.name = "NX";
+	t.localized_name = _C("theme name", "NX");
+
+	t.accent = rgb(119, 0, 255);          // NX violet #7700FF
+	t.accent_hovered = rgb(154, 60, 255); // violet-soft #9a3cff
+	t.accent_active = rgb(102, 0, 219);
+
+	t.background = rgb(10, 7, 20); // deep space field #0a0714
+	t.card = rgb(23, 16, 40);      // panel #171028
+	t.card_hovered = rgb(29, 20, 51); // panel-2 #1d1433
+	t.control = rgb(38, 28, 66);   // recessed well, one step above panel-2
+	t.control_hovered = rgb(48, 36, 84);
+	t.control_active = rgb(59, 45, 102);
+
+	t.text = rgb(239, 234, 255);       // #efeaff
+	t.text_muted = rgb(154, 143, 192); // #9a8fc0
+	t.border = rgb(42, 31, 69);        // hairline #2a1f45
+
+	t.danger = rgb(255, 84, 112); // #ff5470
+	t.danger_hovered = rgb(255, 116, 140);
+	t.success = rgb(0, 229, 255); // cyan = live #00e5ff
+	t.warning = rgb(255, 179, 0); // amber = attention #ffb300
+
+	t.dimming = rgb(10, 7, 20, 0.6f);
+
+	t.rounding = 12;      // --radius-sm
+	t.card_rounding = 18; // --radius
+	return t;
+}
+
 // True black, ideal for OLED panels
 static theme oled()
 {
@@ -151,7 +187,7 @@ static theme light()
 
 std::vector<theme> presets()
 {
-	return {oled(), dark_default(), midnight(), graphite(), slate_light(), light()};
+	return {nx(), oled(), dark_default(), midnight(), graphite(), slate_light(), light()};
 }
 
 std::vector<accent_swatch> accent_swatches()

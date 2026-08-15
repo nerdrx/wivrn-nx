@@ -13,6 +13,12 @@ Kirigami.ScrollablePage {
     id: wizard
     title: i18n("Getting started")
 
+    // transparent over the NX nebula, stock look otherwise
+    background: Rectangle {
+        visible: !DashboardSettings.nx_theme
+        color: Kirigami.Theme.backgroundColor
+    }
+
     // flickable.interactive: false
 
     Component {

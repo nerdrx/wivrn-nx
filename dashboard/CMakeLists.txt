@@ -37,6 +37,9 @@ target_sources(wivrn-dashboard PRIVATE ${DBUS_INTERFACE_SRC})
 set_source_files_properties(../images/wivrn-nx.svg PROPERTIES QT_RESOURCE_ALIAS qml/wivrn.svg)
 qt_add_resources(wivrn-dashboard PREFIX "/" BASE .. FILES ../images/wivrn-nx.svg)
 
+# NX design language color scheme, applied app-locally from main.cpp
+qt_add_resources(wivrn-dashboard "nx-theme" PREFIX "/" FILES nx.colors)
+
 set_source_files_properties(qml/DashboardSettings.qml PROPERTIES
     QT_QML_SINGLETON_TYPE TRUE
 )
@@ -48,6 +51,7 @@ qt_add_qml_module(wivrn-dashboard
         "QtMultimedia auto"
     QML_FILES
         qml/Main.qml
+        qml/NxBackground.qml
         qml/About.qml
         qml/ApkInstallPage.qml
         qml/DashboardSettings.qml
@@ -97,6 +101,15 @@ target_link_libraries(wivrn-dashboard
 
 if (WIVRN_USE_PIPEWIRE)
     target_link_libraries(wivrn-dashboard PRIVATE PkgConfig::libpipewire)
+endif()
+
+# Optional: NX deep-space color scheme needs KColorScheme; without it the
+# dashboard falls back to the system scheme.
+find_package(KF6ColorScheme QUIET)
+find_package(KF6Config QUIET)
+if (TARGET KF6::ColorScheme AND TARGET KF6::ConfigCore)
+    target_link_libraries(wivrn-dashboard PRIVATE KF6::ColorScheme KF6::ConfigCore)
+    target_compile_definitions(wivrn-dashboard PRIVATE WIVRN_HAVE_KCOLORSCHEME)
 endif()
 
 install(TARGETS wivrn-dashboard ${KDE_INSTALL_TARGETS_DEFAULT_ARGS})

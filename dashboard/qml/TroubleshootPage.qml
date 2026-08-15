@@ -12,6 +12,12 @@ Kirigami.ScrollablePage {
 
     Kirigami.Theme.colorSet: Kirigami.Theme.View
 
+    // transparent over the NX nebula, stock look otherwise
+    background: Rectangle {
+        visible: !DashboardSettings.nx_theme
+        color: Kirigami.Theme.backgroundColor
+    }
+
     Kirigami.CardsLayout {
         maximumColumns: 1
         rowSpacing: Kirigami.Units.largeSpacing * 2

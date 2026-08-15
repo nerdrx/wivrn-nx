@@ -13,6 +13,12 @@ Kirigami.ScrollablePage {
     id: settings
     title: i18n("Settings")
 
+    // transparent over the NX nebula, stock look otherwise
+    background: Rectangle {
+        visible: !DashboardSettings.nx_theme
+        color: Kirigami.Theme.backgroundColor
+    }
+
     flickable.interactive: false // Make sure the Kirigami.ScrollablePage does not eat the vertical mouse dragging events
 
     property bool allowUpdates: false // ignore onXXX events until document is loaded
@@ -136,6 +142,15 @@ Kirigami.ScrollablePage {
             Controls.CheckBox {
                 id: show_system_checks
                 text: i18n("Check system configuration on start")
+            }
+            RowLayout {
+                Controls.CheckBox {
+                    id: nx_look
+                    text: i18n("NX look")
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("Deep-space color scheme with the drifting nebula background. Colors fully apply after the dashboard is restarted.")
+                }
             }
             RowLayout {
                 visible: Settings.hid_forwarding_supported
@@ -336,6 +351,7 @@ Kirigami.ScrollablePage {
         Adb.setPath(adb_custom.checked ? adb_location.text : "adb");
 
         DashboardSettings.show_system_checks = show_system_checks.checked;
+        DashboardSettings.nx_theme = nx_look.checked;
 
         Settings.bitrateAuto = bitrate_auto.checked;
         Settings.mirror = desktop_mirror.checked;
@@ -366,6 +382,7 @@ Kirigami.ScrollablePage {
         adb_location.text = DashboardSettings.adb_location;
 
         show_system_checks.checked = DashboardSettings.show_system_checks;
+        nx_look.checked = DashboardSettings.nx_theme;
     }
 
     Shortcut {

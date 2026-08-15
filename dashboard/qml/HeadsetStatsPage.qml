@@ -11,6 +11,12 @@ Kirigami.ScrollablePage {
     id: headsets
     title: i18n("Headset statistics")
 
+    // transparent over the NX nebula, stock look otherwise
+    background: Rectangle {
+        visible: !DashboardSettings.nx_theme
+        color: Kirigami.Theme.backgroundColor
+    }
+
     Connections {
         target: WivrnServer
         function onHeadsetConnectedChanged(value) {

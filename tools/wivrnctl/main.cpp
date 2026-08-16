@@ -18,11 +18,42 @@
 
 #include <CLI/CLI.hpp>
 #include <chrono>
+#include <cstdlib>
 #include <format>
 #include <ranges>
 #include <string_view>
 #include <systemd/sd-bus.h>
 #include <type_traits>
+#include <unistd.h>
+
+// NX design language, terminal adaptation (nx-hub docs/DESIGN.md): violet for section
+// labels and identifiers, cyan for live values, amber for warnings, muted lavender for
+// secondary text and table headers, red for failures only. 24-bit escapes; the layout is
+// identical with them removed, which happens when the stream is not a TTY, when NO_COLOR
+// is set, or on --plain.
+namespace nx
+{
+bool plain = false;
+
+constexpr const char * violet = "\033[38;2;119;0;255m";
+constexpr const char * cyan = "\033[38;2;0;229;255m";
+constexpr const char * amber = "\033[38;2;255;179;0m";
+constexpr const char * muted = "\033[38;2;154;143;192m";
+constexpr const char * text = "\033[38;2;239;234;255m";
+constexpr const char * red = "\033[38;2;255;84;112m";
+constexpr const char * reset = "\033[0m";
+
+// the escape, or nothing when color is off for the given stream
+const char * esc(const char * code, int fd = STDOUT_FILENO)
+{
+	static const bool tty_out = isatty(STDOUT_FILENO);
+	static const bool tty_err = isatty(STDERR_FILENO);
+	static const bool no_color = std::getenv("NO_COLOR");
+	if (plain or no_color or not(fd == STDERR_FILENO ? tty_err : tty_out))
+		return "";
+	return code;
+}
+} // namespace nx
 
 struct deleter
 {
@@ -119,7 +150,9 @@ void set_property(const sd_bus_ptr & bus, const char * member, const char * sign
 }
 
 template <typename Rng, typename value_type = std::remove_cvref_t<decltype(*std::declval<Rng>().begin())>>
-void print_table(const std::array<std::string, std::tuple_size_v<value_type>> & header, const Rng & data)
+void print_table(const std::array<std::string, std::tuple_size_v<value_type>> & header,
+                 const Rng & data,
+                 const std::array<const char *, std::tuple_size_v<value_type>> & column_color = {})
 {
 	constexpr int Columns = std::tuple_size_v<value_type>;
 
@@ -143,18 +176,22 @@ void print_table(const std::array<std::string, std::tuple_size_v<value_type>> & 
 		}
 	}
 
-	std::cout << "\033[1m";
+	// colors wrap the padded cell rather than living inside it, so std::setw never
+	// counts escape bytes and the layout survives --plain unchanged
+	std::cout << nx::esc(nx::muted);
 	for (auto [size, label]: std::views::zip(column_size, header))
 	{
 		std::cout << std::left << std::setw(size) << label << " ";
 	}
-	std::cout << "\033[0m\n";
+	std::cout << nx::esc(nx::reset) << "\n";
 
 	for (const auto & line: lines)
 	{
-		for (auto [size, label]: std::views::zip(column_size, line))
+		for (auto [size, label, color]: std::views::zip(column_size, line, column_color))
 		{
-			std::cout << std::left << std::setw(size) << label << " ";
+			std::cout << nx::esc(color ? color : nx::text)
+			          << std::left << std::setw(size) << label
+			          << nx::esc(nx::reset) << " ";
 		}
 		std::cout << "\n";
 	}
@@ -215,11 +252,11 @@ void pair(int duration)
 
 		if (std::string_view(pin) == "")
 		{
-			std::cout << "Cannot enable pairing while session is active." << pin << std::endl;
+			std::cout << nx::esc(nx::amber) << "Cannot enable pairing while session is active." << nx::esc(nx::reset) << std::endl;
 			return;
 		}
 
-		std::cout << "PIN: " << pin << std::endl;
+		std::cout << "PIN: " << nx::esc(nx::cyan) << pin << nx::esc(nx::reset) << std::endl;
 	}
 }
 
@@ -241,9 +278,9 @@ void tab(std::string tab_name)
 	{
 		auto val = get_property_string(bus, "ClientTab");
 		if (val.empty())
-			std::cout << "<No tab>" << std::endl;
+			std::cout << nx::esc(nx::muted) << "<No tab>" << nx::esc(nx::reset) << std::endl;
 		else
-			std::cout << val << std::endl;
+			std::cout << nx::esc(nx::cyan) << val << nx::esc(nx::reset) << std::endl;
 	}
 	else
 	{
@@ -287,21 +324,25 @@ void list_paired(bool show_keys)
 
 	if (values.empty())
 	{
-		std::cout << "No paired headset" << std::endl;
+		std::cout << nx::esc(nx::muted) << "No paired headset" << nx::esc(nx::reset) << std::endl;
 	}
 	else
 	{
+		// the number is the identifier other subcommands take (violet), the timestamp
+		// and key are secondary (muted), the name is the body
 		if (show_keys)
 			print_table({"", "Headset name", "Last connection", "Public key"},
 			            std::views::zip(std::views::iota(1),
 			                            values | member(&headset::name),
 			                            values | std::views::transform([](const headset & h) { return relative_timestamp(h.last_connection); }),
-			                            values | member(&headset::public_key)));
+			                            values | member(&headset::public_key)),
+			            {nx::violet, nx::text, nx::muted, nx::muted});
 		else
 			print_table({"", "Headset name", "Last connection"},
 			            std::views::zip(std::views::iota(1),
 			                            values | member(&headset::name),
-			                            values | std::views::transform([](const headset & h) { return relative_timestamp(h.last_connection); })));
+			                            values | std::views::transform([](const headset & h) { return relative_timestamp(h.last_connection); })),
+			            {nx::violet, nx::text, nx::muted});
 	}
 }
 
@@ -332,6 +373,7 @@ int main(int argc, char ** argv)
 
 	app.require_subcommand(1);
 	app.failure_message(CLI::FailureMessage::help);
+	app.add_flag("--plain", nx::plain, "Plain output: no colors or escape codes");
 
 	int pairing_duration;
 	auto pair_command = app.add_subcommand("pair", "Allow a new headset to connect")
@@ -384,7 +426,7 @@ int main(int argc, char ** argv)
 	}
 	catch (std::exception & e)
 	{
-		std::cerr << e.what() << std::endl;
+		std::cerr << nx::esc(nx::red, STDERR_FILENO) << e.what() << nx::esc(nx::reset, STDERR_FILENO) << std::endl;
 		return 1;
 	}
 }

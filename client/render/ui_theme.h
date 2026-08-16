@@ -62,6 +62,10 @@ struct theme
 	// Shape, in pixels
 	float rounding;      // buttons, inputs, sliders
 	float card_rounding; // cards
+	// chips and the toggle track, which historically drew as full pills. Presets that
+	// want them keep a huge value (clamped to half the widget height, i.e. a pill);
+	// the NX preset squares them off to sit with its angular geometry.
+	float pill_rounding;
 	float border_size;
 
 	float font_scale; // global text size multiplier

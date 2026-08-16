@@ -59,6 +59,7 @@ static theme dark_default()
 
 	t.rounding = 8;
 	t.card_rounding = 14;
+	t.pill_rounding = 1000; // full pill on chips and toggles
 	t.border_size = 1;
 	t.font_scale = 1.0; // user multiplier, 100% maps to metrics::font_base
 	return t;
@@ -127,8 +128,11 @@ static theme nx()
 
 	t.dimming = rgb(10, 7, 20, 0.6f);
 
-	t.rounding = 12;      // --radius-sm
-	t.card_rounding = 18; // --radius
+	// The revised language is strictly angular: radii live in the 3-6 px band and
+	// nothing is pill-shaped (circles are for dots and spinners only).
+	t.rounding = 5;      // --pill, the 5 px chamfer on buttons and tabs
+	t.card_rounding = 6; // --radius
+	t.pill_rounding = 4; // chips (--radius-xs is 3) and the toggle track, squared off
 	return t;
 }
 

@@ -317,8 +317,8 @@ public:
 	// interface theme, defaults match the built-in "NX" preset and "NX" accent
 	std::string theme_preset = "NX";
 	std::string theme_accent = "NX";
-	float theme_rounding = 12;
-	float theme_card_rounding = 18;
+	float theme_rounding = 5;
+	float theme_card_rounding = 6;
 	float theme_font_scale = 1.0;
 	float theme_background_alpha = 0.75;
 

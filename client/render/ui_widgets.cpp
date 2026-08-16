@@ -536,7 +536,7 @@ bool toggle(const char * id, bool * v, const bool * default_value)
 		track = *v ? t.accent_hovered : t.control_hovered;
 
 	ImDrawList * draw = window->DrawList;
-	draw->AddRectFilled(bb.Min, bb.Max, t.col(track), radius);
+	draw->AddRectFilled(bb.Min, bb.Max, t.col(track), std::min(radius, t.pill_rounding));
 	const float cx = *v ? (bb.Max.x - radius) : (bb.Min.x + radius);
 	draw->AddCircleFilled({cx, bb.Min.y + radius}, radius - metrics::toggle_knob_inset, t.col(t.on_accent));
 
@@ -967,7 +967,7 @@ void chip(const std::string & label, chip_style style, bool dot, float height)
 		return;
 
 	ImDrawList * draw = window->DrawList;
-	draw->AddRectFilled(bb.Min, bb.Max, t.col(bg), size.y * 0.5f);
+	draw->AddRectFilled(bb.Min, bb.Max, t.col(bg), std::min(size.y * 0.5f, t.pill_rounding));
 
 	float tx = bb.Min.x + pad_x;
 	if (dot)

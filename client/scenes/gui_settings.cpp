@@ -1361,6 +1361,11 @@ void settings_theme(const settings_context & ctx)
 			theme.accent_hovered = keep_hover;
 			theme.accent_active = keep_active;
 			config.theme_preset = preset_list[preset].name;
+			// the preset's geometry is part of its look (NX is angular, the rest are
+			// rounder) — persist it, or a restart would silently revert what the
+			// preset change just showed; the sliders below still fine-tune from here
+			config.theme_rounding = theme.rounding;
+			config.theme_card_rounding = theme.card_rounding;
 			config.save();
 		}
 
@@ -1379,7 +1384,7 @@ void settings_theme(const settings_context & ctx)
 
 		ui::row_separator();
 
-		static const int card_rounding_default = 14;
+		static const int card_rounding_default = default_config.theme_card_rounding;
 		int card_rounding = int(theme.card_rounding);
 		ui::setting_label(_cS("setting label", "Card rounding"), _cS("setting description", "Corner radius of panels"), control_w);
 		if (ui::slider_int("##card_rounding", &card_rounding, 0, 28, "%d px", {control_w, 0}, &card_rounding_default))

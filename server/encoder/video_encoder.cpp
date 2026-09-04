@@ -24,6 +24,7 @@
 
 #include "encoder_settings.h"
 #include "os/os_time.h"
+#include "raw_dump.h"
 #include "util/u_logging.h"
 #include "utils/wivrn_trace.h"
 #include "wivrn_config.h"
@@ -318,6 +319,8 @@ video_encoder::video_encoder(vk_bundle & vk,
         target_queue(target_queue),
         need_transfer(not vk.optimal_transfer(vk.queue.family_index, target_queue)),
         bitrate_multiplier(settings.bitrate_multiplier),
+        bit_depth(settings.bit_depth),
+        vk_(vk),
         shared_sender(async_send ? sender::get() : nullptr),
         idr(std::move(idr)),
         extent{
@@ -595,6 +598,17 @@ void video_encoder::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo info
 	}
 	state[present_slot] = busy;
 	++pending_presents;
+
+	// Only here is target_layout final, so the tap is built on the first frame and
+	// never looked at again when it is off, which is always unless WIVRN_RAW_DUMP asks.
+	if (not raw_dump_tried)
+	{
+		raw_dump_tried = true;
+		raw_dump_ = raw_dump::create(vk_, stream_idx, extent, src_layer, target_layout, bit_depth, target_queue);
+	}
+	if (raw_dump_)
+		raw_dump_->present(y_cbcr, info, present_slot);
+
 	return present_image(y_cbcr, info, present_slot, frame_index);
 }
 
@@ -667,6 +681,11 @@ void video_encoder::encode(wivrn_session & cnx,
 	// inside the encode call and returns nothing by design, so for those "no data"
 	// is what success looks like.
 	watchdog.encode_end(os_monotonic_get_ns(), data.has_value() or not shared_sender);
+
+	// The view info only exists here, so the frame the tap copied at present time is
+	// written out now, with the pose it was rendered for.
+	if (raw_dump_)
+		raw_dump_->write(encode_slot, frame_index, view_info);
 
 	cnx.dump_time("encode_begin", frame_index, encode_begin, stream_idx);
 	cnx.dump_time("encode_end", frame_index, os_monotonic_get_ns(), stream_idx);

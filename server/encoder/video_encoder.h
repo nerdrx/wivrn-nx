@@ -45,6 +45,7 @@ namespace wivrn
 struct encoder_settings;
 struct vk_bundle;
 class wivrn_session;
+class raw_dump;
 
 inline const char * encoder_nvenc = "nvenc";
 inline const char * encoder_vaapi = "vaapi";
@@ -126,6 +127,9 @@ public:
 	vk::ImageLayout target_layout = vk::ImageLayout::eGeneral;
 	static const uint8_t num_slots = 2;
 	const double bitrate_multiplier;
+	// Bit depth of the compositor image this encoder reads, kept only so that the raw
+	// dump below knows whether a sample is one byte or two.
+	const int bit_depth;
 
 	// Health of this encoder and the decision to give up on it. Fed by whichever
 	// thread runs the encoder, polled by the compositor's present path — which is
@@ -173,7 +177,17 @@ private:
 	// deliberately counting data payload only — parity never enters the split.
 	size_t frame_offset = 0;
 
+	// Only the raw dump below uses it; the backends keep their own reference.
+	vk_bundle & vk_;
+
 	std::ofstream video_dump;
+
+	// Test-material tap on the encoder input, off unless WIVRN_RAW_DUMP is set. Built
+	// on the first present rather than in the constructor: target_layout is only final
+	// once the backend's constructor has run. Null when the dump is off or when this
+	// stream cannot be tapped, which is every path a normal session takes.
+	std::unique_ptr<raw_dump> raw_dump_;
+	bool raw_dump_tried = false;
 
 	std::shared_ptr<sender> shared_sender;
 

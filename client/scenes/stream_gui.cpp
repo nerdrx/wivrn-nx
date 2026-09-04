@@ -798,6 +798,9 @@ void scenes::stream::gui_transport()
 					case wivrn::video_codec::raw:
 						codec = "Raw";
 						break;
+					case wivrn::video_codec::nxwarp:
+						codec = "NX Warp";
+						break;
 				}
 
 				// A stream the server had to hand to x264 is the one thing on this

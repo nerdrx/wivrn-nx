@@ -234,6 +234,15 @@ public:
 	// and the default) or on the PC (true, experimental). Only meaningful with
 	// motion_smoothing on, exactly like bitrate_bbr under bitrate_auto.
 	bool motion_smoothing_server = false;
+	// NX Warp: ask the server for the nxvc compute codec instead of a hardware one.
+	//
+	// Off by default while it is experimental. What the switch actually does is re-order
+	// the codec list in from_headset::headset_info — nothing else — so the negotiation
+	// that already exists is what picks the codec; see scenes::stream. That means no
+	// protocol field, and a server that has never heard of NX Warp simply picks the next
+	// codec in the list.
+	bool nxwarp = false;
+
 	// What goes on the wire for the two above
 	wivrn::motion_mode motion_mode() const
 	{

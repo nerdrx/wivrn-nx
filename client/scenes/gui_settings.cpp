@@ -364,6 +364,8 @@ void settings_streaming(const settings_context & ctx)
 				return _C("Codec", "HEVC (H.265)");
 			case wivrn::av1:
 				return _C("Codec", "AV1");
+			case wivrn::nxwarp:
+				return _C("Codec", "NX Warp");
 			case wivrn::raw:
 				break;
 		}
@@ -372,7 +374,7 @@ void settings_streaming(const settings_context & ctx)
 
 	std::vector<wivrn::video_codec> codecs;
 	for (auto c: wivrn::decoder::supported_codecs())
-		if (c != wivrn::raw)
+		if (c != wivrn::raw and c != wivrn::nxwarp)
 			codecs.push_back(c);
 
 	// Manual / Adaptive / Adaptive v2. bitrate_auto stays the switch it always was — the
@@ -751,6 +753,18 @@ void settings_streaming(const settings_context & ctx)
 	});
 
 	list.push_back(section("sec_advanced", _cS("settings section", "Advanced"), _cS("settings section subtitle", "Niche and experimental options.")));
+
+	list.push_back({
+	        .id = "##nxwarp",
+	        .label = _("NX Warp codec"),
+	        .description = _("Experimental. Ask the server for NX Warp instead of H.264, HEVC or AV1. NX Warp is a tile based codec decoded on the headset's own GPU rather than its video block: the picture is cut into 64x64 tiles, each one is sent as its own independently decodable piece, and a tile lost on the air costs that tile rather than the whole frame and the keyframe that would follow it.\n\nIt trades video-block power for GPU time, so battery use and heat go up, and it needs a server built with NX Warp support. Off unless you are testing it. Takes effect on the next connection."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.nxwarp; },
+	        .set_bool = [&ctx, &config](bool v) { config.nxwarp = v; config.save(); if (ctx.on_streaming_changed) ctx.on_streaming_changed(); },
+	        .default_bool = default_config.nxwarp,
+	        .enabled = [&ctx] { return not ctx.in_game; },
+	        .disabled_tooltip = disconnect_tip,
+	});
 
 	list.push_back({
 	        .id = "##foveation_adaptive",

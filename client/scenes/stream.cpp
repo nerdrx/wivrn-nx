@@ -440,6 +440,7 @@ void scenes::stream::send_initial_control_packets(wivrn_session & net, float gue
 			{
 				case h264:
 				case raw:
+				case nxwarp:
 					break;
 				case h265:
 				case av1:
@@ -448,6 +449,22 @@ void scenes::stream::send_initial_control_packets(wivrn_session & net, float gue
 		}
 		else
 			info.supported_codecs = decoder::supported_codecs();
+
+		// The NX Warp switch is a re-ordering of this list and nothing else, which is why
+		// it needs no protocol field: with it on, nxwarp goes to the front and the server
+		// picks it if it has an encoder for it, falling back to the hardware codecs behind
+		// it if it does not; with it off, nxwarp is removed and the negotiation is exactly
+		// what it was. See configuration::nxwarp.
+		//
+		// A manual codec choice still wins: the combo and this switch would otherwise
+		// disagree about what was asked for, and one of them would be a lie.
+		if (not config.codec)
+		{
+			auto & cs = info.supported_codecs;
+			std::erase(cs, video_codec::nxwarp);
+			if (config.nxwarp)
+				cs.insert(cs.begin(), video_codec::nxwarp);
+		}
 
 		return info;
 	}());

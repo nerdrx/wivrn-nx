@@ -371,6 +371,13 @@ public:
 		return instance().vk_instance;
 	}
 
+	// The OpenXR instance, for the one thing anything outside a scene needs from it: the
+	// runtime clock. Decoders time-stamp feedback against it.
+	static xr::instance & get_xr_instance()
+	{
+		return instance().xr_instance;
+	}
+
 	static vk::raii::PhysicalDevice & get_physical_device()
 	{
 		return instance().vk_physical_device;

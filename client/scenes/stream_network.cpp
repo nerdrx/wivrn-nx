@@ -18,6 +18,7 @@
  */
 
 #include "stream.h"
+#include "decoder/nxwarp/nxwarp_decoder.h"
 
 #include "application.h"
 #include "crypto.h"
@@ -249,6 +250,34 @@ void scenes::stream::operator()(to_headset::video_stream_parity_shard && parity)
 		return;
 	}
 	decoders[idx].decoder->push_parity(std::move(parity));
+}
+
+void scenes::stream::operator()(to_headset::nxwarp_datagram && dg)
+{
+	std::shared_lock lock(decoder_mutex);
+	uint8_t idx = dg.stream_item_idx;
+	if (idx >= decoders.size() or not decoders[idx].decoder)
+		return;
+#ifdef WIVRN_USE_NXWARP
+	auto * nx = dynamic_cast<nxwarp_decoder *>(decoders[idx].decoder->get_decoder().get());
+	if (not nx)
+		return;
+	nx->push_datagram(std::move(dg));
+#endif
+}
+
+void scenes::stream::send_nxwarp_feedback(uint8_t stream_index, uint8_t path_id, std::vector<uint8_t> payload)
+{
+	if (not network_session)
+		return;
+	// Control socket, as the server expects: the packet is small, it is cumulative over
+	// the last three bands, and a lost one costs the encoder a frame of shadow knowledge
+	// about what the headset actually holds.
+	network_session->send_control(from_headset::nxwarp_feedback{
+	        .stream_item_idx = stream_index,
+	        .path_id = path_id,
+	        .payload = std::move(payload),
+	});
 }
 
 void scenes::stream::operator()(to_headset::motion_field && chunk)

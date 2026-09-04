@@ -108,9 +108,105 @@ target_compile_definitions(wivrn PRIVATE "XR_USE_TIMESPEC=1")
 
 set_target_properties(wivrn PROPERTIES CXX_VISIBILITY_PRESET hidden)
 
+##############################################################################
+# NX Warp (nxvc)
+#
+# The codec lives in its own repository next to this one. Only two of its
+# components are needed on the client: the Vulkan compute decoder (which pulls
+# vk/common for device adoption) and the transport library. Everything else --
+# the encoder, the CPU reference, the rate controller, the tools and the tests --
+# is switched off so a client build does not pay for them.
+#
+# ExternalProject rather than add_subdirectory, and not by preference: nx-warp's
+# own CMake reads CMAKE_SOURCE_DIR in several places (its include root, its
+# install rules, its CPack resources), so as a subdirectory of WiVRn it would
+# look for its headers and its licence inside this tree. Building it out of
+# process also keeps its cache variables, its -Wconversion and its CPack
+# configuration out of ours, which is worth having on its own.
+#
+# nxvc_vk_decoder adopts the client's own VkDevice, so nothing here creates a
+# second Vulkan device; see nxvc_vk.h and client/decoder/nxwarp/.
+set(WIVRN_NXWARP_DIR "${CMAKE_SOURCE_DIR}/../nx-warp" CACHE PATH "Path to the nx-warp source tree")
+set(WIVRN_HAVE_NXWARP OFF)
+if(EXISTS "${WIVRN_NXWARP_DIR}/CMakeLists.txt")
+    set(WIVRN_HAVE_NXWARP ON)
+    set(NXWARP_PREFIX ${CMAKE_BINARY_DIR}/nx-warp)
+    set(NXWARP_INSTALL ${NXWARP_PREFIX}/install)
+
+    set(NXWARP_CMAKE_ARGS
+        -DCMAKE_BUILD_TYPE=$<IF:$<CONFIG:Debug>,Debug,Release>
+        -DCMAKE_INSTALL_PREFIX=${NXWARP_INSTALL}
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        -DNXWARP_BUILD_VK=ON
+        -DNXWARP_VK_SUBDIRS=common$<SEMICOLON>decoder
+        -DNXWARP_BUILD_TRANSPORT=ON
+        -DNXWARP_BUILD_REF=OFF
+        -DNXWARP_BUILD_ENC=OFF
+        -DNXWARP_BUILD_RC=OFF
+        -DNXWARP_BUILD_WARP=OFF
+        -DNXWARP_BUILD_STEREO=OFF
+        -DNXWARP_BUILD_HYBRID=OFF
+        -DNXWARP_BUILD_FOV=OFF
+        -DNXWARP_BUILD_PLATFORM=OFF
+        -DNXWARP_BUILD_TOOLS=OFF
+        -DNXWARP_BUILD_FUZZ=OFF
+        -DNXWARP_BUILD_TESTS=OFF
+        -DNXWARP_BUILD_EXAMPLES=OFF
+        -DVulkan_INCLUDE_DIR=${Vulkan_INCLUDE_DIR}
+    )
+    if(ANDROID)
+        # The decoder is compiled, not linked, for the headset build: the Vulkan
+        # loader comes from the platform, and the NDK's libvulkan.so is only
+        # linked into libwivrn.so.
+        list(APPEND NXWARP_CMAKE_ARGS
+            -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
+            -DANDROID_ABI=${ANDROID_ABI}
+            -DANDROID_PLATFORM=${ANDROID_PLATFORM}
+            -DNXVC_VK_SPIRV_TARGET_ENV=vulkan1.1
+        )
+    endif()
+
+    ExternalProject_Add(nxwarp_ep
+        SOURCE_DIR ${WIVRN_NXWARP_DIR}
+        PREFIX ${NXWARP_PREFIX}
+        BINARY_DIR ${NXWARP_PREFIX}/build
+        INSTALL_DIR ${NXWARP_INSTALL}
+        CMAKE_ARGS ${NXWARP_CMAKE_ARGS}
+        BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target nxvc_vk_decoder nxvc_transport
+        # `cmake --install` rather than the install target, which would first *build*
+        # everything -- including nx-warp's nxvc-vkdec CLI, which links vkWaitSemaphores
+        # and so cannot link against the NDK's android-29 libvulkan.so. The libraries are
+        # the only thing wanted here and BUILD_COMMAND has already made them.
+        INSTALL_COMMAND ${CMAKE_COMMAND} --install <BINARY_DIR>
+        BUILD_ALWAYS ON
+        BUILD_BYPRODUCTS
+            ${NXWARP_INSTALL}/lib/libnxvc_vk_decoder.a
+            ${NXWARP_INSTALL}/lib/libnxvc_vk_common.a
+            ${NXWARP_INSTALL}/lib/libnxvc_transport.a
+    )
+    file(MAKE_DIRECTORY ${NXWARP_INSTALL}/include)
+
+    foreach(_lib nxvc_vk_decoder nxvc_vk_common nxvc_transport)
+        add_library(${_lib} STATIC IMPORTED GLOBAL)
+        set_target_properties(${_lib} PROPERTIES
+            IMPORTED_LOCATION ${NXWARP_INSTALL}/lib/lib${_lib}.a
+            INTERFACE_INCLUDE_DIRECTORIES ${NXWARP_INSTALL}/include)
+        add_dependencies(${_lib} nxwarp_ep)
+    endforeach()
+
+    # nxvc_transport's real AEAD backends come from OpenSSL when it is there; the client
+    # itself already links it, but the loopback tool below has to say so.
+    find_package(OpenSSL QUIET COMPONENTS Crypto)
+    if(OpenSSL_FOUND)
+        set_property(TARGET nxvc_transport APPEND PROPERTY
+                     INTERFACE_LINK_LIBRARIES OpenSSL::Crypto)
+    endif()
+endif()
+
 file(GLOB LOCAL_SOURCE CONFIGURE_DEPENDS
     "*.cpp"
     "decoder/*.cpp"
+    "decoder/nxwarp/*.cpp"
     "scenes/*.cpp"
     "utils/*.cpp"
     "vk/*.cpp"
@@ -140,6 +236,22 @@ target_link_libraries(wivrn
     wivrn-common
     wivrn-external
 )
+
+if(WIVRN_HAVE_NXWARP)
+    target_link_libraries(wivrn nxvc_vk_decoder nxvc_vk_common nxvc_transport)
+    target_compile_definitions(wivrn PRIVATE WIVRN_USE_NXWARP=1)
+
+    # The depacketize-and-reassemble path, exercisable without a headset. See the file
+    # header for what it proves.
+    if(NOT ANDROID)
+        add_executable(nxwarp-loopback
+            decoder/nxwarp/tools/nxwarp_loopback.cpp
+            decoder/nxwarp/nxwarp_reassemble.cpp)
+        target_include_directories(nxwarp-loopback PRIVATE .)
+        target_link_libraries(nxwarp-loopback nxvc_transport)
+        target_compile_features(nxwarp-loopback PRIVATE cxx_std_23)
+    endif()
+endif()
 
 target_compile_definitions(wivrn PRIVATE -DXR_USE_GRAPHICS_API_VULKAN)
 target_compile_definitions(wivrn PRIVATE -DVMA_STATS_STRING_ENABLED=0)

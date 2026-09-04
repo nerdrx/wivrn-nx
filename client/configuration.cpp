@@ -344,6 +344,7 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("standby_freeze", &configuration::standby_freeze),
 	        scalar("seamless_reconnect", &configuration::seamless_reconnect),
 	        scalar("comfort_vignette", &configuration::comfort_vignette),
+	        scalar("nxwarp", &configuration::nxwarp),
 	        scalar("motion_smoothing", &configuration::motion_smoothing),
 	        scalar("motion_smoothing_server", &configuration::motion_smoothing_server),
 	        scalar("quad_layers", &configuration::quad_layers),

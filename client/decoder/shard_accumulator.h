@@ -119,6 +119,14 @@ public:
 		return decoder_->sampler();
 	}
 
+	// The decoder this accumulator drives. NX Warp bypasses the shard path entirely — it
+	// has its own datagram type — so scenes::stream needs to reach past the accumulator to
+	// hand it its datagrams.
+	const std::shared_ptr<decoder> & get_decoder() const
+	{
+		return decoder_;
+	}
+
 	using blit_handle = decoder::blit_handle;
 
 private:

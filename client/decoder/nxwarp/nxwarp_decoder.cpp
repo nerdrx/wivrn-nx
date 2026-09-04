@@ -1,0 +1,561 @@
+/*
+ * WiVRn VR streaming — NX Warp codec
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ */
+
+#include "nxwarp_decoder.h"
+
+#ifdef WIVRN_USE_NXWARP
+
+#include "application.h"
+#include "scenes/stream.h"
+
+#include <spdlog/spdlog.h>
+
+#include <chrono>
+
+#include <nxvc/transport/wire.h>
+
+namespace
+{
+// The transport takes a client-clock microsecond stamp and only ever compares stamps with
+// each other, so the steady clock is the right one.
+uint64_t now_us()
+{
+	return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+	                        std::chrono::steady_clock::now().time_since_epoch())
+	                        .count());
+}
+
+vk::raii::Sampler make_sampler(vk::raii::Device & device, vk::SamplerYcbcrConversion conv)
+{
+	vk::StructureChain info{
+	        vk::SamplerCreateInfo{
+	                .magFilter = vk::Filter::eLinear,
+	                .minFilter = vk::Filter::eLinear,
+	                .mipmapMode = vk::SamplerMipmapMode::eNearest,
+	                .addressModeU = vk::SamplerAddressMode::eClampToEdge,
+	                .addressModeV = vk::SamplerAddressMode::eClampToEdge,
+	                .addressModeW = vk::SamplerAddressMode::eClampToEdge,
+	                .maxAnisotropy = 1,
+	        },
+	        vk::SamplerYcbcrConversionInfo{
+	                .conversion = conv,
+	        },
+	};
+	return vk::raii::Sampler(device, info.get());
+}
+
+struct nxwarp_blit_handle : public wivrn::decoder::blit_handle
+{
+	std::atomic_bool & free;
+	nxwarp_blit_handle(const wivrn::from_headset::feedback & feedback,
+	                   const wivrn::to_headset::video_stream_data_shard::view_info_t & view_info,
+	                   vk::ImageView image_view,
+	                   vk::Image image,
+	                   vk::Extent2D extent,
+	                   vk::ImageLayout & current_layout,
+	                   vk::Semaphore semaphore,
+	                   uint64_t & semaphore_val,
+	                   std::atomic_bool & free) :
+	        wivrn::decoder::blit_handle{feedback, view_info, image_view, image, extent, current_layout, semaphore, &semaphore_val},
+	        free(free) {}
+	~nxwarp_blit_handle()
+	{
+		free = true;
+	}
+};
+
+// path_id 0xFF is not a path: it marks the codec's raw stream header, sent on the control
+// socket. See server/encoder/nxwarp_packetize.h.
+constexpr uint8_t kStreamHeaderPath = 0xFF;
+} // namespace
+
+namespace wivrn
+{
+
+nxwarp_decoder::nxwarp_decoder(vk::raii::Device & device,
+                               vk::raii::PhysicalDevice & physical_device,
+                               uint32_t vk_queue_family_index,
+                               const wivrn::to_headset::video_stream_description & description,
+                               uint8_t stream_index,
+                               std::weak_ptr<scenes::stream> scene,
+                               shard_accumulator * accumulator) :
+        device(device),
+        physical_device(physical_device),
+        queue_family_index(vk_queue_family_index),
+        ycbcr_conversion(device, vk::SamplerYcbcrConversionCreateInfo{
+                                         .format = vk::Format::eG8B8R82Plane420Unorm,
+                                         .ycbcrModel = vk::SamplerYcbcrModelConversion::eYcbcr709,
+                                         .ycbcrRange = vk::SamplerYcbcrRange::eItuFull,
+                                         .chromaFilter = vk::Filter::eLinear,
+                                 }),
+        sampler_(make_sampler(device, *ycbcr_conversion)),
+        command_pool(device, vk::CommandPoolCreateInfo{
+                                     .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
+                                     .queueFamilyIndex = vk_queue_family_index,
+                             }),
+        cmd(device.allocateCommandBuffers(vk::CommandBufferAllocateInfo{
+                                                  .commandPool = *command_pool,
+                                                  .commandBufferCount = 1,
+                                          })[0]
+                    .release()),
+        fence(device, vk::FenceCreateInfo{.flags = vk::FenceCreateFlagBits::eSignaled}),
+        stream_index(stream_index),
+        extent{
+                .width = description.stream_size(stream_index).first,
+                .height = description.stream_size(stream_index).second,
+        },
+        weak_scene(scene),
+        accumulator(accumulator)
+{
+	for (auto & item: image_pool)
+	{
+		item.image = image_allocation(
+		        device,
+		        vk::ImageCreateInfo{
+		                .imageType = vk::ImageType::e2D,
+		                .format = vk::Format::eG8B8R82Plane420Unorm,
+		                .extent = {.width = extent.width, .height = extent.height, .depth = 1},
+		                .mipLevels = 1,
+		                .arrayLayers = 1,
+		                .tiling = vk::ImageTiling::eOptimal,
+		                .usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst,
+		        },
+		        {.usage = VMA_MEMORY_USAGE_AUTO},
+		        "nxwarp image");
+
+		vk::SamplerYcbcrConversionInfo conv{.conversion = *ycbcr_conversion};
+		item.view_full = vk::raii::ImageView(
+		        device,
+		        vk::ImageViewCreateInfo{
+		                .pNext = &conv,
+		                .image = item.image,
+		                .viewType = vk::ImageViewType::e2D,
+		                .format = vk::Format::eG8B8R82Plane420Unorm,
+		                .subresourceRange = {
+		                        .aspectMask = vk::ImageAspectFlagBits::eColor,
+		                        .levelCount = 1,
+		                        .layerCount = 1,
+		                },
+		        });
+
+		item.semaphore = vk::raii::Semaphore(
+		        device,
+		        vk::StructureChain{
+		                vk::SemaphoreCreateInfo{},
+		                vk::SemaphoreTypeCreateInfo{.semaphoreType = vk::SemaphoreType::eTimeline},
+		        }
+		                .get());
+	}
+
+	worker = std::thread([this]() {
+		try
+		{
+			while (true)
+			{
+				auto job = jobs.pop();
+				decode_unit(job);
+			}
+		}
+		catch (const utils::sync_queue_closed &)
+		{
+		}
+		catch (const std::exception & e)
+		{
+			spdlog::error("nxwarp decoder worker: {}", e.what());
+		}
+	});
+}
+
+nxwarp_decoder::~nxwarp_decoder()
+{
+	jobs.close();
+	if (worker.joinable())
+		worker.join();
+	if (nxvc)
+		nxvc_vk_decoder_destroy(nxvc);
+	spdlog::info("nxwarp[{}]: {} frames decoded, {} dropped with a hole, {} refused by the codec",
+	             stream_index, frames_decoded, frames_dropped_holes, frames_dropped_codec);
+}
+
+// Network thread. The first thing that arrives on an NX Warp stream, and the only thing
+// that can create the decoder and the receiver: the stream header carries the geometry
+// both of them are sized from.
+bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
+{
+	if (nxvc or nxvc_failed or header.empty())
+		return nxvc != nullptr;
+
+	nxvc_vkd_create_info ci;
+	nxvc_vk_decoder_create_info_default(&ci);
+	// Device adoption: the WiVRn client owns the VkDevice and the queue, and nxvc must
+	// allocate nothing it does not own (nxvc_vk.h, vk/common). All five handles or none.
+	ci.instance = *application::get_vulkan_instance();
+	ci.physical_device = *physical_device;
+	ci.device = *device;
+	ci.queue = **application::get_queue().lock();
+	ci.queue_family = queue_family_index;
+	// Two-plane 4:2:0 passthrough: what the reprojection shader already samples, and half
+	// the reference-ring memory of an RGBA8 store.
+	ci.output_format = NXVC_VKD_OUT_YCBCR420;
+	ci.flags = 0;
+
+	if (auto st = nxvc_vk_decoder_create(&ci, &nxvc); st != NXVC_VKD_OK)
+	{
+		spdlog::error("nxwarp[{}]: nxvc_vk_decoder_create: {}", stream_index,
+		              nxvc_vk_decoder_status_string(st));
+		nxvc = nullptr;
+		nxvc_failed = true;
+		return false;
+	}
+
+	size_t consumed = 0;
+	if (auto st = nxvc_vk_decoder_parse_stream_header(nxvc, header.data(), header.size(), &consumed);
+	    st != NXVC_VKD_OK)
+	{
+		spdlog::error("nxwarp[{}]: stream header refused: {} ({})", stream_index,
+		              nxvc_vk_decoder_status_string(st), nxvc_vk_decoder_last_error(nxvc));
+		nxvc_vk_decoder_destroy(nxvc);
+		nxvc = nullptr;
+		nxvc_failed = true;
+		return false;
+	}
+
+	nxvc_vkd_stream_info si{};
+	nxvc_vk_decoder_stream_info(nxvc, &si);
+	if (not si.tiles_x or not si.tile_count)
+	{
+		spdlog::error("nxwarp[{}]: stream header has an empty tile grid", stream_index);
+		nxvc_failed = true;
+		return false;
+	}
+
+	// Every field here is fixed by the contract in server/encoder/nxwarp_packetize.h and
+	// video_encoder_nxwarp.cpp. They must agree exactly: the receiver derives its nonces,
+	// its band boundaries and its run payload budget from them, so a single disagreement
+	// shows up as an authentication failure on every datagram rather than as anything
+	// diagnostic.
+	cfg.stream_id = stream_index;
+	cfg.cols = uint16_t(si.tiles_x);
+	cfg.rows = uint16_t(si.tile_count / si.tiles_x);
+	cfg.band_rows = uint16_t(std::min<uint32_t>(cfg.rows, 6));
+	cfg.layers = 1;
+	cfg.mtu = 1280;
+	cfg.caps = nxt::kCapFec | nxt::kCapPoseHdr | nxt::kCapRleFeedback;
+
+	// nxvc_transport never generates or exchanges keys; the integration supplies them.
+	// This transport rides inside WiVRn's own authenticated, encrypted stream socket, so a
+	// second real AEAD would encrypt ciphertext. The NullAead is keyed and detects
+	// corruption but is NOT cryptography, and it is correct here only because of that
+	// outer layer. The constants match video_encoder_nxwarp.cpp byte for byte.
+	aead = nxt::make_null_aead();
+	nxt::Key key{}, salt{};
+	for (size_t i = 0; i < key.size(); ++i)
+	{
+		key[i] = uint8_t(i);
+		salt[i] = uint8_t(0xA0 + i);
+	}
+	receiver = std::make_unique<nxt::Receiver>(cfg, aead.get(), key, salt);
+	receiver->set_negotiated_caps(cfg.caps);
+
+	chunk = nxwarp_wire::chunk_bytes(cfg);
+	slots.assign(cfg.tiles_per_frame(), {});
+	band_fired.assign(cfg.bands(), 0);
+
+	spdlog::info("nxwarp[{}]: {}x{} on {}, {} x {} tiles, {} bytes per tile",
+	             stream_index, si.width, si.height, nxvc_vk_decoder_device_name(nxvc),
+	             cfg.cols, cfg.rows, chunk);
+	return true;
+}
+
+void nxwarp_decoder::push_datagram(to_headset::nxwarp_datagram && dg)
+{
+	if (dg.path_id == kStreamHeaderPath)
+	{
+		on_stream_header(dg.payload);
+		return;
+	}
+	if (not receiver or dg.payload.size() < nxt::kHeaderBytes)
+		return;
+
+	nxt::DatagramHeader h{};
+	if (not nxt::decode_header(dg.payload.data(), &h))
+		return;
+
+	// A new frame retires the previous one: fire whatever band deadlines it still owes,
+	// so its feedback goes out, then decode what arrived.
+	if (assembling and h.frame_id != assembling_frame)
+		finish_frame(dg.path_id);
+	if (not assembling)
+	{
+		for (auto & s: slots)
+			s.clear();
+		std::fill(band_fired.begin(), band_fired.end(), 0);
+		assembling_frame = h.frame_id;
+		assembling = true;
+		fb = from_headset::feedback{};
+		fb.frame_index = ++wivrn_frame_idx;
+		fb.stream_index = stream_index;
+		fb.received_first_packet = application::get_xr_instance().now();
+	}
+
+	std::vector<nxt::TileOutput> tiles;
+	receiver->on_datagram(std::span<const uint8_t>(dg.payload.data(), dg.payload.size()),
+	                      dg.path_id, now_us(), &tiles);
+
+	for (const auto & t: tiles)
+	{
+		if (t.frame_id != assembling_frame or t.layer_id != 0)
+			continue;
+		const uint32_t idx = cfg.tile_index(t.row, t.col);
+		if (idx >= slots.size())
+			continue;
+		// The receiver's spans point into scratch it reuses on the next call, so the
+		// bytes have to be taken now.
+		slots[idx].assign(t.bytes.begin(), t.bytes.end());
+	}
+
+	fb.received_last_packet = application::get_xr_instance().now();
+
+	// Deadlines, driven by arrival rather than by a clock.
+	//
+	// nx-warp docs/TRANSPORT.md 7.4 anchors the band deadline on the runtime's predicted
+	// display time. The decoder does not have one — scenes::stream does, one level up —
+	// so a band is closed as soon as a datagram for a later band, or for a later frame,
+	// arrives: the sender emits bands in order, so a later band on the wire is direct
+	// evidence that the earlier one is finished. nxt::DeadlineController still runs and
+	// the feedback content is identical; what is missing is the ability to close a band
+	// the sender went quiet on, which the frame change above then covers.
+	if (h.band < cfg.bands() and not h.is_parity())
+		fire_bands_through(h.frame_id, h.band, dg.path_id);
+
+	if (h.flags & nxt::kFlagLastRunOfFrame)
+		finish_frame(dg.path_id);
+}
+
+void nxwarp_decoder::fire_bands_through(uint16_t frame_id, uint8_t last_band, uint8_t path_id)
+{
+	auto scene = weak_scene.lock();
+	for (uint8_t b = 0; b <= last_band and b < band_fired.size(); ++b)
+	{
+		if (band_fired[b])
+			continue;
+		band_fired[b] = 1;
+		auto packet = receiver->band_deadline(frame_id, b, now_us(), 0, path_id);
+		if (packet.empty() or not scene)
+			continue;
+		scene->send_nxwarp_feedback(stream_index, path_id, std::move(packet));
+	}
+}
+
+// Network thread. Closes the frame under assembly and hands it to the worker.
+void nxwarp_decoder::finish_frame(uint8_t path_id)
+{
+	if (not assembling)
+		return;
+	assembling = false;
+	fire_bands_through(assembling_frame, uint8_t(cfg.bands() - 1), path_id);
+
+	auto unit = nxwarp_wire::reassemble(cfg, slots, chunk);
+	if (unit.empty())
+	{
+		// A hole, a short chunk in the middle, or fewer bytes than the length prefix
+		// declares. The feedback for the band has already gone out, which is how the
+		// encoder learns to refresh.
+		++frames_dropped_holes;
+		return;
+	}
+
+	decode_job job;
+	job.frame_id = assembling_frame;
+	job.unit = std::move(unit);
+	job.fb = fb;
+	jobs.push(std::move(job));
+}
+
+void nxwarp_decoder::decode_unit(decode_job & job)
+{
+	size_t consumed = 0;
+	VkSemaphore dec_sem = VK_NULL_HANDLE;
+	uint64_t dec_val = 0;
+	{
+		// nxvc submits on the queue it adopted, which is WiVRn's one graphics queue; hold
+		// the same lock every other submitter in the client holds.
+		auto queue = application::get_queue().lock();
+		auto st = nxvc_vk_decode_frame_ex(nxvc, job.unit.data(), job.unit.size(),
+		                                  NXVC_VKD_SUBMIT_ASYNC, &consumed);
+		if (st != NXVC_VKD_OK)
+		{
+			spdlog::warn("nxwarp[{}]: frame {} refused: {} ({})", stream_index, job.frame_id,
+			             nxvc_vk_decoder_status_string(st), nxvc_vk_decoder_last_error(nxvc));
+			++frames_dropped_codec;
+			return;
+		}
+		dec_sem = nxvc_vk_decoder_timeline(nxvc);
+		dec_val = nxvc_vk_decoder_timeline_value(nxvc);
+	}
+
+	nxvc_vkd_images img{};
+	if (nxvc_vk_decoder_images(nxvc, &img) != NXVC_VKD_OK or img.count < 2)
+	{
+		++frames_dropped_codec;
+		return;
+	}
+
+	auto item = get_free();
+	if (not item)
+	{
+		spdlog::warn("nxwarp[{}]: no image available in pool, discard frame", stream_index);
+		return;
+	}
+
+	if (device.waitForFences(*fence, true, UINT64_MAX) != vk::Result::eSuccess)
+		spdlog::warn("nxwarp: waitForFences failed");
+
+	cmd.reset();
+	cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+
+	// nxvc leaves its output in GENERAL and overwrites it in place on the next frame; the
+	// copy below is what decouples the codec's own images from the pool of frames the
+	// render thread picks from.
+	std::array<vk::ImageMemoryBarrier, 3> pre{
+	        vk::ImageMemoryBarrier{
+	                .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
+	                .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+	                .oldLayout = vk::ImageLayout::eGeneral,
+	                .newLayout = vk::ImageLayout::eGeneral,
+	                .image = img.image[0],
+	                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+	        },
+	        vk::ImageMemoryBarrier{
+	                .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
+	                .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+	                .oldLayout = vk::ImageLayout::eGeneral,
+	                .newLayout = vk::ImageLayout::eGeneral,
+	                .image = img.image[1],
+	                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+	        },
+	        vk::ImageMemoryBarrier{
+	                .srcAccessMask = vk::AccessFlagBits::eNone,
+	                .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
+	                .oldLayout = vk::ImageLayout::eUndefined,
+	                .newLayout = vk::ImageLayout::eTransferDstOptimal,
+	                .image = item->image,
+	                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+	        },
+	};
+	item->current_layout = vk::ImageLayout::eTransferDstOptimal;
+	cmd.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+	                    vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, pre);
+
+	vk::ImageCopy luma{
+	        .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+	        .dstSubresource = {vk::ImageAspectFlagBits::ePlane0, 0, 0, 1},
+	        .extent = {std::min(img.width[0], extent.width), std::min(img.height[0], extent.height), 1},
+	};
+	vk::ImageCopy chroma{
+	        .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+	        .dstSubresource = {vk::ImageAspectFlagBits::ePlane1, 0, 0, 1},
+	        .extent = {std::min(img.width[1], extent.width / 2), std::min(img.height[1], extent.height / 2), 1},
+	};
+	cmd.copyImage(img.image[0], vk::ImageLayout::eGeneral, item->image,
+	              vk::ImageLayout::eTransferDstOptimal, luma);
+	cmd.copyImage(img.image[1], vk::ImageLayout::eGeneral, item->image,
+	              vk::ImageLayout::eTransferDstOptimal, chroma);
+
+	vk::ImageMemoryBarrier to_read{
+	        .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+	        .dstAccessMask = vk::AccessFlagBits::eShaderRead,
+	        .oldLayout = item->current_layout,
+	        .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+	        .image = item->image,
+	        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+	};
+	item->current_layout = to_read.newLayout;
+	cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+	                    vk::PipelineStageFlagBits::eFragmentShader, {}, {}, {}, to_read);
+	cmd.end();
+
+	// The pose, the fov and the foveation runs the reprojection pass needs are not on the
+	// NX Warp wire: the codec's own 26-byte pose header is opaque to the transport and
+	// carries neither fov nor foveation, and to_headset::nxwarp_datagram has no view_info
+	// field. Until one of the two carries it, the frame is published with a default
+	// view_info and the projection is wrong. Said once, loudly, rather than every frame.
+	if (not warned_view_info)
+	{
+		warned_view_info = true;
+		spdlog::warn("nxwarp[{}]: no view_info on the NX Warp wire; frames are published "
+		             "with a default pose and foveation (see docs/nxwarp.md)",
+		             stream_index);
+	}
+
+	job.fb.sent_to_decoder = application::get_xr_instance().now();
+	job.fb.received_from_decoder = job.fb.sent_to_decoder;
+	auto handle = std::make_shared<nxwarp_blit_handle>(
+	        job.fb,
+	        to_headset::video_stream_data_shard::view_info_t{},
+	        *item->view_full,
+	        item->image,
+	        extent,
+	        item->current_layout,
+	        *item->semaphore,
+	        item->semaphore_val,
+	        item->free);
+
+	device.resetFences(*fence);
+	{
+		auto queue = application::get_queue().lock();
+		const vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eTransfer;
+		const uint64_t signal_val = ++item->semaphore_val;
+		std::array<vk::Semaphore, 1> wait{dec_sem};
+		std::array<vk::Semaphore, 1> signal{*item->semaphore};
+		queue->submit(
+		        vk::StructureChain{
+		                vk::SubmitInfo{
+		                        .waitSemaphoreCount = 1,
+		                        .pWaitSemaphores = wait.data(),
+		                        .pWaitDstStageMask = &wait_stage,
+		                        .commandBufferCount = 1,
+		                        .pCommandBuffers = &cmd,
+		                        .signalSemaphoreCount = 1,
+		                        .pSignalSemaphores = signal.data(),
+		                },
+		                vk::TimelineSemaphoreSubmitInfo{
+		                        .waitSemaphoreValueCount = 1,
+		                        .pWaitSemaphoreValues = &dec_val,
+		                        .signalSemaphoreValueCount = 1,
+		                        .pSignalSemaphoreValues = &signal_val,
+		                },
+		        }
+		                .get(),
+		        *fence);
+	}
+
+	++frames_decoded;
+	if (auto scene = weak_scene.lock())
+		scene->push_blit_handle(accumulator, std::move(handle));
+}
+
+nxwarp_decoder::image * nxwarp_decoder::get_free()
+{
+	for (auto & item: image_pool)
+	{
+		if (item.free.exchange(false))
+			return &item;
+	}
+	return nullptr;
+}
+
+std::vector<wivrn::video_codec> nxwarp_decoder::supported_codecs()
+{
+	return {video_codec::nxwarp};
+}
+
+} // namespace wivrn
+
+#endif // WIVRN_USE_NXWARP

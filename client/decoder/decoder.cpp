@@ -18,11 +18,14 @@
 
 #include "decoder.h"
 
+#include <stdexcept>
+
 #ifdef __ANDROID__
 #include "decoder/android/android_decoder.h"
 #else
 #include "decoder/ffmpeg/ffmpeg_decoder.h"
 #endif
+#include "decoder/nxwarp/nxwarp_decoder.h"
 #include "decoder/raw_decoder.h"
 
 wivrn::decoder::~decoder() = default;
@@ -58,6 +61,19 @@ std::shared_ptr<wivrn::decoder> wivrn::decoder::make(
 			        scene,
 			        acc);
 #endif
+		case nxwarp:
+#ifdef WIVRN_USE_NXWARP
+			return std::make_shared<wivrn::nxwarp_decoder>(
+			        device,
+			        phys_dev,
+			        vk_queue_family_index,
+			        description,
+			        stream_index,
+			        scene,
+			        acc);
+#else
+			throw std::runtime_error("this client was built without NX Warp support");
+#endif
 		case raw:
 			return std::make_shared<wivrn::raw_decoder>(
 			        device,
@@ -78,6 +94,14 @@ static std::vector<wivrn::video_codec> supported_codecs_()
 	wivrn::android::decoder::supported_codecs(res);
 #else
 	wivrn::ffmpeg::decoder::supported_codecs(res);
+#endif
+#ifdef WIVRN_USE_NXWARP
+	// NX Warp is a pure-compute decoder: there is no hardware capability to probe, only a
+	// Vulkan device that either runs it or does not, and that device does not exist yet
+	// when this list is built. It is advertised last so that a server which supports it
+	// still prefers the hardware codecs unless the headset setting moves it up; see
+	// configuration::nxwarp and scenes::stream's headset_info.
+	res.push_back(wivrn::video_codec::nxwarp);
 #endif
 	res.push_back(wivrn::video_codec::raw);
 	return res;

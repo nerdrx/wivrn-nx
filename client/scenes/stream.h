@@ -377,6 +377,7 @@ public:
 	void operator()(to_headset::server_message &&);
 	void operator()(to_headset::video_stream_data_shard &&);
 	void operator()(to_headset::video_stream_parity_shard &&);
+	void operator()(to_headset::nxwarp_datagram &&);
 	void operator()(to_headset::motion_field &&);
 	void operator()(to_headset::haptics &&);
 	void operator()(to_headset::timesync_query &&);
@@ -395,6 +396,9 @@ public:
 	void push_blit_handle(wivrn::shard_accumulator * decoder, std::shared_ptr<wivrn::shard_accumulator::blit_handle> handle);
 
 	void send_feedback(const wivrn::from_headset::feedback & feedback);
+	// Hands one already-encoded NX Warp feedback packet to the lossy socket. Called from
+	// the decoder's network-thread path once per band deadline.
+	void send_nxwarp_feedback(uint8_t stream_index, uint8_t path_id, std::vector<uint8_t> payload);
 
 	// Ask the server for video shards this headset never received. On the stream
 	// socket, not the control one: a request that misses the frame's display deadline

@@ -57,6 +57,9 @@ static AVCodecID codec_id(wivrn::video_codec codec)
 		case c::av1:
 			return AV_CODEC_ID_AV1;
 		case c::raw:
+		case c::nxwarp:
+			// Neither is an libavcodec codec: raw is uncompressed and NX Warp is decoded
+			// on the GPU by client/decoder/nxwarp/.
 			break;
 	}
 	assert(false);

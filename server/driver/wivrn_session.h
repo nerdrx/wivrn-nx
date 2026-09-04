@@ -229,6 +229,7 @@ public:
 	void operator()(from_headset::timesync_response &&);
 	void operator()(from_headset::feedback &&);
 	void operator()(from_headset::nack &&);
+	void operator()(from_headset::nxwarp_feedback &&);
 	void operator()(from_headset::battery &&);
 	void operator()(from_headset::wifi_state &&);
 	void operator()(from_headset::visibility_mask_changed &&);

@@ -341,17 +341,63 @@ Identifier of the encoder, one of
 * `nvenc`: Nvidia hardware encoding
 * `vaapi`: AMD/Intel hardware encoding
 * `vulkan`: experimental, for any GPU that supports vulkan video encode
+* `nxwarp`: NX Warp, the pure-compute codec of [nx-warp](https://github.com/nerdrx/nx-warp).
+  Only built when the server was configured with `-DWIVRN_USE_NXWARP=ON`, and never chosen
+  automatically — it runs on the CPU reference codec today and would lose to any hardware
+  encoder on the machine. See below.
 
 ### `codec`
 Default value: best supported by both headset and encoder of `av1`, `h264`, `h265`.
 
-One of `h264`, `h265`, `av1`, `raw`.
+One of `h264`, `h265`, `av1`, `raw`, `nxwarp`.
 
 Not all encoders support every codec:
 - `x264` encoder only supports `h264` codec
 - `vulkan` encoder supports `h264` and `h265` codecs
 - `raw` encoder only supports `raw` codec
-- `nvenc` and `vaapi` support all codecs, except `raw`
+- `nxwarp` encoder only supports `nxwarp` codec
+- `nvenc` and `vaapi` support all codecs, except `raw` and `nxwarp`
+
+### NX Warp
+
+`"encoder": "nxwarp"` (or `"codec": "nxwarp"`, which selects the same encoder) streams
+[NX Warp](https://github.com/nerdrx/nx-warp) instead of a hardware codec. It is experimental
+and it is a **protocol break**: adding the codec to the enumeration changes WiVRn's protocol
+version hash, so a client and a server that know NX Warp only talk to each other. The headset
+side is the other half of the switch — the codec is negotiated through the headset's
+`supported_codecs` list, so a client that does not offer `nxwarp` cannot be given it, and the
+headset's own toggle works by re-ordering or removing that list rather than by a new setting.
+
+The encoder ignores WiVRn's shard FEC, retransmission and packet pacing: NX Warp brings its own
+transport, which does its own tile runs, forward error correction and per-band feedback. It also
+opts out of the encoder watchdog's failover, because a silent swap to VAAPI mid-session with an
+NX Warp decoder on the other end is a black screen and the codec cannot be renegotiated without
+a reconnect.
+
+Per-stream `options` (all optional):
+
+| key | default | meaning |
+|---|---|---|
+| `qp` | `28` | fixed quantiser, 0..63. There is no rate control yet: the bitrate controller's number is logged and ignored |
+| `inter` | `off` | inter prediction — the pose warp, per-tile motion vectors and the reference ring. `off` is all-intra, which is the safe bring-up default |
+| `intra-period` | `180` | rolling intra refresh period in frames; `1` forces every tile every frame |
+| `band-rows` | `6` | tile rows per transport band, which is the unit of pacing and of feedback |
+| `mtu` | `1280` | transport MTU. Leaves room for WiVRn's own packet envelope inside a 1400-byte datagram |
+
+```json
+{
+	"encoders": [
+		{
+			"encoder": "nxwarp",
+			"options": { "qp": "26", "inter": "on" }
+		}
+	]
+}
+```
+
+`wivrn-nxwarp-loopback`, built alongside the server, runs the whole encoder path — codec,
+packetizer, transport, receiver, reference decoder — on synthetic frames with no headset, no GPU
+and no socket, and writes a `.nxv` that `nxv-dec` can decode.
 
 If `nvenc` encoder is in use, you can refer to [nvidia website](https://developer.nvidia.com/video-encode-decode-support-matrix) to make sure that your GPU supports encoding with the desired codec.
 

@@ -112,7 +112,7 @@ protected:
 	virtual vk::ExtensionProperties std_header_version() = 0;
 
 public:
-	void present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo, uint8_t slot, uint64_t frame_index) override;
+	void present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo, uint8_t slot, uint64_t frame_index, const to_headset::video_stream_data_shard::view_info_t &) override;
 	std::optional<data> encode(uint8_t slot, uint64_t frame_index) override;
 };
 } // namespace wivrn

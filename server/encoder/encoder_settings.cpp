@@ -229,6 +229,7 @@ class prober
 			case av1:
 				U_LOG_D("Vulkan video encode for AV1 is not implemented in WiVRn");
 			case raw:
+			case nxwarp:
 				return false;
 		}
 		U_LOG_E("Invalid codec %d", int(codec));
@@ -244,6 +245,23 @@ public:
 	{
 		if (config.codec == video_codec::raw or config.name == encoder_raw)
 			return {encoder_raw, video_codec::raw};
+
+		// NX Warp is never auto-selected: it is picked only when the configuration
+		// names it, because it is a CPU reference codec for now and would lose to
+		// every hardware encoder on the machine. The headset still has to be able
+		// to decode it — a stream the client cannot build a decoder for is a black
+		// screen, and unlike a hardware codec there is no fallback the watchdog can
+		// swap in (INTEGRATION-DECISIONS 6).
+		if (config.codec == video_codec::nxwarp or config.name == encoder_nxwarp)
+		{
+#if WIVRN_USE_NXWARP
+			if (not std::ranges::contains(info.supported_codecs, video_codec::nxwarp))
+				U_LOG_W("nxwarp: the headset did not list this codec as supported; the stream will only work with a matching client");
+			return {encoder_nxwarp, video_codec::nxwarp};
+#else
+			throw std::runtime_error("nxwarp encoder was requested but this server was built without it");
+#endif
+		}
 
 #if WIVRN_USE_NVENC
 		if ((nvidia and config.name.empty()) or config.name == encoder_nvenc)
@@ -370,7 +388,10 @@ std::array<encoder_settings, num_streams> get_encoder_settings(wivrn::vk_bundle 
 
 	auto enabled_encoders = res | std::views::filter(&encoder_settings::enabled);
 	if (std::ranges::contains(enabled_encoders, video_codec::h264, &encoder_settings::codec) or
-	    std::ranges::contains(enabled_encoders, video_codec::raw, &encoder_settings::codec))
+	    std::ranges::contains(enabled_encoders, video_codec::raw, &encoder_settings::codec) or
+	    // NX Warp v1 is an 8-bit bitstream: NXVC_TOOL_BITDEPTH10 is defined but not
+	    // implemented by the reference codec, which rejects bit_depth 10 outright.
+	    std::ranges::contains(enabled_encoders, video_codec::nxwarp, &encoder_settings::codec))
 		bit_depth = 8;
 	else if (not bit_depth)
 		bit_depth = 10;

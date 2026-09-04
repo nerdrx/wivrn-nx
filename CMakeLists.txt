@@ -57,6 +57,11 @@ option(WIVRN_USE_NVENC "Enable nvenc (Nvidia) hardware encoder" ON)
 option(WIVRN_USE_VAAPI "Enable vaapi (AMD/Intel) hardware encoder" ON)
 option(WIVRN_USE_VULKAN_ENCODE "Enable vulkan video encoder" ON)
 option(WIVRN_USE_X264 "Enable x264 software encoder" ON)
+# NX Warp: the pure-compute codec of nx-warp/. Off by default because it needs
+# the nxvc libraries (find_package(nxvc), or NXWARP_SOURCE_DIR pointing at a
+# checkout) and because it is not yet a codec anyone should stream with.
+option(WIVRN_USE_NXWARP "Enable the NX Warp encoder (needs the nxvc libraries)" OFF)
+set(NXWARP_SOURCE_DIR "" CACHE PATH "nx-warp checkout to build nxvc from, instead of find_package(nxvc)")
 
 option(WIVRN_USE_PERFETTO "Enable Perfetto tracing via the Perfetto SDK (server only)" OFF)
 option(WIVRN_TRACE_MONADO "Also instrument Monado (percetto) under the same WIVRN_TRACING switch; pulls in a second Perfetto runtime, system backend only. Requires WIVRN_USE_PERFETTO" OFF)
@@ -137,6 +142,19 @@ if (WIVRN_BUILD_SERVER)
 
     if (WIVRN_USE_X264)
         pkg_check_modules(X264 REQUIRED IMPORTED_TARGET x264)
+    endif()
+
+    if (WIVRN_USE_NXWARP)
+        # Two ways in, because the codec and the server are developed together:
+        # an installed nxvc package, or the nx-warp source tree added directly.
+        if (NXWARP_SOURCE_DIR)
+            set(NXWARP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+            set(NXWARP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+            set(NXWARP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+            add_subdirectory(${NXWARP_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/nxwarp)
+        else()
+            find_package(nxvc CONFIG REQUIRED)
+        endif()
     endif()
 
     if (WIVRN_USE_PIPEWIRE)
@@ -315,6 +333,7 @@ if (WIVRN_BUILD_SERVER OR WIVRN_BUILD_SERVER_LIBRARY)
         message(STATUS "\tVAAPI : ${WIVRN_USE_VAAPI}")
         message(STATUS "\tVulkan: ${WIVRN_USE_VULKAN_ENCODE}")
         message(STATUS "\tx264  : ${WIVRN_USE_X264}")
+        message(STATUS "\tNX Warp: ${WIVRN_USE_NXWARP}")
         message(STATUS "")
         message(STATUS "Audio backends:")
         message(STATUS "\tPipewire  : ${WIVRN_USE_PIPEWIRE}")

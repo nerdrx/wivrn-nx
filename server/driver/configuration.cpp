@@ -65,6 +65,7 @@ NLOHMANN_JSON_SERIALIZE_ENUM(
                 {av1, "av1"},
                 {av1, "AV1"},
                 {raw, "raw"},
+                {nxwarp, "nxwarp"},
         })
 
 NLOHMANN_JSON_SERIALIZE_ENUM(

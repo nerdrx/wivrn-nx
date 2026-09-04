@@ -1033,13 +1033,14 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 		{
 			if (not promoted)
 				continue;
-			encoder->present_image(quad->image(i), sem_info, info.frame_id);
+			encoder->present_image(quad->image(i), sem_info, info.frame_id, view_info);
 			continue;
 		}
 		encoder->present_image(
 		        images[i].image,
 		        sem_info,
-		        info.frame_id);
+		        info.frame_id,
+		        view_info);
 	}
 
 	auto j = encode_request.exchange(i);
@@ -1827,6 +1828,15 @@ void compositor::collect_retransmits(const from_headset::nack & n,
 		return;
 
 	snapshot[n.stream_index]->collect_retransmits(n, out);
+}
+
+void compositor::on_nxwarp_feedback(const from_headset::nxwarp_feedback & fb)
+{
+	auto snapshot = get_encoders();
+	if (fb.stream_item_idx >= snapshot.size() or not snapshot[fb.stream_item_idx])
+		return;
+
+	snapshot[fb.stream_item_idx]->on_nxwarp_feedback(fb.path_id, fb.payload);
 }
 
 uint64_t compositor::retransmitted_shards() const

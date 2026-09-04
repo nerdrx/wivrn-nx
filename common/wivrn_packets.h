@@ -200,6 +200,14 @@ enum video_codec
 	hevc = h265,
 	av1,
 	raw,
+	// NX Warp, the pure-compute codec of nx-warp/. The bitstream is carried by its
+	// own transport (see to_headset::nxwarp_datagram), not by the shard path.
+	//
+	// Adding an enumerator here changes protocol_version: serialization_traits for
+	// an enum feeds every enumerator name and value into the type hash. That is
+	// deliberate — a headset that does not know this codec must not negotiate with
+	// a server that does — but it means client and server ship together.
+	nxwarp,
 };
 
 enum class stream_tab : uint8_t
@@ -1028,6 +1036,23 @@ struct stop_application
 	uint32_t id;
 };
 
+// Per-band feedback for an NX Warp stream: the client's receiver builds it
+// (nxt::Receiver::band_deadline) and the server hands it straight back to that
+// stream's nxt::Sender, which folds it into the client shadow. Opaque here on
+// purpose — the wire format is normative in nx-warp/docs/TRANSPORT.md 8 and this
+// packet is only an envelope, so a transport revision does not touch WiVRn.
+//
+// Sent on the control (TCP) socket: it is small, it is cumulative, and a lost
+// feedback packet costs the encoder a frame of shadow knowledge.
+struct nxwarp_feedback
+{
+	// Same stream numbering as video_stream_data_shard
+	uint8_t stream_item_idx;
+	// Path the datagrams it reports on arrived over (nxt path_id, 0 or 1)
+	uint8_t path_id;
+	std::vector<uint8_t> payload;
+};
+
 // when changing this, also make sure there are handlers in wivrn_session, etc. or compilation will fail
 using packets = std::variant<
         crypto_handshake,
@@ -1058,6 +1083,7 @@ using packets = std::variant<
         user_presence_changed,
         stream_tab_changed,
         transport_status_subscribe,
+        nxwarp_feedback,
         override_foveation_center,
         get_application_list,
         start_app,
@@ -1546,6 +1572,26 @@ struct running_applications
 	std::vector<application> applications;
 };
 
+// One NX Warp transport datagram, verbatim.
+//
+// The codec's unit is a tile run with its own header, not a slice of an opaque
+// byte stream, so it cannot ride video_stream_data_shard: SendData cuts a frame
+// into 1400-byte pieces and the shard accumulator reassembles them in order,
+// which would destroy the run boundaries the receiver needs and impose an
+// ordering the codec explicitly does not want (late tiles are still useful).
+// This packet is therefore the whole datagram — nxt header, ciphertext, tag —
+// handed to the socket as one write, exactly as nx-warp/docs/TRANSPORT.md
+// assumes. The nxt::StreamConfig mtu is set so that this envelope still fits in
+// one UDP datagram.
+struct nxwarp_datagram
+{
+	// Same stream numbering as video_stream_data_shard
+	uint8_t stream_item_idx;
+	// nxt path id the sender striped this datagram onto (0 primary, 1 secondary)
+	uint8_t path_id;
+	std::vector<uint8_t> payload;
+};
+
 using packets = std::variant<
         crypto_handshake,
         pin_check_2,
@@ -1559,6 +1605,7 @@ using packets = std::variant<
         audio_data,
         video_stream_data_shard,
         video_stream_parity_shard,
+        nxwarp_datagram,
         motion_field,
         haptics,
         timesync_query,

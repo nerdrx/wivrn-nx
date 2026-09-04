@@ -1061,6 +1061,13 @@ void wivrn_session::operator()(from_headset::nack && nack)
 	}
 }
 
+void wivrn_session::operator()(from_headset::nxwarp_feedback && fb)
+{
+	// Straight through to the encoder: the transport owns the wire format and the
+	// client shadow, and the session knows nothing about either.
+	compositor.on_nxwarp_feedback(fb);
+}
+
 void wivrn_session::operator()(from_headset::battery && battery)
 {
 	hmd.update_battery(battery);

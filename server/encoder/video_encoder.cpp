@@ -48,6 +48,9 @@
 #include "video_encoder_vulkan_h265.h"
 #endif
 #include "video_encoder_raw.h"
+#if WIVRN_USE_NXWARP
+#include "video_encoder_nxwarp.h"
+#endif
 
 namespace
 {
@@ -244,6 +247,8 @@ std::unique_ptr<video_encoder> video_encoder::create(
 				throw std::runtime_error("av1 not supported for vulkan video encode");
 			case video_codec::raw:
 				throw std::runtime_error("raw codec only supported on raw encoder");
+			case video_codec::nxwarp:
+				throw std::runtime_error("nxwarp codec only supported on the nxwarp encoder");
 		}
 #else
 		throw std::runtime_error("Vulkan video encode not enabled");
@@ -279,6 +284,15 @@ std::unique_ptr<video_encoder> video_encoder::create(
 		res = std::make_unique<video_encoder_raw>(wivrn_vk, settings, stream_idx);
 	}
 
+	if (settings.encoder_name == encoder_nxwarp)
+	{
+#if WIVRN_USE_NXWARP
+		res = std::make_unique<video_encoder_nxwarp>(wivrn_vk, settings, stream_idx);
+#else
+		throw std::runtime_error("NX Warp encoder not enabled");
+#endif
+	}
+
 	if (not res)
 		throw std::runtime_error("Failed to create encoder " + settings.encoder_name);
 
@@ -300,6 +314,9 @@ std::unique_ptr<video_encoder> video_encoder::create(
 				break;
 			case raw:
 				file += ".yuv";
+				break;
+			case nxwarp:
+				file += ".nxv";
 				break;
 		}
 		res->video_dump.open(file);
@@ -581,7 +598,10 @@ void video_encoder::set_pacing(bool enabled, float window)
 	pacing_enabled = enabled;
 }
 
-void video_encoder::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo info, uint64_t frame_index)
+void video_encoder::present_image(vk::Image y_cbcr,
+                                  vk::SemaphoreSubmitInfo info,
+                                  uint64_t frame_index,
+                                  const to_headset::video_stream_data_shard::view_info_t & view_info)
 {
 	wivrn::trace::scope trace_present(wivrn::trace::cpu_track::encoder, stream_idx, frame_index, "present_image");
 	// Wait for encoder to be done
@@ -595,7 +615,7 @@ void video_encoder::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo info
 	}
 	state[present_slot] = busy;
 	++pending_presents;
-	return present_image(y_cbcr, info, present_slot, frame_index);
+	return present_image(y_cbcr, info, present_slot, frame_index, view_info);
 }
 
 void video_encoder::encode(wivrn_session & cnx,
@@ -906,6 +926,74 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 			        (unsigned)frame_bytes_secondary,
 			        spill.split_at(),
 			        spill.failed() ? ", path lost mid-frame" : "");
+	}
+}
+
+void video_encoder::SendControlPacket(to_headset::nxwarp_datagram && packet)
+{
+	std::lock_guard lock(mutex);
+	try
+	{
+		cnx->send_control(std::move(packet));
+	}
+	catch (...)
+	{
+		// Ignore network errors; the header is resent periodically.
+	}
+}
+
+void video_encoder::SendPacket(to_headset::nxwarp_datagram && packet, bool end_of_frame)
+{
+	std::lock_guard lock(mutex);
+
+	if (frame_offset == 0 and frame_bytes == 0)
+	{
+		wivrn::trace::cpu_begin(wivrn::trace::cpu_track::network, stream_idx, shard.frame_idx, "SendData");
+		cnx->dump_time("send_begin", shard.frame_idx, os_monotonic_get_ns(), stream_idx);
+		timing_info.send_begin = clock.to_headset(os_monotonic_get_ns());
+	}
+
+	const uint32_t bytes = uint32_t(packet.payload.size());
+	frame_bytes += bytes;
+	frame_bytes_primary += bytes;
+	frame_offset += bytes;
+
+	if (video_dump)
+		video_dump.write((char *)packet.payload.data(), packet.payload.size());
+
+	try
+	{
+		if (cnx->has_stream())
+			cnx->send_stream(std::move(packet));
+		else
+			cnx->send_control(std::move(packet));
+	}
+	catch (...)
+	{
+		// Ignore network errors, same as the shard path: a lost datagram is the
+		// case the codec's concealment and the transport's FEC exist for.
+	}
+
+	if (end_of_frame)
+	{
+		timing_info.send_end = clock.to_headset(os_monotonic_get_ns());
+		if (not timing_info.encode_end)
+			timing_info.encode_end = timing_info.send_end;
+
+		cnx->dump_time("send_end", shard.frame_idx, os_monotonic_get_ns(), stream_idx);
+		wivrn::trace::cpu_end(wivrn::trace::cpu_track::network, stream_idx, shard.frame_idx, "SendData");
+
+		// Same contract as SendData: what the bandwidth estimator divides by the
+		// time the headset says it spent receiving the frame. Every NX Warp
+		// datagram rides the primary path today — the transport's own striper is
+		// not wired to WiVRn's secondary path yet — so the split is trivial.
+		cnx->on_frame_sent(shard.frame_idx, stream_idx, frame_bytes);
+		cnx->on_frame_paths(frame_bytes_primary, 0);
+
+		frame_bytes = 0;
+		frame_bytes_primary = 0;
+		frame_bytes_secondary = 0;
+		frame_offset = 0;
 	}
 }
 

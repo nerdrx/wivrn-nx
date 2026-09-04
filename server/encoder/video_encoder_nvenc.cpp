@@ -85,6 +85,7 @@ static auto encode_guid(video_codec codec)
 		case av1:
 			return NV_ENC_CODEC_AV1_GUID;
 		case raw:
+		case nxwarp:
 			break;
 	}
 	throw std::out_of_range("Invalid codec " + std::to_string(codec));
@@ -395,7 +396,8 @@ video_encoder_nvenc::video_encoder_nvenc(
 
 			break;
 		case video_codec::raw:
-			throw std::runtime_error("raw codec not supported for nvenc");
+		case video_codec::nxwarp:
+			throw std::runtime_error("codec not supported for nvenc");
 	}
 
 	init_params = {
@@ -521,7 +523,7 @@ video_encoder_nvenc::~video_encoder_nvenc()
 		shared_state->fn.nvEncDestroyEncoder(session_handle);
 }
 
-void video_encoder_nvenc::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo, uint8_t slot, uint64_t frame_index)
+void video_encoder_nvenc::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo, uint8_t slot, uint64_t frame_index, const to_headset::video_stream_data_shard::view_info_t &)
 {
 	if (vk.device.waitForFences(*in[slot].fence, true, 1'000'000'000) == vk::Result::eTimeout)
 	{
@@ -725,6 +727,7 @@ std::optional<video_encoder::data> video_encoder_nvenc::encode(uint8_t slot, uin
 					frame_params.codecPicParams.av1PicParams.forceIntraRefreshWithFrameCnt = intra_refresh_frames();
 					break;
 				case video_codec::raw:
+				case video_codec::nxwarp:
 					break;
 			}
 			break;

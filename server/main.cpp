@@ -1096,7 +1096,8 @@ void on_headset_info_packet(const wivrn::from_headset::headset_info_packet & inf
 	static const std::map<video_codec, const char *> codec_names = {
 	        {h264, "h264"},
 	        {h265, "h265"},
-	        {av1, "av1"}};
+	        {av1, "av1"},
+	        {nxwarp, "nxwarp"}};
 	for (video_codec codec: info.supported_codecs)
 	{
 		auto it = codec_names.find(codec);

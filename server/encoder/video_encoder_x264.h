@@ -68,7 +68,7 @@ class video_encoder_x264 : public video_encoder
 public:
 	video_encoder_x264(wivrn::vk_bundle & vk, const encoder_settings & settings, uint8_t stream_idx);
 
-	void present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo, uint8_t slot, uint64_t frame_index) override;
+	void present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo, uint8_t slot, uint64_t frame_index, const to_headset::video_stream_data_shard::view_info_t &) override;
 
 	std::optional<data> encode(uint8_t slot, uint64_t frame_index) override;
 

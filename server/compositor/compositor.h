@@ -454,6 +454,10 @@ public:
 	void collect_retransmits(const from_headset::nack &,
 	                         std::vector<to_headset::video_stream_data_shard> & out);
 
+	// One NX Warp feedback packet, to the encoder of the stream it names. Only
+	// video_encoder_nxwarp does anything with it.
+	void on_nxwarp_feedback(const from_headset::nxwarp_feedback &);
+
 	// Video shards sent again on request over every stream, monotonic
 	uint64_t retransmitted_shards() const;
 

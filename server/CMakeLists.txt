@@ -187,6 +187,28 @@ if (WIVRN_BUILD_SERVER)
 			)
 	endif()
 
+	if(WIVRN_USE_NXWARP)
+		target_sources(
+			wivrn-server
+			PRIVATE encoder/video_encoder_nxwarp.cpp
+				encoder/nxwarp_codec_ref.cpp
+				encoder/nxwarp_packetize.cpp
+			)
+		target_link_libraries(wivrn-server PRIVATE nxvc::ref nxvc::transport)
+
+		# The server path without a headset, a GPU or a socket: synthetic frames
+		# through the codec, the packetizer, the transport and back into the
+		# reference decoder. Links none of WiVRn.
+		add_executable(wivrn-nxwarp-loopback
+			encoder/nxwarp_loopback.cpp
+			encoder/nxwarp_codec_ref.cpp
+			encoder/nxwarp_packetize.cpp
+			)
+		target_include_directories(wivrn-nxwarp-loopback PRIVATE .)
+		target_compile_features(wivrn-nxwarp-loopback PRIVATE cxx_std_20)
+		target_link_libraries(wivrn-nxwarp-loopback PRIVATE nxvc::ref nxvc::transport)
+	endif()
+
 	if(WIVRN_USE_X264)
 		target_sources(wivrn-server PRIVATE encoder/video_encoder_x264.cpp)
 		target_link_libraries(wivrn-server PRIVATE PkgConfig::X264)

@@ -51,6 +51,7 @@ inline const char * encoder_vaapi = "vaapi";
 inline const char * encoder_x264 = "x264";
 inline const char * encoder_vulkan = "vulkan";
 inline const char * encoder_raw = "raw";
+inline const char * encoder_nxwarp = "nxwarp";
 
 class video_encoder
 {
@@ -283,9 +284,14 @@ public:
 	video_encoder(vk_bundle &, uint8_t stream_idx, uint32_t target_queue, const encoder_settings & settings, std::unique_ptr<idr_handler>, bool async_send);
 	virtual ~video_encoder();
 
+	// `view_info` is the pose and projection the frame was rendered for. It is the
+	// same object encode() is handed one call later; a codec whose predictor warps
+	// the previous reconstruction needs it at present time, before any work is
+	// submitted, so it arrives here as well (INTEGRATION-DECISIONS 9).
 	void present_image(vk::Image y_cbcr,
 	                   vk::SemaphoreSubmitInfo sem_info,
-	                   uint64_t frame_index);
+	                   uint64_t frame_index,
+	                   const to_headset::video_stream_data_shard::view_info_t & view_info);
 
 	void on_feedback(const from_headset::feedback &);
 	void reset();
@@ -365,12 +371,19 @@ public:
 	            const to_headset::video_stream_data_shard::view_info_t & view_info,
 	            uint64_t frame_index);
 
+	// One NX Warp feedback packet from the headset, verbatim, on the network
+	// thread. Only the NX Warp encoder does anything with it; every other backend
+	// is on the shard path and hears about loss through on_feedback and nack.
+	virtual void on_nxwarp_feedback(uint8_t path_id, std::span<const uint8_t> payload) {}
+
 protected:
 	// called on present to submit command buffers for the image.
+	// Every backend but NX Warp ignores `view_info`.
 	virtual void present_image(vk::Image y_cbcr,
 	                           vk::SemaphoreSubmitInfo sem_info,
 	                           uint8_t slot,
-	                           uint64_t frame_index) = 0;
+	                           uint64_t frame_index,
+	                           const to_headset::video_stream_data_shard::view_info_t & view_info) = 0;
 
 	// called when command buffer finished executing
 	virtual std::optional<data> encode(uint8_t slot, uint64_t frame_index) = 0;
@@ -398,6 +411,17 @@ protected:
 	// the stream socket; default constructed ones never sleep and never split, which
 	// is what the encoders that send synchronously from inside encode() (x264) get.
 	void SendData(std::span<uint8_t> data, bool end_of_frame, bool control = false, shard_pacer pacer = {}, spill_scheduler spill = {});
+
+	// Put one already-formed packet on the stream (UDP) socket, outside the shard
+	// path. What NX Warp sends: its transport owns framing, FEC and pacing, so
+	// there is nothing here to shard, pace or protect — only the frame byte
+	// accounting the bitrate controller reads, which SendData would otherwise do.
+	// Falls back to the control socket when there is no stream socket.
+	void SendPacket(to_headset::nxwarp_datagram && packet, bool end_of_frame);
+
+	// The same on the control (TCP) socket, for the one part of an NX Warp stream
+	// that must not be lost: the codec's stream header.
+	void SendControlPacket(to_headset::nxwarp_datagram && packet);
 };
 
 } // namespace wivrn

@@ -676,7 +676,7 @@ std::vector<uint8_t> wivrn::video_encoder_vulkan::get_encoded_parameters(void * 
 	return encoded;
 }
 
-void wivrn::video_encoder_vulkan::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo compositor_sem, uint8_t encode_slot, uint64_t frame_index)
+void wivrn::video_encoder_vulkan::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo compositor_sem, uint8_t encode_slot, uint64_t frame_index, const to_headset::video_stream_data_shard::view_info_t &)
 {
 	auto & slot_item = slot_data[encode_slot];
 

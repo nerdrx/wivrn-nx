@@ -293,7 +293,7 @@ video_encoder_x264::video_encoder_x264(
 	}
 }
 
-void video_encoder_x264::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo compositor_sem, uint8_t slot, uint64_t)
+void video_encoder_x264::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo compositor_sem, uint8_t slot, uint64_t, const to_headset::video_stream_data_shard::view_info_t &)
 {
 	if (vk.device.waitForFences(*in[slot].fence, true, 1'000'000'000) == vk::Result::eTimeout)
 	{

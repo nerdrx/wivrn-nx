@@ -69,6 +69,7 @@ const char * encoder(video_codec codec)
 		case video_codec::av1:
 			return "av1_vaapi";
 		case video_codec::raw:
+		case video_codec::nxwarp:
 			break;
 	}
 	throw std::runtime_error("invalid codec " + std::to_string(int(codec)));
@@ -260,7 +261,8 @@ video_encoder_va::video_encoder_va(wivrn::vk_bundle & vk,
 			encoder_ctx->profile = AV_PROFILE_AV1_MAIN;
 			break;
 		case video_codec::raw:
-			throw std::runtime_error("raw codec not supported");
+		case video_codec::nxwarp:
+			throw std::runtime_error("codec not supported for vaapi");
 	}
 	if (settings.sharp_text)
 	{
@@ -473,7 +475,7 @@ video_encoder_va::video_encoder_va(wivrn::vk_bundle & vk,
 	ts_pool = gpu_timestamp_pool(vk, vk.queue.family_index, num_slots, std::format("va encoder {} pixel copy", stream_idx));
 }
 
-void video_encoder_va::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo, uint8_t slot, uint64_t frame_index)
+void video_encoder_va::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo, uint8_t slot, uint64_t frame_index, const to_headset::video_stream_data_shard::view_info_t &)
 {
 	if (vk.device.waitForFences(*in[slot].fence, true, 1'000'000'000) == vk::Result::eTimeout)
 	{

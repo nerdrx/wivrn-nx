@@ -89,7 +89,7 @@ wivrn::video_encoder_raw::video_encoder_raw(
 	}
 }
 
-void wivrn::video_encoder_raw::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo compositor_sem, uint8_t slot, uint64_t)
+void wivrn::video_encoder_raw::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo compositor_sem, uint8_t slot, uint64_t, const to_headset::video_stream_data_shard::view_info_t &)
 {
 	if (vk.device.waitForFences(*in[slot].fence, true, 1'000'000'000) == vk::Result::eTimeout)
 	{

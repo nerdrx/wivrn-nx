@@ -177,6 +177,7 @@ nxwarp_decoder::nxwarp_decoder(vk::raii::Device & device,
 			while (true)
 			{
 				auto job = jobs.pop();
+				jobs_pending--;
 				decode_unit(job);
 			}
 		}
@@ -389,6 +390,23 @@ void nxwarp_decoder::finish_frame(uint8_t path_id)
 	fire_bands_through(assembling_frame, uint8_t(cfg.bands() - 1), path_id);
 
 	auto unit = nxwarp_wire::reassemble(cfg, slots, chunk);
+	// The network side of the two-second report: what arrived, what had a hole,
+	// and how deep the worker's queue is. Printed here because a stalled worker
+	// prints nothing at all, which is exactly the case this line exists for.
+	{
+		net_frames++;
+		if (unit.empty())
+			net_holes++;
+		const auto now = std::chrono::steady_clock::now();
+		if (now - net_since > std::chrono::seconds(2))
+		{
+			spdlog::info("nxwarp[{}] net: {} frames closed in {:.1f} s, {} with a hole, {} queued for the worker, {} decoded so far",
+			             stream_index, net_frames, std::chrono::duration<double>(now - net_since).count(), net_holes, jobs_pending.load(), frames_decoded);
+			net_frames = 0;
+			net_holes = 0;
+			net_since = now;
+		}
+	}
 	if (unit.empty())
 	{
 		// A hole, a short chunk in the middle, or fewer bytes than the length prefix
@@ -406,6 +424,7 @@ void nxwarp_decoder::finish_frame(uint8_t path_id)
 	job.fb = fb;
 	job.view_info = assembling_view_info;
 	job.have_view_info = have_view_info;
+	jobs_pending++;
 	jobs.push(std::move(job));
 }
 

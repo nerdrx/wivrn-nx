@@ -94,6 +94,10 @@ class nxwarp_decoder : public decoder
 		double wait_ms = 0, wall_ms = 0, pass_a_ms = 0, pass_b_ms = 0, gpu_ms = 0;
 		uint64_t bytes = 0;
 	} prof;
+	// Network-thread counters for the same report.
+	std::chrono::steady_clock::time_point net_since = std::chrono::steady_clock::now();
+	uint64_t net_frames = 0, net_holes = 0;
+	std::atomic<int64_t> jobs_pending = 0;
 
 	// One frame's work, complete in itself: by the time the worker runs, the tile slots
 	// and the pending feedback already belong to the next frame.

@@ -176,6 +176,11 @@ nxwarp_decoder::nxwarp_decoder(vk::raii::Device & device,
 		for (auto & item: image_pool)
 			item.semaphore = nullptr;
 
+	// The band deadlines are fractions of one frame; take the rate from the stream
+	// description and fall back to 90 Hz when it says nothing usable.
+	if (description.frame_rate > 1.0f)
+		frame_period_us = uint32_t(1'000'000.0f / description.frame_rate);
+
 	worker = std::thread([this]() {
 		try
 		{
@@ -203,8 +208,9 @@ nxwarp_decoder::~nxwarp_decoder()
 		worker.join();
 	if (nxvc)
 		nxvc_vk_decoder_destroy(nxvc);
-	spdlog::info("nxwarp[{}]: {} frames decoded, {} dropped with a hole, {} refused by the codec",
-	             stream_index, frames_decoded.load(), frames_dropped_holes.load(), frames_dropped_codec.load());
+	spdlog::info("nxwarp[{}]: {} frames decoded, {} dropped with a hole, {} refused by the codec, {} published with no view_info",
+	             stream_index, frames_decoded.load(), frames_dropped_holes.load(), frames_dropped_codec.load(),
+	             frames_no_view_info.load());
 }
 
 // Network thread. The first thing that arrives on an NX Warp stream, and the only thing
@@ -288,8 +294,16 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 	receiver->set_negotiated_caps(cfg.caps);
 
 	chunk = nxwarp_wire::chunk_bytes(cfg);
-	slots.assign(cfg.tiles_per_frame(), {});
-	band_fired.assign(cfg.bands(), 0);
+	// Every entry of the window is sized once, here, and keeps its allocation for the
+	// life of the stream: the network thread must not be allocating per-tile vectors.
+	for (auto & f: window)
+	{
+		f = {};
+		f.slots.assign(cfg.tiles_per_frame(), {});
+		f.band_fired.assign(cfg.bands(), 0);
+	}
+	seen_any_frame = false;
+	any_retired = false;
 
 	spdlog::info("nxwarp[{}]: {}x{} on {}, {} x {} tiles, {} bytes per tile",
 	             stream_index, si.width, si.height, nxvc_vk_decoder_device_name(nxvc),
@@ -311,99 +325,286 @@ void nxwarp_decoder::push_datagram(to_headset::nxwarp_datagram && dg)
 	if (not nxt::decode_header(dg.payload.data(), &h))
 		return;
 
-	// A straggler from a frame that was already retired must not reopen it: it would
-	// close the frame under assembly with a hole, and the next datagram of that frame
-	// would reopen *it* -- a cascade that holed every frame of a live session once the
-	// two eye streams' timing lined up. Frame ids are sequential modulo 2^16.
-	if (assembling and int16_t(uint16_t(h.frame_id) - uint16_t(assembling_frame)) < 0)
+	const uint16_t frame_id = uint16_t(h.frame_id);
+
+	// Out of order means "belongs to a frame older than the newest one seen", which is
+	// the only kind of reordering that costs anything: within a frame the tiles are
+	// placed by index and the order they arrive in does not matter.
+	const bool out_of_order = seen_any_frame and seq_lt(frame_id, newest_frame);
+	if (out_of_order)
+		++net_out_of_order;
+	if (not seen_any_frame or seq_lt(newest_frame, frame_id))
+	{
+		newest_frame = frame_id;
+		seen_any_frame = true;
+	}
+
+	// A newer frame beyond the window closes the frames that have fallen out of it.
+	evict_below_window();
+
+	// A datagram for a frame that has already been closed -- retired, or now below the
+	// window floor -- can no longer change any outcome. Dropping it is what keeps
+	// `retired` monotonic, and therefore what keeps the cascade from ever starting.
+	if (any_retired and not seq_lt(retired_frame, frame_id))
 	{
 		++stragglers_dropped;
 		return;
 	}
-	// A new frame retires the previous one: fire whatever band deadlines it still owes,
-	// so its feedback goes out, then decode what arrived.
-	if (assembling and h.frame_id != assembling_frame)
-		finish_frame(dg.path_id);
-	if (not assembling)
+	if (seq_lt(frame_id, uint16_t(newest_frame - (kFrameWindow - 1))))
 	{
-		for (auto & s: slots)
-			s.clear();
-		std::fill(band_fired.begin(), band_fired.end(), 0);
-		assembling_frame = h.frame_id;
-		assembling = true;
-		fb = from_headset::feedback{};
-		fb.frame_index = ++wivrn_frame_idx;
-		fb.stream_index = stream_index;
-		fb.received_first_packet = host.now();
-		assembling_view_info = {};
-		have_view_info = false;
+		++stragglers_dropped;
+		return;
 	}
+
+	inflight_frame * f = frame_slot(frame_id, dg.path_id);
+	if (not f)
+		return;
+	if (out_of_order)
+		f->reordered = true;
+	f->path_id = dg.path_id;
 
 	// The pose rides the frame's first datagram and only that one; take it whichever
 	// datagram it turns up on, so that reordering on the wire does not lose it.
 	if (dg.view_info)
 	{
-		assembling_view_info = *dg.view_info;
-		have_view_info = true;
+		f->view_info = *dg.view_info;
+		f->have_view_info = true;
 	}
 
+	const uint64_t arrival_us = now_us();
 	std::vector<nxt::TileOutput> tiles;
 	receiver->on_datagram(std::span<const uint8_t>(dg.payload.data(), dg.payload.size()),
-	                      dg.path_id, now_us(), &tiles);
+	                      dg.path_id, arrival_us, &tiles);
 
+	// The receiver may deliver tiles of any frame it currently holds, not only this
+	// datagram's -- a parity datagram repairs the frame it belongs to. Route each tile
+	// to its own frame's entry; a tile for a frame outside the window has nowhere to go
+	// and is dropped, which is the same statement as the straggler check above.
 	for (const auto & t: tiles)
 	{
-		if (t.frame_id != assembling_frame or t.layer_id != 0)
+		if (t.layer_id != 0)
+			continue;
+		inflight_frame * target = t.frame_id == f->frame_id ? f : nullptr;
+		if (not target)
+		{
+			for (auto & w: window)
+			{
+				if (w.used and w.frame_id == t.frame_id)
+				{
+					target = &w;
+					break;
+				}
+			}
+		}
+		if (not target)
 			continue;
 		const uint32_t idx = cfg.tile_index(t.row, t.col);
-		if (idx >= slots.size())
+		if (idx >= target->slots.size())
 			continue;
 		// The receiver's spans point into scratch it reuses on the next call, so the
 		// bytes have to be taken now.
-		slots[idx].assign(t.bytes.begin(), t.bytes.end());
+		target->slots[idx].assign(t.bytes.begin(), t.bytes.end());
 	}
 
-	fb.received_last_packet = host.now();
+	f->fb.received_last_packet = host.now();
 
-	// Deadlines, driven by arrival rather than by a clock.
+	// Band deadlines. See THE BAND DEADLINE POLICY in the header: never on this frame's
+	// own datagram order, because ordinary within-frame reordering then reports almost
+	// every tile that did arrive as late.
 	//
-	// nx-warp docs/TRANSPORT.md 7.4 anchors the band deadline on the runtime's predicted
-	// display time. The decoder does not have one — scenes::stream does, one level up —
-	// so a band is closed as soon as a datagram for a later band, or for a later frame,
-	// arrives: the sender emits bands in order, so a later band on the wire is direct
-	// evidence that the earlier one is finished. nxt::DeadlineController still runs and
-	// the feedback content is identical; what is missing is the ability to close a band
-	// the sender went quiet on, which the frame change above then covers.
+	// A later frame carrying data for band b is direct evidence that band b of every
+	// older frame is finished: the sender emits frames in order.
 	if (h.band < cfg.bands() and not h.is_parity())
-		fire_bands_through(h.frame_id, h.band, dg.path_id);
+	{
+		for (auto & w: window)
+		{
+			if (w.used and seq_lt(w.frame_id, frame_id))
+				fire_bands_through(w, h.band);
+		}
+	}
+	// And the clock, for the bands no later frame has spoken for yet -- including the
+	// case the arrival rule cannot cover at all, a sender that went quiet.
+	fire_elapsed_deadlines(arrival_us);
 
 	if (h.flags & nxt::kFlagLastRunOfFrame)
-		finish_frame(dg.path_id);
+		f->have_last_run = true;
+
+	// A frame is complete when its last run has arrived AND its bytes are whole -- the
+	// second half matters because the last run's datagram routinely overtakes an earlier
+	// one of the same frame, and closing on the flag alone closes the frame with a hole
+	// it was about to fill. Checked for every entry, not just this datagram's: a parity
+	// datagram repairs the frame it belongs to, which need not be this one.
+	for (auto & w: window)
+	{
+		if (w.used and w.have_last_run and not w.complete and
+		    nxwarp_wire::is_complete(cfg, w.slots, chunk))
+			w.complete = true;
+	}
+
+	// A complete frame goes to the worker as soon as every older frame has been closed,
+	// so the worker sees frames in frame order.
+	close_complete_prefix();
 }
 
-void nxwarp_decoder::fire_bands_through(uint16_t frame_id, uint8_t last_band, uint8_t path_id)
+// End of stream. Closes everything still in the window, oldest first, so a frame whose
+// tail was merely late is not counted as lost because nothing came after it to push it
+// out. Same thread as push_datagram.
+void nxwarp_decoder::flush_frames()
 {
-	for (uint8_t b = 0; b <= last_band and b < band_fired.size(); ++b)
+	while (auto * f = oldest_in_flight())
+		close_frame(*f);
+}
+
+nxwarp_decoder::inflight_frame * nxwarp_decoder::oldest_in_flight()
+{
+	inflight_frame * oldest = nullptr;
+	for (auto & f: window)
 	{
-		if (band_fired[b])
+		if (not f.used)
 			continue;
-		band_fired[b] = 1;
-		auto packet = receiver->band_deadline(frame_id, b, now_us(), 0, path_id);
-		if (packet.empty())
-			continue;
-		host.send_feedback(stream_index, path_id, std::move(packet));
+		if (not oldest or seq_lt(f.frame_id, oldest->frame_id))
+			oldest = &f;
+	}
+	return oldest;
+}
+
+// Find the entry for `frame_id`, opening one if this is the frame's first datagram. The
+// caller has already established that the frame is inside the window and not retired, so
+// a free entry always exists: the window holds at most kFrameWindow frames and the window
+// itself spans exactly kFrameWindow ids.
+nxwarp_decoder::inflight_frame * nxwarp_decoder::frame_slot(uint16_t frame_id, uint8_t path_id)
+{
+	for (auto & f: window)
+	{
+		if (f.used and f.frame_id == frame_id)
+			return &f;
+	}
+	inflight_frame * free_slot = nullptr;
+	for (auto & f: window)
+	{
+		if (not f.used)
+		{
+			free_slot = &f;
+			break;
+		}
+	}
+	if (not free_slot)
+	{
+		// Cannot happen by the argument above; if it ever does, make room the same way
+		// the window does rather than dropping the newest frame on the floor.
+		if (auto * oldest = oldest_in_flight())
+		{
+			close_frame(*oldest);
+			free_slot = oldest;
+		}
+	}
+	if (not free_slot)
+		return nullptr;
+
+	for (auto & slot: free_slot->slots)
+		slot.clear();
+	std::fill(free_slot->band_fired.begin(), free_slot->band_fired.end(), 0);
+	free_slot->used = true;
+	free_slot->frame_id = frame_id;
+	free_slot->have_last_run = false;
+	free_slot->complete = false;
+	free_slot->reordered = false;
+	free_slot->path_id = path_id;
+	free_slot->fb = from_headset::feedback{};
+	free_slot->fb.stream_index = stream_index;
+	free_slot->fb.received_first_packet = host.now();
+	free_slot->first_us = now_us();
+	free_slot->view_info = {};
+	free_slot->have_view_info = false;
+	return free_slot;
+}
+
+// Close the leading run of complete frames. A frame that completed while an older one is
+// still in flight waits for it, which is what keeps the worker's input in frame order;
+// the wait is bounded by the window, because the older frame is closed the moment a frame
+// kFrameWindow ahead of it arrives.
+void nxwarp_decoder::close_complete_prefix()
+{
+	while (auto * f = oldest_in_flight())
+	{
+		if (not f->complete)
+			break;
+		close_frame(*f);
 	}
 }
 
-// Network thread. Closes the frame under assembly and hands it to the worker.
-void nxwarp_decoder::finish_frame(uint8_t path_id)
+// Everything below the window floor has had its chance: a newer frame is that far ahead,
+// so nothing more is coming. Oldest first, so frames still reach the worker in order.
+void nxwarp_decoder::evict_below_window()
 {
-	if (not assembling)
+	if (not seen_any_frame)
 		return;
-	assembling = false;
-	fire_bands_through(assembling_frame, uint8_t(cfg.bands() - 1), path_id);
+	const uint16_t floor = uint16_t(newest_frame - (kFrameWindow - 1));
+	while (auto * f = oldest_in_flight())
+	{
+		if (not seq_lt(f->frame_id, floor))
+			break;
+		close_frame(*f);
+	}
+}
 
-	auto unit = nxwarp_wire::reassemble(cfg, slots, chunk);
+// The clock half of the band deadline policy: band b of a frame is due at that frame's
+// first arrival plus (b + 1) / bands of the frame period. Runs over every frame in flight,
+// so a frame whose sender went quiet still reports.
+void nxwarp_decoder::fire_elapsed_deadlines(uint64_t now)
+{
+	const size_t bands = cfg.bands();
+	if (not bands)
+		return;
+	for (auto & f: window)
+	{
+		if (not f.used)
+			continue;
+		for (uint8_t b = 0; b < bands; ++b)
+		{
+			if (f.band_fired[b])
+				continue;
+			const uint64_t due = f.first_us + (uint64_t(b) + 1) * frame_period_us / bands;
+			if (now < due)
+				break; // deadlines are increasing in b; nothing later is due either
+			fire_bands_through(f, b);
+		}
+	}
+}
+
+void nxwarp_decoder::fire_bands_through(inflight_frame & f, uint8_t last_band)
+{
+	for (uint8_t b = 0; b <= last_band and b < f.band_fired.size(); ++b)
+	{
+		if (f.band_fired[b])
+			continue;
+		f.band_fired[b] = 1;
+		auto packet = receiver->band_deadline(f.frame_id, b, now_us(), 0, f.path_id);
+		if (packet.empty())
+			continue;
+		host.send_feedback(stream_index, f.path_id, std::move(packet));
+	}
+}
+
+// Network thread. Retires one frame of the window and hands it to the worker. Called only
+// on the oldest frame in flight (close_complete_prefix, evict_below_window, flush_frames),
+// which is what makes `retired_frame` monotonic and the worker's input frame-ordered.
+void nxwarp_decoder::close_frame(inflight_frame & f)
+{
+	if (not f.used)
+		return;
+	f.used = false;
+	// The frame's remaining band deadlines, so its feedback goes out whether it arrived
+	// whole or not -- unchanged, and still the only thing that tells the encoder to
+	// refresh what the headset never received.
+	fire_bands_through(f, uint8_t(cfg.bands() - 1));
+	if (not any_retired or seq_lt(retired_frame, f.frame_id))
+	{
+		retired_frame = f.frame_id;
+		any_retired = true;
+	}
+
+	auto unit = nxwarp_wire::reassemble(cfg, f.slots, chunk);
 	// The network side of the two-second report: what arrived, what had a hole,
 	// and how deep the worker's queue is. Printed here because a stalled worker
 	// prints nothing at all, which is exactly the case this line exists for.
@@ -416,20 +617,38 @@ void nxwarp_decoder::finish_frame(uint8_t path_id)
 			net_holes++;
 			last_hole = nxwarp_wire::last_report();
 		}
+		// A frame that arrived whole only because the window held it open after a newer
+		// frame had already started. This is the count that says what the window is
+		// worth: every one of these was a hole before it existed.
+		if (not unit.empty() and f.reordered)
+			net_late_completed++;
 		const auto now = std::chrono::steady_clock::now();
 		if (now - net_since > std::chrono::seconds(2))
 		{
-			spdlog::info("nxwarp[{}] net: {} frames closed in {:.1f} s, {} with a hole, {} queued for the worker, {} decoded so far, {} stragglers dropped; last hole {}/{} chunks, first missing {}, short {}, chunk {} B",
-			             stream_index, closed - net_frames_mark, std::chrono::duration<double>(now - net_since).count(), net_holes, jobs_pending.load(), frames_decoded.load(), stragglers_dropped,
+			spdlog::info("nxwarp[{}] net: {} frames closed in {:.1f} s, {} with a hole, {} out-of-order datagrams, {} frames completed late, {} queued for the worker, {} decoded so far, {} stragglers dropped; last hole {}/{} chunks, first missing {}, short {}, chunk {} B",
+			             stream_index, closed - net_frames_mark, std::chrono::duration<double>(now - net_since).count(), net_holes,
+			             net_out_of_order, net_late_completed, jobs_pending.load(), frames_decoded.load(), stragglers_dropped,
 			             last_hole.present, last_hole.expected, last_hole.first_missing == UINT32_MAX ? -1 : int(last_hole.first_missing), last_hole.short_chunk, chunk);
 			if (receiver)
 			{
 				const auto & rs = receiver->stats;
-				spdlog::info("nxwarp[{}] rx: {} datagrams, placed {}, late {}, stale_frame {}, bad_range {}, bad_dir {}, bad_caps {}, bad_ver {}, auth_fail {}, replay {}, frozen {}, dup {}",
-				             stream_index, rs.datagrams, rs.tiles_placed, rs.tiles_late, rs.stale_frame, rs.bad_range, rs.bad_directory, rs.bad_caps, rs.bad_version, rs.auth_fail, rs.replay, rs.frozen_band, rs.duplicates);
+				// Placed and late as deltas over this window, because "late" is the
+				// number that goes wrong quietly: a tile placed after its band's
+				// deadline is a tile that arrived and that the encoder is told did
+				// not. On a healthy link it is zero. Everything else stays a running
+				// total, which is what it is useful as.
+				spdlog::info("nxwarp[{}] rx: {} datagrams, placed {} (+{}), late {} (+{}), stale_frame {}, bad_range {}, bad_dir {}, bad_caps {}, bad_ver {}, auth_fail {}, replay {}, frozen {}, dup {}",
+				             stream_index, rs.datagrams,
+				             rs.tiles_placed, rs.tiles_placed - net_tiles_placed_at,
+				             rs.tiles_late, rs.tiles_late - net_tiles_late_at,
+				             rs.stale_frame, rs.bad_range, rs.bad_directory, rs.bad_caps, rs.bad_version, rs.auth_fail, rs.replay, rs.frozen_band, rs.duplicates);
+				net_tiles_placed_at = rs.tiles_placed;
+				net_tiles_late_at = rs.tiles_late;
 			}
 			net_frames_mark = closed;
 			net_holes = 0;
+			net_out_of_order = 0;
+			net_late_completed = 0;
 			net_since = now;
 		}
 	}
@@ -445,11 +664,15 @@ void nxwarp_decoder::finish_frame(uint8_t path_id)
 	host.on_frame_unit(unit);
 
 	decode_job job;
-	job.frame_id = assembling_frame;
+	job.frame_id = f.frame_id;
 	job.unit = std::move(unit);
-	job.fb = fb;
-	job.view_info = assembling_view_info;
-	job.have_view_info = have_view_info;
+	job.fb = f.fb;
+	// Numbered here rather than when the frame opened: frames are closed in frame order,
+	// but they are *opened* in arrival order, and a frame whose first datagram was late
+	// would otherwise carry a frame_index out of step with everything else.
+	job.fb.frame_index = ++wivrn_frame_idx;
+	job.view_info = f.view_info;
+	job.have_view_info = f.have_view_info;
 	// The network delivers at the server's rate; the worker decodes at whatever
 	// rate this device manages. When the device cannot keep up, a queued frame is
 	// nothing but latency the user will wear -- 90 fps arriving against a 57 ms
@@ -601,16 +824,26 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	cmd.end();
 
 	// The pose, the fov and the foveation runs the reprojection pass needs come off the
-	// frame's first datagram (to_headset::nxwarp_datagram::view_info). A frame that
-	// reached here without one is a bug rather than a loss — under the chunk mapping a
-	// frame missing its first datagram never reassembles — so say it once, loudly, and
-	// publish the default rather than dropping a picture that did decode.
-	if (not job.have_view_info and not warned_view_info)
+	// frame's first datagram (to_headset::nxwarp_datagram::view_info), and nothing else
+	// carries them: the nxt::PoseHeader inside the payload is quantised and has no fov.
+	//
+	// This is reachable, and not only as a bug. The transport's own FEC rebuilds a lost
+	// datagram's *tiles* from the parity of its group, but view_info rides on the WiVRn
+	// packet around it, so a frame whose first datagram was lost and whose tiles were
+	// then recovered arrives whole with no pose. It is rare and it is a loss of quality
+	// rather than of the picture, so say it once, count it, and publish the default
+	// rather than dropping a frame that did decode.
+	if (not job.have_view_info)
 	{
-		warned_view_info = true;
-		spdlog::warn("nxwarp[{}]: frame {} decoded with no view_info on its first datagram; "
-		             "published with a default pose and foveation (see docs/nxwarp.md)",
-		             stream_index, job.frame_id);
+		frames_no_view_info.fetch_add(1, std::memory_order_relaxed);
+		if (not warned_view_info)
+		{
+			warned_view_info = true;
+			spdlog::warn("nxwarp[{}]: frame {} decoded with no view_info on its first datagram "
+			             "(lost, and its tiles recovered by FEC); published with a default pose "
+			             "and foveation (see docs/nxwarp.md)",
+			             stream_index, job.frame_id);
+		}
 	}
 
 	job.fb.sent_to_decoder = host.now();

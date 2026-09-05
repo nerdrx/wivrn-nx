@@ -194,10 +194,23 @@ ffmpeg -f lavfi -i "testsrc2=size=320x240:rate=30:duration=0.5" \
 wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 12
 wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 40 --loss 0.05 --seed 7
 
-# the same two runs on the GPU encoder
+# reordering, and the 16-bit frame id wrap
+wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 40 --reorder 0.05 --seed 7
+wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 40 --first-frame 65500
+
+# the same runs on the GPU encoder
 wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 12 --backend vk
 wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 40 --loss 0.05 --seed 7 --backend vk
 ```
+
+`--reorder P` holds back a P fraction of datagrams by one to three datagram slots: a
+datagram held at slot `s` with delay `d` is released while slot `s+d+1` is handled, so
+exactly `d` datagrams that were behind it on the wire go out in front of it. At the six or
+seven datagrams per frame of a 320x240 stream that crosses the frame boundary whenever the
+held datagram was near the end of its own frame, which is the case a one-frame reassembler
+cannot survive. `--first-frame N` starts the frame counter at N; the encoder puts
+`uint16_t(frame_id)` on the wire, so `--first-frame 65500` walks the stream through the
+16-bit wrap — about twelve minutes into a 90 fps session.
 
 `--backend ref|vk` picks the codec and `--qp N` the quantiser (default 26). Every
 assertion below holds for both backends; the run prints the encoder's own measurement of
@@ -222,27 +235,83 @@ field that does not serialize does not arrive. It asserts:
   stream — captured through `nxwarp_host::on_frame_unit`, so it is the stream the decoder
   was actually fed, not a re-derivation;
 * every published frame is within PSNR of its source, aligned through `view_info` rather
-  than by position, because under loss a dropped frame simply never appears.
+  than by position, because under loss a dropped frame simply never appears;
+* every frame presented reassembles whole when the link lost nothing, **however the
+  datagrams were ordered** — judged on `nxwarp_host::on_frame_unit`, not on published
+  frames, because a frame that reassembled and was then discarded as stale by the bounded
+  worker queue is not a reassembly loss;
+* frames reach the worker and are published in frame order;
+* the transport's `tiles_late` is under 10 % of `tiles_placed` — tiles that arrived and
+  were reported to the encoder as not having arrived;
+* no frame is published with a default pose on a link that lost nothing (see below).
 
-Measured on RADV (RX 7900 XTX), 320x240, QP 26, `--backend ref`:
+How many frames get *published* is deliberately **not** asserted: the worker keeps at most
+`kMaxQueuedFrames` and discards the rest as stale ("late is worse than missing"), so the
+count moves with the machine's load and the resolution. The run prints an accounting line
+instead — presented, reassembled, published, discarded as stale — and the byte-identity
+check aligns published pictures to `nxv-dec`'s by `feedback::frame_index` rather than by
+position, so one frame dropped late no longer makes every later frame look different.
+
+### What `--reorder` found
+
+Measured on RADV (RX 7900 XTX), 40 frames, QP 26, `--backend ref`. "Reassembled" is frames
+that came back whole out of 40 presented; "late tiles" is the transport's `tiles_late` over
+`tiles_placed`.
+
+| run | one-frame reassembler (before) | window of 3 (after) |
+|---|---|---|
+| clean, 320x240 | 40/40, 80.1 % late tiles | 40/40, **0.0 %** late tiles |
+| `--reorder 0.05 --seed 7`, 320x240 | **37/40**, 80.0 % late | **40/40**, 0.0 % late |
+| `--reorder 0.05 --seed 11`, 320x240 | **37/40**, 80.0 % late | **40/40**, 0.0 % late |
+| `--reorder 0.15 --seed 7`, 320x240 | **28/40**, 79.7 % late | **40/40**, 0.0 % late |
+| `--loss 0.05 --seed 7`, 320x240 | 29/40, 78.9 % late | **39/40**, 0.0 % late |
+| `--reorder 0.05 --seed 7`, 960x544 | 40/40, 93.4 % late | 40/40, 0.0 % late |
+| `--first-frame 65500 --reorder 0.05`, 960x544 | — | 40/40, 0.0 % late |
+
+Every "after" run is byte-identical to `nxv-dec` over every frame it published, on both
+`--backend ref` and `--backend vk`.
+
+Three things fall out of this table.
+
+* **Reordering across a frame boundary cost frames, and at 15 % it cost a third of them.**
+  The window loses none, at any rate tried, at either resolution, and across the 16-bit
+  frame id wrap.
+* **The loss run improves too** (29 → 39 of 40), which is not the window: it is the band
+  deadline fix. The old deadlines closed a band on its own first datagram, so FEC groups
+  were closed before their parity could arrive and repairs that were available were never
+  made.
+* **80 to 93 % of tiles that arrived were being reported to the encoder as lost.** The
+  harness reproduces, on a link with nothing wrong with it, what the live headset counters
+  showed (13629 late of 13991 placed, 97 %). It is 0.0 % now. See `docs/nxwarp.md` 2.2.
+
+The "before" column also fails the byte-identity check on a *clean* run, comparing only 20
+of 40 published frames: the one-frame reassembler reopened every frame a second time on its
+trailing parity datagram, so it stamped two `frame_index` values per frame. That defect was
+invisible until the harness started aligning by index.
+
+Earlier measurements, 320x240, QP 26, `--backend ref`, before any of this:
 
 | run | datagrams | published | byte-identical | PSNR vs source |
 |---|---|---|---|---|
 | clean, 12 frames | 83, 0 lost | 11 | 11/11 frames | mean 36.94 dB, worst 36.62 |
 | 5 % loss, 40 frames | 277, 12 lost (4.3 %) | 30 | 30/30 frames | mean 36.89 dB, worst 36.62 |
 
-The loss run is the interesting one: ten frames are lost outright and the PSNR of the
-survivors does not move. That is this backend's concealment — a frame with a hole is
-dropped, never half-decoded — and the stream does not stall.
+`--backend vk` passes every assertion too. The GPU encoder's streams are larger and about
+2.5 dB worse at the same QP, which is the intra-only trade described in section 5, not a
+defect.
 
-The same two runs on `--backend vk` pass every assertion, including the byte-identity
-one: 11/11 and 28/28 frames identical to `nxv-dec`. The GPU encoder's streams are larger
-and about 2.5 dB worse at the same QP (36.54 dB against 39.03 on the clean run), which is
-the intra-only trade described in section 5, not a defect.
+**A case worth knowing:** under loss the harness sometimes prints `1 published frame had no
+view_info`. The transport's FEC rebuilt the tiles of a lost first datagram, but `view_info`
+rides the WiVRn packet around them, so the frame arrives whole with no pose and is published
+with a default one. It cannot happen on a link that lost nothing, and the harness asserts
+that.
 
-**What it does not cover:** reordering. The harness calls `push_datagram` straight from the
-encode loop, so packets arrive in send order. `nxwarp-loopback --loss` covers the
-reassembly path under reordering.
+**What it still does not cover:** real jitter and real sockets. `--reorder` permutes the
+delivery order, but the harness still calls `push_datagram` synchronously from the encode
+loop, so the datagrams of one frame arrive microseconds apart while whole frames are tens of
+milliseconds apart. The clock half of the band deadline policy therefore only ever fires
+between frames, never inside one — which the 0.0 % late-tile figure confirms it should not,
+but a link with real jitter would exercise it properly and this does not.
 
 ---
 

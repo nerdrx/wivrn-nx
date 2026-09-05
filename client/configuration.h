@@ -243,6 +243,14 @@ public:
 	// codec in the list.
 	bool nxwarp = true; // the side-by-side test build exists for this codec: on unless turned off
 
+	// Frame smoothing: on the first display refresh that shows a newly decoded frame,
+	// blend it half and half with the frame it replaces, so the step between two decoded
+	// frames is split into two smaller ones. It hides a low decoded frame rate; it does
+	// not raise it and it synthesizes nothing. Off by default, and off is bit identical
+	// to not having it: the blend weight is zero and the pass samples exactly what it
+	// sampled before. Applies live.
+	bool frame_smoothing = false;
+
 	// What goes on the wire for the two above
 	wivrn::motion_mode motion_mode() const
 	{

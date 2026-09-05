@@ -835,6 +835,24 @@ std::shared_ptr<shard_accumulator::blit_handle> scenes::stream::accumulator_imag
 	return frame;
 }
 
+std::shared_ptr<shard_accumulator::blit_handle> scenes::stream::accumulator_images::previous_frame(uint64_t before) const
+{
+	// Scanned rather than looked up by `before - 1`: NX Warp decodes one frame in every
+	// stride, so consecutive decoded frames are not consecutive frame indices, and a
+	// stride that divides the buffer size would put every one of them in the same slot.
+	// The newest thing older than `before` is the frame that was on screen, whatever the
+	// stride is doing; how old it is allowed to be is the caller's business.
+	std::shared_ptr<shard_accumulator::blit_handle> best;
+	for (const auto & h: latest_frames)
+	{
+		if (not h or h->feedback.frame_index >= before)
+			continue;
+		if (not best or h->feedback.frame_index > best->feedback.frame_index)
+			best = h;
+	}
+	return best;
+}
+
 void scenes::stream::update_gui_position(xr::spaces controller, float predicted_display_period)
 {
 	std::optional<std::pair<glm::vec3, glm::quat>> aim = application::locate_controller(
@@ -915,6 +933,36 @@ bool scenes::stream::is_interactable(stream_tab tab)
 	return false;
 }
 
+namespace
+{
+// Angle between two orientations, in radians. The quaternions are unit length, so the
+// half angle between them is acos of their dot product, sign folded away.
+float pose_angle(const XrQuaternionf & a, const XrQuaternionf & b)
+{
+	const float d = std::abs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w);
+	return 2 * std::acos(std::clamp(d, 0.f, 1.f));
+}
+
+float pose_shift(const XrVector3f & a, const XrVector3f & b)
+{
+	const float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+	return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+// 1 at or below `full`, 0 at or above `zero`, smoothly in between: a hard cut off would
+// make the blend appear and disappear as the head drifted across the threshold, which is
+// the very flicker the setting exists to remove.
+float fade_out(float v, float full, float zero)
+{
+	if (v <= full)
+		return 1;
+	if (v >= zero)
+		return 0;
+	const float t = 1 - (v - full) / (zero - full);
+	return t * t * (3 - 2 * t);
+}
+} // namespace
+
 bool scenes::stream::is_gui_interactable() const
 {
 	return is_interactable(gui_status);
@@ -943,6 +991,16 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	std::shared_lock lock(decoder_mutex);
 	if (not frame_state.shouldRender or decoders[0].empty() or decoders[1].empty() or state_ == state::shutdown)
 	{
+		// Nothing is on screen, so frame smoothing has nothing to carry forward: forget
+		// the frame index, so a frame from before a gap is never blended into the first
+		// frame after it, and hand the pinned images back as soon as the last submission
+		// has retired. This path returns before the fence wait below, so the fence is
+		// tested rather than waited on: releasing a handle gives its image back to the
+		// decoder, which must not happen while the GPU is still sampling it.
+		smoothing_frame_index = uint64_t(-1);
+		if (*fence and fence.getStatus() == vk::Result::eSuccess)
+			smoothing_blend_handles = {};
+
 		// TODO: stop/restart video stream
 		session.begin_frame();
 		session.end_frame(frame_state.predictedDisplayTime, {});
@@ -967,8 +1025,8 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	// We don't need those after vkWaitForFences
 	current_blit_handles.fill(nullptr);
 	// Frame smoothing: the pass that sampled these has now retired, so the decoder's pool
-	// can have them back. Only the frame on screen (smoothing_prev_handles) stays pinned,
-	// which is one image per eye, the same order of pinning current_blit_handles does.
+	// can have them back. Nothing of the decoders' is held between here and the next
+	// blend, which is what keeps the pool as free as it was without the feature.
 	smoothing_blend_handles = {};
 
 	gpu_timestamps timestamps;
@@ -1319,51 +1377,106 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			//
 			// Off, the weight is zero, nothing is bound differently and the pass output
 			// is bit identical to not having the feature.
+			//
+			// Two things make it safe, both learnt the hard way on a Pico 4:
+			// the blend is faded out over the head motion between the two frames,
+			// because they were rendered for different poses and are drawn here under
+			// one; and it never holds a reference to a frame the decoders' rolling
+			// buffer has released, because pinning one starved the NX Warp image pool
+			// until the picture went black.
 			stream_defoveator::frame_blend blend;
-			// Kill switch: the blend jitters and interacts with the menu on a dark frame
-			// (2026-09-05 live report); the setting is kept but has no effect until fixed.
-			if (true or not config.frame_smoothing)
 			{
-				// Off pins nothing and remembers nothing: the decoder's image pool
-				// sees exactly what it saw before this feature existed, and the
-				// first frame after the setting is turned back on has no
-				// predecessor to blend with, which is the honest answer.
-				smoothing_prev_handles = {};
-				smoothing_frame_index = uint64_t(-1);
-			}
-			else if (current_blit_handles[0])
-			{
-				const uint64_t idx = current_blit_handles[0]->feedback.frame_index;
-				if (idx != smoothing_frame_index)
+				const uint64_t idx = current_blit_handles[0]
+				                             ? current_blit_handles[0]->feedback.frame_index
+				                             : uint64_t(-1);
+
+				if (not config.frame_smoothing or idx == uint64_t(-1))
 				{
-					// The frames this refresh may sample move to
-					// smoothing_blend_handles, which pins their images until the
-					// top of the next render(): the frame fence has been waited
-					// on by then, so the pass that read them has retired and the
-					// decoder's pool can have them back.
-					smoothing_blend_handles = std::move(smoothing_prev_handles);
-					for (size_t v = 0; v < view_count; ++v)
-						smoothing_prev_handles[v] = current_blit_handles[v];
+					// Off, or nothing on screen. Remember nothing: no state is
+					// carried across a gap in the stream, so the first frame after
+					// a black patch has no predecessor to blend with rather than
+					// one from before the gap.
+					smoothing_frame_index = uint64_t(-1);
+				}
+				else if (idx != smoothing_frame_index)
+				{
 					smoothing_frame_index = idx;
 
-					// Only when both eyes have a predecessor of the same geometry:
-					// the pass reuses this frame's texture coordinates for the
-					// previous image, which is only meaningful while the decoded
-					// size is unchanged.
+					// The frame this one replaced, out of the rolling buffer the
+					// scene is already holding. Nothing is pinned on its behalf
+					// between refreshes: a frame the buffer has let go of is a
+					// frame this does not blend with, which is what keeps the
+					// decoder's image pool exactly as free as it was without the
+					// feature.
+					std::array<std::shared_ptr<shard_accumulator::blit_handle>, view_count> prev;
+					{
+						std::unique_lock frame_lock(frames_mutex);
+						for (size_t v = 0; v < view_count; ++v)
+							prev[v] = decoders[v].previous_frame(idx);
+					}
+
+					// Both eyes, same decoded geometry (the pass reuses this
+					// frame's texture coordinates for the previous image), and
+					// already transitioned for sampling — a frame that was never
+					// put on screen is still in the undefined layout.
 					bool usable = true;
 					for (size_t v = 0; v < view_count; ++v)
-						usable = usable and smoothing_blend_handles[v] and
-						         current_blit_handles[v] and
-						         smoothing_blend_handles[v]->extent == current_blit_handles[v]->extent;
+						usable = usable and prev[v] and current_blit_handles[v] and
+						         prev[v]->extent == current_blit_handles[v]->extent and
+						         prev[v]->current_layout != vk::ImageLayout::eUndefined;
 
+					// And the same frame in both eyes. The two streams are kept in
+					// lockstep, but if one has let go of a frame the other still
+					// has, blending eye to eye across different frames would put a
+					// stereo mismatch on the headset, which is far worse than not
+					// smoothing at all.
+					for (size_t v = 1; usable and v < view_count; ++v)
+						usable = prev[v]->feedback.frame_index == prev[0]->feedback.frame_index;
+
+					float weight = 0;
 					if (usable)
 					{
+						const XrDuration age = current_blit_handles[0]->view_info.display_time -
+						                       prev[0]->view_info.display_time;
+						if (age > 0 and age <= constants::stream::frame_smoothing_max_age)
+						{
+							// The two frames were rendered for two different
+							// head poses and are drawn here at the same texture
+							// coordinates: the difference between those poses is
+							// exactly how far the older one ghosts. Fade the
+							// blend out over it, worst eye and worst of rotation
+							// and translation, so it only acts where the ghost
+							// is below seeing.
+							float f = 1;
+							for (size_t v = 0; v < view_count; ++v)
+							{
+								const XrPosef & a = prev[v]->view_info.pose[v];
+								const XrPosef & b = current_blit_handles[v]->view_info.pose[v];
+								f = std::min(f, fade_out(pose_angle(a.orientation, b.orientation),
+								                         constants::stream::frame_smoothing_full_angle,
+								                         constants::stream::frame_smoothing_zero_angle));
+								f = std::min(f, fade_out(pose_shift(a.position, b.position),
+								                         constants::stream::frame_smoothing_full_shift,
+								                         constants::stream::frame_smoothing_zero_shift));
+							}
+							weight = constants::stream::frame_smoothing_weight * f;
+						}
+					}
+
+					// Below a five hundredth the blend is not worth a second
+					// sampler, and rounding it to zero keeps the "off" path exact.
+					if (weight > 0.002f)
+					{
+						// Pinned only from here to the fence wait at the top of
+						// the next render(), by which time the pass that reads
+						// them has retired.
+						smoothing_blend_handles = prev;
 						for (size_t v = 0; v < view_count; ++v)
 						{
-							images[v].prev_rgb = smoothing_blend_handles[v]->image_view;
-							images[v].layout_prev_rgb = smoothing_blend_handles[v]->current_layout;
+							images[v].prev_rgb = prev[v]->image_view;
+							images[v].layout_prev_rgb = prev[v]->current_layout;
 						}
-						blend.weight = constants::stream::frame_smoothing_weight;
+						blend.weight = weight;
 					}
 				}
 			}

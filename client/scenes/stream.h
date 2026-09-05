@@ -89,6 +89,11 @@ private:
 		std::array<std::shared_ptr<wivrn::shard_accumulator::blit_handle>, image_buffer_size> latest_frames;
 
 		std::shared_ptr<wivrn::shard_accumulator::blit_handle> frame(uint64_t id) const;
+		// The newest frame the rolling buffer still holds that is older than `before`,
+		// or null. Frame smoothing reads it and nothing else does: it deliberately has
+		// no reference of its own to fall back on, so it can only ever blend with a
+		// frame the scene was keeping anyway.
+		std::shared_ptr<wivrn::shard_accumulator::blit_handle> previous_frame(uint64_t before) const;
 		bool empty() const;
 	};
 
@@ -343,18 +348,21 @@ private:
 	std::array<std::shared_ptr<wivrn::shard_accumulator::blit_handle>, decoder_count> current_blit_handles;
 
 	// --- Frame smoothing (config.frame_smoothing) --------------------------------------
-	// The eye images of the decoded frame the one on screen replaced, held by shared_ptr
-	// so the decoder's pool cannot hand them back out while the pass is still sampling
-	// them. That reference is the whole cost: no copy is made, and the pool is deep
-	// enough (image_buffer_size frames, five in the NX Warp decoder) that pinning one
-	// more frame does not starve it.
-	std::array<std::shared_ptr<wivrn::shard_accumulator::blit_handle>, view_count> smoothing_prev_handles;
-	// The same handles once the pass has been told to sample them: they stay pinned here
-	// until the next new decoded frame, which is at least one completed render away.
+	// The eye images the pass is sampling as the previous frame, pinned for exactly one
+	// render: from the moment the pass is recorded to the fence wait at the top of the
+	// next render(), after which the GPU is done with them.
+	//
+	// This is the ONLY reference frame smoothing ever takes, and it is always a frame the
+	// decoders' rolling buffer is holding anyway. An earlier version kept a reference of
+	// its own to the frame on screen, which pinned one more image than the NX Warp
+	// decoder's five-image pool could spare: get_free() started returning null, the
+	// decoder discarded frames, the picture went black, and the one-second no-output
+	// watchdog then dropped the whole scene to the lobby.
 	std::array<std::shared_ptr<wivrn::shard_accumulator::blit_handle>, view_count> smoothing_blend_handles;
 	// frame_index of the decoded frame currently on screen, so the render thread can tell
 	// the refresh that first shows a new one — the only refresh that blends — from the
-	// repeats after it. Sentinel until the first frame.
+	// repeats after it. Sentinel until the first frame, and reset to it whenever the
+	// stream has no frame at all, so nothing is ever carried across a gap.
 	uint64_t smoothing_frame_index = uint64_t(-1);
 
 	// --- Frame rate readout (Statistics page, compact view) ----------------------------

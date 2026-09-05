@@ -512,6 +512,11 @@ nxwarp_decoder::inflight_frame * nxwarp_decoder::frame_slot(uint16_t frame_id, u
 	free_slot->path_id = path_id;
 	free_slot->fb = from_headset::feedback{};
 	free_slot->fb.stream_index = stream_index;
+	// Numbered from the SENDER's id, here, at the frame's first datagram: the number
+	// has to exist before the frame is known to survive, because a frame that does not
+	// survive is reported too (see close_frame) and the server joins that report to the
+	// other eye's by this very number. See wire_frame_index().
+	free_slot->fb.frame_index = wire_frame_index(frame_id);
 	free_slot->fb.received_first_packet = host.now();
 	free_slot->first_us = now_us();
 	free_slot->view_info = {};
@@ -586,6 +591,38 @@ void nxwarp_decoder::fire_bands_through(inflight_frame & f, uint8_t last_band)
 	}
 }
 
+// The stream's 16-bit frame id, widened to the 64 bits from_headset::feedback carries.
+//
+// Only the wrap is interesting. Ids are sequential modulo 2^16 and this decoder already
+// compares them with seq_lt, so "the sequence moved forward and the number went down" is
+// exactly a wrap. An id that is *behind* the newest but numerically above it is the tail
+// of the previous epoch -- a straggler that arrived after the wrap -- and belongs one
+// epoch back. The epoch starts at 1 so that subtraction can never underflow; the result
+// is 0-based.
+//
+// This is monotonic in the sender's frame order, not in arrival order, which is the whole
+// point: two eyes that drop different frames still agree on the number of every frame
+// they both saw, and on the number of every frame either of them lost.
+uint64_t nxwarp_decoder::wire_frame_index(uint16_t frame_id)
+{
+	if (not wire_seeded)
+	{
+		wire_seeded = true;
+		wire_newest = frame_id;
+	}
+	else if (seq_lt(wire_newest, frame_id))
+	{
+		if (frame_id < wire_newest)
+			++wire_epoch;
+		wire_newest = frame_id;
+	}
+
+	const uint64_t epoch = (seq_lt(frame_id, wire_newest) and frame_id > wire_newest)
+	                               ? wire_epoch - 1
+	                               : wire_epoch;
+	return (epoch << 16 | frame_id) - 0x10000ull;
+}
+
 // Network thread. Retires one frame of the window and hands it to the worker. Called only
 // on the oldest frame in flight (close_complete_prefix, evict_below_window, flush_frames),
 // which is what makes `retired_frame` monotonic and the worker's input frame-ordered.
@@ -655,9 +692,22 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 	if (unit.empty())
 	{
 		// A hole, a short chunk in the middle, or fewer bytes than the length prefix
-		// declares. The feedback for the band has already gone out, which is how the
-		// encoder learns to refresh.
+		// declares. The band feedback has already gone out, which is how the encoder
+		// learns to refresh what this headset never got.
+		//
+		// That is the CODEC's half of the loss report and it always was. The other
+		// half is the server's: from_headset::feedback with no sent_to_decoder is how
+		// every other decoder in this client says "this frame never arrived", and it
+		// is what the automatic bitrate counts as a lost frame and what the IDR
+		// handler watches. Returning here without sending one -- which is what this
+		// did -- makes NX Warp loss invisible to the bitrate controller: it sees a
+		// link on which nothing is ever lost, however much is, and the one signal
+		// that should make it back off never reaches it.
+		//
+		// received_first_packet is a real arrival (the frame's first datagram);
+		// sent_to_decoder stays zero, which is the "never completed" marker.
 		++frames_dropped_holes;
+		host.report_frame_lost(f.fb);
 		return;
 	}
 
@@ -667,10 +717,6 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 	job.frame_id = f.frame_id;
 	job.unit = std::move(unit);
 	job.fb = f.fb;
-	// Numbered here rather than when the frame opened: frames are closed in frame order,
-	// but they are *opened* in arrival order, and a frame whose first datagram was late
-	// would otherwise carry a frame_index out of step with everything else.
-	job.fb.frame_index = ++wivrn_frame_idx;
 	job.view_info = f.view_info;
 	job.have_view_info = f.have_view_info;
 	// The network delivers at the server's rate; the worker decodes at whatever

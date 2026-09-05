@@ -106,6 +106,7 @@
 //                      encoder that restarted its transport state here would break a
 //                      session that was working.
 
+#include "driver/bitrate_controller.h"
 #include "encoder/encoder_settings.h"
 #include "encoder/video_encoder_nxwarp.h"
 #include "utils/wivrn_vk_bundle.h"
@@ -133,6 +134,7 @@
 #include <random>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 using namespace wivrn;
@@ -303,6 +305,10 @@ public:
 	std::vector<published> frames;
 	// Feedback the decoder produced, waiting to go back to the encoder.
 	std::vector<std::pair<uint8_t, std::vector<uint8_t>>> feedback;
+	// The OTHER feedback: from_headset::feedback, the per-frame delivery report the
+	// server's automatic bitrate reads. One per decoded frame and one per frame that
+	// closed with a hole, which is the whole set the client sends.
+	std::vector<from_headset::feedback> frame_reports;
 	// Every decoded picture, as yuv420p, and every .nxv unit the decoder was fed.
 	std::vector<std::vector<uint8_t>> pictures;
 	std::vector<std::vector<uint8_t>> units;
@@ -354,6 +360,18 @@ public:
 		unit_frame_ids.push_back(frame_id);
 	}
 
+	void report_frame_lost(const from_headset::feedback & fb) override
+	{
+		// Through the real serializer like everything else, so a field that does not
+		// survive the wire does not reach the controller here either.
+		auto back = from_wire<from_headset::feedback>(to_wire(fb));
+		std::lock_guard lock(m);
+		frame_reports.push_back(back);
+		++lost_reports;
+	}
+
+	uint64_t lost_reports = 0;
+
 	void publish(shard_accumulator *, std::shared_ptr<decoder::blit_handle> handle) override
 	{
 		// Read the picture back here, while the handle is still alive: releasing it
@@ -361,9 +379,21 @@ public:
 		// would starve the decoder after five frames.
 		auto pic = readback(vk, handle->image, width, height, handle->semaphore,
 		                    handle->semaphore_val ? *handle->semaphore_val : 0);
+		// The render thread's half of the report, which lives in scenes::stream and
+		// therefore not here: a frame this harness publishes is a frame it shows, so
+		// it is stamped blitted and displayed exactly as the client stamps one it
+		// puts on screen. Without this every frame would reach the controller as
+		// "decoded and then dropped before it was ever shown", which is one of the
+		// two things the controller calls congestion.
+		auto fb = handle->feedback;
+		fb.blitted = now();
+		fb.displayed = fb.blitted;
+		fb.times_displayed = 1;
+
 		std::lock_guard lock(m);
 		pictures.push_back(std::move(pic));
 		frames.push_back({handle->view_info, handle->feedback.frame_index});
+		frame_reports.push_back(from_wire<from_headset::feedback>(to_wire(fb)));
 		cv.notify_all();
 	}
 
@@ -797,6 +827,11 @@ int main(int argc, char ** argv)
 	// The band the controller may move in, mirrored here so the assertions can
 	// tell "did not reach the ceiling" from "reached the end of the band".
 	uint32_t min_qp = 20, max_qp = 44;
+	// Drive WiVRn's own bitrate_controller from the feedback this run's decoder
+	// produces, instead of a scripted --bitrate/--bitrate2 schedule: the argument is the
+	// ceiling in bit/s, 0 for off. This is the whole loop -- encoder, transport, real
+	// decoder, real from_headset::feedback, real control law -- closed in one process.
+	uint64_t aimd_ceiling = 0;
 	uint32_t width = 320, height = 240, frames = 12, seed = 1;
 	double loss = 0.0, reorder = 0.0;
 	// The headset app restarted, or the link dropped and came back, while the server's
@@ -867,6 +902,8 @@ int main(int argc, char ** argv)
 			min_qp = uint32_t(std::stoul(next()));
 		else if (a == "--max-qp")
 			max_qp = uint32_t(std::stoul(next()));
+		else if (a == "--aimd")
+			aimd_ceiling = std::stoull(next());
 		else
 		{
 			std::fprintf(stderr, "unknown argument %s\n", a.c_str());
@@ -954,6 +991,47 @@ int main(int argc, char ** argv)
 	enc.set_packet_sink(&link);
 
 	auto src = make_source_image(vk, width, height);
+
+	// ---- WiVRn's own automatic bitrate, closed over this run --------------------
+	//
+	// The real bitrate_controller, on a VIRTUAL clock. Virtual because the harness
+	// encodes as fast as the GPU allows rather than at 90 Hz, and every threshold in
+	// that class is a duration -- a 2 s window, a 250 ms evaluation interval, a 5 s
+	// hold before each increase. Driven on wall time it would see a whole session's
+	// frames inside one window and decide nothing. One frame period per presented
+	// frame is the cadence a headset would produce, and it makes the run repeatable.
+	bitrate_controller aimd;
+	auto aimd_now = bitrate_controller::clock::time_point{} + std::chrono::hours(1);
+	std::vector<std::pair<uint64_t, uint32_t>> aimd_changes;
+	if (aimd_ceiling)
+	{
+		aimd.configure({.enabled = true}, uint32_t(aimd_ceiling), true, false,
+		               wivrn::bitrate_mode::aimd);
+		enc.set_bitrate(uint32_t(aimd_ceiling));
+		std::printf("automatic bitrate: AIMD, ceiling %.1f Mbit/s, floor %.1f Mbit/s\n",
+		            double(aimd_ceiling) * 1e-6,
+		            double(bitrate_controller::config{}.min_bitrate_bps) * 1e-6);
+	}
+	// Drain whatever delivery reports the decoder has produced and let the control law
+	// see them, exactly as wivrn_session::operator()(from_headset::feedback &&) does.
+	auto pump_aimd = [&](uint64_t frame_no) {
+		if (not aimd_ceiling)
+			return;
+		std::vector<from_headset::feedback> reports;
+		{
+			std::lock_guard lock(host.m);
+			reports.swap(host.frame_reports);
+		}
+		for (const auto & fb: reports)
+		{
+			if (auto b = aimd.on_feedback(fb, int64_t(1e9 / settings.fps), true, aimd_now))
+			{
+				enc.set_bitrate(*b);
+				aimd_changes.emplace_back(frame_no, *b);
+			}
+		}
+		aimd_now += std::chrono::nanoseconds(int64_t(1e9 / settings.fps));
+	};
 
 	// ---- drive ----------------------------------------------------------------
 	uint64_t feedback_packets = 0, feedback_bytes = 0;
@@ -1068,6 +1146,10 @@ int main(int argc, char ** argv)
 			// predicts from tiles the headset never received.
 			enc.on_nxwarp_feedback(path, payload);
 		}
+
+		// The other return half: the per-frame delivery reports into WiVRn's own
+		// automatic bitrate, whose answer goes back to the encoder as a new ceiling.
+		pump_aimd(i);
 	}
 
 	// The encode loop is over, so nothing more will arrive to push the tail through:
@@ -1095,6 +1177,46 @@ int main(int argc, char ** argv)
 
 	if (const auto * rs = dec->receiver_stats())
 		post_stats = *rs;
+
+	if (aimd_ceiling)
+	{
+		// Drain anything the decoder produced after the last presented frame.
+		pump_aimd(frames);
+
+		const uint32_t settled = aimd.current();
+		std::printf("automatic bitrate: %.1f -> %.1f Mbit/s over %u frames, %zu change(s), "
+		            "%llu frame(s) reported never delivered\n",
+		            double(aimd_ceiling) * 1e-6, double(settled) * 1e-6, frames,
+		            aimd_changes.size(), (unsigned long long)host.lost_reports);
+		for (const auto & [f, b]: aimd_changes)
+			std::printf("    frame %4llu: %.1f Mbit/s\n", (unsigned long long)f, double(b) * 1e-6);
+
+		// The claim this option exists to check. On a link the harness is not losing
+		// anything on, the control law must leave the ceiling where it is: it used to
+		// walk this to the floor and stay there, because the delivery reports it was
+		// reading described frames that did not exist (a per-eye survivor counter for
+		// a frame index) and never mentioned the frames that were actually lost. See
+		// tests/bitrate_nxwarp_test.cpp, which isolates both halves of that.
+		if (loss <= 0)
+		{
+			check(settled >= uint32_t(aimd_ceiling),
+			      "a clean link holds the automatic bitrate at its ceiling");
+			check(host.lost_reports == 0,
+			      "a clean link reports no undelivered frames (" +
+			              std::to_string(host.lost_reports) + ")");
+		}
+		else
+		{
+			// With loss injected the reports must actually reach the controller --
+			// silence here was the bug, and "it did not decrease" would be the
+			// symptom of it coming back.
+			check(host.lost_reports > 0,
+			      "a lossy link reports frames that never arrived (" +
+			              std::to_string(host.lost_reports) + ")");
+			check(settled < uint32_t(aimd_ceiling),
+			      "a lossy link makes the automatic bitrate back off");
+		}
+	}
 
 	if (bitrate and not rc_trace.empty())
 	{
@@ -1174,27 +1296,27 @@ int main(int argc, char ** argv)
 		              std::to_string(host.units.size()) + "/" + std::to_string(frames) + ")");
 
 	// Frames must reach the worker in frame order. from_headset::feedback::frame_index is
-	// stamped as a frame is handed over, counting from 1, so the published sequence must
-	// be strictly increasing -- with gaps only where the bounded queue discarded a stale
-	// frame. This is what the reassembly window promises and the old one-frame path got
-	// for free by never having two frames open at once.
+	// the SENDER's frame id widened (nxwarp_decoder::wire_frame_index), so the published
+	// sequence must be strictly increasing in the stream's own 16-bit sequence space --
+	// with gaps only where the bounded queue discarded a stale frame. This is what the
+	// reassembly window promises and the old one-frame path got for free by never having
+	// two frames open at once.
+	//
+	// Compared as 16-bit sequence differences rather than as widened values: that is the
+	// space the ids actually live in, it wraps correctly, and it needs no special case
+	// for a reconnect (the new decoder seeds its widening from whatever id is on the
+	// wire when it starts, so its numbers continue the old one's rather than restarting).
 	{
 		bool ordered = true;
-		uint64_t prev = 0;
-		for (size_t j = 0; j < host.frames.size(); ++j)
+		bool have_prev = false;
+		uint16_t prev = 0;
+		for (const auto & f: host.frames)
 		{
-			// A reconnect is the one place the counter legitimately goes backwards:
-			// it belongs to the decoder that stamped it, and the new client starts
-			// again at one. Offsetting by what the old client produced puts both
-			// halves on one scale, which is the same arithmetic the byte comparison
-			// below uses.
-			const uint64_t idx = ((reconnected and j >= frames_at_reconnect)
-			                              ? units_at_reconnect
-			                              : 0) +
-			                     host.frames[j].frame_index;
-			if (idx <= prev)
+			const uint16_t idx = uint16_t(f.frame_index);
+			if (have_prev and int16_t(uint16_t(idx - prev)) <= 0)
 				ordered = false;
 			prev = idx;
+			have_prev = true;
 		}
 		check(ordered, "frames reach the worker and are published in frame order");
 	}
@@ -1404,20 +1526,31 @@ int main(int argc, char ** argv)
 			              std::to_string(ref_frames) + "/" +
 			              std::to_string(host.units.size()) + ")");
 
-			size_t compared = 0, differing = 0, first_diff_frame = 0, misplaced = 0;
+			// A published picture is matched to nxv-dec's frame by the stream's own
+			// 16-bit frame id, which both sides carry: the decoder reports it with
+			// every unit (unit_frame_ids, in the order the units were concatenated
+			// and therefore in nxv-dec's own frame order) and the feedback carries it
+			// widened. No arithmetic on positions, so this needs no special case for
+			// a reconnect and none for the 16-bit wrap.
+			std::unordered_map<uint16_t, size_t> unit_of_id;
+			for (size_t k = 0; k < host.unit_frame_ids.size(); ++k)
+				unit_of_id.emplace(host.unit_frame_ids[k], k);
+
+			size_t compared = 0, differing = 0, first_diff_frame = 0, misplaced = 0, unmatched = 0;
 			for (size_t j = 0; j < gpu_frames and j < host.frames.size(); ++j)
 			{
-				const size_t base = (reconnected and j >= frames_at_reconnect)
-				                            ? units_at_reconnect
-				                            : 0;
-				const uint64_t idx = base + host.frames[j].frame_index;
-				if (idx == 0 or idx > ref_frames)
+				const uint16_t id = uint16_t(host.frames[j].frame_index);
+				auto it = unit_of_id.find(id);
+				if (it == unit_of_id.end() or it->second >= ref_frames)
+				{
+					++unmatched;
 					continue;
-				// The unit that index names has to be the frame this picture says it
-				// is. Both sides know the stream's own 16-bit frame id -- the decoder
-				// reports it with every unit, and the picture carries the pose it was
-				// presented with -- so the alignment is checked, not assumed.
-				if (idx - 1 < host.unit_frame_ids.size())
+				}
+				const size_t unit_idx = it->second;
+
+				// And the picture really is the frame that id names: it carries the
+				// pose it was presented with, so the presented frame it matches must
+				// be the one that id counts to.
 				{
 					size_t src_idx = presented.size();
 					for (size_t k = 0; k < presented.size(); ++k)
@@ -1429,19 +1562,23 @@ int main(int argc, char ** argv)
 						}
 					}
 					if (src_idx < presented.size() and
-					    uint16_t(host.unit_frame_ids[idx - 1] - uint16_t(first_frame)) != src_idx)
+					    uint16_t(id - uint16_t(first_frame)) != src_idx)
 						++misplaced;
 				}
-				const size_t r = (idx - 1) * frame_size;
+
+				const size_t r = unit_idx * frame_size;
 				const size_t g = j * frame_size;
 				++compared;
 				if (std::memcmp(ref.data() + r, gpu.data() + g, frame_size) != 0)
 				{
 					if (not differing)
-						first_diff_frame = idx - 1;
+						first_diff_frame = unit_idx;
 					++differing;
 				}
 			}
+			check(unmatched == 0,
+			      "every published picture names a unit the reassembler produced (" +
+			              std::to_string(unmatched) + " unmatched)");
 			check(misplaced == 0,
 			      "every published picture lines up with the unit whose frame id it carries (" +
 			              std::to_string(misplaced) + " misplaced)");

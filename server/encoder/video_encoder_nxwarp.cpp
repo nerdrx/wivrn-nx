@@ -405,6 +405,42 @@ void wivrn::video_encoder_nxwarp::run_rate_control(size_t last_frame_bytes)
 	rc_target_bytes = double(rc_bitrate) / 8.0 / double(fps);
 	const double actual = double(last_frame_bytes);
 
+	// Is the ceiling reachable at all? The controller has run out of band when the
+	// quantiser is already at max_qp and the frame is still over budget: there is no
+	// coarser quantiser to go to and, this being an all-intra codec, no cheaper frame
+	// type either. Held for rc_unreachable_confirm so a single busy frame at the top
+	// of the band does not name the condition.
+	const auto now = std::chrono::steady_clock::now();
+	if (current_qp >= rc_max_qp and actual > rc_target_bytes * 1.05)
+	{
+		if (rc_over_budget_run < rc_unreachable_confirm_frames)
+			++rc_over_budget_run;
+		if (rc_over_budget_run >= rc_unreachable_confirm_frames)
+			rc_unreachable = true;
+
+		if (rc_unreachable and
+		    (rc_unreachable_logged == std::chrono::steady_clock::time_point{} or
+		     now - rc_unreachable_logged >= rc_unreachable_repeat))
+		{
+			rc_unreachable_logged = now;
+			U_LOG_W("nxwarp: stream %d cannot reach its bitrate ceiling: at max QP %u the frames are "
+			        "%.0f B and the ceiling allows %.0f B (%u bit/s at %.0f Hz). Every NX Warp frame is "
+			        "intra, so this is the smallest frame there is — raise the ceiling, lower the "
+			        "resolution, or raise \"max-qp\"",
+			        int(stream_idx),
+			        unsigned(rc_max_qp),
+			        actual,
+			        rc_target_bytes,
+			        unsigned(rc_bitrate),
+			        double(fps));
+		}
+	}
+	else
+	{
+		rc_over_budget_run = 0;
+		rc_unreachable = false;
+	}
+
 	int step = 0;
 	if (actual > rc_target_bytes * 1.05)
 		step = actual > rc_target_bytes * 2.0 ? +2 : +1;
@@ -543,6 +579,25 @@ void wivrn::video_encoder_nxwarp::present_image(
 	                               .pCommandBufferInfos = &cmd_info,
 	                       },
 	                       *in[slot].fence);
+}
+
+// The transport's path budget, kept in step with what the session's bitrate controller
+// allows this stream. Called once per encoded frame; the comparison is what keeps it from
+// reconfiguring the striper on every frame for a number that wobbles by a few percent.
+void wivrn::video_encoder_nxwarp::follow_path_budget()
+{
+	const uint32_t allowed = pending_bitrate.load();
+	if (not allowed)
+		return;
+	const double want = double(allowed);
+	// Five percent, the same threshold the bitrate controller uses before it bothers
+	// changing anything at all.
+	if (path_bps > 0 and std::abs(want - path_bps) < 0.05 * path_bps)
+		return;
+
+	path_bps = want;
+	std::lock_guard lock(sender_mutex);
+	sender->striper().configure_path(0, path_bps, 8000);
 }
 
 void wivrn::video_encoder_nxwarp::rebuild_sender()
@@ -819,15 +874,23 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 			const double mean_qp = double(prof_qp_sum) / double(prof_n);
 			if (rc_auto and rc_target_bytes > 0)
 				U_LOG_I("nxwarp: stream %d encoded %llu frames in %.1f s: %.1f ms/frame (max %.1f), "
-				        "%.0f B/frame vs %.0f target (%+.0f%%), QP %.1f [%u..%u]%s",
+				        "%.0f B/frame vs %.0f target (%+.0f%%), QP %.1f [%u..%u], "
+				        "controller allows %.1f Mbit/s%s",
 				        int(stream_idx), (unsigned long long)prof_n,
 				        std::chrono::duration<double>(t_enc1 - prof_since).count(),
 				        prof_ms / prof_n, prof_max_ms,
 				        achieved, rc_target_bytes,
 				        100.0 * (achieved - rc_target_bytes) / rc_target_bytes,
 				        mean_qp, unsigned(prof_qp_lo), unsigned(prof_qp_hi),
-				        current_qp == rc_min_qp ? " (at min QP)"
-				                                : (current_qp == rc_max_qp ? " (at max QP)" : ""));
+				        // What the session's bitrate controller currently allows this
+				        // stream, which is the number every other line here is derived
+				        // from and the one that is missing when the picture is worse
+				        // than the link should be able to carry.
+				        double(rc_bitrate) * 1e-6,
+				        rc_unreachable ? " (CEILING UNREACHABLE, pinned at max QP)"
+				                       : (current_qp == rc_min_qp
+				                                  ? " (at min QP)"
+				                                  : (current_qp == rc_max_qp ? " (at max QP)" : "")));
 			else
 				U_LOG_I("nxwarp: stream %d encoded %llu frames in %.1f s: %.1f ms/frame (max %.1f), "
 				        "%.0f B/frame at fixed QP %u",
@@ -939,6 +1002,8 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// everything above describes the frame that was just sent and the controller
 	// is about to invalidate `current_qp` for it.
 	run_rate_control(bitstream.size());
+	// And the transport's own budget, from the same number the quantiser follows.
+	follow_path_budget();
 
 	// Nothing for the sender thread: everything is already on the wire. The
 	// watchdog knows this encoder sends synchronously (async_send == false in the

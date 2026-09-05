@@ -220,6 +220,30 @@ whether a backend can hold a frame budget.
 `nxv-dec` must be on `PATH` (or pass `--nxv-dec /path/to/nxv-dec`) for the byte-identity
 check. Other flags: `--nxv-out`, `--decoded-out`, `--seed`.
 
+### The automatic bitrate
+
+`--aimd N` runs WiVRn's own `bitrate_controller` inside the harness, with `N` as the
+whole-link ceiling in bit/s, fed the `from_headset::feedback` this run's decoder actually
+produces and applying its answer to the live encoder with `set_bitrate`. Encoder,
+transport, real decoder, real delivery reports, real control law, one process.
+
+It runs on a **virtual clock**, one frame period per presented frame. Every threshold in
+that class is a duration — a two second window, a 250 ms evaluation interval, a five
+second hold before each increase — and the harness encodes as fast as the GPU allows, so
+on wall time the controller would see a whole session inside one window and decide
+nothing. One frame period per frame is the cadence a headset produces, and it makes the
+run repeatable.
+
+With a clean link it asserts the ceiling is held and that no frame is reported
+undelivered; with `--loss` it asserts the opposite — that the undelivered frames are
+reported *and* that the controller backs off. Both directions matter: this path used to
+report neither, and "the bitrate did not move" was the symptom.
+
+`tests/bitrate_nxwarp_test.cpp` is the other half, and the one that isolates the cause.
+It drives the control law directly against two simulated eye decoders and separates the
+two changes that had to be made — the frame numbering and the loss report — so each can
+be shown to matter on its own. Build and run it the way its header comment says.
+
 ### Rate control
 
 `--rc auto` turns on the encoder's rate controller and `--bitrate N` gives it a

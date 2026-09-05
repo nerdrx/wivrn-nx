@@ -65,6 +65,14 @@ void nxwarp_application_host::send_feedback(uint8_t stream_index, uint8_t path_i
 		scene->send_nxwarp_feedback(stream_index, path_id, std::move(payload));
 }
 
+void nxwarp_application_host::report_frame_lost(const wivrn::from_headset::feedback & fb)
+{
+	// The same socket and the same packet the conventional decoders' incomplete-frame
+	// report goes out on; scenes::stream::send_feedback is what counts it.
+	if (auto scene = weak_scene.lock())
+		scene->send_feedback(fb);
+}
+
 void nxwarp_application_host::publish(shard_accumulator * accumulator, std::shared_ptr<decoder::blit_handle> handle)
 {
 	if (auto scene = weak_scene.lock())

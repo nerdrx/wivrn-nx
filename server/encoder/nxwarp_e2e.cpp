@@ -89,6 +89,7 @@
 #include <nxvc/transport/aead.h>
 #include <nxvc/transport/receiver.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -672,7 +673,23 @@ int main(int argc, char ** argv)
 	// (the Vulkan compute encoder). Both must reach the same conclusions here,
 	// which is the point of running the test against each.
 	std::string backend = "ref";
+	// "auto" honours the bitrate ceiling below; "fixed" pins --qp for the run.
+	// Default "fixed" here and not in the server: a test whose bytes per frame
+	// drift is not a test whose byte-identity check means anything.
+	std::string rc = "fixed";
 	uint32_t qp = 26;
+	// Whole-link bitrate handed to the encoder's rate controller, bit/s. Zero
+	// means the controller is never told a ceiling, which is what every test
+	// that predates it expects.
+	uint64_t bitrate = 0;
+	// A second ceiling, applied halfway through the run: WiVRn's automatic
+	// bitrate mode moves the target mid-session, and a controller that only
+	// converged from its starting point would look correct here without ever
+	// having followed anything.
+	uint64_t bitrate2 = 0;
+	// The band the controller may move in, mirrored here so the assertions can
+	// tell "did not reach the ceiling" from "reached the end of the band".
+	uint32_t min_qp = 20, max_qp = 44;
 	uint32_t width = 320, height = 240, frames = 12, seed = 1;
 	double loss = 0.0;
 
@@ -702,6 +719,16 @@ int main(int argc, char ** argv)
 			backend = next();
 		else if (a == "--qp")
 			qp = uint32_t(std::stoul(next()));
+		else if (a == "--rc")
+			rc = next();
+		else if (a == "--bitrate")
+			bitrate = std::stoull(next());
+		else if (a == "--bitrate2")
+			bitrate2 = std::stoull(next());
+		else if (a == "--min-qp")
+			min_qp = uint32_t(std::stoul(next()));
+		else if (a == "--max-qp")
+			max_qp = uint32_t(std::stoul(next()));
 		else
 		{
 			std::fprintf(stderr, "unknown argument %s\n", a.c_str());
@@ -737,16 +764,35 @@ int main(int argc, char ** argv)
 	settings.codec = video_codec::nxwarp;
 	settings.fps = 90;
 	settings.encoder_name = encoder_nxwarp;
-	settings.bitrate = 50'000'000;
+	settings.bitrate = bitrate ? bitrate : 50'000'000;
 	settings.bitrate_multiplier = 1.0;
 	settings.bit_depth = 8;
 	settings.src_layer = 0;
-	// Fixed QP: the rate controller is not wired (see video_encoder_nxwarp.cpp), and a
-	// test that let it drift would not be reproducible.
 	settings.options["qp"] = std::to_string(qp);
 	settings.options["backend"] = backend;
+	// Rate control off by default. The byte-identity check below compares this
+	// run's bitstream against nxv-dec's decode of it, which a moving quantiser
+	// does not disturb -- but the frame sizes and the loss pattern would stop
+	// being reproducible, and every assertion about the transport is written
+	// against a run whose frames are the same size every time.
+	settings.options["rc"] = rc;
+	settings.options["min-qp"] = std::to_string(min_qp);
+	settings.options["max-qp"] = std::to_string(max_qp);
 
 	video_encoder_nxwarp enc(vk, settings, 0);
+
+	// The whole-link ceiling, exactly as the session's bitrate controller sets
+	// it: video_encoder::set_bitrate takes this stream's share out of it (here a
+	// multiplier of 1.0 and no FEC parity, so the share is the whole number) and
+	// publishes it as pending_bitrate, which is what the encoder's controller
+	// reads. Nothing about the path from the ceiling to the QP is bypassed.
+	if (bitrate)
+	{
+		enc.set_bitrate(uint32_t(bitrate));
+		std::printf("rate control: %s, ceiling %llu bit/s -> %.0f B/frame at %.0f Hz\n",
+		            rc.c_str(), (unsigned long long)bitrate,
+		            double(bitrate) / 8.0 / double(settings.fps), double(settings.fps));
+	}
 
 	// ---- the decoder, as the headset builds it -------------------------------
 	to_headset::video_stream_description desc{};
@@ -768,6 +814,17 @@ int main(int argc, char ** argv)
 
 	// ---- drive ----------------------------------------------------------------
 	uint64_t feedback_packets = 0, feedback_bytes = 0;
+	// One row per frame: the quantiser it was coded at and the bytes that
+	// bought. Filled from the encoder's own profile counters -- read once
+	// before the encode for the QP and once after for the byte total -- so it
+	// is the encoder's arithmetic, not a re-derivation of it.
+	struct rc_row
+	{
+		uint32_t qp;
+		uint64_t bytes;
+		double target;
+	};
+	std::vector<rc_row> rc_trace;
 	std::vector<view_info_t> presented;
 	std::vector<std::vector<uint8_t>> source_frames;
 	const uint8_t num_slots_used = 1;
@@ -786,9 +843,22 @@ int main(int argc, char ** argv)
 		        .value = 0,
 		        .stageMask = vk::PipelineStageFlagBits2::eTransfer,
 		};
+		// The session's bitrate controller moving its mind, mid-stream, the only
+		// way it ever does: set_bitrate on the live encoder.
+		if (bitrate2 and f == frames / 2)
+		{
+			enc.set_bitrate(uint32_t(bitrate2));
+			std::printf("frame %u: ceiling moved to %llu bit/s\n", f,
+			            (unsigned long long)bitrate2);
+		}
+
 		const uint8_t slot = uint8_t(f % num_slots_used);
 		enc.present_image(*src.image, sem_info, slot, f, vi);
+		const auto before = enc.profile();
 		(void)enc.encode(slot, f);
+		const auto after = enc.profile();
+		if (after.frames > before.frames)
+			rc_trace.push_back({before.qp, after.bytes - before.bytes, after.target_bytes});
 
 		// Feedback the decoder produced while that frame was going through, straight back
 		// into the encoder, which is what the network thread does.
@@ -816,6 +886,68 @@ int main(int argc, char ** argv)
 	            (unsigned long long)link.sent, (unsigned long long)link.dropped,
 	            link.sent ? 100.0 * double(link.dropped) / double(link.sent) : 0.0);
 	std::printf("decoder published %zu frames\n\n", host.frames.size());
+
+	if (bitrate and not rc_trace.empty())
+	{
+		// Frame by frame, then the tail. The tail is the number that matters:
+		// the controller is allowed to spend the first frames walking to the
+		// target, and what it must not do is sit away from it once it arrives.
+		std::printf("rate control trace (frame: QP, bytes, target):\n");
+		for (size_t i = 0; i < rc_trace.size(); ++i)
+			std::printf("  %3zu  QP %2u  %7llu B  target %7.0f B  %+6.1f%%\n",
+			            i, unsigned(rc_trace[i].qp),
+			            (unsigned long long)rc_trace[i].bytes, rc_trace[i].target,
+			            rc_trace[i].target > 0
+			                    ? 100.0 * (double(rc_trace[i].bytes) - rc_trace[i].target) / rc_trace[i].target
+			                    : 0.0);
+
+		const size_t tail_from = rc_trace.size() * 2 / 3;
+		double tail_bytes = 0, tail_target = 0;
+		uint32_t tail_qp_lo = 63, tail_qp_hi = 0;
+		size_t tail_n = 0;
+		for (size_t i = tail_from; i < rc_trace.size(); ++i)
+		{
+			tail_bytes += double(rc_trace[i].bytes);
+			tail_target += rc_trace[i].target;
+			tail_qp_lo = std::min(tail_qp_lo, rc_trace[i].qp);
+			tail_qp_hi = std::max(tail_qp_hi, rc_trace[i].qp);
+			++tail_n;
+		}
+		if (tail_n)
+		{
+			const double mean = tail_bytes / double(tail_n);
+			const double want = tail_target / double(tail_n);
+			std::printf("\nlast %zu frames: %.0f B/frame against a %.0f B target (%+.1f%%), QP %u..%u\n\n",
+			            tail_n, mean, want,
+			            want > 0 ? 100.0 * (mean - want) / want : 0.0,
+			            unsigned(tail_qp_lo), unsigned(tail_qp_hi));
+			if (rc == "auto")
+			{
+				check(want > 0, "the controller was given a byte budget");
+
+				// A ceiling is a ceiling: going over it is the failure, and the
+				// controller must not. Coming in under it is only correct when
+				// the quantiser has run out of band -- at min_qp the frames are
+				// as large as this encoder is willing to make them, and a
+				// ceiling above that is simply more link than the picture needs.
+				check(mean <= 1.25 * want,
+				      "bytes per frame stay within 25% above the ceiling's budget");
+				check(mean >= 0.75 * want or tail_qp_lo == min_qp,
+				      "bytes per frame come in under the budget only at the bottom of the QP band");
+
+				// And it has to have STOPPED. Bytes on target with the
+				// quantiser still swinging is a controller that is averaging,
+				// not converging, and the swing is visible as pumping.
+				check(tail_qp_hi - tail_qp_lo <= 2,
+				      "the quantiser settles into a band of at most 2 QP");
+			}
+			else
+			{
+				check(tail_qp_lo == tail_qp_hi and tail_qp_lo == qp,
+				      "\"rc\": \"fixed\" leaves the quantiser exactly where it was configured");
+			}
+		}
+	}
 
 	// ==== assertions ==========================================================
 	const bool clean = loss <= 0;

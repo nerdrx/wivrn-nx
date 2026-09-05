@@ -23,6 +23,10 @@
 #include <span>
 #include <string>
 
+// Only for the five handles make_vulkan() takes. Nothing else in this header
+// is Vulkan, and the CPU implementation never touches them.
+#include <vulkan/vulkan.h>
+
 namespace wivrn
 {
 
@@ -116,6 +120,24 @@ public:
 	// The CPU reference codec. Throws std::runtime_error if the configuration is
 	// outside what it accepts.
 	static std::unique_ptr<nxwarp_codec> make_reference(const nxwarp_codec_config &);
+
+	// The Vulkan compute encoder (nxvc_vk_encoder), running on the VkDevice the
+	// server already owns — the one the compositor's image lives on — the same
+	// way the headset's decoder adopts the client's. Throws std::runtime_error
+	// if the configuration is outside what it accepts, which is a strictly
+	// smaller set than the reference's: intra only, no rate control, 8-bit
+	// 4:2:0. See nxwarp_codec_vk.cpp for what it ignores and what it refuses.
+	//
+	// Declared unconditionally, defined only when the build found an nxvc with
+	// the Vulkan encoder in it; video_encoder_nxwarp guards the call site on
+	// WIVRN_NXWARP_VK_ENCODER so a server built against a reference-only nxvc
+	// still links.
+	static std::unique_ptr<nxwarp_codec> make_vulkan(const nxwarp_codec_config &,
+	                                                 VkInstance,
+	                                                 VkPhysicalDevice,
+	                                                 VkDevice,
+	                                                 VkQueue,
+	                                                 uint32_t queue_family);
 };
 
 } // namespace wivrn

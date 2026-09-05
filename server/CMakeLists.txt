@@ -196,6 +196,20 @@ if (WIVRN_BUILD_SERVER)
 			)
 		target_link_libraries(wivrn-server PRIVATE nxvc::ref nxvc::transport)
 
+		# The Vulkan compute encoder behind `"backend": "vk"`. Optional for the
+		# same reason the Vulkan decoder is optional below: an nxvc built with
+		# NXWARP_BUILD_VK=OFF is a perfectly good server dependency, and a
+		# server built against one simply has no "vk" backend to offer and says
+		# so at construction rather than failing to configure.
+		if (TARGET nxvc::vk_encoder)
+			target_sources(wivrn-server PRIVATE encoder/nxwarp_codec_vk.cpp)
+			target_link_libraries(wivrn-server PRIVATE nxvc::vk_encoder nxvc::vk_common)
+			target_compile_definitions(wivrn-server PRIVATE WIVRN_NXWARP_VK_ENCODER)
+			message(STATUS "\tNX Warp Vulkan encoder: ON")
+		else()
+			message(STATUS "\tNX Warp Vulkan encoder: OFF (nxvc has no vk_encoder)")
+		endif()
+
 		# The server path without a headset, a GPU or a socket: synthetic frames
 		# through the codec, the packetizer, the transport and back into the
 		# reference decoder. Links none of WiVRn.
@@ -243,6 +257,13 @@ if (WIVRN_BUILD_SERVER)
 				)
 			target_compile_features(wivrn-nxwarp-e2e PRIVATE cxx_std_23)
 			target_compile_definitions(wivrn-nxwarp-e2e PRIVATE VULKAN_HPP_NO_STRUCT_CONSTRUCTORS)
+			# The e2e proves the shipping encoder, so it has to be able to prove
+			# both backends; --backend vk is what selects the second one.
+			if (TARGET nxvc::vk_encoder)
+				target_sources(wivrn-nxwarp-e2e PRIVATE encoder/nxwarp_codec_vk.cpp)
+				target_link_libraries(wivrn-nxwarp-e2e PRIVATE nxvc::vk_encoder)
+				target_compile_definitions(wivrn-nxwarp-e2e PRIVATE WIVRN_NXWARP_VK_ENCODER)
+			endif()
 			target_link_libraries(wivrn-nxwarp-e2e PRIVATE
 				nxvc::ref
 				nxvc::transport

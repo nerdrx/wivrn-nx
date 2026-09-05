@@ -97,6 +97,9 @@ class video_encoder_nxwarp : public video_encoder
 	std::vector<uint8_t> cr_plane;
 
 	std::unique_ptr<nxwarp_codec> codec;
+	// The GPU backend submits on vk.queue and so must hold WiVRn's queue mutex
+	// across encode(); the CPU one never touches a queue. See encode().
+	bool codec_uses_vk_queue = false;
 
 	// The transport. No sockets in it: it hands back datagram buffers and this
 	// class puts them on WiVRn's stream socket.
@@ -135,6 +138,10 @@ class video_encoder_nxwarp : public video_encoder
 	double prof_ms = 0, prof_max_ms = 0;
 	uint64_t prof_bytes = 0;
 	bool logged_oversize = false;
+	// The same measurements as prof_*, but never reset, for profile().
+	uint64_t prof_total_n = 0;
+	double prof_total_ms = 0, prof_total_max_ms = 0;
+	uint64_t prof_total_bytes = 0;
 
 	void send_stream_header();
 
@@ -151,6 +158,24 @@ public:
 	std::optional<data> encode(uint8_t slot, uint64_t frame_id) override;
 
 	void on_nxwarp_feedback(uint8_t path_id, std::span<const uint8_t> payload) override;
+
+	// Cumulative encode timing, for a harness that wants the number rather
+	// than the two-second log line: total frames, total and worst-case
+	// milliseconds spent in codec->encode(), and total bytes produced. That
+	// interval is the codec alone -- for the GPU backend, the plane repack
+	// plus the submit and its wait -- and excludes the image readback, which
+	// present_image already paid for on the transfer queue.
+	struct encode_profile
+	{
+		uint64_t frames = 0;
+		double total_ms = 0;
+		double max_ms = 0;
+		uint64_t bytes = 0;
+	};
+	encode_profile profile() const
+	{
+		return {prof_total_n, prof_total_ms, prof_total_max_ms, prof_total_bytes};
+	}
 };
 
 } // namespace wivrn

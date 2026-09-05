@@ -315,7 +315,27 @@ public:
 	                   const to_headset::video_stream_data_shard::view_info_t & view_info);
 
 	void on_feedback(const from_headset::feedback &);
-	void reset();
+
+	// The client lost its reference frames and needs to be able to start decoding
+	// again: send a keyframe. It is the SAME client on the other end, with the same
+	// transport state, so an encoder that carries per-client sequence numbers must not
+	// disturb them here.
+	virtual void reset();
+
+	// The session was resumed and the client on the other end is a NEW one: it has
+	// just been created, it knows nothing about the stream, and it cannot infer any
+	// state the old one had accumulated. Everything the two cannot share -- codec
+	// references, stream headers, per-client transport sequence numbers -- has to go
+	// back to where it was at the start of a session.
+	//
+	// Called from compositor::resume(), i.e. wivrn_session::resume_session. The
+	// default is a keyframe, which is all a codec whose stream carries no per-client
+	// state needs; video_encoder_nxwarp overrides it because NX Warp's transport does
+	// carry such state and a fresh nxt::Receiver rejects every datagram without it.
+	virtual void reset_stream()
+	{
+		reset();
+	}
 
 	// bitrate_bps is the bitrate for the whole stream
 	// the encoder bitrate will be scaled accordingly

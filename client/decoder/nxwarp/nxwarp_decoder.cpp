@@ -661,7 +661,7 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 		return;
 	}
 
-	host.on_frame_unit(unit);
+	host.on_frame_unit(f.frame_id, unit);
 
 	decode_job job;
 	job.frame_id = f.frame_id;

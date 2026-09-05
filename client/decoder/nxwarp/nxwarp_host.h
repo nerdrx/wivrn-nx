@@ -74,8 +74,10 @@ public:
 	// The client ignores it; wivrn-nxwarp-e2e uses it to rebuild the byte stream the
 	// decoder was actually fed, so that nx-warp's own nxv-dec can be run over the same
 	// bytes and the two decoders' output compared. Called on the network thread, before
-	// the decode job is queued.
-	virtual void on_frame_unit(std::span<const uint8_t>) {}
+	// the decode job is queued. `frame_id` is the stream's own 16-bit frame id, which
+	// is what lets a caller line the units up with anything else it knows about the
+	// stream without guessing at the order they close in.
+	virtual void on_frame_unit(uint16_t frame_id, std::span<const uint8_t>) {}
 
 	// A decoded frame, with the view_info it was rendered for.
 	virtual void publish(shard_accumulator * accumulator, std::shared_ptr<decoder::blit_handle> handle) = 0;

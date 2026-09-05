@@ -273,7 +273,9 @@ public:
 
 	// The transport's own counters, or nullptr before the stream header has arrived.
 	// Read on the network thread, or after it has stopped: tiles_placed against
-	// tiles_late is what says whether the band deadlines are firing sanely.
+	// tiles_late is what says whether the band deadlines are firing sanely. A test
+	// harness also uses it to name the counter that rejected a datagram rather than
+	// infer it from a black picture.
 	const nxt::ReceiverStats * receiver_stats() const
 	{
 		return receiver ? &receiver->stats : nullptr;

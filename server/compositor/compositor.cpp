@@ -2030,10 +2030,14 @@ void compositor::update_foveation_shape()
 
 void compositor::resume()
 {
+	// reset_stream(), not reset(): the headset that comes back from a reconnect is a
+	// new client process with a new decoder, and for a codec whose transport keeps
+	// per-client state (NX Warp) a keyframe alone leaves it unable to authenticate a
+	// single datagram. See video_encoder::reset_stream.
 	for (auto & encoder: get_encoders())
 	{
 		if (encoder)
-			encoder->reset();
+			encoder->reset_stream();
 	}
 	// The headset lost whatever it had; the pyramid of the frame before the pause
 	// has nothing to do with the one that comes next, and neither does the frame the

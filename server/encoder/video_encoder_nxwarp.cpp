@@ -271,20 +271,13 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	// wiring nxt's AEAD to the session key is the right follow-up if the datagrams
 	// ever leave WiVRn's socket.
 	aead = nxt::make_null_aead();
-	nxt::Key key{}, salt{};
-	for (size_t i = 0; i < key.size(); ++i)
+	for (size_t i = 0; i < session_key.size(); ++i)
 	{
-		key[i] = uint8_t(i);
-		salt[i] = uint8_t(0xA0 + i);
+		session_key[i] = uint8_t(i);
+		session_salt[i] = uint8_t(0xA0 + i);
 	}
-	sender = std::make_unique<nxt::Sender>(stream_cfg, aead.get(), key, salt);
-	// A chunk that will not fit an MTU cannot be carried without fragmentation.
-	// Dropping it loses part of a frame, which the codec's concealment is built
-	// for; rejecting the band would lose all of it.
-	sender->packetizer().set_policy(nxt::Packetizer::OversizePolicy::kDropTile);
-	sender->set_auto_fec(false);
-	sender->packetizer().set_fec(nxwarp_fec_policy());
-	sender->striper().configure_path(0, double(settings.bitrate ? settings.bitrate : 100'000'000), 8000);
+	path_bps = double(settings.bitrate ? settings.bitrate : 100'000'000);
+	rebuild_sender();
 
 	tiles_per_frame = stream_cfg.tiles_per_frame();
 	chunk_bytes = nxwarp_chunk_bytes(stream_cfg);
@@ -552,6 +545,82 @@ void wivrn::video_encoder_nxwarp::present_image(
 	                       *in[slot].fence);
 }
 
+void wivrn::video_encoder_nxwarp::rebuild_sender()
+{
+	sender = std::make_unique<nxt::Sender>(stream_cfg, aead.get(), session_key, session_salt);
+	// A chunk that will not fit an MTU cannot be carried without fragmentation.
+	// Dropping it loses part of a frame, which the codec's concealment is built
+	// for; rejecting the band would lose all of it.
+	sender->packetizer().set_policy(nxt::Packetizer::OversizePolicy::kDropTile);
+	sender->set_auto_fec(false);
+	sender->packetizer().set_fec(nxwarp_fec_policy());
+	sender->striper().configure_path(0, path_bps, 8000);
+}
+
+// The client lost its references. Nothing about the transport changed, so the
+// sender keeps its sequence numbers, its shadow and its path state: the receiver
+// on the other end is the same object and is still counting.
+void wivrn::video_encoder_nxwarp::reset()
+{
+	video_encoder::reset();
+
+	// Acted on by encode(), not here: reset() is called from the session's network
+	// thread and every call into the codec belongs to the thread that encodes.
+	// encode() then hands the codec an all-zero receipt map -- the codec's own lever
+	// for "the client does not have these tiles" -- so it has no temporal reference
+	// to predict from and codes the frame intra. That is what makes a resumed stream
+	// decodable by a client that has never seen a frame once `inter` is on; it is off
+	// by default today (nxwarp_codec_config::inter), which is why an all-intra stream
+	// survives a reconnect the moment the transport stops rejecting it.
+	client_holds_nothing = true;
+}
+
+// A new client, with a new nxt::Receiver that starts from nothing.
+//
+// This is the fix for the reconnect that used to kill the stream until the server
+// was restarted. What a fresh Receiver cannot infer, and why each piece matters:
+//
+//   * the per-path sequence number. nxt::Sender counts datagrams per path in 64
+//     bits and puts the low 14 on the wire; the receiver rebuilds the other 50 by
+//     extending against what it has already seen (Receiver::process,
+//     extend_seq14). A receiver that has seen nothing takes the wire value AS the
+//     full sequence -- it has nothing to extend against -- so once the sender has
+//     sent more than 16384 datagrams on a path (seconds, at video rates) the
+//     nonce the two sides derive from it disagree, and EVERY datagram fails
+//     authentication: ReceiverStats::auth_fail climbs with the datagram count,
+//     tiles_placed stays at zero, and every frame closes "with a hole" because
+//     not one chunk was ever delivered. A new Sender starts its counters at zero,
+//     which is exactly what the new Receiver expects.
+//
+//     The epoch field exists for precisely this and would be the tidier lever,
+//     but nothing carries it to the client: the receiver's epoch is zero and the
+//     codec's stream header has no room for one. Restarting the counters is safe
+//     here only because this AEAD is nxt's NullAead riding inside WiVRn's own
+//     encrypted stream socket (see the constructor); a real key on this transport
+//     would need the epoch, and the client, to move together.
+//
+//   * the client shadow, the striper's path state and the band scheduler. All of
+//     them describe a headset that is gone.
+//
+//   * the stream header. The new decoder cannot create its receiver, or its
+//     codec, until it has one; it is resent every header_period_frames, so
+//     without this the stream would recover by itself after up to a second of
+//     black -- but only if the transport were not rejecting the datagrams anyway.
+void wivrn::video_encoder_nxwarp::reset_stream()
+{
+	reset();
+	{
+		std::lock_guard lock(sender_mutex);
+		rebuild_sender();
+	}
+	// Send it now rather than at the next period boundary: the new client decodes
+	// nothing at all until it arrives.
+	header_sent = false;
+	U_LOG_I("nxwarp: stream %d resumed for a new client: transport sequence restarted, "
+	        "stream header resent, next frame coded without a reference",
+	        int(stream_idx));
+}
+
 void wivrn::video_encoder_nxwarp::send_stream_header()
 {
 	auto header = codec->stream_header();
@@ -631,7 +700,16 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// UNKNOWN counts as received: no feedback for a band yet is not evidence of
 	// loss, and treating it as loss would force a needless refresh every frame on
 	// a link whose feedback is merely late.
-	if (have_previous_frame)
+	// A reset() since the last frame: the client holds nothing of the previous one,
+	// either because it asked for a keyframe or because it is a different client
+	// altogether. An all-zero receipt map is how the codec is told so.
+	if (client_holds_nothing.exchange(false))
+	{
+		std::fill(received_tiles.begin(), received_tiles.end(), uint8_t(0));
+		codec->set_received_tiles(received_tiles);
+		have_previous_frame = false;
+	}
+	else if (have_previous_frame)
 	{
 		std::lock_guard lock(sender_mutex);
 		auto & shadow = sender->shadow();

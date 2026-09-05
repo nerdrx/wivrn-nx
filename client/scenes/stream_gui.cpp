@@ -94,6 +94,25 @@ ImPlotPoint getter(int index, void * data_)
 }
 } // namespace
 
+// The user-facing name of a negotiated codec, shared by every place the GUI names one.
+static const char * codec_label(wivrn::video_codec c)
+{
+	switch (c)
+	{
+		case wivrn::video_codec::h264:
+			return "H.264";
+		case wivrn::video_codec::h265:
+			return "HEVC";
+		case wivrn::video_codec::av1:
+			return "AV1";
+		case wivrn::video_codec::raw:
+			return "Raw";
+		case wivrn::video_codec::nxwarp:
+			return "NX Warp";
+	}
+	return "?";
+}
+
 void scenes::stream::accumulate_metrics(XrTime predicted_display_time, const std::array<std::shared_ptr<shard_accumulator::blit_handle>, decoder_count> & blit_handles, const gpu_timestamps & timestamps)
 {
 	// On a wall clock of its own, so 60 s of transport history is 60 s whatever the
@@ -783,25 +802,7 @@ void scenes::stream::gui_transport()
 				if (not decoders[i].decoder)
 					continue;
 
-				const char * codec = "?";
-				switch (video_stream_description->codec[i])
-				{
-					case wivrn::video_codec::h264:
-						codec = "H.264";
-						break;
-					case wivrn::video_codec::h265:
-						codec = "HEVC";
-						break;
-					case wivrn::video_codec::av1:
-						codec = "AV1";
-						break;
-					case wivrn::video_codec::raw:
-						codec = "Raw";
-						break;
-					case wivrn::video_codec::nxwarp:
-						codec = "NX Warp";
-						break;
-				}
+				const char * codec = codec_label(video_stream_description->codec[i]);
 
 				// A stream the server had to hand to x264 is the one thing on this
 				// page a user can act on, so it is the one thing coloured.
@@ -1408,7 +1409,14 @@ void scenes::stream::draw_gui(XrTime predicted_display_time, XrDuration predicte
 			ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {20, 20});
 			ImGui::BeginChild("Main", ImVec2(ImGui::GetWindowSize().x - ImGui::GetCursorPosX() - content_margin, 0));
 			ImGui::SetCursorPosY(20);
-			wivrn::ui::page_header(_S("Statistics"), _S("Live streaming performance."));
+			{
+				// Name the codec where people look first: nobody should have to open the
+				// Transport page to learn whether the session is NX Warp or HEVC.
+				std::string subtitle = _("Live streaming performance.");
+				if (video_stream_description)
+					subtitle = fmt::format("{} {}", subtitle, fmt::format(_F("Video codec: {}."), codec_label(video_stream_description->codec[0])));
+				wivrn::ui::page_header(_S("Statistics"), subtitle);
+			}
 			ImGui::BeginChild("plots", {0, 0});
 			gui_performance_metrics();
 			ImGui::EndChild();

@@ -714,6 +714,36 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	VkSemaphore dec_sem = VK_NULL_HANDLE;
 	uint64_t dec_val = 0;
 	bool refused = false;
+	// This driver advertises VK_KHR_timeline_semaphore and then refuses to create one,
+	// so nxvc_vk_decoder_timeline() is null on the headset and there used to be no
+	// object at all for the queue to wait on: the copy below had to be fenced against
+	// the decode on the HOST, one full round trip in the middle of every frame.
+	// NXVC_VKD_SUBMIT_SIGNAL_BINARY gives us a binary semaphore instead, which the
+	// copy waits on where it would have waited on the timeline.
+	//
+	// A binary semaphore is single-use: signalled once, waited once. Every path that
+	// leaves this function after a successful decode must therefore consume it, or the
+	// next frame's decode submit blocks forever on a semaphore that is already
+	// signalled. drain_binsem() below is that obligation, and the early returns call it.
+	VkSemaphore bin_sem = VK_NULL_HANDLE;
+	bool bin_pending = false;
+	const bool use_bin_sem = nxvc_vk_decoder_timeline(nxvc) == VK_NULL_HANDLE and
+	                         nxvc_vk_decoder_binary_semaphore(nxvc) != VK_NULL_HANDLE;
+	const auto drain_bin_sem = [&]() {
+		if (not bin_pending)
+			return;
+		bin_pending = false;
+		// An empty submit whose only job is to consume the signal.
+		host.with_queue([&](vk::Queue queue) {
+			const vk::PipelineStageFlags stage = vk::PipelineStageFlagBits::eTopOfPipe;
+			const vk::Semaphore sem{bin_sem};
+			queue.submit(vk::SubmitInfo{
+			        .waitSemaphoreCount = 1,
+			        .pWaitSemaphores = &sem,
+			        .pWaitDstStageMask = &stage,
+			});
+		});
+	};
 	// nxvc submits on the queue it adopted, which is the host's one graphics queue; hold
 	// the same lock every other submitter in the process holds.
 	// The decoder owns one command buffer, one staging buffer and (since the
@@ -726,8 +756,11 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	nxvc_vk_decoder_wait(nxvc, UINT64_MAX);
 	const auto t_decode0 = std::chrono::steady_clock::now();
 	host.with_queue([&](vk::Queue) {
+		const uint32_t submit_flags =
+		        NXVC_VKD_SUBMIT_ASYNC |
+		        (use_bin_sem ? uint32_t(NXVC_VKD_SUBMIT_SIGNAL_BINARY) : 0u);
 		auto st = nxvc_vk_decode_frame_ex(nxvc, job.unit.data(), job.unit.size(),
-		                                  NXVC_VKD_SUBMIT_ASYNC, &consumed);
+		                                  submit_flags, &consumed);
 		if (st != NXVC_VKD_OK)
 		{
 			spdlog::warn("nxwarp[{}]: frame {} refused: {} ({})", stream_index, job.frame_id,
@@ -738,6 +771,11 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		}
 		dec_sem = nxvc_vk_decoder_timeline(nxvc);
 		dec_val = nxvc_vk_decoder_timeline_value(nxvc);
+		if (use_bin_sem)
+		{
+			bin_sem = nxvc_vk_decoder_binary_semaphore(nxvc);
+			bin_pending = bin_sem != VK_NULL_HANDLE;
+		}
 	});
 	if (refused)
 		return;
@@ -746,6 +784,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	if (nxvc_vk_decoder_images(nxvc, &img) != NXVC_VKD_OK or img.count < 2)
 	{
 		++frames_dropped_codec;
+		drain_bin_sem();
 		return;
 	}
 
@@ -753,6 +792,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	if (not item)
 	{
 		spdlog::warn("nxwarp[{}]: no image available in pool, discard frame", stream_index);
+		drain_bin_sem();
 		return;
 	}
 
@@ -859,10 +899,12 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	        item->semaphore_val,
 	        item->free);
 
-	// nxvc returns no timeline when it is on its fence fallback: the decode is then
-	// complete on the host before the copy is even recorded (see the wait above the
-	// decode call), so there is nothing for the queue to wait on.
-	if (dec_sem == VK_NULL_HANDLE)
+	// What the copy waits on, in order of preference: the timeline where the driver
+	// gives one, the binary semaphore where it does not, and the host only where
+	// neither exists. The host wait is the expensive one and is now the last resort
+	// rather than the headset's normal path.
+	VkSemaphore wait_sem = dec_sem != VK_NULL_HANDLE ? dec_sem : bin_sem;
+	if (wait_sem == VK_NULL_HANDLE)
 		nxvc_vk_decoder_wait(nxvc, UINT64_MAX);
 	const bool signal_on_queue = *item->semaphore != VK_NULL_HANDLE;
 
@@ -870,9 +912,9 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	host.with_queue([&](vk::Queue queue) {
 		const vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eTransfer;
 		const uint64_t signal_val = ++item->semaphore_val;
-		std::array<vk::Semaphore, 1> wait{dec_sem};
+		std::array<vk::Semaphore, 1> wait{wait_sem};
 		std::array<vk::Semaphore, 1> signal{*item->semaphore};
-		const uint32_t n_wait = dec_sem != VK_NULL_HANDLE ? 1 : 0;
+		const uint32_t n_wait = wait_sem != VK_NULL_HANDLE ? 1 : 0;
 		const uint32_t n_signal = signal_on_queue ? 1 : 0;
 		queue.submit(
 		        vk::StructureChain{
@@ -895,6 +937,9 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		                .get(),
 		        *fence);
 	});
+	// The submit above is the one wait the binary semaphore gets. dec_val is passed
+	// alongside it and is ignored: a binary semaphore has no value.
+	bin_pending = false;
 	// No semaphore to hand the render thread: make the copy complete before it can see
 	// the frame. One frame of pipelining lost, on the driver that gives no other choice.
 	if (not signal_on_queue and device.waitForFences(*fence, true, UINT64_MAX) != vk::Result::eSuccess)

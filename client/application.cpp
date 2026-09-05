@@ -957,12 +957,21 @@ void application::initialize_vulkan()
 	}
 	assert(vk_queue_found);
 
-	float queuePriority = 0.0f;
+	// Two queues where the family has them: queue 0 is the renderer's and is
+	// what the OpenXR runtime is handed, queue 1 is the decode queue.  The
+	// Adreno 650's single graphics family reports queueCount 3, and taking only
+	// queue 0 is what put every NX Warp decode behind the compositor's own
+	// frame.  A family with one queue clamps back to the old behaviour.
+	const uint32_t vk_queues_wanted =
+	        std::min<uint32_t>(2, queue_properties[vk_queue_family_index].queueCount);
+	// Equal priority: the decode is not less important than the frame it is
+	// decoded for, and a lower priority would only put it further behind.
+	float queuePriority[2] = {0.0f, 0.0f};
 
 	vk::DeviceQueueCreateInfo queueCreateInfo{
 	        .queueFamilyIndex = vk_queue_family_index,
-	        .queueCount = 1,
-	        .pQueuePriorities = &queuePriority,
+	        .queueCount = vk_queues_wanted,
+	        .pQueuePriorities = queuePriority,
 	};
 
 	vk::PhysicalDeviceFeatures device_features{
@@ -1007,6 +1016,17 @@ void application::initialize_vulkan()
 
 	vk_device = xr_system_id.create_device(vk_physical_device, device_create_info.get());
 	*vk_queue.lock() = vk_device.getQueue(vk_queue_family_index, 0);
+	if (vk_queues_wanted > 1)
+	{
+		*vk_decode_queue.lock() = vk_device.getQueue(vk_queue_family_index, 1);
+		vk_have_decode_queue = true;
+		spdlog::info("    queue family {} has {} queues; decoding on queue 1",
+		             vk_queue_family_index,
+		             queue_properties[vk_queue_family_index].queueCount);
+	}
+	else
+		spdlog::info("    queue family {} has one queue; decode shares it with the renderer",
+		             vk_queue_family_index);
 
 	vk::PipelineCacheCreateInfo pipeline_cache_info;
 	std::vector<std::byte> pipeline_cache_bytes;

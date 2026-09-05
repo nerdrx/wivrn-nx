@@ -23,6 +23,8 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cassert>
+#include <cerrno>
+#include <ctime>
 #include <limits.h>
 #include <memory>
 #include <netdb.h>
@@ -38,6 +40,57 @@
 
 thread_local crypto::encrypt_context wivrn::UDP::encrypter{EVP_aes_128_ctr()};
 std::atomic<uint64_t> wivrn::UDP::iv_counter;
+
+namespace
+{
+// A single UDP datagram to a connected socket, retrying the transient
+// backpressure errors a burst provokes instead of dropping the datagram.
+//
+// The failure this exists for: an NX Warp intra frame is dozens of datagrams
+// pushed onto the socket back to back with no spacing. On a real link the device
+// queue (or, on a socket with a send timeout, the socket send buffer) fills part
+// way through the burst and the kernel returns ENOBUFS / EAGAIN *synchronously*
+// from writev — not a fatal error, just "come back in a moment". The old code let
+// that throw, the caller swallowed it, and every datagram from that point to the
+// end of the frame was silently dropped: the client saw the head of the frame,
+// never the tail, and every large frame reassembled with a hole and decoded none.
+// A small frame (a handful of datagrams) never fills the queue and was unaffected,
+// which is exactly the size-dependent loss that was observed.
+//
+// The queue drains in microseconds, so a short bounded backoff recovers the whole
+// frame. The retry re-issues the *same* writev: the payload was already encrypted
+// in place under an IV that was already consumed, so re-sending the identical
+// bytes keeps the CTR keystream and the wire in step (unlike TCP, where a partial
+// send has already advanced the stream). EINTR is retried for free and does not
+// count against the budget. Anything else, or exhausting the budget, throws as
+// before so the path-liveness machinery still sees a genuinely dead link.
+ssize_t writev_with_retry(int fd, const iovec * iov, int iovcnt)
+{
+	// ~64 tries at 60us is under 4ms of worst-case backoff — comfortably inside a
+	// frame period even at a high refresh, and far cheaper than losing the frame.
+	constexpr int max_retries = 64;
+	constexpr long backoff_ns = 60'000;
+
+	for (int transient = 0;;)
+	{
+		ssize_t sent = ::writev(fd, iov, iovcnt);
+		if (sent >= 0)
+			return sent;
+
+		const int err = errno;
+		if (err == EINTR)
+			continue;
+
+		const bool retryable = (err == EAGAIN or err == EWOULDBLOCK or err == ENOBUFS);
+		if (not retryable or transient >= max_retries)
+			return sent; // caller reads errno
+
+		++transient;
+		timespec ts{.tv_sec = 0, .tv_nsec = backoff_ns};
+		::nanosleep(&ts, nullptr);
+	}
+}
+} // namespace
 
 const char * wivrn::invalid_packet::what() const noexcept
 {
@@ -413,7 +466,7 @@ size_t wivrn::UDP::send_raw(serialization_packet && packet)
 	for (const auto & span: data)
 		iovecs.emplace_back(span.data(), span.size());
 
-	if (ssize_t sent = ::writev(fd, iovecs.data(), iovecs.size()); sent >= 0)
+	if (ssize_t sent = writev_with_retry(fd, iovecs.data(), int(iovecs.size())); sent >= 0)
 		return sent;
 	throw std::system_error{errno, std::generic_category()};
 }

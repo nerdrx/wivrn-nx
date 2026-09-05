@@ -16,6 +16,11 @@
 #include <spdlog/spdlog.h>
 
 #include <chrono>
+#include <cmath>
+#include <algorithm>
+
+// Shared by every NX Warp stream in the process (see the push site).
+static std::atomic<uint32_t> g_decode_stride{1};
 
 #include <nxvc/transport/wire.h>
 
@@ -204,7 +209,8 @@ nxwarp_decoder::~nxwarp_decoder()
 	if (nxvc)
 		nxvc_vk_decoder_destroy(nxvc);
 	spdlog::info("nxwarp[{}]: {} frames decoded, {} dropped with a hole, {} refused by the codec, {} published with no view_info",
-	             stream_index, frames_decoded, frames_dropped_holes, frames_dropped_codec, frames_no_view_info);
+	             stream_index, frames_decoded.load(), frames_dropped_holes.load(), frames_dropped_codec.load(),
+	             frames_no_view_info.load());
 }
 
 // Network thread. The first thing that arrives on an NX Warp stream, and the only thing
@@ -603,9 +609,14 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 	// and how deep the worker's queue is. Printed here because a stalled worker
 	// prints nothing at all, which is exactly the case this line exists for.
 	{
-		net_frames++;
+		// net_frames is monotonic (the GUI differences it); the line below wants the
+		// count for this window, so it keeps its own mark of where the window began.
+		const uint64_t closed = net_frames.fetch_add(1, std::memory_order_relaxed) + 1;
 		if (unit.empty())
+		{
 			net_holes++;
+			last_hole = nxwarp_wire::last_report();
+		}
 		// A frame that arrived whole only because the window held it open after a newer
 		// frame had already started. This is the count that says what the window is
 		// worth: every one of these was a hole before it existed.
@@ -614,15 +625,27 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 		const auto now = std::chrono::steady_clock::now();
 		if (now - net_since > std::chrono::seconds(2))
 		{
-			const uint64_t placed = receiver->stats.tiles_placed - net_tiles_placed_at;
-			const uint64_t late = receiver->stats.tiles_late - net_tiles_late_at;
-			spdlog::info("nxwarp[{}] net: {} frames closed in {:.1f} s, {} with a hole, {} out-of-order datagrams, {} frames completed late, {} tiles placed of which {} after their band deadline, {} queued for the worker, {} decoded so far, {} stragglers dropped",
-			             stream_index, net_frames, std::chrono::duration<double>(now - net_since).count(), net_holes,
-			             net_out_of_order, net_late_completed, placed, late,
-			             jobs_pending.load(), frames_decoded, stragglers_dropped);
-			net_tiles_placed_at = receiver->stats.tiles_placed;
-			net_tiles_late_at = receiver->stats.tiles_late;
-			net_frames = 0;
+			spdlog::info("nxwarp[{}] net: {} frames closed in {:.1f} s, {} with a hole, {} out-of-order datagrams, {} frames completed late, {} queued for the worker, {} decoded so far, {} stragglers dropped; last hole {}/{} chunks, first missing {}, short {}, chunk {} B",
+			             stream_index, closed - net_frames_mark, std::chrono::duration<double>(now - net_since).count(), net_holes,
+			             net_out_of_order, net_late_completed, jobs_pending.load(), frames_decoded.load(), stragglers_dropped,
+			             last_hole.present, last_hole.expected, last_hole.first_missing == UINT32_MAX ? -1 : int(last_hole.first_missing), last_hole.short_chunk, chunk);
+			if (receiver)
+			{
+				const auto & rs = receiver->stats;
+				// Placed and late as deltas over this window, because "late" is the
+				// number that goes wrong quietly: a tile placed after its band's
+				// deadline is a tile that arrived and that the encoder is told did
+				// not. On a healthy link it is zero. Everything else stays a running
+				// total, which is what it is useful as.
+				spdlog::info("nxwarp[{}] rx: {} datagrams, placed {} (+{}), late {} (+{}), stale_frame {}, bad_range {}, bad_dir {}, bad_caps {}, bad_ver {}, auth_fail {}, replay {}, frozen {}, dup {}",
+				             stream_index, rs.datagrams,
+				             rs.tiles_placed, rs.tiles_placed - net_tiles_placed_at,
+				             rs.tiles_late, rs.tiles_late - net_tiles_late_at,
+				             rs.stale_frame, rs.bad_range, rs.bad_directory, rs.bad_caps, rs.bad_version, rs.auth_fail, rs.replay, rs.frozen_band, rs.duplicates);
+				net_tiles_placed_at = rs.tiles_placed;
+				net_tiles_late_at = rs.tiles_late;
+			}
+			net_frames_mark = closed;
 			net_holes = 0;
 			net_out_of_order = 0;
 			net_late_completed = 0;
@@ -661,6 +684,21 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 	// nxvc_vk_decoder_mark_missing() plus the received-tiles feedback -- or the
 	// encoder's shadow of the client's reference ring drifts (SYNTAX 6.11,
 	// INTEGRATION-DECISIONS 6). Wire that up before enabling inter here.
+	//
+	// And the drop must be the SAME decision on every stream: the render thread
+	// composes only a frame that every decoder has produced ("Failed to find a
+	// common frame for all decoders"), so two eyes each keeping "their newest"
+	// drift onto different frames and nothing is ever shown. Hence a shared
+	// stride: every stream decodes frames whose id is a multiple of the stride,
+	// and the stride is the worst measured decode time over the frame period,
+	// so the selected frames are exactly the ones the slowest decoder can keep
+	// up with, and they are the same frames on both eyes.
+	const uint32_t stride = g_decode_stride.load();
+	if (stride > 1 and (job.frame_id % stride) != 0)
+	{
+		++frames_dropped_late;
+		return;
+	}
 	if (jobs_pending.load() >= kMaxQueuedFrames)
 	{
 		jobs.drop_until([](const decode_job &) { return false; });
@@ -797,7 +835,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	// rather than dropping a frame that did decode.
 	if (not job.have_view_info)
 	{
-		++frames_no_view_info;
+		frames_no_view_info.fetch_add(1, std::memory_order_relaxed);
 		if (not warned_view_info)
 		{
 			warned_view_info = true;
@@ -886,9 +924,26 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			spdlog::info("nxwarp[{}]: {} frames in {:.1f} s: {:.0f} B/frame, wait-prev {:.1f} ms, wall {:.1f} ms, nxvc passA {:.1f} passB {:.1f} gpu {:.1f} ms; holes {}, refused {}",
 			             stream_index, prof.n, ms(t_end - prof.since) / 1000.0, prof.bytes / n,
 			             prof.wait_ms / n, prof.wall_ms / n, prof.pass_a_ms / n, prof.pass_b_ms / n, prof.gpu_ms / n,
-			             frames_dropped_holes, frames_dropped_codec);
+			             frames_dropped_holes.load(), frames_dropped_codec.load());
 			spdlog::info("nxwarp[{}]: {} frames dropped late (queue kept to {})",
-			             stream_index, frames_dropped_late, kMaxQueuedFrames);
+			             stream_index, frames_dropped_late.load(), kMaxQueuedFrames);
+
+			// The same window, republished for stats(): the GUI shows these under the
+			// latency figure instead of anybody reading the lines above out of the log.
+			prof_wall_ms.store(float(prof.wall_ms / n), std::memory_order_relaxed);
+			prof_gpu_ms.store(float(prof.gpu_ms / n), std::memory_order_relaxed);
+			prof_bytes.store(float(prof.bytes / n), std::memory_order_relaxed);
+			// Feed the shared stride from this stream's measured cost: ceil(wall / period).
+			// Streams only ever raise it quickly and lower it by one step per report, so
+			// a momentary hiccup does not flip the selection back and forth.
+			{
+				constexpr double period_ms = 1000.0 / 90.0;
+				const uint32_t want = std::clamp<uint32_t>(uint32_t(std::ceil((prof.wall_ms / n) / period_ms)), 1u, 8u);
+				uint32_t cur = g_decode_stride.load();
+				const uint32_t next = want > cur ? want : (cur > 1 ? cur - 1 : 1);
+				if (next != cur)
+					g_decode_stride.store(next);
+			}
 			prof = {};
 			prof.since = t_end;
 		}

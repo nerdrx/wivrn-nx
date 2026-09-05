@@ -41,6 +41,17 @@
 
 namespace wivrn::nxwarp_wire
 {
+// Why the last reassemble() on this thread returned empty, for the two-second report.
+struct reassemble_report
+{
+	uint32_t expected = 0; // highest chunk index seen + 1
+	uint32_t present = 0;
+	uint32_t first_missing = UINT32_MAX;
+	uint32_t out_of_range = 0; // tile indices past the grid
+	bool short_chunk = false;  // a non-last chunk shorter than chunk_bytes
+};
+reassemble_report last_report();
+
 
 // The frame's byte length, little endian, in front of chunk 0.
 inline constexpr size_t kFrameLenBytes = 4;
@@ -53,7 +64,8 @@ size_t chunk_bytes(const nxt::StreamConfig & cfg);
 // True when `by_index` already holds a whole frame: the run of tile indices from 0 has no
 // hole, no chunk before the last is short, and the length prefix on chunk 0 is covered by
 // the bytes that arrived. Exactly the conditions reassemble() checks -- it calls this
-// first -- but without building the frame.
+// first -- but without building the frame. It fills last_report() either way, so a frame
+// that is not here yet can still say what it is waiting for.
 //
 // The windowed reassembler in nxwarp_decoder needs this because "the last run of the frame
 // arrived" is not the same statement as "the frame is here": on a link that reorders, the

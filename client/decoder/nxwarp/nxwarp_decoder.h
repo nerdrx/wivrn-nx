@@ -95,25 +95,26 @@ class nxwarp_decoder : public decoder
 		double wait_ms = 0, wall_ms = 0, pass_a_ms = 0, pass_b_ms = 0, gpu_ms = 0;
 		uint64_t bytes = 0;
 	} prof;
-	// Network-thread counters for the same report. net_* are per reporting window;
-	// stragglers_dropped is cumulative.
+	// Network-thread counters for the same report.
 	std::chrono::steady_clock::time_point net_since = std::chrono::steady_clock::now();
-	uint64_t net_frames = 0, net_holes = 0, stragglers_dropped = 0;
+	uint64_t net_holes = 0, stragglers_dropped = 0;
 	// Datagrams that arrived belonging to a frame older than the newest one seen, and
 	// frames that were completed by such a datagram. On a link that never reorders both
 	// stay zero; on a live 90 fps session with two eye streams on one socket they do not,
 	// and the second number is exactly the frames the one-frame reassembler used to lose.
 	uint64_t net_out_of_order = 0, net_late_completed = 0;
-	// Transport counters at the last report, so the line carries deltas rather than
-	// running totals: tiles that were placed after their band deadline had fired are
-	// tiles the encoder is never told about.
+	// Transport counters at the last report, so the "rx:" line carries deltas rather than
+	// running totals.
 	uint64_t net_tiles_placed_at = 0, net_tiles_late_at = 0;
+	// Value of net_frames when the current two-second window opened.
+	uint64_t net_frames_mark = 0;
+	nxwarp_wire::reassemble_report last_hole;
 	std::atomic<int64_t> jobs_pending = 0;
 	// Deepest the worker's backlog is allowed to get before the older frames are
 	// discarded in favour of the newest one. Two lets one frame decode while the
 	// next waits; anything more is latency.
 	static constexpr int64_t kMaxQueuedFrames = 1;
-	uint64_t frames_dropped_late = 0;
+	std::atomic<uint64_t> frames_dropped_late = 0;
 
 	// One frame's work, complete in itself: by the time the worker runs, the tile slots
 	// and the pending feedback already belong to the next frame.
@@ -263,20 +264,48 @@ public:
 	// The real entry point. Called on the network thread, once per arriving packet.
 	void push_datagram(to_headset::nxwarp_datagram && dg);
 
+	static std::vector<wivrn::video_codec> supported_codecs();
+
 	// End of stream: close whatever is still under assembly, so a frame whose tail was
 	// merely late is not counted as lost because nothing came after it to push it out.
 	// Called from the same thread as push_datagram.
 	void flush_frames();
 
-	static std::vector<wivrn::video_codec> supported_codecs();
-
 	// The transport's own counters, or nullptr before the stream header has arrived.
 	// Read on the network thread, or after it has stopped: tiles_placed against
-	// tiles_late is what says whether the band deadlines are firing sanely, and that is
-	// invisible from anywhere else in the client.
+	// tiles_late is what says whether the band deadlines are firing sanely.
 	const nxt::ReceiverStats * receiver_stats() const
 	{
 		return receiver ? &receiver->stats : nullptr;
+	}
+
+	// What the GUI is allowed to see. Monotonic counters plus the last completed
+	// two-second profile window, all read through atomics: the readout differences
+	// the counters itself rather than parsing the log lines decode_unit prints.
+	struct live_stats
+	{
+		uint64_t frames_closed = 0;        // reassembled off the wire, decoded or not
+		uint64_t frames_decoded = 0;       // handed to the render thread
+		uint64_t frames_dropped_late = 0;  // refused to keep the worker's backlog short
+		uint64_t frames_dropped_holes = 0; // a chunk never arrived
+		uint64_t frames_dropped_codec = 0; // nxvc refused the unit
+		float decode_wall_ms = 0;          // mean, over the last two-second window
+		float decode_gpu_ms = 0;
+		float bytes_per_frame = 0;
+	};
+
+	live_stats stats() const
+	{
+		return {
+		        .frames_closed = net_frames.load(std::memory_order_relaxed),
+		        .frames_decoded = frames_decoded.load(std::memory_order_relaxed),
+		        .frames_dropped_late = frames_dropped_late.load(std::memory_order_relaxed),
+		        .frames_dropped_holes = frames_dropped_holes.load(std::memory_order_relaxed),
+		        .frames_dropped_codec = frames_dropped_codec.load(std::memory_order_relaxed),
+		        .decode_wall_ms = prof_wall_ms.load(std::memory_order_relaxed),
+		        .decode_gpu_ms = prof_gpu_ms.load(std::memory_order_relaxed),
+		        .bytes_per_frame = prof_bytes.load(std::memory_order_relaxed),
+		};
 	}
 
 private:
@@ -288,10 +317,10 @@ private:
 	inflight_frame * oldest_in_flight();
 	inflight_frame * frame_slot(uint16_t frame_id, uint8_t path_id);
 	void close_frame(inflight_frame & f);
-	// Bands whose share of the frame period has elapsed, over every frame in flight.
-	void fire_elapsed_deadlines(uint64_t now);
 	void close_complete_prefix();
 	void evict_below_window();
+	// Bands whose share of the frame period has elapsed, over every frame in flight.
+	void fire_elapsed_deadlines(uint64_t now);
 
 	vk::raii::Device & device;
 	vk::raii::PhysicalDevice & physical_device;
@@ -325,7 +354,6 @@ private:
 	// of it; 90 Hz when the description does not say.
 	uint32_t frame_period_us = 11111;
 
-
 	// --- the frames in flight, network thread only. See THE WINDOW POLICY above.
 	// Fixed storage, sized once from the stream header: the per-tile slot vectors keep
 	// their allocation across frames, which is what the network thread wants.
@@ -336,16 +364,22 @@ private:
 	bool any_retired = false;
 	uint64_t wivrn_frame_idx = 0;
 
+
 	// --- worker
 	utils::sync_queue<decode_job> jobs;
 	std::thread worker;
 
 	// Counters logged when the stream ends: the only way to tell "the link is dropping
 	// datagrams" from "the mapping is wrong".
-	uint64_t frames_decoded = 0, frames_dropped_holes = 0, frames_dropped_codec = 0;
+	std::atomic<uint64_t> frames_decoded = 0, frames_dropped_holes = 0, frames_dropped_codec = 0;
 	// Frames that decoded but whose first datagram -- the only one carrying view_info --
 	// was lost and whose tiles came back through FEC. Published with a default pose.
-	uint64_t frames_no_view_info = 0;
+	std::atomic<uint64_t> frames_no_view_info = 0;
+	// Frames the reassembler closed, decoded or not: the rate the server is actually
+	// putting on the wire, as seen from here.
+	std::atomic<uint64_t> net_frames = 0;
+	// Last completed two-second profile window, republished for stats() below.
+	std::atomic<float> prof_wall_ms = 0, prof_gpu_ms = 0, prof_bytes = 0;
 	bool warned_view_info = false;
 };
 

@@ -11,6 +11,9 @@
 
 namespace wivrn::nxwarp_wire
 {
+static thread_local reassemble_report g_last_report;
+reassemble_report last_report() { return g_last_report; }
+
 
 size_t chunk_bytes(const nxt::StreamConfig & cfg)
 {
@@ -50,19 +53,36 @@ bool is_complete(const nxt::StreamConfig & cfg,
 		}
 	}
 	if (not any)
+	{
+		g_last_report = reassemble_report{};
 		return false;
+	}
 
+	// Account before judging, so a frame that is not here can say what it is missing --
+	// which is the whole of the two-second "hole" line, and is just as useful for a frame
+	// the window is still holding open as for one it gave up on.
+	reassemble_report r;
+	r.expected = highest + 1;
 	size_t total = 0;
 	for (uint32_t i = 0; i <= highest; ++i)
 	{
 		if (by_index[i].empty())
-			return false; // a hole: this frame cannot be decoded by this backend
+		{
+			if (r.first_missing == UINT32_MAX)
+				r.first_missing = i;
+			continue;
+		}
+		++r.present;
+		total += by_index[i].size();
 		// Only the last chunk sent may be short, and the sender fills chunks in order,
 		// so a short one anywhere else is a malformed stream.
 		if (i != highest and by_index[i].size() != chunk)
-			return false;
-		total += by_index[i].size();
+			r.short_chunk = true;
 	}
+	g_last_report = r;
+
+	if (r.present != r.expected or r.short_chunk)
+		return false;
 
 	// The length prefix is what turns "everything that arrived" into "the whole frame":
 	// a frame whose tail chunks were lost reassembles into a prefix that is otherwise

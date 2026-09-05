@@ -67,6 +67,10 @@ public:
 		cfg.intra_period = c.intra_period;
 
 		// Encoder-side speed levers. None of them changes how a stream decodes.
+		// Eight rANS lanes, fixed. The library's "auto" lane count drops to one
+		// lane per tile at high QP, which costs the Adreno decoder 4x of Pass A
+		// for a 30% rate saving it cannot afford (vk/decoder README, live shape).
+		cfg.nsub_log2 = 3;
 		cfg.rdo = 0;         // dead-zone quantiser instead of the RD trellis (~2.7x)
 		cfg.qp_search = 0;   // no per-tile QP offset search
 		cfg.intra_dir = c.intra_dir ? 1 : 0;

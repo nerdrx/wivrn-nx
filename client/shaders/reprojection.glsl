@@ -33,6 +33,8 @@ layout(push_constant) uniform pc
 	//    spans; 0 disables the warp and is what every frame that has a fresh image
 	//    or no field uses
 	// y: longest vector in the field, as a fraction of the eye image
+	// z: frame smoothing blend weight, the share of the *previous* decoded frame mixed
+	//    into this one; 0 disables it and prev_rgb is then never read
 	vec4 motion;
 	// Ambient bias lighting
 	// x: strength of the peripheral colour wash at the very edge, 0 disables it
@@ -85,6 +87,11 @@ layout(set = 0, binding = 0) uniform sampler2D rgb[alpha + 1];
 // One cell per motion vector, covering the whole eye image, sampled with the
 // hardware bilinear filter so the warp varies smoothly across cell boundaries
 layout(set = 0, binding = 1) uniform sampler2D motion_field;
+// Frame smoothing: the colour image of the decoded frame this one replaces, bound with
+// the same sampler and the same geometry as rgb[0]. When smoothing is off, or there is
+// no usable previous frame, this is bound to rgb[0] itself and motion.z is zero, so the
+// mix below never runs and the output is byte identical to not having the feature.
+layout(set = 0, binding = 2) uniform sampler2D prev_rgb;
 
 layout(location = 0) in vec4 inUV;
 layout(location = 1) in vec2 inPosition;
@@ -466,6 +473,20 @@ void main()
 	// content near the edge without ever making transparent periphery opaque.
 	if (glow.x > 0.0)
 		colour.rgb = ambient_glow(colour.rgb, uv, inPosition, glow.x, glow.y);
+
+	// Frame smoothing. The decoded frame rate can sit far below the panel's, and each
+	// decoded frame is then held for several refreshes: the picture stands still and then
+	// jumps. Blending the first refresh of a new frame half and half with the frame it
+	// replaces splits that jump into two, which the eye reads as a short motion blur
+	// rather than a step. It is a softening of the transition, not an extra frame: no
+	// motion is estimated and nothing is synthesized.
+	//
+	// Done here, after sharpening and the glow, in the raw sampled (gamma) space every
+	// other effect in this pass works in, and on the colour channels only: the alpha
+	// stream that carries passthrough transparency is never blended, so a frame's
+	// transparent periphery cannot bleed into the next one's.
+	if (motion.z > 0.0)
+		colour.rgb = mix(colour.rgb, texture(prev_rgb, uv).rgb, motion.z);
 
 	if (alpha == 1)
 	{

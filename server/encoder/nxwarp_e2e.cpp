@@ -46,9 +46,11 @@
 //
 //   There are no sockets and no threads pretending to be a network: the harness calls
 //   `push_datagram` on the decoder directly from the encode loop, which is where WiVRn's
-//   network thread would call it. Ordering is therefore the sender's order. That is the
-//   one thing this test does not stress; `nxwarp-loopback --loss` covers reordering on the
-//   reassembly path.
+//   network thread would call it. `--reorder` permutes the delivery order across frame
+//   boundaries, which is the case a live 90 fps link produces constantly, but the calls are
+//   still synchronous: the datagrams of one frame arrive microseconds apart while whole
+//   frames are tens of milliseconds apart, so there is no jitter and the clock half of the
+//   band deadline policy is only ever exercised between frames.
 //
 // WHAT IT ASSERTS
 //
@@ -69,6 +71,14 @@
 //   5. Loss conceals rather than stalls. A five percent run must keep publishing frames and
 //      must terminate; frames with holes are dropped, which is this backend's documented
 //      behaviour (see nxwarp_packetize.h), but the stream must not wedge.
+//   6. Reordering costs nothing. With no loss on the link, every frame presented must
+//      reassemble whole however the datagrams were ordered -- judged on
+//      nxwarp_host::on_frame_unit, because a frame that reassembled and was then discarded
+//      as stale by the bounded worker queue is not a reassembly loss -- and frames must
+//      reach the worker in frame order.
+//   7. Tiles that arrived are counted as arrived. The transport marks a tile placed after
+//      its band deadline `late` and drops it from the feedback, so the encoder is told the
+//      headset does not have a tile it has. Under ten percent, or the run fails.
 //
 // Run:
 //   wivrn-nxwarp-e2e --yuv in.yuv --width W --height H [--frames N] [--loss 0.05]

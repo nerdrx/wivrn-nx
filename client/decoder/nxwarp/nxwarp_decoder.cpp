@@ -16,6 +16,11 @@
 #include <spdlog/spdlog.h>
 
 #include <chrono>
+#include <cmath>
+#include <algorithm>
+
+// Shared by every NX Warp stream in the process (see the push site).
+static std::atomic<uint32_t> g_decode_stride{1};
 
 #include <nxvc/transport/wire.h>
 
@@ -444,6 +449,21 @@ void nxwarp_decoder::finish_frame(uint8_t path_id)
 	// nxvc_vk_decoder_mark_missing() plus the received-tiles feedback -- or the
 	// encoder's shadow of the client's reference ring drifts (SYNTAX 6.11,
 	// INTEGRATION-DECISIONS 6). Wire that up before enabling inter here.
+	//
+	// And the drop must be the SAME decision on every stream: the render thread
+	// composes only a frame that every decoder has produced ("Failed to find a
+	// common frame for all decoders"), so two eyes each keeping "their newest"
+	// drift onto different frames and nothing is ever shown. Hence a shared
+	// stride: every stream decodes frames whose id is a multiple of the stride,
+	// and the stride is the worst measured decode time over the frame period,
+	// so the selected frames are exactly the ones the slowest decoder can keep
+	// up with, and they are the same frames on both eyes.
+	const uint32_t stride = g_decode_stride.load();
+	if (stride > 1 and (job.frame_id % stride) != 0)
+	{
+		++frames_dropped_late;
+		return;
+	}
 	if (jobs_pending.load() >= kMaxQueuedFrames)
 	{
 		jobs.drop_until([](const decode_job &) { return false; });
@@ -662,6 +682,17 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			             frames_dropped_holes, frames_dropped_codec);
 			spdlog::info("nxwarp[{}]: {} frames dropped late (queue kept to {})",
 			             stream_index, frames_dropped_late, kMaxQueuedFrames);
+			// Feed the shared stride from this stream's measured cost: ceil(wall / period).
+			// Streams only ever raise it quickly and lower it by one step per report, so
+			// a momentary hiccup does not flip the selection back and forth.
+			{
+				constexpr double period_ms = 1000.0 / 90.0;
+				const uint32_t want = std::clamp<uint32_t>(uint32_t(std::ceil((prof.wall_ms / n) / period_ms)), 1u, 8u);
+				uint32_t cur = g_decode_stride.load();
+				const uint32_t next = want > cur ? want : (cur > 1 ? cur - 1 : 1);
+				if (next != cur)
+					g_decode_stride.store(next);
+			}
 			prof = {};
 			prof.since = t_end;
 		}

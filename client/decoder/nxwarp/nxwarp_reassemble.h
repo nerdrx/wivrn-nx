@@ -41,6 +41,17 @@
 
 namespace wivrn::nxwarp_wire
 {
+// Why the last reassemble() on this thread returned empty, for the two-second report.
+struct reassemble_report
+{
+	uint32_t expected = 0; // highest chunk index seen + 1
+	uint32_t present = 0;
+	uint32_t first_missing = UINT32_MAX;
+	uint32_t out_of_range = 0; // tile indices past the grid
+	bool short_chunk = false;  // a non-last chunk shorter than chunk_bytes
+};
+reassemble_report last_report();
+
 
 // The frame's byte length, little endian, in front of chunk 0.
 inline constexpr size_t kFrameLenBytes = 4;

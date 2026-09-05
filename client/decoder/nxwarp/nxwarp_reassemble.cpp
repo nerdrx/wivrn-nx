@@ -11,6 +11,9 @@
 
 namespace wivrn::nxwarp_wire
 {
+static thread_local reassemble_report g_last_report;
+reassemble_report last_report() { return g_last_report; }
+
 
 size_t chunk_bytes(const nxt::StreamConfig & cfg)
 {
@@ -42,6 +45,26 @@ std::vector<uint8_t> reassemble(const nxt::StreamConfig & cfg,
 	if (not any)
 		return out;
 
+	// Account before judging, so a rejected frame can say what it was missing.
+	{
+		reassemble_report r;
+		r.expected = highest + 1;
+		for (uint32_t i = 0; i <= highest; ++i)
+		{
+			if (by_index[i].empty())
+			{
+				if (r.first_missing == UINT32_MAX)
+					r.first_missing = i;
+			}
+			else
+			{
+				++r.present;
+				if (i != highest and by_index[i].size() != chunk)
+					r.short_chunk = true;
+			}
+		}
+		g_last_report = r;
+	}
 	out.reserve(size_t(highest + 1) * chunk);
 	for (uint32_t i = 0; i <= highest; ++i)
 	{

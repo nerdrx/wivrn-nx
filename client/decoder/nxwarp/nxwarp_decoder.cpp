@@ -410,12 +410,22 @@ void nxwarp_decoder::finish_frame(uint8_t path_id)
 	{
 		net_frames++;
 		if (unit.empty())
+		{
 			net_holes++;
+			last_hole = nxwarp_wire::last_report();
+		}
 		const auto now = std::chrono::steady_clock::now();
 		if (now - net_since > std::chrono::seconds(2))
 		{
-			spdlog::info("nxwarp[{}] net: {} frames closed in {:.1f} s, {} with a hole, {} queued for the worker, {} decoded so far, {} stragglers dropped",
-			             stream_index, net_frames, std::chrono::duration<double>(now - net_since).count(), net_holes, jobs_pending.load(), frames_decoded, stragglers_dropped);
+			spdlog::info("nxwarp[{}] net: {} frames closed in {:.1f} s, {} with a hole, {} queued for the worker, {} decoded so far, {} stragglers dropped; last hole {}/{} chunks, first missing {}, short {}, chunk {} B",
+			             stream_index, net_frames, std::chrono::duration<double>(now - net_since).count(), net_holes, jobs_pending.load(), frames_decoded, stragglers_dropped,
+			             last_hole.present, last_hole.expected, last_hole.first_missing == UINT32_MAX ? -1 : int(last_hole.first_missing), last_hole.short_chunk, chunk);
+			if (receiver)
+			{
+				const auto & rs = receiver->stats;
+				spdlog::info("nxwarp[{}] rx: {} datagrams, placed {}, late {}, stale_frame {}, bad_range {}, bad_dir {}, bad_caps {}, bad_ver {}, auth_fail {}, replay {}, frozen {}, dup {}",
+				             stream_index, rs.datagrams, rs.tiles_placed, rs.tiles_late, rs.stale_frame, rs.bad_range, rs.bad_directory, rs.bad_caps, rs.bad_version, rs.auth_fail, rs.replay, rs.frozen_band, rs.duplicates);
+			}
 			net_frames = 0;
 			net_holes = 0;
 			net_since = now;

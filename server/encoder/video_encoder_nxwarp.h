@@ -24,6 +24,7 @@
 #include "vk/allocation.h"
 
 #include <array>
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -119,6 +120,14 @@ class video_encoder_nxwarp : public video_encoder
 	std::unique_ptr<nxt::Aead> aead;
 	std::unique_ptr<nxt::Sender> sender;
 	nxt::StreamConfig stream_cfg;
+	// The AEAD key material, kept because reset_stream() builds a new Sender with it.
+	nxt::Key session_key{}, session_salt{};
+	// What striper().configure_path was told at construction, re-applied to the Sender
+	// a resumed session builds.
+	double path_bps = 0;
+	// Rebuilds `sender` and re-applies its configuration. Callers other than the
+	// constructor hold sender_mutex across it.
+	void rebuild_sender();
 	// Serialises encode()'s use of the sender against feedback arriving on the
 	// network thread; nxt::Sender is not internally synchronised.
 	std::mutex sender_mutex;
@@ -135,6 +144,9 @@ class video_encoder_nxwarp : public video_encoder
 	std::vector<uint8_t> received_tiles;
 	uint16_t previous_frame_id = 0;
 	bool have_previous_frame = false;
+	// Set by reset() on the session thread, acted on by the next encode(): the client
+	// holds nothing, so the frame is coded with no temporal reference.
+	std::atomic<bool> client_holds_nothing{false};
 
 	// The stream header goes out on the control (TCP) socket, because a client
 	// that misses it cannot decode anything at all. Repeated periodically so a
@@ -171,6 +183,14 @@ public:
 	std::optional<data> encode(uint8_t slot, uint64_t frame_id) override;
 
 	void on_nxwarp_feedback(uint8_t path_id, std::span<const uint8_t> payload) override;
+
+	// The client holds nothing of the frame just sent: code the next one without a
+	// temporal reference. Same client, same transport -- the sender is left alone.
+	void reset() override;
+
+	// A new client. See video_encoder::reset_stream: this is the one that also puts
+	// the transport back to its initial state and resends the stream header.
+	void reset_stream() override;
 
 	// Cumulative encode timing, for a harness that wants the number rather
 	// than the two-second log line: total frames, total and worst-case

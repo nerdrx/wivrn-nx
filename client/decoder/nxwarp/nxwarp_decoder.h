@@ -122,6 +122,34 @@ class nxwarp_decoder : public decoder
 	// Value of net_frames when the current two-second window opened.
 	uint64_t net_frames_mark = 0;
 	nxwarp_wire::reassemble_report last_hole;
+	// --- how fast frames actually arrive -------------------------------------
+	//
+	// When the previous frame unit was handed toward the worker, and a smoothed
+	// interval between them: the rate this stream is being SENT at, measured on the
+	// network thread.
+	//
+	// The decode stride below is "how many arriving frames does one decode take", and
+	// that question has an arrival rate in it. It used to be answered against a
+	// hard-coded 90 Hz, which is the rate the server composites at and was the rate it
+	// sent at -- so a 31 ms decode gave a stride of 3 and the decoder threw away two
+	// frames in three for ever. It kept giving 3 no matter what the server did about
+	// it: a server that paced its sends down to the rate this device can actually
+	// manage would still have had two frames in three discarded here, each one
+	// reported as not held and answered with an all-intra frame. Against the measured
+	// arrival period the same 31 ms decode gives a stride of 1 as soon as the frames
+	// are 31 ms apart, which is what closes that loop.
+	std::chrono::steady_clock::time_point arrival_last{};
+	bool arrival_seeded = false;
+	std::atomic<float> arrival_period_ms = 0;
+
+	// Harness hook: pretend a decode costs this many milliseconds on top of what it
+	// really costs (set_simulated_decode_ms). Zero everywhere but in
+	// wivrn-nxwarp-e2e, whose desktop GPU decodes far too fast to reproduce a
+	// headset's decode stride otherwise. It is a real wait on the worker thread, so
+	// the stride, the bounded queue, the not-held reports and the decode figure sent
+	// to the server are all the shipping ones reacting to a slow device.
+	double sim_decode_ms = 0;
+
 	std::atomic<int64_t> jobs_pending = 0;
 	// Deepest the worker's backlog is allowed to get before the older frames are
 	// discarded in favour of the newest one. Two lets one frame decode while the
@@ -263,6 +291,12 @@ public:
 	               shard_accumulator * accumulator);
 
 	~nxwarp_decoder() override;
+
+	// See sim_decode_ms. For wivrn-nxwarp-e2e; must be set before the first frame.
+	void set_simulated_decode_ms(double ms)
+	{
+		sim_decode_ms = ms;
+	}
 
 	// The shard path is not used: NX Warp has its own datagram type.
 	void push_data(std::span<std::span<const uint8_t>> data, uint64_t frame_index, bool partial) override {}

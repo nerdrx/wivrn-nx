@@ -50,6 +50,19 @@ inline constexpr size_t kFrameLenBytes = 4;
 // budget on the first datagram of every band.
 size_t chunk_bytes(const nxt::StreamConfig & cfg);
 
+// True when `by_index` already holds a whole frame: the run of tile indices from 0 has no
+// hole, no chunk before the last is short, and the length prefix on chunk 0 is covered by
+// the bytes that arrived. Exactly the conditions reassemble() checks -- it calls this
+// first -- but without building the frame.
+//
+// The windowed reassembler in nxwarp_decoder needs this because "the last run of the frame
+// arrived" is not the same statement as "the frame is here": on a link that reorders, the
+// datagram carrying the last run routinely overtakes an earlier one, and a frame closed on
+// the flag alone is closed with a hole it was about to fill.
+bool is_complete(const nxt::StreamConfig & cfg,
+                 std::span<const std::vector<uint8_t>> by_index,
+                 size_t chunk);
+
 // `tiles` is everything Receiver::on_datagram delivered for one frame, in any order.
 // Returns the frame's bytes with the length prefix stripped, or an empty vector if the run
 // of tile indices from 0 has a hole in it, if a tile other than the last is short, or if

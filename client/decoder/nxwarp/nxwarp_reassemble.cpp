@@ -19,13 +19,23 @@ size_t chunk_bytes(const nxt::StreamConfig & cfg)
 	return budget > reserve ? budget - reserve : 0;
 }
 
-std::vector<uint8_t> reassemble(const nxt::StreamConfig & cfg,
-                                std::span<const std::vector<uint8_t>> by_index,
-                                size_t chunk)
+namespace
 {
-	std::vector<uint8_t> out;
+// The length prefix chunk 0 carries, once at least four bytes of it are here.
+uint32_t declared_len(const std::vector<uint8_t> & chunk0)
+{
+	return uint32_t(chunk0[0]) | (uint32_t(chunk0[1]) << 8) |
+	       (uint32_t(chunk0[2]) << 16) | (uint32_t(chunk0[3]) << 24);
+}
+} // namespace
+
+bool is_complete(const nxt::StreamConfig & cfg,
+                 std::span<const std::vector<uint8_t>> by_index,
+                 size_t chunk)
+{
+	(void)cfg;
 	if (chunk == 0 or by_index.empty())
-		return out;
+		return false;
 
 	// Sparse by design: a frame is a prefix of the grid and everything past the last
 	// chunk is simply not sent.
@@ -40,29 +50,47 @@ std::vector<uint8_t> reassemble(const nxt::StreamConfig & cfg,
 		}
 	}
 	if (not any)
-		return out;
+		return false;
 
-	out.reserve(size_t(highest + 1) * chunk);
+	size_t total = 0;
 	for (uint32_t i = 0; i <= highest; ++i)
 	{
 		if (by_index[i].empty())
-			return {}; // a hole: this frame cannot be decoded by this backend
+			return false; // a hole: this frame cannot be decoded by this backend
 		// Only the last chunk sent may be short, and the sender fills chunks in order,
 		// so a short one anywhere else is a malformed stream.
 		if (i != highest and by_index[i].size() != chunk)
-			return {};
-		out.insert(out.end(), by_index[i].begin(), by_index[i].end());
+			return false;
+		total += by_index[i].size();
 	}
 
 	// The length prefix is what turns "everything that arrived" into "the whole frame":
 	// a frame whose tail chunks were lost reassembles into a prefix that is otherwise
 	// indistinguishable from a complete small frame.
-	if (out.size() < kFrameLenBytes)
-		return {};
-	const uint32_t declared = uint32_t(out[0]) | (uint32_t(out[1]) << 8) |
-	                          (uint32_t(out[2]) << 16) | (uint32_t(out[3]) << 24);
-	if (out.size() < size_t(kFrameLenBytes) + declared)
-		return {};
+	if (by_index[0].size() < kFrameLenBytes or total < kFrameLenBytes)
+		return false;
+	return total >= size_t(kFrameLenBytes) + declared_len(by_index[0]);
+}
+
+std::vector<uint8_t> reassemble(const nxt::StreamConfig & cfg,
+                                std::span<const std::vector<uint8_t>> by_index,
+                                size_t chunk)
+{
+	std::vector<uint8_t> out;
+	if (not is_complete(cfg, by_index, chunk))
+		return out;
+
+	uint32_t highest = 0;
+	for (uint32_t i = 0; i < by_index.size(); ++i)
+	{
+		if (not by_index[i].empty())
+			highest = i;
+	}
+	out.reserve(size_t(highest + 1) * chunk);
+	for (uint32_t i = 0; i <= highest; ++i)
+		out.insert(out.end(), by_index[i].begin(), by_index[i].end());
+
+	const uint32_t declared = declared_len(by_index[0]);
 	out.erase(out.begin(), out.begin() + kFrameLenBytes);
 	out.resize(declared);
 	return out;

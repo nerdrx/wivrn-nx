@@ -43,8 +43,13 @@ struct nxwarp_datagram
   `nxt::PoseHeader` is quantised, opaque to the transport, and carries neither fov nor
   foveation. It rides the frame's own first datagram rather than the control socket because
   it must arrive *with* its picture: a pose that overtakes or trails its frame is worse than
-  no pose. Losing it is not a separate failure mode — under the chunk mapping of section 2 a
-  frame whose first datagram is missing does not reassemble at all.
+  no pose. Losing it is *nearly* not a separate failure mode — under the chunk mapping of
+  section 2 a frame whose first datagram is missing does not reassemble — but the
+  transport's own FEC can rebuild that datagram's tiles from the parity of its group, and
+  `view_info` rides the WiVRn packet around them, not the tiles. Such a frame arrives whole
+  with no pose; the decoder counts it, warns once, and publishes it with a default rather
+  than throwing away a picture that decoded. `wivrn-nxwarp-e2e` sees one every few hundred
+  datagrams at 5 % loss and asserts it never happens on a link that lost nothing.
 * `path_id == 0xFF`: **not an nxt datagram**. It is the codec's raw `.nxv` stream header,
   sent on the control socket and repeated every 90 frames, and it goes to
   `nxvc_vk_decoder_parse_stream_header`. It is what creates both the decoder and the
@@ -115,8 +120,72 @@ The pose header is subtracted because the first datagram of every band replicate
 Reassembly (`client/decoder/nxwarp/nxwarp_reassemble.cpp`) is a concatenation in tile-index
 order, a length check, and nothing else. It returns nothing — and the client drops the
 frame — when the run of indices from 0 has a hole, when a chunk other than the last is
-short, or when fewer bytes arrived than the prefix declares. The band's feedback has
-already gone out by then, which is how the encoder learns to refresh.
+short, or when fewer bytes arrived than the prefix declares. `is_complete()` in the same
+file answers the same question without building the frame, which is what the windowed
+reassembler below asks once a frame's last run has arrived. The band's feedback has already
+gone out by then, which is how the encoder learns to refresh.
+
+### 2.1 The reassembly window
+
+`nxwarp_decoder` keeps **three** frames under assembly at once (`kFrameWindow`) and routes
+every datagram to its own frame by `frame_id`. It used to keep one, and close it the moment
+a datagram of a different frame arrived. That was not merely lossy, it was unstable: a
+straggler of frame N arriving after the head of N+1 reopened N and closed N+1 with a hole,
+whereupon N+1's next datagram reopened N+1 and closed N — a cascade that holed 180 of 180
+frames per two seconds, on both eyes, over a clean Wi-Fi link.
+
+Frame ids are sequential modulo 2^16, so every comparison is on an `int16_t` difference.
+With `newest` the highest id seen, the window is the closed range
+`[newest - (kFrameWindow - 1), newest]`:
+
+* a datagram inside the window and not yet retired goes to that frame's entry, which is
+  created on the frame's first datagram;
+* a datagram below the window floor, or for a frame already retired, is dropped as a
+  straggler — it can no longer change any outcome, and dropping it is what keeps the
+  cascade from starting;
+* a frame closes when it is **complete** — its last run has arrived *and* its bytes
+  reassemble, which are two different statements on a link that reorders — when a newer
+  frame pushes it below the floor, or at end of stream (`flush_frames()`).
+
+Frames are always closed oldest first, so the worker sees them in frame order and a frame
+that completes while an older one is still in flight waits for it. That wait is bounded by
+the window, so a lost frame costs at most two frames of extra latency and never a stall.
+Everything downstream is unchanged: the same drop-with-hole accounting, the same
+`from_headset::feedback` per frame with its own `received_first_packet`, and the same
+bounded worker queue (`kMaxQueuedFrames`).
+
+The two-second `net:` line reports frames closed, holes, **out-of-order datagrams**,
+**frames completed late** (frames that arrived whole only because the window held them open
+after a newer frame had started — every one of these was a hole before the window existed),
+tiles placed against tiles placed after their band deadline, queue depth, frames decoded and
+stragglers dropped.
+
+### 2.2 Band deadlines
+
+A band's deadline is when the receiver stops counting arrivals for it: a tile placed
+afterwards is marked `late` and drops out of the feedback, so the encoder is told the
+headset does not have a tile it does have.
+
+The first implementation fired band `b` on the first datagram *of band `b` of the same
+frame* — the loop ran `b <= last_band`, so a band closed its own deadline the instant it
+opened. A live headset counted **13629 late tiles out of 13991 placed** over two seconds on
+a clean link with no holes at all. Closing on the next band's first datagram instead is only
+slightly better: ordinary within-frame reordering puts a datagram of band `b+1` in front of
+the rest of band `b`.
+
+A band now closes on evidence independent of its own frame's datagram order, whichever comes
+first:
+
+* a **later frame** carrying data for band `b` — the sender emits frames in order, so band
+  `b` of a newer frame means band `b` of every older frame is finished;
+* the **clock**: band `b` is due at its frame's first arrival plus `(b + 1) / bands` of the
+  frame period, taken from `video_stream_description::frame_rate` (90 Hz if it says
+  nothing). This is the only rule that can close a band on a sender that went quiet;
+* the frame closing, which fires whatever it still owes.
+
+`wivrn-nxwarp-e2e` reports the transport's `tiles_placed` against `tiles_late` and fails if
+more than 10 % of what arrived is counted as late. Every run in `docs/NXWARP-E2E.md` is at
+0.0 %.
 
 **Why it is not one tile per tile yet:** the CPU reference codec's C ABI reports a tile's
 payload *length* but not its *offset*, so the server cannot hand the transport real

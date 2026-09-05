@@ -122,9 +122,19 @@ class video_encoder_nxwarp : public video_encoder
 	nxt::StreamConfig stream_cfg;
 	// The AEAD key material, kept because reset_stream() builds a new Sender with it.
 	nxt::Key session_key{}, session_salt{};
-	// What striper().configure_path was told at construction, re-applied to the Sender
-	// a resumed session builds.
+	// The transport's own path budget: what striper().configure_path was told, and what
+	// is re-applied to the Sender a resumed session builds.
+	//
+	// It follows the bitrate controller. It used to be set once, at construction, from
+	// the initial split -- so a session whose controller had walked the bitrate down to
+	// a fifth of that still had a transport pacing as though it had the whole of the
+	// original budget. The QP controller keeps the frames small either way, so nothing
+	// looked broken; what was lost is that the transport's pacing and its striping
+	// decisions were being made against a number nobody was at any more.
 	double path_bps = 0;
+	// Reconfigures the striper when the controller has moved far enough to matter.
+	// Takes sender_mutex.
+	void follow_path_budget();
 	// Rebuilds `sender` and re-applies its configuration. Callers other than the
 	// constructor hold sender_mutex across it.
 	void rebuild_sender();
@@ -186,6 +196,34 @@ class video_encoder_nxwarp : public video_encoder
 	double rc_target_bytes = 0;
 	uint32_t rc_bitrate = 0;
 	bool logged_rc_mode = false;
+
+	// --- an unreachable ceiling ---------------------------------------------
+	//
+	// The quantiser band has an end, and NX Warp's is closer than a conventional
+	// codec's: every frame is intra, so there is no P-frame an order of magnitude
+	// smaller than its I-frame to average the bitrate down with. A 1088x1088
+	// intra frame at max-qp is a few tens of kilobytes and there is nothing below
+	// it. When the ceiling asks for less than that, the controller does the only
+	// thing it can — sit on max-qp — and the encode report would otherwise show a
+	// large positive error forever with no indication that it is not a controller
+	// that failed to converge but a target that cannot be hit.
+	//
+	// So the condition is named: QP pinned at max_qp with the frames still over
+	// budget, held long enough not to be a scene change.
+	// Counted in FRAMES rather than measured in seconds, because the condition is about
+	// frames: it is "the last N frames were all over budget at the coarsest quantiser
+	// there is". Counting them also makes it observable in a harness, which encodes as
+	// fast as the GPU allows and would never accumulate two seconds of anything.
+	uint32_t rc_over_budget_run = 0;
+	bool rc_unreachable = false;
+	// Two seconds' worth at 90 Hz: long enough that a busy stretch at the top of the
+	// band does not get called unreachable.
+	static constexpr uint32_t rc_unreachable_confirm_frames = 180;
+	// The log line is rate-limited on wall time, because that is what a log line is
+	// about: it is a standing condition, not an event, and the two-second encode report
+	// carries it in the meantime.
+	std::chrono::steady_clock::time_point rc_unreachable_logged{};
+	static constexpr std::chrono::seconds rc_unreachable_repeat{30};
 
 	// Move `current_qp` toward the byte budget implied by the bitrate share and
 	// the frame rate. Called once per encoded frame with that frame's size.

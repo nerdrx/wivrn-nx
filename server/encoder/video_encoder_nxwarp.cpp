@@ -137,6 +137,9 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	        .base_qp = base_qp,
 	        .inter = option_bool(settings.options, "inter", false),
 	        .intra_period = option_u32(settings.options, "intra-period", 180),
+	        .intra_dir = option_bool(settings.options, "intra-dir", true),
+	        .preset = option_u32(settings.options, "preset", 1),
+	        .threads = option_u32(settings.options, "threads", 0),
 	};
 	codec = nxwarp_codec::make_reference(codec_cfg);
 

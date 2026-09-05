@@ -53,6 +53,14 @@ struct nxwarp_codec_config
 	bool inter = false;
 	// Rolling intra refresh period in frames. 1 forces every tile every frame.
 	uint32_t intra_period = 180;
+	// Encoder-side speed knobs; none of them changes how a stream decodes.
+	// Directional intra (tool 17): costs the CPU encoder most of its time at
+	// this resolution; off codes the DC-plane predictor only.
+	bool intra_dir = true;
+	// nxvc effort preset: 0 medium, 1 fast, 2 slow.
+	uint32_t preset = 1;
+	// Encoder worker threads: 0 = all cores (capped at 16), 1 = serial.
+	uint32_t threads = 0;
 };
 
 // One eye's view for one frame, OpenXR conventions: a unit quaternion and the

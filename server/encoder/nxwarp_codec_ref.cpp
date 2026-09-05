@@ -69,7 +69,10 @@ public:
 		// Encoder-side speed levers. None of them changes how a stream decodes.
 		cfg.rdo = 0;         // dead-zone quantiser instead of the RD trellis (~2.7x)
 		cfg.qp_search = 0;   // no per-tile QP offset search
+		cfg.intra_dir = c.intra_dir ? 1 : 0;
 		cfg.intra_dir_cand = 1;
+		cfg.preset = c.preset;
+		cfg.threads = c.threads; // the tile pool (ref/README.md "Encoder threading")
 		cfg.collect_stats = 0;
 
 		nxvc_status st = NXVC_OK;

@@ -381,6 +381,9 @@ Per-stream `options` (all optional):
 | `qp` | `28` | fixed quantiser, 0..63. There is no rate control yet: the bitrate controller's number is logged and ignored |
 | `inter` | `off` | inter prediction — the pose warp, per-tile motion vectors and the reference ring. `off` is all-intra, which is the safe bring-up default |
 | `intra-period` | `180` | rolling intra refresh period in frames; `1` forces every tile every frame |
+| `intra-dir` | `on` | directional intra prediction (tool 17). It is most of the CPU encoder's time at headset resolutions; `off` codes the DC-plane predictor only, for more bits and a much faster encode |
+| `preset` | `1` | nxvc effort preset: `0` medium, `1` fast, `2` slow. Encoder-side only |
+| `threads` | `0` | encoder worker threads for the tile pool: `0` uses every core (capped at 16), `1` is the serial path. Byte-identical either way |
 | `band-rows` | `6` | tile rows per transport band, which is the unit of pacing and of feedback |
 | `mtu` | `1280` | transport MTU. Leaves room for WiVRn's own packet envelope inside a 1400-byte datagram |
 

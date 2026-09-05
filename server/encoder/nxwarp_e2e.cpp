@@ -83,7 +83,8 @@
 // Run:
 //   wivrn-nxwarp-e2e --yuv in.yuv --width W --height H [--frames N] [--loss 0.05]
 //                    [--reorder 0.05] [--first-frame 65500] [--seed S] [--nxv-out f.nxv] [--decoded-out f.yuv] [--nxv-dec PATH]
-//                    [--backend ref|vk] [--qp N]
+//                    [--backend ref|vk] [--qp N] [--inter on|off]
+//                    [--intra-period N]
 //                    [--reconnect-at N] [--start-frame-id F]
 //
 //   --reconnect-at N   at frame N the client is thrown away and rebuilt -- new decoder,
@@ -780,6 +781,11 @@ int main(int argc, char ** argv)
 	// (the Vulkan compute encoder). Both must reach the same conclusions here,
 	// which is the point of running the test against each.
 	std::string backend = "ref";
+	// Inter prediction on the codec backend, and its rolling refresh.  Off by
+	// default so every existing invocation of this harness keeps producing the
+	// all-intra stream its assertions were written against.
+	std::string inter = "false";
+	uint32_t intra_period = 180;
 	// "auto" honours the bitrate ceiling below; "fixed" pins --qp for the run.
 	// Default "fixed" here and not in the server: a test whose bytes per frame
 	// drift is not a test whose byte-identity check means anything.
@@ -847,6 +853,16 @@ int main(int argc, char ** argv)
 			nxv_dec = next();
 		else if (a == "--backend")
 			backend = next();
+		else if (a == "--inter")
+		{
+			const std::string v = next();
+			// The option the server config carries is a string "true"/"false";
+			// on|off is accepted here because every other flag in this harness
+			// spells it that way.
+			inter = (v == "on" or v == "true") ? "true" : "false";
+		}
+		else if (a == "--intra-period")
+			intra_period = uint32_t(std::stoul(next()));
 		else if (a == "--qp")
 			qp = uint32_t(std::stoul(next()));
 		else if (a == "--reconnect-at")
@@ -909,6 +925,8 @@ int main(int argc, char ** argv)
 	settings.src_layer = 0;
 	settings.options["qp"] = std::to_string(qp);
 	settings.options["backend"] = backend;
+	settings.options["inter"] = inter;
+	settings.options["intra-period"] = std::to_string(intra_period);
 	// Rate control off by default. The byte-identity check below compares this
 	// run's bitstream against nxv-dec's decode of it, which a moving quantiser
 	// does not disturb -- but the frame sizes and the loss pattern would stop
@@ -1404,7 +1422,52 @@ int main(int argc, char ** argv)
 			              std::to_string(ref_frames) + "/" +
 			              std::to_string(host.units.size()) + ")");
 
+			// How far the GPU decoder's output can legitimately be compared.
+			//
+			// On an ALL-INTRA stream every frame stands alone, so any frame the
+			// decoder published can be diffed against nxv-dec's decode of the
+			// same unit -- which is what this check has always done, and the
+			// bounded worker queue discarding the frames in between is
+			// irrelevant.
+			//
+			// On an INTER stream it is not. A frame predicts from the reference
+			// ring, and the ring holds pictures the decoder itself
+			// reconstructed, so a decoder that skipped units 1..14 and then
+			// decoded unit 15 is not decoding the same stream badly -- it is
+			// decoding a different stream, one whose reference does not exist.
+			// nxv-dec decoded every unit and its ring is complete; comparing
+			// the two says nothing about the codec.
+			//
+			// So under inter the comparison runs over the longest UNBROKEN RUN
+			// of published units from the start of the stream, which is exactly
+			// the set whose whole reference chain the GPU decoder holds. With a
+			// bounded queue that is usually just unit 1, and that is honest:
+			// the harness feeds units faster than this decoder drains them, and
+			// what it can still prove is that the first frame matches and that
+			// nxv-dec decodes the whole stream.
+			uint64_t chain_upto = 0; // inclusive unit index; 0 = nothing yet
+			if (inter == "true")
+			{
+				std::vector<uint64_t> published;
+				for (size_t j = 0; j < gpu_frames and j < host.frames.size(); ++j)
+				{
+					const size_t b = (reconnected and j >= frames_at_reconnect)
+					                         ? units_at_reconnect
+					                         : 0;
+					published.push_back(b + host.frames[j].frame_index);
+				}
+				std::sort(published.begin(), published.end());
+				for (uint64_t want = 1; ; ++want)
+				{
+					if (std::find(published.begin(), published.end(), want) ==
+					    published.end())
+						break;
+					chain_upto = want;
+				}
+			}
+
 			size_t compared = 0, differing = 0, first_diff_frame = 0, misplaced = 0;
+			size_t chain_skipped = 0;
 			for (size_t j = 0; j < gpu_frames and j < host.frames.size(); ++j)
 			{
 				const size_t base = (reconnected and j >= frames_at_reconnect)
@@ -1432,6 +1495,12 @@ int main(int argc, char ** argv)
 					    uint16_t(host.unit_frame_ids[idx - 1] - uint16_t(first_frame)) != src_idx)
 						++misplaced;
 				}
+				if (inter == "true" and idx > chain_upto)
+				{
+					// Its reference chain is not in this decoder's ring.
+					++chain_skipped;
+					continue;
+				}
 				const size_t r = (idx - 1) * frame_size;
 				const size_t g = j * frame_size;
 				++compared;
@@ -1452,6 +1521,11 @@ int main(int argc, char ** argv)
 			if (not identical)
 				std::printf("  %zu of %zu frames differ, first at unit %zu\n",
 				            differing, compared, first_diff_frame);
+			if (chain_skipped)
+				std::printf("  %zu published frame%s not compared: inter, and the "
+				            "units they predict from were dropped before this "
+				            "decoder saw them\n",
+				            chain_skipped, chain_skipped == 1 ? "" : "s");
 
 			// PSNR against the source, per frame, which is what the number actually
 			// means to a viewer.
@@ -1470,6 +1544,17 @@ int main(int argc, char ** argv)
 				}
 				if (src_idx >= source_frames.size())
 					continue;
+				// The same restriction as the byte comparison above, for the
+				// same reason: a frame whose reference the decoder never
+				// reconstructed is not a picture this codec produced.
+				if (inter == "true")
+				{
+					const size_t b = (reconnected and i >= frames_at_reconnect)
+					                         ? units_at_reconnect
+					                         : 0;
+					if (b + host.frames[i].frame_index > chain_upto)
+						continue;
+				}
 				const double v = psnr(host.pictures[i], source_frames[src_idx]);
 				if (v < 0)
 					continue;

@@ -17,6 +17,7 @@
  */
 
 #pragma once
+#include <chrono>
 
 #include "nxwarp_codec.h"
 #include "video_encoder.h"
@@ -128,6 +129,11 @@ class video_encoder_nxwarp : public video_encoder
 
 	uint32_t base_qp;
 	bool logged_bitrate_note = false;
+	// Rolling encode timing, reported every two seconds (encode()).
+	std::chrono::steady_clock::time_point prof_since = std::chrono::steady_clock::now();
+	uint64_t prof_n = 0;
+	double prof_ms = 0, prof_max_ms = 0;
+	uint64_t prof_bytes = 0;
 	bool logged_oversize = false;
 
 	void send_stream_header();

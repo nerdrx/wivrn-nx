@@ -417,12 +417,16 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	bool refused = false;
 	// nxvc submits on the queue it adopted, which is the host's one graphics queue; hold
 	// the same lock every other submitter in the process holds.
+	// The decoder owns one command buffer, one staging buffer and (since the
+	// inter path) a reference ring that frame N writes and frame N+1 reads.
+	// Until nxvc grows a command-buffer ring, an async submit must be fenced
+	// before the next record: wait here, not at present time -- and outside
+	// the queue lock, since a host wait needs no queue and the render thread
+	// does.
+	const auto t_wait0 = std::chrono::steady_clock::now();
+	nxvc_vk_decoder_wait(nxvc, UINT64_MAX);
+	const auto t_decode0 = std::chrono::steady_clock::now();
 	host.with_queue([&](vk::Queue) {
-		// The decoder owns one command buffer, one staging buffer and (since the
-		// inter path) a reference ring that frame N writes and frame N+1 reads.
-		// Until nxvc grows a command-buffer ring, an async submit must be fenced
-		// before the next record: wait here, not at present time.
-		nxvc_vk_decoder_wait(nxvc, UINT64_MAX);
 		auto st = nxvc_vk_decode_frame_ex(nxvc, job.unit.data(), job.unit.size(),
 		                                  NXVC_VKD_SUBMIT_ASYNC, &consumed);
 		if (st != NXVC_VKD_OK)
@@ -589,6 +593,33 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 
 	++frames_decoded;
 	host.publish(accumulator, std::move(handle));
+
+	// Where the time goes, once every two seconds per stream: the wait on the
+	// previous frame, the wall time of this one, nxvc's own pass timings, and
+	// the unit size. This is the number a live session on a headset is about.
+	{
+		const auto t_end = std::chrono::steady_clock::now();
+		const auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
+		nxvc_vkd_stats st{};
+		nxvc_vk_decoder_stats(nxvc, &st);
+		prof.n++;
+		prof.wait_ms += ms(t_decode0 - t_wait0);
+		prof.wall_ms += ms(t_end - t_decode0);
+		prof.pass_a_ms += st.pass_a_ms;
+		prof.pass_b_ms += st.pass_b_ms;
+		prof.gpu_ms += st.gpu_ms;
+		prof.bytes += job.unit.size();
+		if (t_end - prof.since > std::chrono::seconds(2))
+		{
+			const double n = prof.n;
+			spdlog::info("nxwarp[{}]: {} frames in {:.1f} s: {:.0f} B/frame, wait-prev {:.1f} ms, wall {:.1f} ms, nxvc passA {:.1f} passB {:.1f} gpu {:.1f} ms; holes {}, refused {}",
+			             stream_index, prof.n, ms(t_end - prof.since) / 1000.0, prof.bytes / n,
+			             prof.wait_ms / n, prof.wall_ms / n, prof.pass_a_ms / n, prof.pass_b_ms / n, prof.gpu_ms / n,
+			             frames_dropped_holes, frames_dropped_codec);
+			prof = {};
+			prof.since = t_end;
+		}
+	}
 }
 
 nxwarp_decoder::image * nxwarp_decoder::get_free()

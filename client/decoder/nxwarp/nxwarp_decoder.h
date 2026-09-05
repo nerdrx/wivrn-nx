@@ -8,6 +8,7 @@
  */
 
 #pragma once
+#include <chrono>
 
 // decoder_nxwarp: the NX Warp (nxvc) codec inside the WiVRn NX client.
 //
@@ -85,6 +86,14 @@ class nxwarp_decoder : public decoder
 	// Set when the device refuses timeline semaphores (Adreno 650): frames are then
 	// fenced on the host and published with no semaphore.
 	bool host_sync = false;
+	// Rolling per-stream timing, reported every two seconds (decode_unit).
+	struct
+	{
+		std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
+		uint64_t n = 0;
+		double wait_ms = 0, wall_ms = 0, pass_a_ms = 0, pass_b_ms = 0, gpu_ms = 0;
+		uint64_t bytes = 0;
+	} prof;
 
 	// One frame's work, complete in itself: by the time the worker runs, the tile slots
 	// and the pending feedback already belong to the next frame.

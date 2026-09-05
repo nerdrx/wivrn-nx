@@ -17,6 +17,7 @@
  */
 
 #include "video_encoder_nxwarp.h"
+#include <chrono>
 
 #include "nxwarp_packetize.h"
 
@@ -423,11 +424,34 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		        unsigned(pending_bitrate.load()));
 	}
 
+	const auto t_enc0 = std::chrono::steady_clock::now();
 	auto bitstream = codec->encode(y, extent.width, cb_plane.data(), cr_plane.data(), cw);
+	const auto t_enc1 = std::chrono::steady_clock::now();
 	if (bitstream.empty())
 	{
 		U_LOG_W("nxwarp: stream %d frame %llu did not encode", int(stream_idx), (unsigned long long)frame_id);
 		return {};
+	}
+	// Encode wall time, once every two seconds per stream: on a CPU reference
+	// encoder this is the number that decides the frame rate a headset sees.
+	{
+		const double ms = std::chrono::duration<double, std::milli>(t_enc1 - t_enc0).count();
+		prof_n++;
+		prof_ms += ms;
+		prof_max_ms = std::max(prof_max_ms, ms);
+		prof_bytes += bitstream.size();
+		if (t_enc1 - prof_since > std::chrono::seconds(2))
+		{
+			U_LOG_I("nxwarp: stream %d encoded %llu frames in %.1f s: %.1f ms/frame (max %.1f), %.0f B/frame",
+			        int(stream_idx), (unsigned long long)prof_n,
+			        std::chrono::duration<double>(t_enc1 - prof_since).count(),
+			        prof_ms / prof_n, prof_max_ms, double(prof_bytes) / prof_n);
+			prof_n = 0;
+			prof_ms = 0;
+			prof_max_ms = 0;
+			prof_bytes = 0;
+			prof_since = t_enc1;
+		}
 	}
 
 	// --- frame bytes onto the tile grid -----------------------------------

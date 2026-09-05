@@ -67,8 +67,13 @@ public:
 	virtual XrTime now() = 0;
 
 	// One transport feedback packet, already formed by nxt::Receiver::band_deadline,
-	// bound for from_headset::nxwarp_feedback on the control socket.
-	virtual void send_feedback(uint8_t stream_index, uint8_t path_id, std::vector<uint8_t> payload) = 0;
+	// bound for from_headset::nxwarp_feedback on the control socket. `decode_us` is
+	// this stream's current decode cost per frame in microseconds, or 0 before it has
+	// decoded anything; it rides the same packet because it goes out at the same
+	// cadence and is what the server's send pacing reads (see the field's comment on
+	// from_headset::nxwarp_feedback).
+	virtual void send_feedback(uint8_t stream_index, uint8_t path_id, std::vector<uint8_t> payload,
+	                           uint16_t decode_us) = 0;
 
 	// One reassembled .nxv frame unit, exactly as it is about to be handed to the codec.
 	// The client ignores it; wivrn-nxwarp-e2e uses it to rebuild the byte stream the

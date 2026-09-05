@@ -186,6 +186,19 @@ class video_encoder_nxwarp : public video_encoder
 	std::atomic<uint64_t> not_held_total{0};
 	uint64_t not_held_reported = 0;
 
+	// --- what the headset costs to decode ------------------------------------
+	//
+	// Microseconds per frame, as the headset measures it, off every feedback packet
+	// (from_headset::nxwarp_feedback::decode_us). Written on the network thread, read
+	// by the encode thread. Zero until the headset has decoded something.
+	//
+	// This is the number the whole pacing question turns on. The server composites at
+	// 90 Hz and used to encode and send all 90 of them; a headset whose decoder takes
+	// 31 ms a frame can take 32 a second, and each of the other 58 was received, thrown
+	// away, reported as not held, and answered with an all-intra frame -- which is
+	// larger, which makes the decode slower still.
+	std::atomic<uint16_t> client_decode_us{0};
+
 	// The stream header goes out on the control (TCP) socket, because a client
 	// that misses it cannot decode anything at all. Repeated periodically so a
 	// decoder that was restarted mid-session recovers without a reconnect.
@@ -288,7 +301,8 @@ public:
 
 	std::optional<data> encode(uint8_t slot, uint64_t frame_id) override;
 
-	void on_nxwarp_feedback(uint8_t path_id, std::span<const uint8_t> payload) override;
+	void on_nxwarp_feedback(uint8_t path_id, std::span<const uint8_t> payload,
+	                        uint16_t decode_us) override;
 	void on_nxwarp_frame_not_held(uint16_t frame_id,
 	                              from_headset::nxwarp_frame_not_held::reason why) override;
 

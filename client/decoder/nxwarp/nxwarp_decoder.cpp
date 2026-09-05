@@ -605,7 +605,8 @@ void nxwarp_decoder::fire_bands_through(inflight_frame & f, uint8_t last_band)
 		auto packet = receiver->band_deadline(f.frame_id, b, now_us(), 0, f.path_id);
 		if (packet.empty())
 			continue;
-		host.send_feedback(stream_index, f.path_id, std::move(packet));
+		host.send_feedback(stream_index, f.path_id, std::move(packet),
+		                   decode_us_report.load(std::memory_order_relaxed));
 	}
 }
 
@@ -1116,6 +1117,18 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		prof.pass_b_ms += st.pass_b_ms;
 		prof.gpu_ms += st.gpu_ms;
 		prof.bytes += job.unit.size();
+
+		// What this frame cost, published for the server. The same wall time the
+		// stride below is derived from, smoothed with a fifth-weight EWMA so a
+		// single slow frame moves it a little and a sustained change moves it
+		// within a handful of frames. Saturated at the 16-bit field's range.
+		{
+			const double wall_us = ms(t_end - t_decode0) * 1000.0;
+			const double prev = double(decode_us_report.load(std::memory_order_relaxed));
+			const double next = prev > 0 ? prev + 0.2 * (wall_us - prev) : wall_us;
+			decode_us_report.store(uint16_t(std::clamp(next, 0.0, 65535.0)),
+			                       std::memory_order_relaxed);
+		}
 		if (t_end - prof.since > std::chrono::seconds(2))
 		{
 			const double n = prof.n;

@@ -1051,6 +1051,27 @@ struct nxwarp_feedback
 	// Path the datagrams it reports on arrived over (nxt path_id, 0 or 1)
 	uint8_t path_id;
 	std::vector<uint8_t> payload;
+
+	// What one frame of this stream costs this headset to decode, in microseconds, or
+	// 0 before it has decoded anything.
+	//
+	// It rides here rather than in a packet of its own because it is the same kind of
+	// statement as the payload above -- a periodic report from the receiving end about
+	// what it is managing -- and it goes out at the same cadence, several times a
+	// frame, which is exactly the rate the server's pace controller wants to read it
+	// at. A packet of its own would cost a control-socket write per report for two
+	// bytes.
+	//
+	// The server uses it for one thing: video_encoder_nxwarp's send pacing. A headset
+	// that decodes in 31 ms cannot be sent 90 frames a second, and until this field
+	// existed the server had no way to know that other than by counting the frames the
+	// headset threw away -- each of which cost an all-intra frame, which made the
+	// decode slower, which made it throw away more. See the pace controller in
+	// video_encoder_nxwarp.cpp.
+	//
+	// Saturates at 65535 us. A decode slower than 65 ms is already below the pace
+	// floor, so the exact figure past that point changes nothing.
+	uint16_t decode_us = 0;
 };
 
 // A frame the headset will NOT reconstruct, named by the stream's own 16-bit frame id.

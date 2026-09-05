@@ -1095,8 +1095,14 @@ void wivrn::video_encoder_nxwarp::on_nxwarp_frame_not_held(
 	client_dropped_frame = true;
 }
 
-void wivrn::video_encoder_nxwarp::on_nxwarp_feedback(uint8_t path_id, std::span<const uint8_t> payload)
+void wivrn::video_encoder_nxwarp::on_nxwarp_feedback(uint8_t path_id,
+                                                     std::span<const uint8_t> payload,
+                                                     uint16_t decode_us)
 {
+	// The headset's decode cost, for the pace controller. Zero means it has not decoded
+	// anything yet and is not a measurement, so it is not one.
+	if (decode_us)
+		client_decode_us.store(decode_us, std::memory_order_relaxed);
 	std::lock_guard lock(sender_mutex);
 	// Decrypts, applies the per-band bitmaps to the client shadow and updates the
 	// path statistics. Everything the encoder does with the result happens at the

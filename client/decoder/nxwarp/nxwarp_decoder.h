@@ -96,6 +96,18 @@ class nxwarp_decoder : public decoder
 		double wait_ms = 0, wall_ms = 0, pass_a_ms = 0, pass_b_ms = 0, gpu_ms = 0;
 		uint64_t bytes = 0;
 	} prof;
+	// What one frame of this stream currently costs this device to decode, in
+	// microseconds, published for the network thread to put on every feedback packet
+	// (from_headset::nxwarp_feedback::decode_us). Written by the worker after every
+	// frame as an exponential moving average of the same wall time prof.wall_ms
+	// accumulates and the decode stride is derived from -- deliberately the same
+	// number, so the rate the server paces to and the rate this decoder selects
+	// frames at are answers to one measurement rather than two.
+	//
+	// An EWMA rather than the two-second mean the log line prints: the server's pace
+	// controller does its own smoothing, and feeding it a figure that only moves twice
+	// a minute would make that loop as slow as the report interval.
+	std::atomic<uint16_t> decode_us_report = 0;
 	// Network-thread counters for the same report.
 	std::chrono::steady_clock::time_point net_since = std::chrono::steady_clock::now();
 	uint64_t net_holes = 0, stragglers_dropped = 0;

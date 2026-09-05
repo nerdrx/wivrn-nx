@@ -304,8 +304,15 @@ public:
 	std::mutex m;
 	std::condition_variable cv;
 	std::vector<published> frames;
-	// Feedback the decoder produced, waiting to go back to the encoder.
-	std::vector<std::pair<uint8_t, std::vector<uint8_t>>> feedback;
+	// Feedback the decoder produced, waiting to go back to the encoder: the path it
+	// reports on, its bytes, and the decode cost the headset stamped on it.
+	struct feedback_packet
+	{
+		uint8_t path_id;
+		std::vector<uint8_t> payload;
+		uint16_t decode_us;
+	};
+	std::vector<feedback_packet> feedback;
 	// The OTHER feedback: from_headset::feedback, the per-frame delivery report the
 	// server's automatic bitrate reads. One per decoded frame and one per frame that
 	// closed with a hole, which is the whole set the client sends.
@@ -340,18 +347,20 @@ public:
 		                      .count());
 	}
 
-	void send_feedback(uint8_t stream_index, uint8_t path_id, std::vector<uint8_t> payload) override
+	void send_feedback(uint8_t stream_index, uint8_t path_id, std::vector<uint8_t> payload,
+	                   uint16_t decode_us) override
 	{
 		// Through the real packet type and the real serializer, like everything else.
 		from_headset::nxwarp_feedback fb{
 		        .stream_item_idx = stream_index,
 		        .path_id = path_id,
 		        .payload = std::move(payload),
+		        .decode_us = decode_us,
 		};
 		auto wire = to_wire(fb);
 		auto back = from_wire<from_headset::nxwarp_feedback>(std::move(wire));
 		std::lock_guard lock(m);
-		feedback.emplace_back(back.path_id, std::move(back.payload));
+		feedback.push_back({back.path_id, std::move(back.payload), back.decode_us});
 	}
 
 	// Wire frame ids the decoder actually put through the codec, in the order it did.
@@ -1181,19 +1190,19 @@ int main(int argc, char ** argv)
 
 		// Feedback the decoder produced while that frame was going through, straight back
 		// into the encoder, which is what the network thread does.
-		std::vector<std::pair<uint8_t, std::vector<uint8_t>>> fb;
+		std::vector<e2e_host::feedback_packet> fb;
 		{
 			std::lock_guard lock(host.m);
 			fb.swap(host.feedback);
 		}
-		for (auto & [path, payload]: fb)
+		for (auto & p: fb)
 		{
 			++feedback_packets;
-			feedback_bytes += payload.size();
+			feedback_bytes += p.payload.size();
 			// Straight into the encoder, which folds it into nxt::Sender's client
 			// shadow. This is the return half of the loop: without it the encoder
 			// predicts from tiles the headset never received.
-			enc.on_nxwarp_feedback(path, payload);
+			enc.on_nxwarp_feedback(p.path_id, p.payload, p.decode_us);
 		}
 
 		// And the correction the transport cannot carry: frames the decoder received

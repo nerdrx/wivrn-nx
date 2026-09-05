@@ -42,7 +42,15 @@ vk::Instance nxwarp_application_host::instance()
 
 void nxwarp_application_host::with_queue(const std::function<void(vk::Queue)> & fn)
 {
-	auto queue = application::get_queue().lock();
+	// The decode queue, which is a SECOND queue of the renderer's family where
+	// the driver offers one and the renderer's own queue where it does not.
+	// Everything nxvc and this decoder submit goes through here -- the decode,
+	// the copy into the pool image and the semaphore drain -- so on a device
+	// with two queues none of it is scheduled behind the compositor's frame.
+	// The pool item's semaphore then crosses queues, which is what a binary
+	// semaphore is for; both queues are in one family, so no image passes an
+	// ownership transfer.
+	auto queue = application::get_decode_queue().lock();
 	fn(**queue);
 }
 

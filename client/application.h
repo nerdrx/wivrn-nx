@@ -109,6 +109,14 @@ private:
 	vk::raii::Device vk_device = nullptr;
 	uint32_t vk_queue_family_index;
 	thread_safe<vk::raii::Queue> vk_queue = nullptr;
+	// A SECOND queue from the same family, when the driver offers one, for work
+	// that must not queue behind the compositor's frame.  The Adreno 650 reports
+	// queueCount 3 on its one graphics family and the client had only ever taken
+	// queue 0, so every NX Warp decode was scheduled behind the renderer: on a
+	// live session that is 49.9 ms of queue wait around 9.6 ms of decode.
+	// Null when the family has only one queue; callers fall back to vk_queue.
+	thread_safe<vk::raii::Queue> vk_decode_queue = nullptr;
+	bool vk_have_decode_queue = false;
 	vk::raii::CommandPool vk_cmdpool = nullptr;
 	vk::raii::PipelineCache pipeline_cache = nullptr;
 	vk::PhysicalDeviceProperties physical_device_properties;
@@ -344,6 +352,14 @@ public:
 		// printf("set_debug_reports_name %p, %s\n", object, name.c_str());
 		// instance().debug_report_object_name[(uint64_t)object] = std::move(name);
 		// #endif
+	}
+
+	// The decode queue if there is one, the main queue if there is not.  Callers
+	// must still serialise their own submissions on whichever they get back.
+	static thread_safe<vk::raii::Queue> & get_decode_queue()
+	{
+		auto & app = instance();
+		return app.vk_have_decode_queue ? app.vk_decode_queue : app.vk_queue;
 	}
 
 	static thread_safe<vk::raii::Queue> & get_queue()

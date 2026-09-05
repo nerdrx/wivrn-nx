@@ -736,9 +736,10 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		// An empty submit whose only job is to consume the signal.
 		host.with_queue([&](vk::Queue queue) {
 			const vk::PipelineStageFlags stage = vk::PipelineStageFlagBits::eTopOfPipe;
+			const vk::Semaphore sem{bin_sem};
 			queue.submit(vk::SubmitInfo{
 			        .waitSemaphoreCount = 1,
-			        .pWaitSemaphores = &bin_sem,
+			        .pWaitSemaphores = &sem,
 			        .pWaitDstStageMask = &stage,
 			});
 		});

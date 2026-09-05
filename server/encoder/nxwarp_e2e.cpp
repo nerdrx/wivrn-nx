@@ -86,6 +86,24 @@
 //                    [--backend ref|vk] [--qp N] [--inter on|off]
 //                    [--intra-period N] [--coded-vectors default|none|static]
 //                    [--reconnect-at N] [--start-frame-id F]
+//                    [--pace auto|off|FPS] [--client-decode-ms N] [--present-hz N]
+//                    [--feedback-delay N]
+//
+//   --pace             the encoder's "pace" option. OFF by default here and "auto" on the
+//                      server: the pace is a wall-clock decision about the interval
+//                      between SENT frames, so leaving it on would make every other
+//                      assertion's frame count depend on how fast this machine encodes.
+//   --client-decode-ms the shipping decoder waits this long on its worker thread for
+//                      every frame. A desktop GPU decodes 320x240 in about a
+//                      millisecond, so without it nothing here reproduces what a Pico 4
+//                      does: the decode stride, the bounded queue, and the flood of
+//                      not-held reports that used to hold inter prediction off entirely.
+//   --present-hz       present composited frames at this rate rather than as fast as the
+//                      GPU allows, which is what the pace has to be measured against.
+//   --feedback-delay   hold each not-held report back this many presented frames. Zero
+//                      is this harness's own behaviour -- the report arrives in the same
+//                      loop iteration that produced it, which no network does -- and it
+//                      is what hides the case the encoder's last_resync_id rule is for.
 //
 //   --reconnect-at N   at frame N the client is thrown away and rebuilt -- new decoder,
 //                      new nxt::Receiver, no memory of the stream -- while the encoder

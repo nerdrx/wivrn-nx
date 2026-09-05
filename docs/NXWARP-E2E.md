@@ -212,6 +212,9 @@ cannot survive. `--first-frame N` starts the frame counter at N; the encoder put
 `uint16_t(frame_id)` on the wire, so `--first-frame 65500` walks the stream through the
 16-bit wrap — about twelve minutes into a 90 fps session.
 
+`--pace`, `--client-decode-ms`, `--present-hz` and `--feedback-delay` are below, under
+*Send pacing, and a slow client*.
+
 `--backend ref|vk` picks the codec and `--qp N` the quantiser (default 26). Every
 assertion below holds for both backends; the run prints the encoder's own measurement of
 the interval around `codec->encode()` at the end, which is the number that decides
@@ -243,6 +246,41 @@ report neither, and "the bitrate did not move" was the symptom.
 It drives the control law directly against two simulated eye decoders and separates the
 two changes that had to be made — the frame numbering and the loss report — so each can
 be shown to matter on its own. Build and run it the way its header comment says.
+
+### Send pacing, and a slow client
+
+A desktop GPU decodes a 320x240 NX Warp frame in about a millisecond, so nothing in this
+harness reproduced the thing that actually goes wrong on a Pico 4: a decoder that cannot
+keep up, a bounded worker queue, a decode stride, and the flood of
+`from_headset::nxwarp_frame_not_held` reports that follows. Four flags put that case in
+reach, and all four are off by default.
+
+| flag | |
+| --- | --- |
+| `--client-decode-ms N` | the shipping decoder waits N ms on its worker thread for every frame. Everything downstream of the wait — the stride, the queue bound, the not-held reports, the decode figure it sends the server — is the real thing reacting to a real cost |
+| `--pace auto\|off\|N` | the encoder's `"pace"` option. **`off` here, unlike the server, whose default is `auto`**: the pace is a wall-clock decision, so leaving it on would make the frame count of every other test depend on how fast this machine encodes |
+| `--present-hz N` | present composited frames at N Hz instead of as fast as the GPU allows. Pacing tests need it: a loop presenting a thousand frames a second makes the pace drop 97% of them and says nothing about a compositor at 90 Hz |
+| `--feedback-delay N` | hold each not-held report back N presented frames. Zero is the harness's own behaviour — the report arrives in the same loop iteration that produced it, which no network does — and it is what hides the case the encoder's `last_resync_id` rule exists for |
+
+Under pacing the harness counts **sent** frames rather than presented ones, since those are
+no longer the same number, and it rebuilds the wire frame ids itself so that the check that
+each published picture lines up with the frame id it carries still means something. It also
+counts the resync notices on path `0xFE`, which is the direct measure of whether inter
+prediction is engaging at all: bytes per frame depend on the clip, that number does not.
+
+A representative pair, 320x240, `vk` backend, `--inter on`, 1800 frames at 90 Hz, a
+simulated 31 ms client (37 ms as the client measures it — this harness reads the picture
+back inside the measured window) and a three-frame control-socket delay:
+
+```
+--pace off    1800 sent at 90.0 fps, 1765 not held (1209 by the decode stride),
+              434 all-intra resyncs (24.1% of sent frames), 31 frames published
+--pace auto    460 sent at 23.0 fps,   11 not held (0 by the decode stride),
+                3 all-intra resyncs (0.7%),                449 frames published
+```
+
+Both runs are byte-identical to `nxv-dec` over every published frame. The second sends a
+quarter of the frames and shows 14 times as many of them.
 
 ### Rate control
 

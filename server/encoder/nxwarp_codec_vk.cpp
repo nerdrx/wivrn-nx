@@ -48,11 +48,13 @@ namespace
 //
 // WHAT IT DOES NOT DO, and how it refuses:
 //
-//   * WARP_MV and STATIC_MV, the coded-vector inter modes. `inter = true`
-//     gets WARP_SKIP and INTRA: a tile either predicts from the pose-warped
-//     reference and carries no payload at all, or is coded fresh. That is
-//     where nx-warp's GPU encoder is today, and it is the larger half of the
-//     win -- 2.73x fewer bytes at 1088x1088 -- but it is not the whole of it.
+//   * WARP_MV and QUAD_MV. `inter = true` gets WARP_SKIP, STATIC_MV and
+//     INTRA: a tile predicts from the pose-warped reference and carries no
+//     payload, or carries a translation vector and a residual, or is coded
+//     fresh. That is 3.95x fewer bytes at 1088x1088. WARP_MV is measured and
+//     deliberately absent -- 6.2% fewer bytes than STATIC_MV alone and 0.12 dB
+//     WORSE, for a predictor the encoder's search cannot evaluate cheaply.
+//     "coded-vectors": "none" pins the skip-only shape, which is 2.73x.
 //   * a rate controller of its own, and per-tile quantisers. One QP codes
 //     every tile of a frame — but that QP is settable between frames
 //     (set_qp), so the controller in video_encoder_nxwarp drives this backend
@@ -140,6 +142,28 @@ public:
 		// the option's own default is already 180.
 		ci.inter = c.inter ? 1u : 0u;
 		ci.intra_period = c.inter ? c.intra_period : 0u;
+		// The library refuses a non-default value without `inter`, the same
+		// way it refuses a period without it, so this is only passed with it.
+		// The two enumerations are deliberately the same three values in the
+		// same order; the mapping is written out rather than cast, because a
+		// cast would keep compiling the day either side gains a fourth.
+		ci.coded_vectors = NXVC_VKE_CV_DEFAULT;
+		if (c.inter)
+		{
+			using cv = wivrn::nxwarp_codec_config::coded_vectors_t;
+			switch (c.coded_vectors)
+			{
+				case cv::none:
+					ci.coded_vectors = NXVC_VKE_CV_NONE;
+					break;
+				case cv::statik:
+					ci.coded_vectors = NXVC_VKE_CV_STATIC;
+					break;
+				case cv::def:
+					ci.coded_vectors = NXVC_VKE_CV_DEFAULT;
+					break;
+			}
+		}
 
 		nxvc_vke_status st = nxvc_vk_encoder_create(&ci, &enc);
 		if (st != NXVC_VKE_OK or not enc)

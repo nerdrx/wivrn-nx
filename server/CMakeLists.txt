@@ -226,6 +226,12 @@ if (WIVRN_BUILD_SERVER)
 		if (TARGET nxvc::vk_common)
 			target_link_libraries(wivrn-nxwarp-loopback PRIVATE nxvc::vk_common)
 		endif()
+		if (TARGET Vulkan::Vulkan)
+			target_link_libraries(wivrn-nxwarp-loopback PRIVATE Vulkan::Vulkan)
+		endif()
+		if (NXVC_VK_HEADERS_DIR)
+			target_include_directories(wivrn-nxwarp-loopback SYSTEM PRIVATE ${NXVC_VK_HEADERS_DIR})
+		endif()
 
 		# Both ends of NX Warp in one process: the shipping server encoder and the
 		# shipping client decoder, connected by the real packet types over a lossy

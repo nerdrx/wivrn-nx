@@ -241,7 +241,7 @@ public:
 	// that already exists is what picks the codec; see scenes::stream. That means no
 	// protocol field, and a server that has never heard of NX Warp simply picks the next
 	// codec in the list.
-	bool nxwarp = false;
+	bool nxwarp = true; // the side-by-side test build exists for this codec: on unless turned off
 
 	// What goes on the wire for the two above
 	wivrn::motion_mode motion_mode() const

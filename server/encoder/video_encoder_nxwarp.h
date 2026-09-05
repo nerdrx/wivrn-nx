@@ -199,6 +199,80 @@ class video_encoder_nxwarp : public video_encoder
 	// larger, which makes the decode slower still.
 	std::atomic<uint16_t> client_decode_us{0};
 
+	// --- send pacing ---------------------------------------------------------
+	//
+	// THE PROBLEM. The compositor produces 90 frames a second and this encoder used to
+	// encode and send every one of them. The Pico 4's NX Warp decoder takes 15-17 ms
+	// per eye and keeps a queue of one, so it decoded about one frame in four and threw
+	// the rest away -- and it is not free to throw a frame away: the headset reports
+	// each one (from_headset::nxwarp_frame_not_held) and the answer is an all-intra
+	// frame, which is three times the size, which makes the decode slower, which
+	// throws away more. Measured on a live session: 614 frames dropped late per two
+	// seconds per stream, 60 all-intra resyncs in the same window, inter prediction
+	// never engaging once, every frame ~29 KB. The bytes for three frames in four were
+	// spent to make the picture worse.
+	//
+	// THE FIX. Do not send what the headset cannot decode. The headset says what a
+	// frame costs it (from_headset::nxwarp_feedback::decode_us); a composited frame
+	// that arrives sooner than that cost since the last SENT frame is dropped HERE --
+	// no encode, no bytes, no shadow update, no wire frame id. What the headset then
+	// receives is a stream at its own rate, which it decodes whole, which means it
+	// stops reporting frames it did not reconstruct, which means the encoder stops
+	// coding intra and inter prediction engages, which makes the frames smaller and
+	// the decode faster.
+	//
+	// WHY THE FRAME IDS MOVE WITH IT. `sent_frame_id` counts sent frames, not
+	// composited ones. The client's reassembly window and its widening of the 16-bit
+	// id (nxwarp_decoder::wire_frame_index) read a gap in the sequence as a frame that
+	// was lost, and the delivery reports built from it are what WiVRn's automatic
+	// bitrate calls congestion. A paced gap is not loss and must not look like it, so
+	// there is no gap: the wire sequence is dense over the frames that were sent.
+	enum class pace_mode_t
+	{
+		off,       // "pace": "off" -- send every composited frame, the old behaviour
+		automatic, // "pace": "auto" -- follow the headset's reported decode cost
+		fixed,     // "pace": "<fps>" -- an explicit rate, whatever the headset says
+	};
+	pace_mode_t pace_mode = pace_mode_t::automatic;
+	// Seconds between sent frames. Starts at the fastest the band allows, so a stream
+	// whose headset has not reported anything yet behaves exactly as it did before.
+	double pace_interval = 1.0 / 90.0;
+	// The band the controller may move in. 90 fps because there is nothing above the
+	// compositor's rate to pace to, and 15 fps because a headset that cannot decode
+	// 15 frames a second has a problem pacing cannot solve and slowing further only
+	// makes the picture staler.
+	static constexpr double pace_min_interval = 1.0 / 90.0;
+	static constexpr double pace_max_interval = 1.0 / 15.0;
+	std::chrono::steady_clock::time_point pace_last_sent{};
+	bool pace_have_last = false;
+	// Not-held reports whose reason was the decode stride, and the count the pace
+	// controller has already acted on. Only the stride: it is the one reason that
+	// means "you are sending faster than I can decode". A hole is the link's fault, a
+	// codec refusal is the codec's, and pacing down for either would be treating a
+	// different problem.
+	std::atomic<uint64_t> stride_not_held{0};
+	uint64_t pace_stride_seen = 0;
+
+	// Composited frames dropped by the pace, over the two-second report window.
+	uint64_t prof_paced_out = 0;
+
+	// The frame id on the wire. Counts SENT frames: seeded from the first frame the
+	// encoder actually sends and incremented once per frame that reaches the socket,
+	// so the sequence the client sees has no holes in it that pacing put there.
+	uint16_t sent_frame_id = 0;
+	bool sent_frame_id_seeded = false;
+	// Sent frames since the stream started, which is what the stream header's period
+	// counts in -- a paced stream still gets a header every header_period_frames
+	// frames the client can actually see.
+	uint64_t sent_frames = 0;
+
+	// Move `pace_interval` toward what the headset's reported decode cost asks for.
+	// Called once per composited frame, before the admission test below.
+	void run_pace_control();
+	// Should this composited frame be sent? Takes the pace decision and, when the
+	// answer is yes, marks `now` as the last send.
+	bool pace_admit(std::chrono::steady_clock::time_point now);
+
 	// The stream header goes out on the control (TCP) socket, because a client
 	// that misses it cannot decode anything at all. Repeated periodically so a
 	// decoder that was restarted mid-session recovers without a reconnect.

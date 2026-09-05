@@ -32,6 +32,7 @@
 #include <format>
 #include <optional>
 #include <stdexcept>
+#include <string>
 
 namespace
 {
@@ -197,6 +198,35 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 			throw std::runtime_error(
 			        std::format("unknown NX Warp \"rc\" mode \"{}\"; expected \"auto\" or \"fixed\"", rc));
 	}
+	// "pace": "auto" (the default) sends at the rate the headset says it can decode
+	// at; "off" sends every composited frame, which is what this encoder did before
+	// the pace controller existed; anything else is read as a frame rate and held
+	// exactly, whatever the headset reports. An unknown value is an error rather than
+	// a fallback, for the same reason "backend" and "rc" are.
+	{
+		const std::string pace = option_string(settings.options, "pace", "auto");
+		if (pace == "auto")
+			pace_mode = pace_mode_t::automatic;
+		else if (pace == "off")
+			pace_mode = pace_mode_t::off;
+		else
+		{
+			double fps = 0;
+			const char * end = pace.data() + pace.size();
+			char * stop = nullptr;
+			fps = std::strtod(pace.c_str(), &stop);
+			if (stop != end or not(fps > 0))
+				throw std::runtime_error(std::format(
+				        "unknown NX Warp \"pace\" mode \"{}\"; expected \"auto\", \"off\" "
+				        "or a frame rate in frames per second",
+				        pace));
+			pace_mode = pace_mode_t::fixed;
+			// An override is an override: it is not clamped into the automatic
+			// controller's band, because the reason to write a number here rather
+			// than "auto" is to get that number.
+			pace_interval = 1.0 / fps;
+		}
+	}
 	rc_min_qp = std::min(63u, option_u32(settings.options, "min-qp", 20));
 	rc_max_qp = std::min(63u, option_u32(settings.options, "max-qp", 44));
 	if (rc_min_qp > rc_max_qp)
@@ -343,12 +373,21 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	                              current_qp, rc_min_qp, rc_max_qp, rc_fps)
 	                : std::format("fixed QP {}", base_qp);
 
-	U_LOG_I("nxwarp: stream %d %ux%u, %s, %s, %ux%u tiles in %u band(s), %zu bytes per transport tile",
+	const std::string pace_desc =
+	        pace_mode == pace_mode_t::off
+	                ? std::string("no send pacing")
+	                : (pace_mode == pace_mode_t::fixed
+	                           ? std::format("paced at a fixed {:.1f} fps", 1.0 / pace_interval)
+	                           : std::format("send pacing follows the headset's decode cost, {:.0f}..{:.0f} fps",
+	                                         1.0 / pace_max_interval, 1.0 / pace_min_interval));
+
+	U_LOG_I("nxwarp: stream %d %ux%u, %s, %s, %s, %ux%u tiles in %u band(s), %zu bytes per transport tile",
 	        int(stream_idx),
 	        unsigned(extent.width),
 	        unsigned(extent.height),
 	        codec->description().c_str(),
 	        rc_desc.c_str(),
+	        pace_desc.c_str(),
 	        unsigned(stream_cfg.cols),
 	        unsigned(stream_cfg.rows),
 	        unsigned(stream_cfg.bands()),
@@ -478,6 +517,103 @@ void wivrn::video_encoder_nxwarp::run_rate_control(size_t last_frame_bytes)
 	// try again next frame.
 	if (codec->set_qp(want))
 		current_qp = want;
+}
+
+// The pace controller.
+//
+// WHAT IT CONTROLS. The interval between frames that leave this encoder. Not a target
+// frame rate in the abstract: the interval, measured against the last frame that was
+// actually sent, because that is the quantity the headset's decoder experiences and the
+// one its own stride is computed from (nxwarp_decoder's arrival period).
+//
+// THE TARGET. The headset's measured decode wall time, plus a tenth of it, plus a
+// millisecond. The tenth is proportional headroom -- a decode that varies by ten percent
+// frame to frame, which every GPU decoder does, must not put the headset back into the
+// state where it drops one -- and the millisecond is the fixed cost of getting a frame
+// off the wire and into the worker, which does not scale with the picture.
+//
+// THE LAW. Slew a twentieth of the way to the target every composited frame, and jump
+// five percent slower than wherever it is now whenever the headset reports another frame
+// dropped by its decode stride.
+//
+//   * a slew rather than a jump to the target, because the reported decode cost moves
+//     with the frame it measured: the first inter frames after pacing engages are three
+//     times smaller than the intra ones before them, so the target drops sharply, and a
+//     controller that followed it exactly would send faster than the headset had proved
+//     it could take and put the whole loop back where it started.
+//   * a twentieth per composited frame is about half a second to close the gap at 90 Hz,
+//     which is slower than the decode figure moves and faster than a user notices.
+//   * the five percent on a stride drop is the asymmetry the problem needs. Being too
+//     slow costs frame rate; being too fast costs an all-intra frame AND the frame rate,
+//     so the response to evidence of being too fast is immediate and the response to
+//     evidence of headroom is the slew.
+//   * and it is never faster than the target even on a drop, which is what `max` says:
+//     a drop is not a reason to send closer to the last measurement.
+//
+// A headset that has reported nothing is left alone entirely. The interval starts at the
+// compositor's own rate, so a stream whose feedback has not arrived yet, or whose client
+// is an older one that does not carry the field, behaves exactly as it did before.
+void wivrn::video_encoder_nxwarp::run_pace_control()
+{
+	if (pace_mode != pace_mode_t::automatic)
+		return;
+
+	const uint16_t decode_us = client_decode_us.load(std::memory_order_relaxed);
+	if (not decode_us)
+		return;
+
+	const double target = double(decode_us) * 1e-6 * 1.1 + 0.001;
+
+	const uint64_t drops = stride_not_held.load(std::memory_order_relaxed);
+	if (drops != pace_stride_seen)
+	{
+		pace_stride_seen = drops;
+		pace_interval = std::max(pace_interval * 1.05, target);
+	}
+	else
+	{
+		pace_interval += 0.05 * (target - pace_interval);
+	}
+	pace_interval = std::clamp(pace_interval, pace_min_interval, pace_max_interval);
+}
+
+// The admission test. A frame that arrives sooner than `pace_interval` since the last one
+// that was SENT is dropped here, before anything is spent on it.
+//
+// The last send is stamped at `now` rather than advanced by exactly one interval: the
+// point is to space the frames the headset receives, and an encoder that fell behind for
+// a moment must not then send a burst to catch up on a schedule -- a burst is precisely
+// what overruns the decoder's queue of one.
+bool wivrn::video_encoder_nxwarp::pace_admit(std::chrono::steady_clock::time_point now)
+{
+	if (pace_mode == pace_mode_t::off)
+		return true;
+
+	run_pace_control();
+
+	if (not pace_have_last)
+	{
+		pace_have_last = true;
+		pace_last_sent = now;
+		return true;
+	}
+	// The compositor's frame period, which is the granularity this decision actually
+	// has: frames arrive at multiples of it, so a strict "not sooner than the interval"
+	// test always rounds the send rate down to the next divisor of the compositor rate.
+	// At 90 Hz with a 35 ms interval that is 44.4 ms -- 22.5 frames a second where the
+	// headset had just said it could take 32, a third of the frame rate given away to
+	// arithmetic. Half a period of tolerance takes the nearest arrival rather than the
+	// next one after it; if that turns out to be too fast the headset says so and
+	// run_pace_control() adds its five percent, which is the loop working.
+	float fps = pending_framerate.load();
+	if (not(fps > 0))
+		fps = rc_fps;
+	const double tolerance = fps > 0 ? 0.5 / double(fps) : 0.0;
+
+	if (std::chrono::duration<double>(now - pace_last_sent).count() < pace_interval - tolerance)
+		return false;
+	pace_last_sent = now;
+	return true;
 }
 
 wivrn::video_encoder_nxwarp::~video_encoder_nxwarp()
@@ -688,6 +824,14 @@ void wivrn::video_encoder_nxwarp::reset_stream()
 		std::lock_guard lock(sender_mutex);
 		rebuild_sender();
 	}
+	// A different headset, so the decode cost the old one reported says nothing about
+	// this one. Back to the compositor's rate until it reports its own, which is the
+	// same conservative start a fresh stream gets.
+	client_decode_us.store(0, std::memory_order_relaxed);
+	if (pace_mode == pace_mode_t::automatic)
+		pace_interval = pace_min_interval;
+	pace_have_last = false;
+	pace_stride_seen = stride_not_held.load(std::memory_order_relaxed);
 	// Send it now rather than at the next period boundary: the new client decodes
 	// nothing at all until it arrives.
 	header_sent = false;
@@ -744,14 +888,36 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	if (not in[slot].have_view_info)
 		return {};
 
+	// --- the pace ----------------------------------------------------------
+	//
+	// First, before anything is spent on this frame: no de-interleave, no codec, no
+	// receipt map, no wire frame id, no bytes. The two flags the network thread sets
+	// (client_holds_nothing, client_dropped_frame) are deliberately NOT read here --
+	// they are answered by the next frame that is actually sent, and consuming them on
+	// a frame that never leaves would throw the answer away.
+	if (not pace_admit(std::chrono::steady_clock::now()))
+	{
+		++prof_paced_out;
+		// The pose in this slot belongs to a frame that was not sent, so nothing may
+		// encode from it later.
+		in[slot].have_view_info = false;
+		return {};
+	}
+
 	const auto & view_info = in[slot].view_info;
 
-	if (not header_sent or frame_id - last_header_frame >= header_period_frames)
+	if (not header_sent or sent_frames - last_header_frame >= header_period_frames)
 	{
 		send_stream_header();
 		header_sent = true;
-		last_header_frame = frame_id;
+		last_header_frame = sent_frames;
 	}
+
+	// The id this frame will carry if it reaches the socket. Not committed yet: an
+	// encode that fails, or a frame too large for the tile grid, must not spend an id
+	// and leave a hole the client would read as loss.
+	const uint16_t frame_id16 = sent_frame_id_seeded ? uint16_t(sent_frame_id + 1)
+	                                                 : uint16_t(frame_id);
 
 	// --- host side of the image -------------------------------------------
 	//
@@ -806,6 +972,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// the stronger claim -- the shadow below describes what the transport delivered,
 	// and the whole point of the not-held packet is that the transport's account is
 	// true and insufficient.
+	bool resync_this_frame = false;
 	const bool dropped = client_dropped_frame.exchange(false);
 	if (client_holds_nothing.exchange(false) or dropped)
 	{
@@ -817,7 +984,11 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		// decoded between breaking its chain and this frame was warped from a
 		// reference it does not have, and showing that is the "a few blocks of
 		// picture and the rest grey" the user reports.
-		send_resync_notice(uint16_t(frame_id));
+		//
+		// Sent below, once the frame has an id on the wire: a notice naming a frame
+		// that then failed to encode would leave the headset waiting for a resync
+		// point that never arrives.
+		resync_this_frame = true;
 	}
 	else if (have_previous_frame)
 	{
@@ -893,6 +1064,12 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	if (bitstream.empty())
 	{
 		U_LOG_W("nxwarp: stream %d frame %llu did not encode", int(stream_idx), (unsigned long long)frame_id);
+		// The all-zero receipt map was consumed by an encode that produced nothing,
+		// and nxvc's map lasts exactly one frame -- so without this the next frame
+		// would predict from a reference the client does not have and the headset
+		// would never be told. Ask again.
+		if (resync_this_frame)
+			client_holds_nothing = true;
 		return {};
 	}
 	// Encode wall time, once every two seconds per stream: on a CPU reference
@@ -927,10 +1104,26 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 			// stream cannot reach from inside its band.
 			const double achieved = double(prof_bytes) / double(prof_n);
 			const double mean_qp = double(prof_qp_sum) / double(prof_n);
+			// The pace, next to the numbers it is derived from and the numbers it
+			// explains. Without it a stream sending 30 frames a second where the
+			// compositor made 90 looks exactly like an encoder that is stalling.
+			std::string pace_note;
+			if (pace_mode != pace_mode_t::off)
+			{
+				const uint16_t dus = client_decode_us.load(std::memory_order_relaxed);
+				pace_note = std::format(
+				        ", paced to {:.1f} fps ({}), {} composited frame(s) not sent",
+				        pace_interval > 0 ? 1.0 / pace_interval : 0.0,
+				        pace_mode == pace_mode_t::fixed
+				                ? std::string("fixed by configuration")
+				                : (dus ? std::format("client decode {:.1f} ms", double(dus) / 1000.0)
+				                       : std::string("client decode not reported yet")),
+				        (unsigned long long)prof_paced_out);
+			}
 			if (rc_auto and rc_target_bytes > 0)
 				U_LOG_I("nxwarp: stream %d encoded %llu frames in %.1f s: %.1f ms/frame (max %.1f), "
 				        "%.0f B/frame vs %.0f target (%+.0f%%), QP %.1f [%u..%u], "
-				        "controller allows %.1f Mbit/s%s",
+				        "controller allows %.1f Mbit/s%s%s",
 				        int(stream_idx), (unsigned long long)prof_n,
 				        std::chrono::duration<double>(t_enc1 - prof_since).count(),
 				        prof_ms / prof_n, prof_max_ms,
@@ -945,13 +1138,15 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				        rc_unreachable ? " (CEILING UNREACHABLE, pinned at max QP)"
 				                       : (current_qp == rc_min_qp
 				                                  ? " (at min QP)"
-				                                  : (current_qp == rc_max_qp ? " (at max QP)" : "")));
+				                                  : (current_qp == rc_max_qp ? " (at max QP)" : "")),
+				        pace_note.c_str());
 			else
 				U_LOG_I("nxwarp: stream %d encoded %llu frames in %.1f s: %.1f ms/frame (max %.1f), "
-				        "%.0f B/frame at fixed QP %u",
+				        "%.0f B/frame at fixed QP %u%s",
 				        int(stream_idx), (unsigned long long)prof_n,
 				        std::chrono::duration<double>(t_enc1 - prof_since).count(),
-				        prof_ms / prof_n, prof_max_ms, achieved, unsigned(current_qp));
+				        prof_ms / prof_n, prof_max_ms, achieved, unsigned(current_qp),
+				        pace_note.c_str());
 			// What the headset threw away since the last report, and why. Not on
 			// the line above: it is usually zero, and when it is not it is the
 			// thing to look at rather than a field to scan past. Every one of
@@ -977,6 +1172,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 			prof_qp_sum = 0;
 			prof_qp_lo = 63;
 			prof_qp_hi = 0;
+			prof_paced_out = 0;
 			prof_since = t_enc1;
 		}
 	}
@@ -1017,13 +1213,15 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 			        unsigned(tiles_per_frame),
 			        chunk_bytes);
 		}
+		if (resync_this_frame)
+			client_holds_nothing = true;
 		return {};
 	}
 
 	auto descs = codec->tiles();
 
 	nxt::PoseHeader pose_hdr{};
-	pose_hdr.pose_seq = uint16_t(frame_id);
+	pose_hdr.pose_seq = frame_id16;
 	pose_hdr.quat[0] = q15(pose.orientation.x);
 	pose_hdr.quat[1] = q15(pose.orientation.y);
 	pose_hdr.quat[2] = q15(pose.orientation.z);
@@ -1032,7 +1230,6 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	pose_hdr.pos_mm_q8[1] = mm_q8(pose.position.y);
 	pose_hdr.pos_mm_q8[2] = mm_q8(pose.position.z);
 
-	const uint16_t frame_id16 = uint16_t(frame_id);
 	const uint64_t encode_end_ns = uint64_t(os_monotonic_get_ns());
 	const uint32_t now_us = uint32_t(encode_end_ns / 1000);
 
@@ -1068,6 +1265,13 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	}
 
 	in[slot].have_view_info = false;
+	// The frame is on the wire, so its id is spent and the next one follows it.
+	sent_frame_id = frame_id16;
+	sent_frame_id_seeded = true;
+	++sent_frames;
+	// And now the headset can be told which frame it may trust again.
+	if (resync_this_frame)
+		send_resync_notice(frame_id16);
 	previous_frame_id = frame_id16;
 	have_previous_frame = true;
 
@@ -1091,6 +1295,11 @@ void wivrn::video_encoder_nxwarp::on_nxwarp_frame_not_held(
 	// thread's, and the next encode() is the only place it may be touched.
 	last_not_held_id = frame_id;
 	last_not_held_why = uint8_t(why);
+	// The pace controller reads only the stride reason: it is the one that means "you
+	// are sending faster than I can decode". A hole is the link's, a codec refusal is
+	// the codec's, and slowing down for either would be answering a different question.
+	if (why == from_headset::nxwarp_frame_not_held::reason::stride)
+		stride_not_held.fetch_add(1, std::memory_order_relaxed);
 	not_held_total.fetch_add(1, std::memory_order_relaxed);
 	client_dropped_frame = true;
 }

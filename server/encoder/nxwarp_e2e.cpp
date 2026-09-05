@@ -123,6 +123,7 @@
 #include <nxvc/transport/receiver.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -470,6 +471,12 @@ public:
 	// datagram count the last one went out. A resumed session that does not resend the
 	// header leaves a fresh decoder with no receiver at all.
 	uint64_t headers_sent = 0;
+	// Resync notices (path 0xFE): one per frame the encoder coded with an all-zero
+	// receipt map, i.e. one per frame it was forced to code entirely INTRA because the
+	// headset said it had not reconstructed something. Counting them is the direct
+	// measure of whether inter prediction is engaging at all -- bytes per frame depend
+	// on the clip, this does not.
+	uint64_t resync_notices = 0;
 
 	lossy_link(nxwarp_decoder & dec, double loss, double reorder, uint32_t seed) :
 	        dec(&dec), rng(seed), loss(loss), reorder(reorder) {}
@@ -489,6 +496,8 @@ public:
 			stream_header = packet.payload;
 			++headers_sent;
 		}
+		if (packet.path_id == to_headset::nxwarp_resync_path)
+			++resync_notices;
 		deliver(std::move(packet));
 	}
 
@@ -874,6 +883,25 @@ int main(int argc, char ** argv)
 	// ceiling in bit/s, 0 for off. This is the whole loop -- encoder, transport, real
 	// decoder, real from_headset::feedback, real control law -- closed in one process.
 	uint64_t aimd_ceiling = 0;
+	// The encoder's send pacing: "off" (the default here), "auto", or a fixed frame
+	// rate. See the settings.options assignment below for why the default differs from
+	// the server's.
+	std::string pace = "off";
+	// Pretend this device's decoder costs this many milliseconds a frame. Zero, and the
+	// desktop GPU decodes in about a millisecond, which is nothing like a Pico 4 and
+	// exercises none of the decode stride, the bounded queue or the not-held reports
+	// that a slow client produces. With a number here the shipping decoder waits that
+	// long on its worker thread, so everything downstream of the wait is the real thing
+	// reacting to a real cost.
+	double client_decode_ms = 0;
+	// Present composited frames at this rate instead of as fast as the GPU allows.
+	// Zero (the default) is the old behaviour and is what every test that measures the
+	// encoder wants. It is the pacing tests that need it: the pace is a decision about
+	// WALL TIME between sent frames, so a loop that presents a thousand frames a second
+	// makes it drop 97 percent of them and proves nothing about a compositor running at
+	// 90 Hz. With --present-hz 90 the frames arrive when a compositor would make them,
+	// and "how many of them did the pace send" is the number the headset would see.
+	double present_hz = 0;
 	uint32_t width = 320, height = 240, frames = 12, seed = 1;
 	double loss = 0.0, reorder = 0.0;
 	// The headset app restarted, or the link dropped and came back, while the server's
@@ -958,6 +986,12 @@ int main(int argc, char ** argv)
 			max_qp = uint32_t(std::stoul(next()));
 		else if (a == "--aimd")
 			aimd_ceiling = std::stoull(next());
+		else if (a == "--pace")
+			pace = next();
+		else if (a == "--client-decode-ms")
+			client_decode_ms = std::stod(next());
+		else if (a == "--present-hz")
+			present_hz = std::stod(next());
 		else
 		{
 			std::fprintf(stderr, "unknown argument %s\n", a.c_str());
@@ -1009,6 +1043,12 @@ int main(int argc, char ** argv)
 	// being reproducible, and every assertion about the transport is written
 	// against a run whose frames are the same size every time.
 	settings.options["rc"] = rc;
+	// Send pacing OFF by default here, for the reason rate control is: every other
+	// assertion in this harness is written against a run that sends exactly the frames
+	// it presents, and the pace is a wall-clock decision, so leaving it on would make
+	// the frame count depend on how fast this machine encodes. The server's own default
+	// is "auto"; --pace auto is how that is exercised.
+	settings.options["pace"] = pace;
 	settings.options["min-qp"] = std::to_string(min_qp);
 	settings.options["max-qp"] = std::to_string(max_qp);
 
@@ -1039,8 +1079,11 @@ int main(int argc, char ** argv)
 	host.width = width;
 	host.height = height;
 	auto make_decoder = [&] {
-		return std::make_unique<nxwarp_decoder>(vk.device, vk.physical_device,
-		                                        vk.queue.family_index, desc, 0, host, nullptr);
+		auto d = std::make_unique<nxwarp_decoder>(vk.device, vk.physical_device,
+		                                          vk.queue.family_index, desc, 0, host, nullptr);
+		if (client_decode_ms > 0)
+			d->set_simulated_decode_ms(client_decode_ms);
+		return d;
 	};
 	auto dec = make_decoder();
 
@@ -1104,6 +1147,29 @@ int main(int argc, char ** argv)
 		double target;
 	};
 	std::vector<rc_row> rc_trace;
+	// --- what the pace actually sent -------------------------------------------
+	//
+	// A paced encoder sends fewer frames than the compositor presents, so "how many
+	// frames were presented" stops being the number every assertion below is against.
+	// A frame is counted as sent when it put datagrams on the link, which is the only
+	// definition that cannot disagree with what the decoder saw.
+	//
+	// The wire frame ids are rebuilt here rather than read off the encoder: they are
+	// the part of pacing the client is most exposed to (a gap in the sequence is loss,
+	// to a windowed reassembler and to the AIMD report built from it), so the harness
+	// keeps its own count and the checks below compare the two.
+	uint64_t sent_frames = 0;
+	uint16_t next_wire_id = 0;
+	bool wire_id_seeded = false;
+	std::unordered_map<uint16_t, size_t> presented_of_wire_id;
+	// Wall time of the first and last frame that was sent, for the sent rate.
+	std::chrono::steady_clock::time_point first_send{}, last_send{};
+	// Not-held reports by reason, in the order from_headset::nxwarp_frame_not_held
+	// declares them, and the presented-frame index of the last stride one -- which is
+	// what says whether the pace settled or is still being told it is too fast.
+	std::array<uint64_t, 4> not_held_by_reason{};
+	uint64_t last_stride_not_held_at = 0;
+	bool any_stride_not_held = false;
 	std::vector<view_info_t> presented;
 	std::vector<std::vector<uint8_t>> source_frames;
 	const uint8_t num_slots_used = 1;
@@ -1112,6 +1178,7 @@ int main(int argc, char ** argv)
 	// the moment the client was replaced, so that "did anything decode AFTER the
 	// reconnect" is a number rather than an impression.
 	size_t frames_at_reconnect = 0, units_at_reconnect = 0;
+	uint64_t sent_at_reconnect = 0;
 	uint64_t headers_at_reconnect = 0;
 	bool reconnected = false;
 	nxt::ReceiverStats post_stats{};
@@ -1122,9 +1189,20 @@ int main(int argc, char ** argv)
 		            (unsigned long long)((first_frame / 65536 + 1) * 65536),
 		            first_frame % 65536 + frames > 65536 ? "is" : "is NOT");
 
+	const auto run_start = std::chrono::steady_clock::now();
 	for (uint32_t i = 0; i < frames; ++i)
 	{
 		const uint64_t f = first_frame + i;
+
+		// The compositor's cadence, when one was asked for. Against the run's own
+		// start rather than the previous frame, so a slow frame does not push the
+		// whole schedule back -- which is exactly what a compositor does.
+		if (present_hz > 0)
+		{
+			const auto due = run_start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+			                                     std::chrono::duration<double>(double(i) / present_hz));
+			std::this_thread::sleep_until(due);
+		}
 
 		if (reconnect_at and i == reconnect_at)
 		{
@@ -1135,6 +1213,7 @@ int main(int argc, char ** argv)
 			frames_at_reconnect = host.frames.size();
 			units_at_reconnect = host.units.size();
 			headers_at_reconnect = link.headers_sent;
+			sent_at_reconnect = sent_frames;
 
 			// The client goes away and a new one takes its place. The encoder object
 			// survives, exactly as it does across wivrn_session::resume_session, and
@@ -1183,10 +1262,26 @@ int main(int argc, char ** argv)
 		const uint8_t slot = uint8_t(f % num_slots_used);
 		enc.present_image(*src.image, sem_info, slot, f, vi);
 		const auto before = enc.profile();
+		const uint64_t datagrams_before = link.sent;
 		(void)enc.encode(slot, f);
 		const auto after = enc.profile();
 		if (after.frames > before.frames)
 			rc_trace.push_back({before.qp, after.bytes - before.bytes, after.target_bytes});
+		// Datagrams on the link is what "sent" means: an encode that produced bytes the
+		// tile grid could not carry is not a frame the client ever hears about, and it
+		// spends no wire frame id either.
+		if (link.sent > datagrams_before)
+		{
+			++sent_frames;
+			const uint16_t id = wire_id_seeded ? uint16_t(next_wire_id + 1) : uint16_t(f);
+			next_wire_id = id;
+			wire_id_seeded = true;
+			presented_of_wire_id[id] = i;
+			const auto now = std::chrono::steady_clock::now();
+			if (sent_frames == 1)
+				first_send = now;
+			last_send = now;
+		}
 
 		// Feedback the decoder produced while that frame was going through, straight back
 		// into the encoder, which is what the network thread does.
@@ -1217,6 +1312,14 @@ int main(int argc, char ** argv)
 			for (const auto & p: nh)
 			{
 				++not_held_packets;
+				const auto w = size_t(p.why);
+				if (w < not_held_by_reason.size())
+					++not_held_by_reason[w];
+				if (p.why == from_headset::nxwarp_frame_not_held::reason::stride)
+				{
+					last_stride_not_held_at = i;
+					any_stride_not_held = true;
+				}
 				enc.on_nxwarp_frame_not_held(p.frame_id, p.why);
 			}
 		}
@@ -1246,8 +1349,59 @@ int main(int argc, char ** argv)
 	            link.sent ? 100.0 * double(link.dropped) / double(link.sent) : 0.0,
 	            (unsigned long long)link.delayed,
 	            link.sent ? 100.0 * double(link.delayed) / double(link.sent) : 0.0);
-	std::printf("reassembly produced %zu complete frame units of %u presented\n", host.units.size(), frames);
-	std::printf("decoder published %zu frames\n\n", host.frames.size());
+	std::printf("reassembly produced %zu complete frame units of %llu sent (%u presented)\n",
+	            host.units.size(), (unsigned long long)sent_frames, frames);
+	std::printf("decoder published %zu frames\n", host.frames.size());
+
+	// --- the pace ---------------------------------------------------------------
+	{
+		const double span = sent_frames > 1
+		                            ? std::chrono::duration<double>(last_send - first_send).count()
+		                            : 0.0;
+		std::printf("pace: \"%s\", simulated client decode %.1f ms; %llu of %u composited "
+		            "frames sent (%.1f%%)",
+		            pace.c_str(), client_decode_ms, (unsigned long long)sent_frames, frames,
+		            frames ? 100.0 * double(sent_frames) / double(frames) : 0.0);
+		if (span > 0)
+			std::printf(", %.1f frames/s on the wire", double(sent_frames - 1) / span);
+		std::printf("\n");
+		std::printf("not held: %llu total -- %llu hole, %llu decode stride, %llu worker "
+		            "backlog, %llu codec refusal\n",
+		            (unsigned long long)not_held_packets,
+		            (unsigned long long)not_held_by_reason[0],
+		            (unsigned long long)not_held_by_reason[1],
+		            (unsigned long long)not_held_by_reason[2],
+		            (unsigned long long)not_held_by_reason[3]);
+		std::printf("all-intra resyncs: %llu of %llu sent frames (%.1f%%) were coded with no "
+		            "temporal reference because the headset had reported one not held\n",
+		            (unsigned long long)link.resync_notices, (unsigned long long)sent_frames,
+		            sent_frames ? 100.0 * double(link.resync_notices) / double(sent_frames) : 0.0);
+		if (any_stride_not_held)
+			std::printf("last decode-stride report was at presented frame %llu of %u\n",
+			            (unsigned long long)last_stride_not_held_at, frames);
+
+		// Bytes per SENT frame at the start of the run and at the end of it. This is
+		// where inter prediction shows up or does not: while the headset is dropping
+		// frames the encoder answers every not-held report with an all-zero receipt
+		// map and every frame is intra, so the head of the run is intra-sized. Once
+		// the pace has settled and the headset stops dropping, the encoder predicts
+		// and the frames fall to a fraction of that. Quarters rather than halves so
+		// the settling itself does not sit inside the "after".
+		if (rc_trace.size() >= 8)
+		{
+			const size_t q = rc_trace.size() / 4;
+			double head = 0, tail = 0;
+			for (size_t k = 0; k < q; ++k)
+				head += double(rc_trace[k].bytes);
+			for (size_t k = rc_trace.size() - q; k < rc_trace.size(); ++k)
+				tail += double(rc_trace[k].bytes);
+			head /= double(q);
+			tail /= double(q);
+			std::printf("bytes per sent frame: first %zu %.0f B, last %zu %.0f B (%.2fx)\n",
+			            q, head, q, tail, tail > 0 ? head / tail : 0.0);
+		}
+	}
+	std::printf("\n");
 
 	if (const auto * rs = dec->receiver_stats())
 		post_stats = *rs;
@@ -1365,9 +1519,9 @@ int main(int argc, char ** argv)
 	// frame presented must reassemble whole no matter how the datagrams were ordered,
 	// which is the windowed reassembler's whole contract.
 	if (clean)
-		check(host.units.size() == frames,
-		      "every frame presented reassembled whole under reordering (" +
-		              std::to_string(host.units.size()) + "/" + std::to_string(frames) + ")");
+		check(host.units.size() == sent_frames,
+		      "every frame SENT reassembled whole under reordering (" +
+		              std::to_string(host.units.size()) + "/" + std::to_string(sent_frames) + ")");
 
 	// Frames must reach the worker in frame order. from_headset::feedback::frame_index is
 	// the SENDER's frame id widened (nxwarp_decoder::wire_frame_index), so the published
@@ -1421,15 +1575,15 @@ int main(int argc, char ** argv)
 	// stale -- and that is what the two checks above state. So this is a report, not an
 	// assertion; asserting it would only make the test flaky about the machine.
 	if (clean)
-		std::printf("accounting: %u presented, %zu reassembled, %zu published, "
+		std::printf("accounting: %u presented, %llu sent, %zu reassembled, %zu published, "
 		            "%zu discarded as stale by the bounded worker queue\n",
-		            frames, host.units.size(), host.frames.size(),
+		            frames, (unsigned long long)sent_frames, host.units.size(), host.frames.size(),
 		            host.units.size() - std::min(host.units.size(), host.frames.size()));
 	else
 	{
 		check(arrived or not host.frames.empty(),
 		      "lossy run keeps publishing rather than stalling");
-		check(host.frames.size() < frames,
+		check(host.frames.size() < sent_frames,
 		      "lossy run drops the frames with holes rather than inventing them");
 	}
 
@@ -1437,8 +1591,8 @@ int main(int argc, char ** argv)
 	{
 		const size_t units_after = host.units.size() - units_at_reconnect;
 		const size_t after = host.frames.size() - frames_at_reconnect;
-		const size_t presented_after = frames - reconnect_at;
-		std::printf("reconnect: %zu of %zu frames presented after the new client appeared were "
+		const size_t presented_after = size_t(sent_frames - sent_at_reconnect);
+		std::printf("reconnect: %zu of %zu frames sent after the new client appeared were "
 		            "reassembled whole, %zu of them decoded\n",
 		            units_after, presented_after, after);
 		std::printf("reconnect: receiver of the NEW client saw %llu datagrams, placed %llu tiles; "
@@ -1462,7 +1616,7 @@ int main(int argc, char ** argv)
 		      "no datagram was rejected by the new client's replay window (replay " +
 		              std::to_string(post_stats.replay) + ")");
 		check(clean ? units_after == presented_after : units_after > 0,
-		      "every frame presented after the reconnect arrived whole (" +
+		      "every frame sent after the reconnect arrived whole (" +
 		              std::to_string(units_after) + "/" + std::to_string(presented_after) + ")");
 		check(after > 0, "the new client decoded and published frames (" + std::to_string(after) + ")");
 	}
@@ -1692,8 +1846,14 @@ int main(int argc, char ** argv)
 							break;
 						}
 					}
+					// Which composited frame this wire id was assigned to. Under
+					// pacing the two are not the same counter -- the wire sequence
+					// is dense over the frames that were SENT -- so the mapping is
+					// the one the send loop recorded, not an offset from the first
+					// frame id.
+					auto pit = presented_of_wire_id.find(id);
 					if (src_idx < presented.size() and
-					    uint16_t(id - uint16_t(first_frame)) != src_idx)
+					    (pit == presented_of_wire_id.end() or pit->second != src_idx))
 						++misplaced;
 				}
 				const size_t r = unit_idx * frame_size;

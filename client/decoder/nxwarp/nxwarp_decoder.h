@@ -157,6 +157,15 @@ public:
 
 	static std::vector<wivrn::video_codec> supported_codecs();
 
+	// The transport receiver's own reject counters, or nullptr while the stream header
+	// has not arrived and there is no receiver yet. Read-only, and only so that a test
+	// harness can name the counter that rejected a datagram rather than infer it from a
+	// black picture; the client itself reads them through its own two-second log line.
+	const nxt::ReceiverStats * transport_stats() const
+	{
+		return receiver ? &receiver->stats : nullptr;
+	}
+
 private:
 	image * get_free();
 	bool on_stream_header(std::span<const uint8_t> header);

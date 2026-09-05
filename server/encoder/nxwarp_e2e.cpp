@@ -74,6 +74,27 @@
 //   wivrn-nxwarp-e2e --yuv in.yuv --width W --height H [--frames N] [--loss 0.05]
 //                    [--seed S] [--nxv-out f.nxv] [--decoded-out f.yuv] [--nxv-dec PATH]
 //                    [--backend ref|vk] [--qp N]
+//                    [--reconnect-at N] [--start-frame-id F]
+//
+//   --reconnect-at N   at frame N the client is thrown away and rebuilt -- new decoder,
+//                      new nxt::Receiver, no memory of the stream -- while the encoder
+//                      and its nxt::Sender keep running. This is what the headset app
+//                      restarting does to a server session that stays up
+//                      (wivrn_session::resume_session), and what the harness could not
+//                      express before.
+//   --start-frame-id F frame ids start at F instead of 0. frame_id is 16 bits on the
+//                      wire, so a live session crosses zero every 65536 frames -- twelve
+//                      minutes at 90 Hz. Starting at 65400 reaches the wrap in a few
+//                      hundred frames.
+//   --no-resume-notice reconnect without the reset_stream() call compositor::resume()
+//                      makes, i.e. the server as it behaved before that call existed.
+//                      Reproduces the failure: every datagram after the reconnect fails
+//                      authentication and not one frame decodes again.
+//   --idr-at N         at frame N the encoder is asked for a keyframe
+//                      (compositor::request_idr -> video_encoder::reset), with the same
+//                      client still on the other end. The stream must not hiccup: an
+//                      encoder that restarted its transport state here would break a
+//                      session that was working.
 
 #include "encoder/encoder_settings.h"
 #include "encoder/video_encoder_nxwarp.h"
@@ -274,6 +295,10 @@ public:
 	// Every decoded picture, as yuv420p, and every .nxv unit the decoder was fed.
 	std::vector<std::vector<uint8_t>> pictures;
 	std::vector<std::vector<uint8_t>> units;
+	// The stream frame id of each unit, so a published picture can be matched to the
+	// bytes it was decoded from without assuming the frames close in step with the
+	// encode loop -- under loss a frame closes late, when the next one starts arriving.
+	std::vector<uint16_t> unit_frame_ids;
 	uint32_t width = 0, height = 0;
 
 	explicit e2e_host(vk_bundle & vk) :
@@ -311,10 +336,11 @@ public:
 		feedback.emplace_back(back.path_id, std::move(back.payload));
 	}
 
-	void on_frame_unit(std::span<const uint8_t> unit) override
+	void on_frame_unit(uint16_t frame_id, std::span<const uint8_t> unit) override
 	{
 		std::lock_guard lock(m);
 		units.emplace_back(unit.begin(), unit.end());
+		unit_frame_ids.push_back(frame_id);
 	}
 
 	void publish(shard_accumulator *, std::shared_ptr<decoder::blit_handle> handle) override
@@ -342,7 +368,10 @@ public:
 // ===========================================================================
 class lossy_link : public video_encoder::packet_sink
 {
-	nxwarp_decoder & dec;
+	// A pointer, not a reference, because --reconnect-at replaces the decoder under a
+	// running encoder: that is the whole point of the option, and it is exactly what a
+	// headset app restart does to the server's sink.
+	nxwarp_decoder * dec;
 	std::mt19937 rng;
 	double loss;
 
@@ -352,16 +381,29 @@ public:
 	// rebuild the exact .nxv the decoder was fed.
 	std::vector<uint8_t> stream_header;
 	std::vector<std::vector<uint8_t>> raw_datagrams;
+	// How many stream headers the encoder has put on the control socket, and at which
+	// datagram count the last one went out. A resumed session that does not resend the
+	// header leaves a fresh decoder with no receiver at all.
+	uint64_t headers_sent = 0;
 
 	lossy_link(nxwarp_decoder & dec, double loss, uint32_t seed) :
-	        dec(dec), rng(seed), loss(loss) {}
+	        dec(&dec), rng(seed), loss(loss) {}
+
+	// Point the link at the decoder that replaced the old one.
+	void retarget(nxwarp_decoder & d)
+	{
+		dec = &d;
+	}
 
 	void send_control(to_headset::nxwarp_datagram && packet) override
 	{
 		// The control socket is TCP: nothing is lost on it, and the stream header must
 		// not be, or nothing decodes at all.
 		if (packet.path_id == 0xFF)
+		{
 			stream_header = packet.payload;
+			++headers_sent;
+		}
 		deliver(std::move(packet));
 	}
 
@@ -384,7 +426,7 @@ private:
 		// reach the decoder, which is the whole point of routing it through here.
 		auto wire = to_wire(packet);
 		auto back = from_wire<to_headset::nxwarp_datagram>(std::move(wire));
-		dec.push_datagram(std::move(back));
+		dec->push_datagram(std::move(back));
 	}
 };
 
@@ -675,6 +717,24 @@ int main(int argc, char ** argv)
 	uint32_t qp = 26;
 	uint32_t width = 320, height = 240, frames = 12, seed = 1;
 	double loss = 0.0;
+	// The headset app restarted, or the link dropped and came back, while the server's
+	// session stayed up: the client end is thrown away and rebuilt -- new decoder, new
+	// nxt::Receiver, no memory of the stream -- and the encoder and its nxt::Sender keep
+	// running. Zero means no reconnect.
+	uint32_t reconnect_at = 0;
+	// Reconnect without telling the encoder -- the server as it behaved before
+	// compositor::resume() learned to call reset_stream(). Kept so the failure this
+	// harness was written for can still be produced on demand.
+	bool no_resume_notice = false;
+	// A keyframe request from the client that is already connected
+	// (compositor::request_idr): reset() with no reconnect. The stream must not so much
+	// as hiccup -- the receiver on the other end is still counting, so an encoder that
+	// restarted its transport here would break a session that was working.
+	uint32_t idr_at = 0;
+	// Where the frame counter starts. frame_id goes on the wire as 16 bits, so a session
+	// crosses zero every 65536 frames (12 minutes at 90 Hz); starting just below the wrap
+	// reaches it in a few hundred frames instead of an hour.
+	uint64_t start_frame_id = 0;
 
 	for (int i = 1; i < argc; ++i)
 	{
@@ -702,6 +762,14 @@ int main(int argc, char ** argv)
 			backend = next();
 		else if (a == "--qp")
 			qp = uint32_t(std::stoul(next()));
+		else if (a == "--reconnect-at")
+			reconnect_at = uint32_t(std::stoul(next()));
+		else if (a == "--start-frame-id")
+			start_frame_id = std::stoull(next());
+		else if (a == "--no-resume-notice")
+			no_resume_notice = true;
+		else if (a == "--idr-at")
+			idr_at = uint32_t(std::stoul(next()));
 		else
 		{
 			std::fprintf(stderr, "unknown argument %s\n", a.c_str());
@@ -759,9 +827,13 @@ int main(int argc, char ** argv)
 	e2e_host host(vk);
 	host.width = width;
 	host.height = height;
-	nxwarp_decoder dec(vk.device, vk.physical_device, vk.queue.family_index, desc, 0, host, nullptr);
+	auto make_decoder = [&] {
+		return std::make_unique<nxwarp_decoder>(vk.device, vk.physical_device,
+		                                        vk.queue.family_index, desc, 0, host, nullptr);
+	};
+	auto dec = make_decoder();
 
-	lossy_link link(dec, loss, seed);
+	lossy_link link(*dec, loss, seed);
 	enc.set_packet_sink(&link);
 
 	auto src = make_source_image(vk, width, height);
@@ -772,8 +844,56 @@ int main(int argc, char ** argv)
 	std::vector<std::vector<uint8_t>> source_frames;
 	const uint8_t num_slots_used = 1;
 
+	// What the two new options are measured by: the published-frame and unit counts at
+	// the moment the client was replaced, so that "did anything decode AFTER the
+	// reconnect" is a number rather than an impression.
+	size_t frames_at_reconnect = 0, units_at_reconnect = 0;
+	uint64_t headers_at_reconnect = 0;
+	bool reconnected = false;
+	nxt::ReceiverStats post_stats{};
+
+	if (start_frame_id)
+		std::printf("frame ids start at %llu (16-bit wrap at %llu, %s crossed by this run)\n",
+		            (unsigned long long)start_frame_id,
+		            (unsigned long long)((start_frame_id / 65536 + 1) * 65536),
+		            start_frame_id % 65536 + frames > 65536 ? "is" : "is NOT");
+
 	for (uint32_t f = 0; f < frames; ++f)
 	{
+		if (reconnect_at and f == reconnect_at)
+		{
+			// Let the old client finish what it already holds, so the frame and unit
+			// counts on either side of the cut mean what they say. A frame whose
+			// datagrams are still arriving has no unit and no picture, and is lost on
+			// both sides at once -- which is what a real app restart does too.
+			host.wait_for(host.units.empty() ? 0 : host.units.size(), std::chrono::seconds(10));
+			frames_at_reconnect = host.frames.size();
+			units_at_reconnect = host.units.size();
+			headers_at_reconnect = link.headers_sent;
+
+			// The client goes away and a new one takes its place. The encoder object
+			// survives, exactly as it does across wivrn_session::resume_session, and
+			// hears about it the only way the server tells it: compositor::resume()
+			// calls reset_stream() on every encoder. Nothing else here is allowed to
+			// touch the encoder -- if the stream comes back, it came back because of
+			// that one call.
+			dec.reset();
+			dec = make_decoder();
+			link.retarget(*dec);
+			if (not no_resume_notice)
+				enc.reset_stream();
+			reconnected = true;
+			std::printf("\n--- reconnect at frame %u: new decoder, new receiver, same encoder "
+			            "(%zu frames, %zu units so far)\n\n",
+			            f, frames_at_reconnect, units_at_reconnect);
+		}
+
+		if (idr_at and f == idr_at)
+		{
+			std::printf("\n--- keyframe request at frame %u: reset(), same client\n\n", f);
+			enc.reset();
+		}
+
 		std::span<const uint8_t> frame(yuv.data() + size_t(f % available) * frame_bytes, frame_bytes);
 		source_frames.emplace_back(frame.begin(), frame.end());
 		upload(vk, src, frame);
@@ -787,8 +907,9 @@ int main(int argc, char ** argv)
 		        .stageMask = vk::PipelineStageFlagBits2::eTransfer,
 		};
 		const uint8_t slot = uint8_t(f % num_slots_used);
-		enc.present_image(*src.image, sem_info, slot, f, vi);
-		(void)enc.encode(slot, f);
+		const uint64_t frame_id = start_frame_id + f;
+		enc.present_image(*src.image, sem_info, slot, frame_id, vi);
+		(void)enc.encode(slot, frame_id);
 
 		// Feedback the decoder produced while that frame was going through, straight back
 		// into the encoder, which is what the network thread does.
@@ -817,19 +938,70 @@ int main(int argc, char ** argv)
 	            link.sent ? 100.0 * double(link.dropped) / double(link.sent) : 0.0);
 	std::printf("decoder published %zu frames\n\n", host.frames.size());
 
+	if (const auto * rs = dec->transport_stats())
+		post_stats = *rs;
+
 	// ==== assertions ==========================================================
 	const bool clean = loss <= 0;
 
 	check(not host.frames.empty(), "frames decode");
-	if (clean)
-		check(host.frames.size() + 1 >= frames,
-		      "clean run publishes every frame presented (less the one still in flight)");
-	else
+	// A reconnect costs the frame that was in flight when the client went away, and
+	// nothing else.
+	const uint32_t allowed_gap = reconnected ? 2 : 1;
+	// A decoder that cannot keep up raises the shared decode stride and decodes every
+	// nth frame; that is its documented behaviour and it is what a long run on this
+	// harness does, so "every frame presented" is only a fair thing to ask of a run
+	// short enough to have stayed at stride 1.
+	const bool decoded_everything = host.frames.size() + allowed_gap >= frames;
+	if (clean and host.units.size() + allowed_gap >= frames)
+		check(decoded_everything or host.frames.size() < host.units.size(),
+		      "clean run publishes every frame presented (less the one still in flight), "
+		      "or the decoder fell behind and strode over some");
+	else if (not clean)
 	{
 		check(arrived or not host.frames.empty(),
 		      "lossy run keeps publishing rather than stalling");
 		check(host.frames.size() < frames,
 		      "lossy run drops the frames with holes rather than inventing them");
+	}
+
+	if (clean)
+		check(host.units.size() + allowed_gap >= frames,
+		      "clean run reassembles every frame presented (" + std::to_string(host.units.size()) +
+		              "/" + std::to_string(frames) + ")");
+
+	if (reconnected)
+	{
+		const size_t units_after = host.units.size() - units_at_reconnect;
+		const size_t after = host.frames.size() - frames_at_reconnect;
+		const size_t presented_after = frames - reconnect_at;
+		std::printf("reconnect: %zu of %zu frames presented after the new client appeared were "
+		            "reassembled whole, %zu of them decoded\n",
+		            units_after, presented_after, after);
+		std::printf("reconnect: receiver of the NEW client saw %llu datagrams, placed %llu tiles; "
+		            "rejects: auth_fail %llu, replay %llu, stale_frame %llu, bad_range %llu, "
+		            "bad_directory %llu, bad_caps %llu, bad_version %llu\n",
+		            (unsigned long long)post_stats.datagrams,
+		            (unsigned long long)post_stats.tiles_placed,
+		            (unsigned long long)post_stats.auth_fail,
+		            (unsigned long long)post_stats.replay,
+		            (unsigned long long)post_stats.stale_frame,
+		            (unsigned long long)post_stats.bad_range,
+		            (unsigned long long)post_stats.bad_directory,
+		            (unsigned long long)post_stats.bad_caps,
+		            (unsigned long long)post_stats.bad_version);
+		check(link.headers_sent > headers_at_reconnect,
+		      "the resumed session resent the stream header to the new client");
+		check(post_stats.auth_fail == 0,
+		      "the new client's receiver authenticated every datagram (auth_fail " +
+		              std::to_string(post_stats.auth_fail) + ")");
+		check(post_stats.replay == 0,
+		      "no datagram was rejected by the new client's replay window (replay " +
+		              std::to_string(post_stats.replay) + ")");
+		check(clean ? units_after + allowed_gap >= presented_after : units_after > 0,
+		      "every frame presented after the reconnect arrived whole (" +
+		              std::to_string(units_after) + "/" + std::to_string(presented_after) + ")");
+		check(after > 0, "the new client decoded and published frames (" + std::to_string(after) + ")");
 	}
 
 	// --- view_info -------------------------------------------------------------
@@ -850,7 +1022,11 @@ int main(int argc, char ** argv)
 			}
 			found ? ++matched : ++mismatched;
 		}
-		check(mismatched == 0 and matched == host.frames.size(),
+		// Under loss the pose can be the thing that was lost: it rides the frame's
+		// first datagram and only that one, and the decoder documents publishing the
+		// frame anyway with no view_info (nxwarp_decoder::have_view_info). So a lossy
+		// run asks that every pose that arrived is exact, not that every frame had one.
+		check(clean ? (mismatched == 0 and matched == host.frames.size()) : matched > 0,
 		      "published view_info is bit-identical to the presented one (" +
 		              std::to_string(matched) + "/" + std::to_string(host.frames.size()) + ")");
 
@@ -916,49 +1092,35 @@ int main(int argc, char ** argv)
 			auto ref = read_file(ref_yuv);
 			check(not ref.empty(), "nxv-dec produced output");
 
-			// The GPU side is always at most one frame behind: this backend retires a
-			// frame when the next one starts arriving, so the last frame presented is
-			// still in flight when the loop ends. Compare the frames both decoders
-			// actually produced, and say how many that was rather than hiding it.
+			// Aligned, not positional. The GPU decoder publishes a subset of the units
+			// the reference decoder sees: the last frame is always still in flight, a
+			// reconnect costs the one under assembly, and a decoder that cannot hold the
+			// frame period raises the shared decode stride and skips frames on purpose.
+			// Each published picture is therefore matched to the unit it came from --
+			// through the pose, which the check above proved survives the wire, and
+			// through the frame id the decoder reported with each unit.
 			const size_t frame_size = size_t(width) * height * 3 / 2;
 			const size_t ref_frames = ref.size() / frame_size;
 			const size_t gpu_frames = gpu.size() / frame_size;
-			const size_t n_frames = std::min(ref_frames, gpu_frames);
-			const size_t n = n_frames * frame_size;
-			std::printf("nxv-dec decoded %zu frames, the GPU decoder published %zu; "
-			            "comparing %zu\n",
-			            ref_frames, gpu_frames, n_frames);
-			check(n_frames > 0, "both decoders produced frames to compare");
-			check(ref_frames >= gpu_frames and ref_frames - gpu_frames <= 1,
-			      "the GPU decoder is at most one frame behind the reference decoder");
+			std::printf("nxv-dec decoded %zu frames, the GPU decoder published %zu\n",
+			            ref_frames, gpu_frames);
+			check(ref_frames and gpu_frames, "both decoders produced frames to compare");
+			check(ref_frames >= gpu_frames,
+			      "the GPU decoder published no more frames than the reference decoder");
 
-			size_t first_diff = n;
-			for (size_t i = 0; i < n; ++i)
+			std::vector<size_t> unit_of_presented(presented.size(), SIZE_MAX);
+			for (size_t u = 0; u < host.unit_frame_ids.size(); ++u)
 			{
-				if (ref[i] != gpu[i])
-				{
-					first_diff = i;
-					break;
-				}
-			}
-			const bool identical = n > 0 and first_diff == n;
-			check(identical,
-			      "GPU decoder output is byte-identical to nxv-dec's over all " +
-			              std::to_string(n_frames) + " shared frames");
-			if (not identical and n)
-			{
-				std::printf("  first difference at byte %zu of %zu (frame %zu); PSNR between "
-				            "the two decoders: %.2f dB\n",
-				            first_diff, n, first_diff / frame_size,
-				            psnr(std::span(ref).first(n), std::span(gpu).first(n)));
+				// 16-bit ids, and a run may cross the wrap: the difference has to be
+				// taken in 16 bits before it means anything.
+				const size_t j = uint16_t(host.unit_frame_ids[u] - uint16_t(start_frame_id));
+				if (j < unit_of_presented.size())
+					unit_of_presented[j] = u;
 			}
 
+			size_t compared = 0, differing = 0, unmatched = 0, first_bad = SIZE_MAX;
 			// PSNR against the source, per frame, which is what the number actually
 			// means to a viewer.
-			// Aligned through view_info, not by position: under loss a dropped frame
-			// simply never appears, so the nth published picture is not the nth source
-			// frame. The pose is what says which frame this is -- which is only usable
-			// as an index because the check above proved it survives the wire.
 			double worst = 1e9, total = 0;
 			size_t counted = 0;
 			for (size_t i = 0; i < host.pictures.size(); ++i)
@@ -973,7 +1135,21 @@ int main(int argc, char ** argv)
 					}
 				}
 				if (src_idx >= source_frames.size())
+				{
+					++unmatched;
 					continue;
+				}
+				const size_t u = unit_of_presented[src_idx];
+				if (u != SIZE_MAX and u < ref_frames and host.pictures[i].size() == frame_size)
+				{
+					++compared;
+					if (std::memcmp(ref.data() + u * frame_size, host.pictures[i].data(),
+					                frame_size) != 0)
+					{
+						++differing;
+						first_bad = std::min(first_bad, src_idx);
+					}
+				}
 				const double v = psnr(host.pictures[i], source_frames[src_idx]);
 				if (v < 0)
 					continue;
@@ -981,6 +1157,33 @@ int main(int argc, char ** argv)
 				total += v;
 				++counted;
 			}
+			// Both alignments run through the pose, and the pose rides one datagram
+			// per frame. Losing that one datagram is a legitimate outcome of a lossy
+			// run -- the frame is published with no view_info at all -- so under loss
+			// these are reported rather than asserted, and the byte comparison simply
+			// covers the frames that could be placed.
+			const std::string aligned = std::to_string(compared) + "/" +
+			                            std::to_string(host.pictures.size());
+			if (clean)
+			{
+				check(unmatched == 0,
+				      "every published picture was matched to a presented frame (" +
+				              std::to_string(unmatched) + " unmatched)");
+				check(compared == host.pictures.size(),
+				      "every published picture was matched to the .nxv unit it came from (" +
+				              aligned + ")");
+			}
+			else
+				std::printf("aligned %s published pictures to their units through the pose; "
+				            "%zu carried no view_info to align with\n",
+				            aligned.c_str(), unmatched);
+			check(compared > 0 and differing == 0,
+			      "GPU decoder output is byte-identical to nxv-dec's over all " +
+			              std::to_string(compared) + " frames it published");
+			if (differing)
+				std::printf("  %zu of %zu frames differ; earliest at presented frame %zu\n",
+				            differing, compared, first_bad);
+
 			if (counted)
 			{
 				std::printf("PSNR vs source over %zu frames: mean %.2f dB, worst %.2f dB\n",

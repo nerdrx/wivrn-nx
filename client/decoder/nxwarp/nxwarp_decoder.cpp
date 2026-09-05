@@ -440,7 +440,7 @@ void nxwarp_decoder::finish_frame(uint8_t path_id)
 		return;
 	}
 
-	host.on_frame_unit(unit);
+	host.on_frame_unit(assembling_frame, unit);
 
 	decode_job job;
 	job.frame_id = assembling_frame;

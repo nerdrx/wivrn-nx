@@ -106,6 +106,17 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 	                .stageFlags = vk::ShaderStageFlagBits::eFragment,
 	                .pImmutableSamplers = &*motion_sampler,
 	        },
+	        // Frame smoothing: the previous decoded colour frame. Same immutable sampler
+	        // as rgb[0] (it comes from the same decoder, so it needs the same, possibly
+	        // YCbCr, conversion). It is always bound, to rgb[0] itself when there is no
+	        // previous frame to blend with.
+	        vk::DescriptorSetLayoutBinding{
+	                .binding = 2,
+	                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+	                .descriptorCount = 1,
+	                .stageFlags = vk::ShaderStageFlagBits::eFragment,
+	                .pImmutableSamplers = samplers.data(),
+	        },
 	};
 
 	target.descriptor_set_layout = device.createDescriptorSetLayout(vk::DescriptorSetLayoutCreateInfo{
@@ -253,8 +264,8 @@ stream_defoveator::stream_defoveator(
 
 	vk::DescriptorPoolSize pool_size{
 	        .type = vk::DescriptorType::eCombinedImageSampler,
-	        // rgb, alpha and the motion field, for both pipeline variants
-	        .descriptorCount = view_count * 6,
+	        // rgb, alpha, the motion field and the previous frame, for both variants
+	        .descriptorCount = view_count * 8,
 	};
 
 	ds_pool = device.createDescriptorPool(vk::DescriptorPoolCreateInfo{
@@ -402,6 +413,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
                                   std::array<float, 4> bias,
                                   const post_processing & post,
                                   const motion_warp & motion,
+                                  const frame_blend & blend,
                                   int destination,
                                   bool cas_full_kernel,
                                   bool fsr)
@@ -608,6 +620,16 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		        .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
 		};
 
+		// Frame smoothing. Without a previous frame the binding still has to be a valid
+		// image, so it points at this frame's own colour image and the weight is forced
+		// to zero: the shader then never reads it and the result is unchanged.
+		const bool blend_on = blend.weight > 0 and input.prev_rgb;
+		vk::DescriptorImageInfo prev_info{
+		        .sampler = input.sampler_rgb,
+		        .imageView = blend_on ? input.prev_rgb : input.rgb,
+		        .imageLayout = blend_on ? input.layout_prev_rgb : input.layout_rgb,
+		};
+
 		std::array descriptor_writes{
 		        vk::WriteDescriptorSet{
 		                .dstSet = pipeline.ds,
@@ -623,6 +645,13 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
 		                .pImageInfo = &motion_info,
 		        },
+		        vk::WriteDescriptorSet{
+		                .dstSet = pipeline.ds,
+		                .dstBinding = 2,
+		                .descriptorCount = 1,
+		                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+		                .pImageInfo = &prev_info,
+		        },
 		};
 
 		vert_pc pc{
@@ -637,7 +666,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		        .scale = scale,
 		        .bias = bias,
 		        .post = {post.sharpness, post.vignette, post.vignette_inner, post.vignette_outer},
-		        .motion = {motion_step, motion_scale, 0, 0},
+		        .motion = {motion_step, motion_scale, blend_on ? blend.weight : 0.f, 0},
 		        .glow = {post.glow, post.glow_margin, 0, 0},
 		        .deband = {post.deband, 0, 0, 0},
 		};

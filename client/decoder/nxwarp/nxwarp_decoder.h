@@ -96,14 +96,16 @@ class nxwarp_decoder : public decoder
 	} prof;
 	// Network-thread counters for the same report.
 	std::chrono::steady_clock::time_point net_since = std::chrono::steady_clock::now();
-	uint64_t net_frames = 0, net_holes = 0, stragglers_dropped = 0;
+	uint64_t net_holes = 0, stragglers_dropped = 0;
+	// Value of net_frames when the current two-second window opened.
+	uint64_t net_frames_mark = 0;
 	nxwarp_wire::reassemble_report last_hole;
 	std::atomic<int64_t> jobs_pending = 0;
 	// Deepest the worker's backlog is allowed to get before the older frames are
 	// discarded in favour of the newest one. Two lets one frame decode while the
 	// next waits; anything more is latency.
 	static constexpr int64_t kMaxQueuedFrames = 1;
-	uint64_t frames_dropped_late = 0;
+	std::atomic<uint64_t> frames_dropped_late = 0;
 
 	// One frame's work, complete in itself: by the time the worker runs, the tile slots
 	// and the pending feedback already belong to the next frame.
@@ -156,6 +158,35 @@ public:
 	void push_datagram(to_headset::nxwarp_datagram && dg);
 
 	static std::vector<wivrn::video_codec> supported_codecs();
+
+	// What the GUI is allowed to see. Monotonic counters plus the last completed
+	// two-second profile window, all read through atomics: the readout differences
+	// the counters itself rather than parsing the log lines decode_unit prints.
+	struct live_stats
+	{
+		uint64_t frames_closed = 0;        // reassembled off the wire, decoded or not
+		uint64_t frames_decoded = 0;       // handed to the render thread
+		uint64_t frames_dropped_late = 0;  // refused to keep the worker's backlog short
+		uint64_t frames_dropped_holes = 0; // a chunk never arrived
+		uint64_t frames_dropped_codec = 0; // nxvc refused the unit
+		float decode_wall_ms = 0;          // mean, over the last two-second window
+		float decode_gpu_ms = 0;
+		float bytes_per_frame = 0;
+	};
+
+	live_stats stats() const
+	{
+		return {
+		        .frames_closed = net_frames.load(std::memory_order_relaxed),
+		        .frames_decoded = frames_decoded.load(std::memory_order_relaxed),
+		        .frames_dropped_late = frames_dropped_late.load(std::memory_order_relaxed),
+		        .frames_dropped_holes = frames_dropped_holes.load(std::memory_order_relaxed),
+		        .frames_dropped_codec = frames_dropped_codec.load(std::memory_order_relaxed),
+		        .decode_wall_ms = prof_wall_ms.load(std::memory_order_relaxed),
+		        .decode_gpu_ms = prof_gpu_ms.load(std::memory_order_relaxed),
+		        .bytes_per_frame = prof_bytes.load(std::memory_order_relaxed),
+		};
+	}
 
 private:
 	image * get_free();
@@ -211,7 +242,12 @@ private:
 
 	// Counters logged when the stream ends: the only way to tell "the link is dropping
 	// datagrams" from "the mapping is wrong".
-	uint64_t frames_decoded = 0, frames_dropped_holes = 0, frames_dropped_codec = 0;
+	std::atomic<uint64_t> frames_decoded = 0, frames_dropped_holes = 0, frames_dropped_codec = 0;
+	// Frames the reassembler closed, decoded or not: the rate the server is actually
+	// putting on the wire, as seen from here.
+	std::atomic<uint64_t> net_frames = 0;
+	// Last completed two-second profile window, republished for stats() below.
+	std::atomic<float> prof_wall_ms = 0, prof_gpu_ms = 0, prof_bytes = 0;
 	bool warned_view_info = false;
 };
 

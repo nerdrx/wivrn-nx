@@ -171,6 +171,18 @@ constexpr float gui_max_foveation_pitch = M_PI / 3;
 // sends its own status at, so a plotted setpoint step lands on one sample rather than
 // being smeared over two.
 constexpr XrDuration transport_sample_period = 500'000'000;
+
+// Frame rate readout under the latency figure: rates are averaged over fps_window and
+// recomputed every fps_sample_period, so the figures are steady enough to read while
+// still following a stall within a quarter of a second.
+constexpr XrDuration fps_sample_period = 250'000'000;
+constexpr XrDuration fps_window = 1'000'000'000;
+
+// Frame smoothing: how much of the previous decoded frame is mixed into the refresh that
+// first shows a new one. A half splits the step between two decoded frames into two equal
+// halves, which is the whole point; more of the old frame would lag the image behind the
+// head, less would barely soften anything.
+constexpr float frame_smoothing_weight = 0.5f;
 constexpr size_t transport_history = 120;
 // A radio trend below this many dB between the fast and slow average is noise, not the
 // user walking somewhere. The two averages are fed at the 1 Hz the radio is sampled at.

@@ -33,6 +33,7 @@
 #include "render/ui_theme.h"
 #include "render/ui_widgets.h"
 #include "transport_rates.h"
+#include "decoder/nxwarp/nxwarp_decoder.h"
 #include "utils/i18n.h"
 #include "utils/ranges.h"
 #include <IconsFontAwesome6.h>
@@ -118,6 +119,10 @@ void scenes::stream::accumulate_metrics(XrTime predicted_display_time, const std
 	// On a wall clock of its own, so 60 s of transport history is 60 s whatever the
 	// framerate is doing, and unaffected by the guard below
 	accumulate_transport_metrics(predicted_display_time);
+	// Same reasoning: a rate in frames per second has to be sampled on a clock, and it
+	// must keep being sampled through the dt guard below or a stall would freeze the
+	// figure that exists to show the stall.
+	accumulate_fps(predicted_display_time);
 
 	uint64_t rx = network_session->bytes_received();
 	uint64_t tx = network_session->bytes_sent();
@@ -190,6 +195,133 @@ void scenes::stream::accumulate_metrics(XrTime predicted_display_time, const std
 	}
 
 	metrics_offset = (metrics_offset + 1) % global_metrics.size();
+}
+
+// --- Frame rate readout -----------------------------------------------------------------
+//
+// Three numbers people actually need under the latency figure: how many frames the render
+// thread put on the panel, how many the decoders produced, and — on NX Warp, whose decoder
+// runs on the GPU and can fall well under the panel rate — what its own counters say about
+// where the missing frames went.
+//
+// The rates are differences of monotonic counters over a rolling one second window,
+// resampled every constants::stream::fps_sample_period. A one-second window is what makes
+// a figure sitting at 27 readable instead of a number that flickers between 24 and 31 at
+// panel rate.
+//
+// The server's own encode rate is not shown: to_headset::transport_status carries the
+// bitrate, not a frame rate, and inventing one from timestamps that crossed the link would
+// be a guess dressed as a measurement. What the NX Warp line does show is the rate frames
+// arrive and close on this headset, which is the closest honest thing to it.
+
+float scenes::stream::panel_refresh_rate() const
+{
+	const XrDuration period = real_display_period;
+	return period > 0 ? float(1e9 / double(period)) : 0.f;
+}
+
+ImVec4 scenes::stream::fps_colour(float rate) const
+{
+	const wivrn::ui::theme & t = wivrn::ui::current();
+	const float refresh = panel_refresh_rate();
+	if (refresh <= 0)
+		return t.text_muted;
+	if (rate >= refresh - 0.5f)
+		return t.text_muted;
+	if (rate < refresh * 0.5f)
+		return t.warning;
+	return t.text;
+}
+
+void scenes::stream::accumulate_fps(XrTime now)
+{
+	if (fps_last_sample and now - fps_last_sample < constants::stream::fps_sample_period)
+		return;
+	fps_last_sample = now;
+
+	fps_counters c;
+	c.t = now;
+	c.displayed = displayed_frames;
+	for (size_t i = 0; i < view_count; ++i)
+		c.decoded[i] = decoded_frames[i].load(std::memory_order_relaxed);
+
+	bool nxwarp = false;
+#if WIVRN_USE_NXWARP
+	// The NX Warp counters, summed over the eye streams: both eyes run the same frame
+	// stride, so the arrival and decode rates are the same number twice, while a hole or
+	// a late drop is a real loss on whichever stream it happened to.
+	{
+		// render() already holds decoder_mutex shared for the whole frame, and this runs
+		// inside it: taking it again would be a recursive shared lock, which is exactly
+		// what deadlocks against a waiting writer.
+		float ms = 0;
+		for (size_t i = 0; i < view_count; ++i)
+		{
+			if (not decoders[i].decoder)
+				continue;
+			auto * d = dynamic_cast<wivrn::nxwarp_decoder *>(decoders[i].decoder->get_decoder().get());
+			if (not d)
+				continue;
+			nxwarp = true;
+			const auto st = d->stats();
+			c.nxwarp_closed += st.frames_closed;
+			c.nxwarp_decoded += st.frames_decoded;
+			c.nxwarp_late += st.frames_dropped_late;
+			c.nxwarp_holes += st.frames_dropped_holes;
+			ms = std::max(ms, st.decode_wall_ms);
+		}
+		// Not a rate: the mean of the decoder's own last two-second profile window,
+		// taken as it is rather than differenced.
+		fps.nxwarp_ms = ms;
+	}
+#endif
+	fps.nxwarp = nxwarp;
+
+	// The oldest snapshot still inside the window, which is the one this rate is measured
+	// against. Until the ring has filled, the oldest one there is.
+	const size_t oldest = fps_ring_count < fps_ring_size
+	                              ? (fps_ring_head + fps_ring_size - fps_ring_count) % fps_ring_size
+	                              : fps_ring_head;
+	if (fps_ring_count > 0)
+	{
+		const fps_counters & p = fps_ring[oldest];
+		const double dt = double(now - p.t) * 1e-9;
+		if (dt > 0.05)
+		{
+			const auto rate = [dt](uint64_t a, uint64_t b) { return float(double(a - b) / dt); };
+			fps.displayed = rate(c.displayed, p.displayed);
+			for (size_t i = 0; i < view_count; ++i)
+				fps.decoded[i] = rate(c.decoded[i], p.decoded[i]);
+			fps.nxwarp_closed = rate(c.nxwarp_closed, p.nxwarp_closed);
+			fps.nxwarp_decoded = rate(c.nxwarp_decoded, p.nxwarp_decoded);
+			fps.nxwarp_late = rate(c.nxwarp_late, p.nxwarp_late);
+			fps.nxwarp_holes = rate(c.nxwarp_holes, p.nxwarp_holes);
+		}
+	}
+
+	fps_ring[fps_ring_head] = c;
+	fps_ring_head = (fps_ring_head + 1) % fps_ring_size;
+	fps_ring_count = std::min(fps_ring_count + 1, fps_ring_size);
+}
+
+std::array<std::string, 2> scenes::stream::fps_lines() const
+{
+	std::array<std::string, 2> lines;
+
+	std::string decoded = fmt::format("{:.0f}", fps.decoded[0]);
+	for (size_t i = 1; i < view_count; ++i)
+		decoded += fmt::format("/{:.0f}", fps.decoded[i]);
+
+	lines[0] = fmt::format(_F("Shown {:.0f} · decoded {} fps"), fps.displayed, decoded);
+
+	if (fps.nxwarp)
+		lines[1] = fmt::format(_F("NX Warp: {:.0f} in · {:.0f} late · {:.0f} holes /s · decode {:.1f} ms"),
+		                       fps.nxwarp_closed,
+		                       fps.nxwarp_late,
+		                       fps.nxwarp_holes,
+		                       fps.nxwarp_ms);
+
+	return lines;
 }
 
 void scenes::stream::gui_performance_metrics()
@@ -378,6 +510,19 @@ void scenes::stream::gui_performance_metrics()
 		                _F("Estimated motion to photons latency: {}ms"),
 		                tracking_control.lock()->motions_to_photons / 1'000'000)
 		                .c_str());
+
+		// Directly under the latency figure: what the panel is actually being shown and
+		// what the decoders are actually producing. Two lines at most, the same two the
+		// compact view draws.
+		const auto lines = fps_lines();
+		for (size_t i = 0; i < lines.size(); ++i)
+		{
+			if (lines[i].empty())
+				continue;
+			ImGui::TextColored(fps_colour(i == 0 ? std::min(fps.displayed, fps.decoded[0]) : fps.nxwarp_decoded),
+			                   "%s",
+			                   lines[i].c_str());
+		}
 
 		if (is_gui_interactable())
 			ImGui::Text("%s", _S("Press the grip button to move the window"));
@@ -876,6 +1021,18 @@ void scenes::stream::gui_compact_view()
 		  tracking_control.lock()->motions_to_photons / 1'000'000.f,
 		  "ms");
 		ImGui::EndTable();
+	}
+
+	// Directly under the latency figure, outside the two-column table so the two lines
+	// stay two lines and do not stretch the compact panel.
+	const auto lines = fps_lines();
+	for (size_t i = 0; i < lines.size(); ++i)
+	{
+		if (lines[i].empty())
+			continue;
+		ImGui::TextColored(fps_colour(i == 0 ? std::min(fps.displayed, fps.decoded[0]) : fps.nxwarp_decoded),
+		                   "%s",
+		                   lines[i].c_str());
 	}
 }
 

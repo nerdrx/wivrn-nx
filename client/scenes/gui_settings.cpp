@@ -767,6 +767,16 @@ void settings_streaming(const settings_context & ctx)
 	});
 
 	list.push_back({
+	        .id = "##frame_smoothing",
+	        .label = _("Frame smoothing"),
+	        .description = _("When a newly decoded frame first appears, show it blended half and half with the frame it replaces, then show it alone on the refreshes after that. It splits the jump between two decoded frames into two smaller jumps, which reads as a short motion blur instead of a hard step.\n\nThis hides a low decoded frame rate, it does not raise one: no frames are created, nothing is interpolated, and every image on screen is still a real decoded frame or a blend of two of them. It costs one extra texture sample on the refreshes that show a new frame. Useful when the decoder is running well under the display rate, as NX Warp does; pointless when it keeps up. Applies immediately."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.frame_smoothing; },
+	        .set_bool = [&config](bool v) { config.frame_smoothing = v; config.save(); },
+	        .default_bool = default_config.frame_smoothing,
+	});
+
+	list.push_back({
 	        .id = "##foveation_adaptive",
 	        .label = _("Adaptive foveation"),
 	        .description = _("Let the server steepen the center-sharpening curve on its own when the link degrades, so the periphery compresses under a Wi-Fi dip instead of the whole image losing quality. Only the curve shape changes, never the encoded size, so it stays live. Needs the automatic bitrate."),

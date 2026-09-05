@@ -39,23 +39,29 @@ namespace
 // C ABI rather than chosen here — so swapping the backend changes the encode
 // time and nothing about the stream.
 //
+// INTER PREDICTION is on when the `inter` option is, and then `intra-period`
+// sets the rolling refresh -- 1/T of the tiles are coded fresh every frame and
+// each tile position exactly once every T frames, which is the loss-recovery
+// bound the format states. Two calls carry it, and both are made
+// unconditionally by video_encoder_nxwarp: set_view() every frame, and
+// set_received_tiles() whenever the transport has feedback.
+//
 // WHAT IT DOES NOT DO, and how it refuses:
 //
-//   * inter prediction, the pose warp and the reference ring. `inter = true`
-//     is REFUSED at construction, because silently coding all-intra when the
-//     caller asked for inter would be a performance mystery rather than an
-//     error. Every frame is intra, so `intra_period` is moot and ignored.
+//   * WARP_MV and STATIC_MV, the coded-vector inter modes. `inter = true`
+//     gets WARP_SKIP and INTRA: a tile either predicts from the pose-warped
+//     reference and carries no payload at all, or is coded fresh. That is
+//     where nx-warp's GPU encoder is today, and it is the larger half of the
+//     win -- 2.73x fewer bytes at 1088x1088 -- but it is not the whole of it.
 //   * a rate controller of its own, and per-tile quantisers. One QP codes
 //     every tile of a frame — but that QP is settable between frames
 //     (set_qp), so the controller in video_encoder_nxwarp drives this backend
 //     exactly as it drives the reference one.
-//   * set_view() and set_received_tiles() are ACCEPTED AND IGNORED, and that
-//     is deliberate rather than lazy. An all-intra frame has no reference to
-//     warp and no prediction a lost tile can corrupt, so there is nothing for
-//     either to change. They stay wired so video_encoder_nxwarp does not have
-//     to branch on the backend, and so the day inter lands the plumbing above
-//     is already correct. The transport still gets real feedback and still
-//     conceals; it is only the encoder's own shadow that has nothing to do.
+//   * with `inter = false` -- the default -- set_view() and
+//     set_received_tiles() are still accepted and ignored by the library, for
+//     the reason they always were: an all-intra frame has no reference to warp
+//     and no prediction a lost tile can corrupt. The calls stay unconditional
+//     here so this file has no mode to get wrong.
 //   * 10-bit, 4:4:4 and an alpha plane are refused by the library at create().
 //
 // THE INPUT PATH is the compositor's image itself. E0 reads the two planes of
@@ -88,6 +94,11 @@ class nxwarp_codec_vk final : public wivrn::nxwarp_codec
 	std::vector<uint8_t> header;
 	std::vector<wivrn::nxwarp_tile_desc> tile_descs;
 	uint32_t cols = 0, rows = 0;
+	// One warning each, not one per frame: a refused view or a wrong-sized
+	// receipt map is a wiring mistake that would otherwise fill the log at
+	// 90 Hz and hide whatever came next.
+	bool warned_view = false;
+	bool warned_recv = false;
 	uint32_t width = 0, height = 0;
 	std::string device;
 
@@ -104,11 +115,6 @@ public:
 	                         VkQueue queue,
 	                         uint32_t queue_family)
 	{
-		if (c.inter)
-			throw std::runtime_error(
-			        "the NX Warp Vulkan encoder is intra-only; "
-			        "unset the \"inter\" option or use \"backend\": \"ref\"");
-
 		nxvc_vke_create_info ci;
 		nxvc_vk_encoder_create_info_default(&ci);
 		// All five handles or none — the library then creates and destroys
@@ -127,6 +133,13 @@ public:
 		ci.bit_depth = 8;
 		ci.base_qp = c.base_qp;
 		ci.quant_matrix = 1; // the reference's frame matrix
+
+		// Inter prediction, the pose warp and the reference ring.  The
+		// library refuses `intra_period` without `inter`, so it is only
+		// passed with it; 0 there would mean "the library's default", and
+		// the option's own default is already 180.
+		ci.inter = c.inter ? 1u : 0u;
+		ci.intra_period = c.inter ? c.intra_period : 0u;
 
 		nxvc_vke_status st = nxvc_vk_encoder_create(&ci, &enc);
 		if (st != NXVC_VKE_OK or not enc)
@@ -169,9 +182,84 @@ public:
 		r = rows;
 	}
 
-	// Accepted and ignored; see the class comment.
-	void set_view(const wivrn::nxwarp_codec_view &) override {}
-	void set_received_tiles(std::span<const uint8_t>) override {}
+	// The frame's pose and projection, for the frame the next encode codes.
+	//
+	// `nxwarp_codec_view` and `nxvc_vke_view` are the same eight doubles in
+	// the same order and the same conventions -- an OpenXR quaternion and an
+	// XrFovf with left and down negative -- so this is a copy and not a
+	// conversion.  They are kept as separate types so that server/encoder does
+	// not include nxvc's headers in its own interface, not because they
+	// differ.
+	//
+	// It MUST be called for every frame, including the first.  The library
+	// keeps the view that went with each reference-ring slot and derives
+	// warp_ext() from that slot's view and this frame's, so a skipped call
+	// does not degrade gracefully: it makes the encoder predict confidently
+	// from the wrong pose, which looks like a bad codec rather than a missing
+	// call.  On an intra stream the library accepts and ignores it.
+	void set_view(const wivrn::nxwarp_codec_view & v) override
+	{
+		nxvc_vke_view nv{};
+		nv.qx = v.qx;
+		nv.qy = v.qy;
+		nv.qz = v.qz;
+		nv.qw = v.qw;
+		nv.fov_left = v.fov_left;
+		nv.fov_right = v.fov_right;
+		nv.fov_up = v.fov_up;
+		nv.fov_down = v.fov_down;
+
+		const nxvc_vke_status st = nxvc_vk_encoder_set_view(enc, &nv);
+		if (st != NXVC_VKE_OK and not warned_view)
+		{
+			warned_view = true;
+			U_LOG_W("nxwarp: the GPU encoder refused a view: %s (%s)",
+			        nxvc_vk_encoder_status_string(st),
+			        nxvc_vk_encoder_last_error(enc));
+		}
+	}
+
+	// Which tiles the client actually holds, one byte per tile.
+	//
+	// The library's rule is the blunt one: a tile the client does not hold is
+	// coded INTRA on the next frame, and it holds for that one frame.  An
+	// ALL-ZERO map is therefore a full reset, and that is how a resumed
+	// session says so -- there is no separate reset entry point and there does
+	// not need to be.
+	//
+	// The size has to be the tile count exactly; the library refuses anything
+	// else rather than guessing which tiles a short map describes.  An empty
+	// span is the caller saying "no feedback this frame", which is not the
+	// same statement as "the client holds nothing", so it is dropped here
+	// rather than forwarded as a reset.
+	void set_received_tiles(std::span<const uint8_t> received) override
+	{
+		if (received.empty())
+			return;
+
+		const uint32_t want = cols * rows;
+		if (received.size() != want)
+		{
+			if (not warned_recv)
+			{
+				warned_recv = true;
+				U_LOG_W("nxwarp: receipt map is %zu bytes, expected %u (one per tile); ignoring",
+				        received.size(),
+				        unsigned(want));
+			}
+			return;
+		}
+
+		const nxvc_vke_status st =
+		        nxvc_vk_encoder_set_received_tiles(enc, received.data(), want);
+		if (st != NXVC_VKE_OK and not warned_recv)
+		{
+			warned_recv = true;
+			U_LOG_W("nxwarp: the GPU encoder refused a receipt map: %s (%s)",
+			        nxvc_vk_encoder_status_string(st),
+			        nxvc_vk_encoder_last_error(enc));
+		}
+	}
 
 	// The quantiser, which this backend DOES honour: nxvc_vk_encoder_set_qp
 	// rewrites the frame parameter record and the job list, both of which the

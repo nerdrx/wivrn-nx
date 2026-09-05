@@ -305,6 +305,7 @@ void nxwarp_decoder::push_datagram(to_headset::nxwarp_datagram && dg)
 	nxt::DatagramHeader h{};
 	if (not nxt::decode_header(dg.payload.data(), &h))
 		return;
+	last_path_id = dg.path_id;
 
 	// A straggler from a frame that was already retired must not reopen it: it would
 	// close the frame under assembly with a hole, and the next datagram of that frame
@@ -374,6 +375,12 @@ void nxwarp_decoder::push_datagram(to_headset::nxwarp_datagram && dg)
 
 	if (h.flags & nxt::kFlagLastRunOfFrame)
 		finish_frame(dg.path_id);
+}
+
+void nxwarp_decoder::flush_frames()
+{
+	if (assembling)
+		finish_frame(last_path_id);
 }
 
 void nxwarp_decoder::fire_bands_through(uint16_t frame_id, uint8_t last_band, uint8_t path_id)

@@ -154,6 +154,11 @@ public:
 	// The real entry point. Called on the network thread, once per arriving packet.
 	void push_datagram(to_headset::nxwarp_datagram && dg);
 
+	// End of stream: close whatever is still under assembly, so a frame whose tail was
+	// merely late is not counted as lost because nothing came after it to push it out.
+	// Called from the same thread as push_datagram.
+	void flush_frames();
+
 	static std::vector<wivrn::video_codec> supported_codecs();
 
 private:
@@ -195,6 +200,7 @@ private:
 	// --- the frame under assembly, network thread only
 	bool assembling = false;
 	uint16_t assembling_frame = 0;
+	uint8_t last_path_id = 0;
 	std::vector<std::vector<uint8_t>> slots; // one per tile index
 	std::vector<uint8_t> band_fired;
 	from_headset::feedback fb{};

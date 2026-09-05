@@ -72,7 +72,7 @@
 //
 // Run:
 //   wivrn-nxwarp-e2e --yuv in.yuv --width W --height H [--frames N] [--loss 0.05]
-//                    [--seed S] [--nxv-out f.nxv] [--decoded-out f.yuv] [--nxv-dec PATH]
+//                    [--reorder 0.05] [--seed S] [--nxv-out f.nxv] [--decoded-out f.yuv] [--nxv-dec PATH]
 //                    [--backend ref|vk] [--qp N]
 
 #include "encoder/encoder_settings.h"
@@ -89,6 +89,7 @@
 #include <nxvc/transport/aead.h>
 #include <nxvc/transport/receiver.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -345,16 +346,25 @@ class lossy_link : public video_encoder::packet_sink
 	nxwarp_decoder & dec;
 	std::mt19937 rng;
 	double loss;
+	// Fraction of datagrams held back by one to three datagram slots. At ~7 datagrams
+	// per frame that lands a held datagram behind the head of the *next* frame about
+	// three times in seven, which is the case a one-frame reassembler cannot survive:
+	// the tail of frame N arrives after the head of N+1. On the wire this is what two
+	// eye streams interleaved on one socket, plus any path reordering, actually do.
+	double reorder;
+	// Datagrams waiting for their slot to come up: {slot at which it is released, packet}.
+	std::vector<std::pair<uint64_t, to_headset::nxwarp_datagram>> held;
+	uint64_t slot_index = 0;
 
 public:
-	uint64_t sent = 0, dropped = 0;
+	uint64_t sent = 0, dropped = 0, delayed = 0;
 	// The stream header, and the shadow reassembly of every frame, so the harness can
 	// rebuild the exact .nxv the decoder was fed.
 	std::vector<uint8_t> stream_header;
 	std::vector<std::vector<uint8_t>> raw_datagrams;
 
-	lossy_link(nxwarp_decoder & dec, double loss, uint32_t seed) :
-	        dec(dec), rng(seed), loss(loss) {}
+	lossy_link(nxwarp_decoder & dec, double loss, double reorder, uint32_t seed) :
+	        dec(dec), rng(seed), loss(loss), reorder(reorder) {}
 
 	void send_control(to_headset::nxwarp_datagram && packet) override
 	{
@@ -368,16 +378,62 @@ public:
 	void send_stream(to_headset::nxwarp_datagram && packet) override
 	{
 		++sent;
+		const uint64_t slot = slot_index++;
+		release_due(slot);
 		if (loss > 0 and std::uniform_real_distribution<double>(0, 1)(rng) < loss)
 		{
 			++dropped;
+			return;
+		}
+		if (reorder > 0 and std::uniform_real_distribution<double>(0, 1)(rng) < reorder)
+		{
+			++delayed;
+			const uint64_t d = 1 + (uint64_t(rng()) % 3);
+			held.emplace_back(slot + d, std::move(packet));
 			return;
 		}
 		raw_datagrams.push_back(packet.payload);
 		deliver(std::move(packet));
 	}
 
+	// The link has nothing more to carry: everything still held goes now, in the order
+	// it was due. Without this the last few frames of a reordered run would be judged
+	// on datagrams the harness never handed over, which says nothing about the decoder.
+	void flush()
+	{
+		std::stable_sort(held.begin(), held.end(),
+		                 [](const auto & a, const auto & b) { return a.first < b.first; });
+		auto pending = std::move(held);
+		held.clear();
+		for (auto & [due, packet]: pending)
+		{
+			raw_datagrams.push_back(packet.payload);
+			deliver(std::move(packet));
+		}
+	}
+
 private:
+	// Everything whose slot has come up, oldest due first. A datagram held at slot s with
+	// a delay of d is released while slot s+d+1 is being handled, so exactly d datagrams
+	// that were behind it on the wire go out in front of it. d=1 is a swap with the next
+	// datagram; d=3 puts it three behind, which at six or seven datagrams per frame is
+	// past the head of the following frame whenever it was near the end of its own.
+	void release_due(uint64_t slot)
+	{
+		for (size_t i = 0; i < held.size();)
+		{
+			if (held[i].first >= slot)
+			{
+				++i;
+				continue;
+			}
+			auto packet = std::move(held[i].second);
+			held.erase(held.begin() + long(i));
+			raw_datagrams.push_back(packet.payload);
+			deliver(std::move(packet));
+		}
+	}
+
 	void deliver(to_headset::nxwarp_datagram && packet)
 	{
 		// Real serializer, both directions. A field that does not survive this does not
@@ -674,7 +730,7 @@ int main(int argc, char ** argv)
 	std::string backend = "ref";
 	uint32_t qp = 26;
 	uint32_t width = 320, height = 240, frames = 12, seed = 1;
-	double loss = 0.0;
+	double loss = 0.0, reorder = 0.0;
 
 	for (int i = 1; i < argc; ++i)
 	{
@@ -690,6 +746,8 @@ int main(int argc, char ** argv)
 			frames = uint32_t(std::stoul(next()));
 		else if (a == "--loss")
 			loss = std::stod(next());
+		else if (a == "--reorder")
+			reorder = std::stod(next());
 		else if (a == "--seed")
 			seed = uint32_t(std::stoul(next()));
 		else if (a == "--nxv-out")
@@ -761,7 +819,7 @@ int main(int argc, char ** argv)
 	host.height = height;
 	nxwarp_decoder dec(vk.device, vk.physical_device, vk.queue.family_index, desc, 0, host, nullptr);
 
-	lossy_link link(dec, loss, seed);
+	lossy_link link(dec, loss, reorder, seed);
 	enc.set_packet_sink(&link);
 
 	auto src = make_source_image(vk, width, height);
@@ -808,19 +866,41 @@ int main(int argc, char ** argv)
 		}
 	}
 
-	// The decoder finishes a frame when a datagram for the next one arrives, so the last
-	// frame needs the worker to drain rather than another datagram.
+	// The encode loop is over, so nothing more will arrive to push the tail through:
+	// the link hands over everything it is still holding back, and the decoder closes
+	// whatever is still inside its reassembly window. Without both, the last frames of a
+	// reordered run would be counted as lost when they were only late.
+	link.flush();
+	dec.flush_frames();
+
+	// The decoder finishes a frame when its last run arrives, when a newer frame pushes
+	// it out of the window, or at the flush above, so by here everything presented has
+	// been decided one way or the other.
 	const bool arrived = host.wait_for(frames > 0 ? frames - 1 : 0, std::chrono::seconds(20));
 
-	std::printf("\nlink: %llu datagrams, %llu dropped (%.1f%%)\n",
+	std::printf("\nlink: %llu datagrams, %llu dropped (%.1f%%), %llu delayed by 1-3 slots (%.1f%%)\n",
 	            (unsigned long long)link.sent, (unsigned long long)link.dropped,
-	            link.sent ? 100.0 * double(link.dropped) / double(link.sent) : 0.0);
+	            link.sent ? 100.0 * double(link.dropped) / double(link.sent) : 0.0,
+	            (unsigned long long)link.delayed,
+	            link.sent ? 100.0 * double(link.delayed) / double(link.sent) : 0.0);
+	std::printf("reassembly produced %zu complete frame units of %u presented\n", host.units.size(), frames);
 	std::printf("decoder published %zu frames\n\n", host.frames.size());
 
 	// ==== assertions ==========================================================
 	const bool clean = loss <= 0;
 
 	check(not host.frames.empty(), "frames decode");
+
+	// Reassembly is judged on its own, separately from what the worker later does with
+	// the queue: a frame that reassembled whole and was then dropped as stale
+	// (kMaxQueuedFrames) is not a reassembly loss. With nothing lost on the link every
+	// frame presented must reassemble whole no matter how the datagrams were ordered,
+	// which is the windowed reassembler's whole contract.
+	if (clean)
+		check(host.units.size() == frames,
+		      "every frame presented reassembled whole under reordering (" +
+		              std::to_string(host.units.size()) + "/" + std::to_string(frames) + ")");
+
 	if (clean)
 		check(host.frames.size() + 1 >= frames,
 		      "clean run publishes every frame presented (less the one still in flight)");

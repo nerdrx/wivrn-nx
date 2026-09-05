@@ -135,18 +135,16 @@ to any hardware encoder on the machine. Ask for it in
 
 ```json
 {
-	"encoders": [
-		{
-			"encoder": "nxwarp",
-			"codec": "nxwarp",
-			"options": { "qp": "26" }
-		}
-	]
+	"encoder": { "encoder": "nxwarp", "codec": "nxwarp", "options": { "qp": "26" } }
 }
 ```
 
-`"codec": "nxwarp"` selects the same encoder on its own; both keys together are simply
-explicit. The full option table is in `docs/configuration.md`; the one you will actually
+The top-level key is the singular **`encoder`** in this fork (an object for every stream,
+or an array with one entry per stream); a plural `encoders` key is silently ignored and the
+server falls back to its default hardware encoder, which is exactly what a first live
+session did. `"codec": "nxwarp"` selects the same encoder on its own; both keys together
+are simply explicit. `wivrn-server -f <file>` takes the file directly, so the everyday
+`config.json` need not change. The full option table is in `docs/configuration.md`; the one you will actually
 reach for is `qp`, the **fixed** quantiser (0..63, default 28) — lower is better quality
 and more bits. There is no rate control, so this is the only quality knob, and the
 bitrate the controller computes is logged and ignored.

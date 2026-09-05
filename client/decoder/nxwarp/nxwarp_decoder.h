@@ -82,6 +82,9 @@ class nxwarp_decoder : public decoder
 		vk::raii::Semaphore semaphore = nullptr;
 		uint64_t semaphore_val = 0;
 	};
+	// Set when the device refuses timeline semaphores (Adreno 650): frames are then
+	// fenced on the host and published with no semaphore.
+	bool host_sync = false;
 
 	// One frame's work, complete in itself: by the time the worker runs, the tile slots
 	// and the pending feedback already belong to the next frame.

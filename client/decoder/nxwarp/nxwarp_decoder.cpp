@@ -143,14 +143,33 @@ nxwarp_decoder::nxwarp_decoder(vk::raii::Device & device,
 		                },
 		        });
 
-		item.semaphore = vk::raii::Semaphore(
-		        device,
-		        vk::StructureChain{
-		                vk::SemaphoreCreateInfo{},
-		                vk::SemaphoreTypeCreateInfo{.semaphoreType = vk::SemaphoreType::eTimeline},
-		        }
-		                .get());
+		// The Pico 4's Adreno 650 driver advertises timeline semaphores and refuses to
+		// create one (vkCreateSemaphore returns VK_INCOMPLETE); nxvc's own decoder falls
+		// back to a fence for the same reason. Without one, the copy below is waited for
+		// on the host and the frame is published with no semaphore, which the render
+		// thread already treats as "nothing to wait for".
+		if (not host_sync)
+		{
+			try
+			{
+				item.semaphore = vk::raii::Semaphore(
+				        device,
+				        vk::StructureChain{
+				                vk::SemaphoreCreateInfo{},
+				                vk::SemaphoreTypeCreateInfo{.semaphoreType = vk::SemaphoreType::eTimeline},
+				        }
+				                .get());
+			}
+			catch (const std::exception & e)
+			{
+				host_sync = true;
+				spdlog::warn("nxwarp[{}]: timeline semaphore unavailable ({}); frames will be fenced on the host", stream_index, e.what());
+			}
+		}
 	}
+	if (host_sync)
+		for (auto & item: image_pool)
+			item.semaphore = nullptr;
 
 	worker = std::thread([this]() {
 		try
@@ -527,33 +546,46 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	        item->semaphore_val,
 	        item->free);
 
+	// nxvc returns no timeline when it is on its fence fallback: the decode is then
+	// complete on the host before the copy is even recorded (see the wait above the
+	// decode call), so there is nothing for the queue to wait on.
+	if (dec_sem == VK_NULL_HANDLE)
+		nxvc_vk_decoder_wait(nxvc, UINT64_MAX);
+	const bool signal_on_queue = *item->semaphore != VK_NULL_HANDLE;
+
 	device.resetFences(*fence);
 	host.with_queue([&](vk::Queue queue) {
 		const vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eTransfer;
 		const uint64_t signal_val = ++item->semaphore_val;
 		std::array<vk::Semaphore, 1> wait{dec_sem};
 		std::array<vk::Semaphore, 1> signal{*item->semaphore};
+		const uint32_t n_wait = dec_sem != VK_NULL_HANDLE ? 1 : 0;
+		const uint32_t n_signal = signal_on_queue ? 1 : 0;
 		queue.submit(
 		        vk::StructureChain{
 		                vk::SubmitInfo{
-		                        .waitSemaphoreCount = 1,
+		                        .waitSemaphoreCount = n_wait,
 		                        .pWaitSemaphores = wait.data(),
 		                        .pWaitDstStageMask = &wait_stage,
 		                        .commandBufferCount = 1,
 		                        .pCommandBuffers = &cmd,
-		                        .signalSemaphoreCount = 1,
+		                        .signalSemaphoreCount = n_signal,
 		                        .pSignalSemaphores = signal.data(),
 		                },
 		                vk::TimelineSemaphoreSubmitInfo{
-		                        .waitSemaphoreValueCount = 1,
+		                        .waitSemaphoreValueCount = n_wait,
 		                        .pWaitSemaphoreValues = &dec_val,
-		                        .signalSemaphoreValueCount = 1,
+		                        .signalSemaphoreValueCount = n_signal,
 		                        .pSignalSemaphoreValues = &signal_val,
 		                },
 		        }
 		                .get(),
 		        *fence);
 	});
+	// No semaphore to hand the render thread: make the copy complete before it can see
+	// the frame. One frame of pipelining lost, on the driver that gives no other choice.
+	if (not signal_on_queue and device.waitForFences(*fence, true, UINT64_MAX) != vk::Result::eSuccess)
+		spdlog::warn("nxwarp: waitForFences failed");
 
 	++frames_decoded;
 	host.publish(accumulator, std::move(handle));

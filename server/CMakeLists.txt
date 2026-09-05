@@ -221,6 +221,11 @@ if (WIVRN_BUILD_SERVER)
 		target_include_directories(wivrn-nxwarp-loopback PRIVATE .)
 		target_compile_features(wivrn-nxwarp-loopback PRIVATE cxx_std_20)
 		target_link_libraries(wivrn-nxwarp-loopback PRIVATE nxvc::ref nxvc::transport)
+		# nxwarp_codec.h names Vulkan handles since the vk backend; the common
+		# library carries the header path on a box without a system SDK.
+		if (TARGET nxvc::vk_common)
+			target_link_libraries(wivrn-nxwarp-loopback PRIVATE nxvc::vk_common)
+		endif()
 
 		# Both ends of NX Warp in one process: the shipping server encoder and the
 		# shipping client decoder, connected by the real packet types over a lossy

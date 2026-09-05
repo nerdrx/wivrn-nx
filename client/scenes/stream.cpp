@@ -1320,7 +1320,9 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			// Off, the weight is zero, nothing is bound differently and the pass output
 			// is bit identical to not having the feature.
 			stream_defoveator::frame_blend blend;
-			if (not config.frame_smoothing)
+			// Kill switch: the blend jitters and interacts with the menu on a dark frame
+			// (2026-09-05 live report); the setting is kept but has no effect until fixed.
+			if (true or not config.frame_smoothing)
 			{
 				// Off pins nothing and remembers nothing: the decoder's image pool
 				// sees exactly what it saw before this feature existed, and the

@@ -774,6 +774,8 @@ void settings_streaming(const settings_context & ctx)
 	        .get_bool = [&config] { return config.frame_smoothing; },
 	        .set_bool = [&config](bool v) { config.frame_smoothing = v; config.save(); },
 	        .default_bool = default_config.frame_smoothing,
+	        .enabled = [] { return false; },
+	        .disabled_tooltip = _("Disabled in this build: the blend jitters and is being reworked."),
 	});
 
 	list.push_back({

@@ -416,6 +416,12 @@ public:
 	// thread. Only the NX Warp encoder does anything with it; every other backend
 	// is on the shard path and hears about loss through on_feedback and nack.
 	virtual void on_nxwarp_feedback(uint8_t path_id, std::span<const uint8_t> payload) {}
+	// One frame the headset received and did not reconstruct. See
+	// from_headset::nxwarp_frame_not_held: it is the correction the transport's own
+	// feedback structurally cannot carry, because that is sent before the decoder has
+	// touched the frame.
+	virtual void on_nxwarp_frame_not_held(uint16_t frame_id,
+	                                      from_headset::nxwarp_frame_not_held::reason why) {}
 
 protected:
 	// called on present to submit command buffers for the image.

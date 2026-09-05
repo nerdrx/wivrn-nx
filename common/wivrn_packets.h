@@ -1053,6 +1053,48 @@ struct nxwarp_feedback
 	std::vector<uint8_t> payload;
 };
 
+// A frame the headset will NOT reconstruct, named by the stream's own 16-bit frame id.
+//
+// It is a CORRECTION, and that is the whole reason it has to exist separately from
+// nxwarp_feedback above. That one is the transport's report and it is about the wire: it
+// says which tiles arrived, it is assembled on the network thread as the datagrams land,
+// and it goes out on the band deadline -- before the decoder has done anything with them.
+// Everything that happens to a frame after that point is invisible to it. And plenty
+// does: the shared decode stride skips frames this device cannot decode at the rate they
+// arrive, the bounded worker queue discards a frame that is already stale by the time the
+// worker reaches it, the codec can refuse a unit, and a frame can close with a hole. In
+// every one of those the transport has already said "these tiles arrived", truthfully,
+// and the headset then does not reconstruct the picture.
+//
+// With an all-intra stream that costs one dropped frame and nothing else. With inter
+// prediction it is a silent corruption: the encoder's receipt map says the client holds
+// frame N, so it codes N+1 as a warp of it, and the headset warps from a reference that
+// was never built. What the user sees is a few blocks of real picture and the rest grey.
+//
+// So this packet says the thing the transport cannot: the frame arrived and was not
+// reconstructed. The server's answer is the blunt and correct one -- an all-zero receipt
+// map, which is nxvc's documented way to say "the client holds nothing", and which makes
+// the next frame code every tile INTRA so the headset resynchronises from it.
+//
+// It rides the CONTROL socket. A lost one is the corruption it exists to prevent.
+struct nxwarp_frame_not_held
+{
+	// Same stream numbering as video_stream_data_shard
+	uint8_t stream_item_idx;
+	// The stream's own 16-bit frame id, as it arrived on the wire
+	uint16_t frame_id;
+	// Why, for the server's log only. Never a control input: every reason has the
+	// same consequence, and a server that treated them differently would be trusting
+	// a headset's account of its own scheduling.
+	enum class reason : uint8_t
+	{
+		hole,      // closed incomplete: a chunk never arrived
+		stride,    // skipped by the shared decode stride
+		backlog,   // discarded by the bounded worker queue
+		refused,   // the codec would not decode the unit
+	} why;
+};
+
 // when changing this, also make sure there are handlers in wivrn_session, etc. or compilation will fail
 using packets = std::variant<
         crypto_handshake,
@@ -1084,6 +1126,7 @@ using packets = std::variant<
         stream_tab_changed,
         transport_status_subscribe,
         nxwarp_feedback,
+        nxwarp_frame_not_held,
         override_foveation_center,
         get_application_list,
         start_app,
@@ -1583,6 +1626,27 @@ struct running_applications
 // handed to the socket as one write, exactly as nx-warp/docs/TRANSPORT.md
 // assumes. The nxt::StreamConfig mtu is set so that this envelope still fits in
 // one UDP datagram.
+// Reserved path ids on nxwarp_datagram. A real nxt path id is 0 (primary) or 1
+// (secondary); the values below are not paths at all, they are how the two ends carry
+// the small amount of per-stream control that must not be lost, on the control socket,
+// without a packet type of its own and without a byte on the video path.
+//
+// Both ends read these constants, so they cannot drift.
+//
+//   0xFF  the codec's raw stream header. Not an nxt datagram: it has no header the
+//         receiver could parse, and the client hands it straight to
+//         nxvc_decoder_parse_stream_header.
+//   0xFE  a resync notice. The payload is a little-endian uint16 frame id, and the
+//         claim is "that frame needs no reference". The encoder sends one whenever it
+//         feeds the codec an all-zero receipt map, which is the documented way to make
+//         every tile of the next frame INTRA. It is the answer to
+//         from_headset::nxwarp_frame_not_held, and it is the half only the encoder can
+//         state: a headset knows when its reference chain broke, but the per-tile
+//         ref_delta on the wire rides the chunk mapping and cannot tell it when the
+//         chain is whole again.
+inline constexpr uint8_t nxwarp_stream_header_path = 0xFF;
+inline constexpr uint8_t nxwarp_resync_path = 0xFE;
+
 struct nxwarp_datagram
 {
 	// Same stream numbering as video_stream_data_shard

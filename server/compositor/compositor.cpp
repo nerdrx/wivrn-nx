@@ -1857,6 +1857,15 @@ void compositor::on_nxwarp_feedback(const from_headset::nxwarp_feedback & fb)
 	snapshot[fb.stream_item_idx]->on_nxwarp_feedback(fb.path_id, fb.payload);
 }
 
+void compositor::on_nxwarp_frame_not_held(const from_headset::nxwarp_frame_not_held & fb)
+{
+	auto snapshot = get_encoders();
+	if (fb.stream_item_idx >= snapshot.size() or not snapshot[fb.stream_item_idx])
+		return;
+
+	snapshot[fb.stream_item_idx]->on_nxwarp_frame_not_held(fb.frame_id, fb.why);
+}
+
 uint64_t compositor::retransmitted_shards() const
 {
 	uint64_t total = 0;

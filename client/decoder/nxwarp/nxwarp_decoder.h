@@ -59,6 +59,7 @@
 
 #include <array>
 #include <atomic>
+#include <deque>
 #include <memory>
 #include <thread>
 
@@ -384,6 +385,55 @@ private:
 	// server stamps uint16_t(frame_id) on every stream), survives a frame this
 	// decoder drops, and is what every other part of this class already keys on.
 	// Widening it is only about the 16-bit wrap; see wire_frame_index().
+	// --- the reference chain --------------------------------------------------
+	//
+	// Set the moment this decoder declines to reconstruct a frame, by any route: the
+	// frame is not in the codec's ring, so every later frame that warps from it warps
+	// from something that was never built. Decoding those is harmless -- the ring is
+	// about to be reset anyway -- but SHOWING them is the bug this exists to stop:
+	// a few tiles of real picture over a field of grey.
+	//
+	// It is cleared by the encoder's resync notice (wivrn_packets.h, path 0xFE) and
+	// not before. The headset cannot work the moment out for itself: the per-tile
+	// ref_delta it can see on the wire rides the chunk mapping, so on a frame with
+	// more codec tiles than chunks "every tile I was told about is intra" is not the
+	// same claim as "this frame is intra", and acting on it would put the corruption
+	// back on the screen occasionally instead of always.
+	// The last frame id this decoder actually put through the codec, worker-thread
+	// only. The ring advanced for it, so it is the one reference the NEXT frame may
+	// safely predict from -- and a frame that does not continue that run is a frame
+	// whose reference this decoder never built.
+	//
+	// The publish rule is derived from these two and nothing else, deliberately: it is
+	// evaluated entirely on the worker, from a value the worker itself wrote, so there
+	// is no race with the network thread to lose. A flag set at the drop sites had one
+	// and it was not theoretical -- a frame's hole is only confirmed when the window
+	// evicts it, three frames later, by which time the frame after it could already
+	// have been decoded and shown.
+	uint16_t last_decoded_id = 0;
+	bool have_last_decoded = false;
+	// The encoder's answers to our not-held reports: "THIS frame needs no reference".
+	//
+	// A set, not a single id, and matched EXACTLY. Both of those are load-bearing.
+	// Exactly, because "this frame or any later one" is not what the notice says and
+	// is not true: an id-or-later test passes every inter frame that follows a resync
+	// and puts the corruption straight back. A set, because several notices can be in
+	// flight at once -- with the worker queue discarding most frames the encoder is
+	// told the client holds nothing almost every frame -- and a single slot would be
+	// overwritten before the frame it names arrives, so the run would never restart.
+	//
+	// Bounded and oldest-out: an id that never arrives is a frame that was dropped
+	// too, and the encoder has already been told about that and sent another.
+	//
+	// Network thread writes, worker reads and consumes; a late notice only withholds a
+	// frame that could have been shown, a lost one would not, which is why it rides
+	// the control socket.
+	std::mutex resync_mutex;
+	std::deque<uint16_t> resync_ids;
+	static constexpr size_t kMaxPendingResync = 16;
+	// Frames decoded and deliberately not published because of the above.
+	std::atomic<uint64_t> frames_withheld{0};
+
 	uint64_t wire_epoch = 1; // 1-based so an id behind a wrap can look one back
 	uint16_t wire_newest = 0;
 	bool wire_seeded = false;

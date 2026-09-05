@@ -282,6 +282,30 @@ void scenes::stream::send_nxwarp_feedback(uint8_t stream_index, uint8_t path_id,
 	});
 }
 
+void scenes::stream::send_nxwarp_frame_not_held(
+        uint8_t stream_index, uint16_t frame_id,
+        from_headset::nxwarp_frame_not_held::reason why)
+{
+	if (not network_session)
+		return;
+	// Control socket, and this one really must be reliable: the whole point of the
+	// packet is to stop the encoder predicting from a picture the headset never built,
+	// and a lost one leaves it doing exactly that until something else resets the
+	// stream.
+	try
+	{
+		network_session->send_control(from_headset::nxwarp_frame_not_held{
+		        .stream_item_idx = stream_index,
+		        .frame_id = frame_id,
+		        .why = why,
+		});
+	}
+	catch (std::exception & e)
+	{
+		spdlog::warn("Exception while sending an NX Warp not-held packet: {}", e.what());
+	}
+}
+
 void scenes::stream::operator()(to_headset::motion_field && chunk)
 {
 	// A field arrives as several chunks; only a complete one is ever warped along.

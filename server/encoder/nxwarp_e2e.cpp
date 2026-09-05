@@ -354,11 +354,36 @@ public:
 		feedback.emplace_back(back.path_id, std::move(back.payload));
 	}
 
+	// Wire frame ids the decoder actually put through the codec, in the order it did.
+	std::vector<uint16_t> decoded_ids;
+
+	void on_frame_decoded(uint16_t frame_id) override
+	{
+		std::lock_guard lock(m);
+		decoded_ids.push_back(frame_id);
+	}
+
 	void on_frame_unit(uint16_t frame_id, std::span<const uint8_t> unit) override
 	{
 		std::lock_guard lock(m);
 		units.emplace_back(unit.begin(), unit.end());
 		unit_frame_ids.push_back(frame_id);
+	}
+
+	// Frames this decoder received and will not reconstruct, in arrival order, each
+	// through the real packet type and the real serializer.
+	std::vector<from_headset::nxwarp_frame_not_held> not_held;
+
+	void report_frame_not_held(uint8_t stream_index, uint16_t frame_id,
+	                           from_headset::nxwarp_frame_not_held::reason why) override
+	{
+		from_headset::nxwarp_frame_not_held p{
+		        .stream_item_idx = stream_index,
+		        .frame_id = frame_id,
+		        .why = why,
+		};
+		std::lock_guard lock(m);
+		not_held.push_back(from_wire<from_headset::nxwarp_frame_not_held>(to_wire(p)));
 	}
 
 	void report_frame_lost(const from_headset::feedback & fb) override
@@ -1058,6 +1083,7 @@ int main(int argc, char ** argv)
 
 	// ---- drive ----------------------------------------------------------------
 	uint64_t feedback_packets = 0, feedback_bytes = 0;
+	uint64_t not_held_packets = 0;
 	// One row per frame: the quantiser it was coded at and the bytes that
 	// bought. Filled from the encoder's own profile counters -- read once
 	// before the encode for the QP and once after for the byte total -- so it
@@ -1168,6 +1194,22 @@ int main(int argc, char ** argv)
 			// shadow. This is the return half of the loop: without it the encoder
 			// predicts from tiles the headset never received.
 			enc.on_nxwarp_feedback(path, payload);
+		}
+
+		// And the correction the transport cannot carry: frames the decoder received
+		// and will not reconstruct. Straight into the encoder, exactly as
+		// compositor::on_nxwarp_frame_not_held does.
+		{
+			std::vector<from_headset::nxwarp_frame_not_held> nh;
+			{
+				std::lock_guard lock(host.m);
+				nh.swap(host.not_held);
+			}
+			for (const auto & p: nh)
+			{
+				++not_held_packets;
+				enc.on_nxwarp_frame_not_held(p.frame_id, p.why);
+			}
 		}
 
 		// The other return half: the per-frame delivery reports into WiVRn's own
@@ -1489,14 +1531,41 @@ int main(int argc, char ** argv)
 	// complete .nxv, which nx-warp's own nxv-dec can decode. If the GPU decoder and the
 	// reference decoder agree byte for byte then their PSNR against the source is
 	// identical by construction.
+	//
+	// The reference is built from the units the decoder actually CONSUMED, in the order
+	// it consumed them (nxwarp_host::on_frame_decoded), not from every unit the
+	// reassembler produced. On an intra stream the two lists differ only in length and
+	// it makes no difference. On an INTER stream it is the whole comparison: a frame
+	// that was reassembled and then dropped before the codec saw it never entered this
+	// decoder's reference ring, so handing it to nxv-dec would give the two decoders
+	// different chains and compare pictures that were never meant to be equal. Feeding
+	// the reference exactly what this decoder was fed is the only way the question
+	// "does it produce the same pixels" has an answer.
+	//
+	// The gapped list decodes because the gaps are exactly where the encoder was told
+	// the client held nothing and answered with an all-intra frame; a resync frame
+	// needs no predecessor, so nxv-dec picks the stream back up there too.
 	if (not host.units.empty() and not link.stream_header.empty())
 	{
+		std::vector<size_t> ref_unit_pos; // index into host.units, in decode order
+		{
+			std::unordered_map<uint16_t, size_t> pos;
+			for (size_t k = 0; k < host.unit_frame_ids.size(); ++k)
+				pos.emplace(host.unit_frame_ids[k], k);
+			for (uint16_t id: host.decoded_ids)
+			{
+				auto it = pos.find(id);
+				if (it != pos.end())
+					ref_unit_pos.push_back(it->second);
+			}
+		}
 		std::vector<uint8_t> nxv = link.stream_header;
-		for (const auto & u: host.units)
-			nxv.insert(nxv.end(), u.begin(), u.end());
+		for (size_t k: ref_unit_pos)
+			nxv.insert(nxv.end(), host.units[k].begin(), host.units[k].end());
 		write_file(nxv_out, nxv);
-		std::printf("wrote %s: stream header + %zu frame units, %zu bytes\n",
-		            nxv_out.c_str(), host.units.size(), nxv.size());
+		std::printf("wrote %s: stream header + %zu frame units the decoder consumed "
+		            "(of %zu reassembled), %zu bytes\n",
+		            nxv_out.c_str(), ref_unit_pos.size(), host.units.size(), nxv.size());
 
 		std::vector<uint8_t> gpu;
 		for (const auto & pic: host.pictures)
@@ -1544,10 +1613,10 @@ int main(int argc, char ** argv)
 			            host.units.size() - std::min(host.units.size(), gpu_frames),
 			            host.units.size() - std::min(host.units.size(), gpu_frames) == 1 ? "" : "s");
 			check(gpu_frames > 0, "both decoders produced frames to compare");
-			check(ref_frames == host.units.size(),
-			      "nxv-dec decoded every unit the reassembler produced (" +
+			check(ref_frames == host.decoded_ids.size(),
+			      "nxv-dec decoded every unit this decoder consumed (" +
 			              std::to_string(ref_frames) + "/" +
-			              std::to_string(host.units.size()) + ")");
+			              std::to_string(host.decoded_ids.size()) + ")");
 
 			// A published picture is matched to nxv-dec's frame by the stream's own
 			// 16-bit frame id, which both sides carry: the decoder reports it with
@@ -1558,44 +1627,48 @@ int main(int argc, char ** argv)
 			std::unordered_map<uint16_t, size_t> unit_of_id;
 			for (size_t k = 0; k < host.unit_frame_ids.size(); ++k)
 				unit_of_id.emplace(host.unit_frame_ids[k], k);
+			// Where each frame sits in the REFERENCE stream, which is the units the
+			// decoder consumed in the order it consumed them -- see the .nxv above.
+			// A published frame is always in this map; a reassembled-then-dropped one
+			// is not, and is not in nxv-dec's output either.
+			std::unordered_map<uint16_t, size_t> ref_of_id;
+			for (size_t k = 0; k < host.decoded_ids.size(); ++k)
+				ref_of_id.emplace(host.decoded_ids[k], k);
 
 			size_t compared = 0, differing = 0, first_diff_frame = 0, misplaced = 0, unmatched = 0;
 
-			// How far the GPU decoder's output can legitimately be compared on an
-			// INTER stream: a frame predicts from the ring, which holds pictures this
-			// decoder itself reconstructed, so only the longest UNBROKEN RUN of
-			// published units from the start of the stream has its whole reference
-			// chain present. Units are named by wire frame id (unit_of_id), so this
-			// needs no position arithmetic across a reconnect or the 16-bit wrap.
-			uint64_t chain_upto = 0; // inclusive 1-based unit index; 0 = nothing yet
-			if (inter == "true")
-			{
-				std::vector<uint64_t> published;
-				for (size_t j = 0; j < gpu_frames and j < host.frames.size(); ++j)
-				{
-					auto it = unit_of_id.find(uint16_t(host.frames[j].frame_index));
-					if (it != unit_of_id.end())
-						published.push_back(it->second + 1);
-				}
-				std::sort(published.begin(), published.end());
-				for (uint64_t want = 1;; ++want)
-				{
-					if (std::find(published.begin(), published.end(), want) == published.end())
-						break;
-					chain_upto = want;
-				}
-			}
-			size_t chain_skipped = 0;
+			// EVERY published frame is compared, on an inter stream as much as on an
+			// intra one.
+			//
+			// This used to compare only the longest unbroken run of published units
+			// from the start of the stream, on the argument that a frame predicts from
+			// a ring holding pictures this decoder itself reconstructed, so a frame
+			// after a gap has no reference chain and cannot be expected to match. That
+			// argument was true, and it was hiding the bug: it is exactly the state in
+			// which a real headset shows a few blocks of picture and the rest grey.
+			// The gap is not something to excuse in the comparison, it is something
+			// the encoder has to be told about -- and now is
+			// (from_headset::nxwarp_frame_not_held), so the frame after a gap is coded
+			// all-intra and matches whatever this decoder skipped.
+			//
+			// Keeping the excuse would mean the harness could not tell the fix from
+			// the bug, which is the only reason it was ever worth removing.
 			for (size_t j = 0; j < gpu_frames and j < host.frames.size(); ++j)
 			{
 				const uint16_t id = uint16_t(host.frames[j].frame_index);
 				auto it = unit_of_id.find(id);
-				if (it == unit_of_id.end() or it->second >= ref_frames)
+				if (it == unit_of_id.end())
 				{
 					++unmatched;
 					continue;
 				}
-				const size_t unit_idx = it->second;
+				auto rit = ref_of_id.find(id);
+				if (rit == ref_of_id.end() or rit->second >= ref_frames)
+				{
+					++unmatched;
+					continue;
+				}
+				const size_t unit_idx = rit->second;
 
 				// And the picture really is the frame that id names: it carries the
 				// pose it was presented with, so the presented frame it matches must
@@ -1613,12 +1686,6 @@ int main(int argc, char ** argv)
 					if (src_idx < presented.size() and
 					    uint16_t(id - uint16_t(first_frame)) != src_idx)
 						++misplaced;
-				}
-				if (inter == "true" and unit_idx + 1 > chain_upto)
-				{
-					// Its reference chain is not in this decoder's ring.
-					++chain_skipped;
-					continue;
 				}
 				const size_t r = unit_idx * frame_size;
 				const size_t g = j * frame_size;
@@ -1643,11 +1710,6 @@ int main(int argc, char ** argv)
 			if (not identical)
 				std::printf("  %zu of %zu frames differ, first at unit %zu\n",
 				            differing, compared, first_diff_frame);
-			if (chain_skipped)
-				std::printf("  %zu published frame%s not compared: inter, and the "
-				            "units they predict from were dropped before this "
-				            "decoder saw them\n",
-				            chain_skipped, chain_skipped == 1 ? "" : "s");
 
 			// PSNR against the source, per frame, which is what the number actually
 			// means to a viewer.
@@ -1666,17 +1728,21 @@ int main(int argc, char ** argv)
 				}
 				if (src_idx >= source_frames.size())
 					continue;
-				// The same restriction as the byte comparison above, for the
-				// same reason: a frame whose reference the decoder never
-				// reconstructed is not a picture this codec produced.
-				if (inter == "true")
-				{
-					const size_t b = (reconnected and i >= frames_at_reconnect)
-					                         ? units_at_reconnect
-					                         : 0;
-					if (b + host.frames[i].frame_index > chain_upto)
-						continue;
-				}
+				// No inter exemption here either, for the reason the byte
+				// comparison gives: a frame whose reference this decoder never
+				// reconstructed is now coded all-intra, so it is a picture this
+				// codec produced and it has to look like one.
+				//
+				// The one frame that is excluded is the one whose FIRST datagram
+				// was lost, so it arrived with no view_info and was published with
+				// a default pose and foveation (docs/nxwarp.md). That is a
+				// documented degradation, the harness has already counted and
+				// printed it, and PSNR against the source measures the missing
+				// pose rather than anything the codec did -- the byte comparison
+				// above still covers the frame, and it is the check that would
+				// catch a decode fault in it.
+				if (host.frames[i].view_info.display_time == 0)
+					continue;
 				const double v = psnr(host.pictures[i], source_frames[src_idx]);
 				if (v < 0)
 					continue;
@@ -1688,7 +1754,71 @@ int main(int argc, char ** argv)
 			{
 				std::printf("PSNR vs source over %zu frames: mean %.2f dB, worst %.2f dB\n",
 				            counted, total / double(counted), worst);
-				check(worst > 20.0, "every decoded frame resembles its source (PSNR > 20 dB)");
+				// Which frames the low scores belong to, and whether each one opened
+				// a run or continued one. A frame that continues a run is inter and
+				// may legitimately be a stale warp; a frame that OPENS one is the
+				// encoder's all-intra resync, and a bad score there is a fault.
+				size_t low_opening = 0, low_continuing = 0;
+				for (size_t i = 0; i < host.pictures.size() and i < host.frames.size(); ++i)
+				{
+					size_t src_idx = presented.size();
+					for (size_t j = 0; j < presented.size(); ++j)
+						if (same(presented[j], host.frames[i].view_info))
+						{
+							src_idx = j;
+							break;
+						}
+					if (src_idx >= source_frames.size() or
+					    host.frames[i].view_info.display_time == 0)
+						continue;
+					const double v = psnr(host.pictures[i], source_frames[src_idx]);
+					if (v >= 0 and v < 20.0)
+					{
+						const uint16_t id = uint16_t(host.frames[i].frame_index);
+						size_t pos = host.decoded_ids.size();
+						for (size_t k = 0; k < host.decoded_ids.size(); ++k)
+							if (host.decoded_ids[k] == id)
+							{
+								pos = k;
+								break;
+							}
+						const bool opens_run =
+						        pos == 0 or pos >= host.decoded_ids.size() or
+						        uint16_t(id - host.decoded_ids[pos - 1]) != 1;
+						opens_run ? ++low_opening : ++low_continuing;
+						std::printf("  low PSNR %.2f dB at frame id %u (%s)\n", v,
+						            unsigned(id),
+						            opens_run ? "opens a run: the encoder's all-intra resync"
+						                      : "continues a run: inter");
+					}
+				}
+				// A frame that OPENS a run is the encoder's answer to a not-held
+				// report: an all-zero receipt map, every tile coded INTRA. It owes
+				// nothing to any reference and there is no excuse for it to be a bad
+				// picture, on any link. This is the assertion that caught the resync
+				// test being written as "this frame or any later one" instead of
+				// "this frame", which passed every inter frame after a resync and put
+				// the corruption back.
+				check(low_opening == 0,
+				      "every frame that resynchronises the stream is a good picture (" +
+				              std::to_string(low_opening) + " below 20 dB)");
+				if (low_continuing)
+					std::printf("  %zu inter frame%s below 20 dB: a tile lost on the wire is\n"
+					            "  a stale warp until the receipt map codes it fresh one frame\n"
+					            "  later, which is the documented recovery latency\n",
+					            low_continuing, low_continuing == 1 ? "" : "s");
+				// On an intra stream, and on any clean link, every frame stands on its
+				// own and must look like its source. On an inter stream with loss or
+				// reordering injected, a frame in the one-frame window between a tile
+				// being lost and the receipt map coding it fresh is a stale warp, so
+				// the per-frame floor moves to the mean and the resync guarantee above
+				// carries the weight.
+				const bool inter_lossy = inter == "true" and (loss > 0 or reorder > 0);
+				if (not inter_lossy)
+					check(worst > 20.0, "every decoded frame resembles its source (PSNR > 20 dB)");
+				else
+					check(total / double(counted) > 30.0,
+					      "the stream as a whole resembles its source (mean PSNR > 30 dB)");
 			}
 		}
 	}

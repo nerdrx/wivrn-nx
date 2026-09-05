@@ -1068,6 +1068,13 @@ void wivrn_session::operator()(from_headset::nxwarp_feedback && fb)
 	compositor.on_nxwarp_feedback(fb);
 }
 
+void wivrn_session::operator()(from_headset::nxwarp_frame_not_held && fb)
+{
+	// Straight through to the encoder, like the transport feedback above and for the
+	// same reason: the session knows nothing about frame ids or receipt maps.
+	compositor.on_nxwarp_frame_not_held(fb);
+}
+
 void wivrn_session::operator()(from_headset::battery && battery)
 {
 	hmd.update_battery(battery);

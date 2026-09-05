@@ -45,8 +45,10 @@ namespace
 //     is REFUSED at construction, because silently coding all-intra when the
 //     caller asked for inter would be a performance mystery rather than an
 //     error. Every frame is intra, so `intra_period` is moot and ignored.
-//   * rate control. The QP is fixed, exactly as it is for the reference
-//     backend; this is not a regression from it.
+//   * a rate controller of its own, and per-tile quantisers. One QP codes
+//     every tile of a frame — but that QP is settable between frames
+//     (set_qp), so the controller in video_encoder_nxwarp drives this backend
+//     exactly as it drives the reference one.
 //   * set_view() and set_received_tiles() are ACCEPTED AND IGNORED, and that
 //     is deliberate rather than lazy. An all-intra frame has no reference to
 //     warp and no prediction a lost tile can corrupt, so there is nothing for
@@ -171,6 +173,26 @@ public:
 	void set_view(const wivrn::nxwarp_codec_view &) override {}
 	void set_received_tiles(std::span<const uint8_t>) override {}
 
+	// The quantiser, which this backend DOES honour: nxvc_vk_encoder_set_qp
+	// rewrites the frame parameter record and the job list, both of which the
+	// library re-uploads on every encode, so nothing is rebuilt and the next
+	// frame simply carries the new QP. nx-warp's tests/vk-encoder/qp_switch
+	// pins byte identity with nxv-enc across the change, frame by frame, which
+	// is what makes it safe to move every frame.
+	bool set_qp(uint32_t qp) override
+	{
+		const nxvc_vke_status st = nxvc_vk_encoder_set_qp(enc, qp);
+		if (st != NXVC_VKE_OK)
+		{
+			U_LOG_W("nxwarp: the GPU encoder refused QP %u: %s (%s)",
+			        unsigned(qp),
+			        nxvc_vk_encoder_status_string(st),
+			        nxvc_vk_encoder_last_error(enc));
+			return false;
+		}
+		return true;
+	}
+
 	// The image path. See the class comment for what the image must be; the
 	// library checks what it can (geometry, layout) and refuses the rest at the
 	// only place it could be checked, which is the caller.
@@ -259,7 +281,7 @@ public:
 	std::string description() const override
 	{
 		return std::format("nxvc_vk_encoder GPU compute encoder, {} ({}x{} tiles, "
-		                   "intra only, fixed QP)",
+		                   "intra only, one QP per frame)",
 		                   device,
 		                   cols,
 		                   rows);

@@ -163,11 +163,38 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	watchdog.set_eligible(false);
 
 	base_qp = std::min(63u, option_u32(settings.options, "qp", 28));
+	current_qp = base_qp;
+
+	// "rc": "auto" (the default) maps the bitrate the session gives this stream
+	// to a quantiser, frame by frame. "fixed" is the behaviour NX Warp shipped
+	// with: this stream's `qp`, whatever the link is doing. An unknown value is
+	// an error rather than a fallback, for the reason "backend" gives below.
+	{
+		const std::string rc = option_string(settings.options, "rc", "auto");
+		if (rc == "auto")
+			rc_auto = true;
+		else if (rc == "fixed")
+			rc_auto = false;
+		else
+			throw std::runtime_error(
+			        std::format("unknown NX Warp \"rc\" mode \"{}\"; expected \"auto\" or \"fixed\"", rc));
+	}
+	rc_min_qp = std::min(63u, option_u32(settings.options, "min-qp", 20));
+	rc_max_qp = std::min(63u, option_u32(settings.options, "max-qp", 44));
+	if (rc_min_qp > rc_max_qp)
+		throw std::runtime_error(std::format("NX Warp \"min-qp\" {} is above \"max-qp\" {}",
+		                                     rc_min_qp,
+		                                     rc_max_qp));
+	// The starting QP has to be inside the band the controller may move in, or
+	// the first move is a jump rather than a step.
+	if (rc_auto)
+		current_qp = std::clamp(base_qp, rc_min_qp, rc_max_qp);
+	rc_fps = settings.fps;
 
 	nxwarp_codec_config codec_cfg{
 	        .width = extent.width,
 	        .height = extent.height,
-	        .base_qp = base_qp,
+	        .base_qp = current_qp,
 	        .inter = option_bool(settings.options, "inter", false),
 	        .intra_period = option_u32(settings.options, "intra-period", 180),
 	        .intra_dir = option_bool(settings.options, "intra-dir", true),
@@ -291,16 +318,110 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 		cr_plane.resize(cb_plane.size());
 	}
 
-	U_LOG_I("nxwarp: stream %d %ux%u, %s, base QP %u, %ux%u tiles in %u band(s), %zu bytes per transport tile",
+	const std::string rc_desc =
+	        rc_auto ? std::format("rate control from QP {} in {}..{} at {:.0f} Hz",
+	                              current_qp, rc_min_qp, rc_max_qp, rc_fps)
+	                : std::format("fixed QP {}", base_qp);
+
+	U_LOG_I("nxwarp: stream %d %ux%u, %s, %s, %ux%u tiles in %u band(s), %zu bytes per transport tile",
 	        int(stream_idx),
 	        unsigned(extent.width),
 	        unsigned(extent.height),
 	        codec->description().c_str(),
-	        unsigned(base_qp),
+	        rc_desc.c_str(),
 	        unsigned(stream_cfg.cols),
 	        unsigned(stream_cfg.rows),
 	        unsigned(stream_cfg.bands()),
 	        chunk_bytes);
+}
+
+// The rate controller.
+//
+// WHAT IT CONTROLS. Not a bit budget in the abstract: bytes per frame. The
+// codec has one quantiser per frame and no rate control of its own, so the only
+// output variable is a frame's size, and on this headset that size is two things
+// at once. It is the link load, and it is the frame rate — NX Warp decodes at
+// roughly a millisecond per kilobyte on the Pico 4, so a 12 KB frame decodes
+// inside a 90 Hz budget and a 52 KB frame arrives at ten. A controller that
+// holds bytes per frame therefore holds both, and there is nothing else in this
+// encoder that can.
+//
+// THE TARGET. `pending_bitrate` is already this stream's share: video_encoder's
+// apply_bitrate() takes the whole-link number the session's controller decided,
+// multiplies by this encoder's `bitrate_multiplier` (encoder_settings.cpp's
+// split_bitrate weighs the eyes, the passthrough alpha stream at 5% and the
+// quad layer) and then takes the FEC parity overhead out of it. So the split
+// across streams is not re-done here — doing it again would double-apply it —
+// and the number simply divides by eight and by the frame rate.
+//
+// It is read fresh every frame on purpose. WiVRn's automatic bitrate mode moves
+// the target at runtime, and an adaptive FEC ratio moves this encoder's share
+// without the target moving at all; both arrive through pending_bitrate, so a
+// controller that recomputed its budget once at startup would spend the session
+// chasing a number nobody is at any more.
+//
+// THE LAW. One QP step per frame toward the target, two when the frame is more
+// than a factor of two out, with a 5% dead band in the middle.
+//
+//   * a step, rather than a jump to the QP some rate model says fits, because
+//     there is no such model that survives a scene change: bytes at a given QP
+//     move by an order of magnitude between a dark corridor and a bright
+//     detailed room, and a controller that trusts a model overshoots on every
+//     cut and then oscillates. The step needs no model at all.
+//   * damped to one QP, because a step is roughly a 12% move in bytes and the
+//     loop runs at frame rate: 90 corrections a second converge in well under a
+//     second from anywhere in the band, which is faster than the bitrate
+//     controller above it moves the target.
+//   * two when more than 2x out, because that case is not a drift, it is a cut
+//     or a fresh target, and single-stepping across a factor of eight would
+//     take half a second of frames nobody can decode in time.
+//   * the dead band, because without it the QP dithers by one every frame
+//     forever — the target is never hit exactly — and every dither is a visible
+//     step in a flat gradient.
+//
+// The band is [min_qp, max_qp] and it is a real limit, not a formality: below
+// min_qp the frames cost frame rate on the headset however much link there is,
+// and above max_qp there is no point sending the picture at all. A session that
+// wants the frames the ceiling implies and cannot have them is a session whose
+// ceiling is wrong, and clamping says so in the two-second report rather than
+// silently obeying.
+void wivrn::video_encoder_nxwarp::run_rate_control(size_t last_frame_bytes)
+{
+	if (not rc_auto)
+		return;
+
+	rc_bitrate = pending_bitrate.load();
+	if (not rc_bitrate)
+		return; // no ceiling has been decided yet; stay where we are
+
+	// The live compositor rate when the session has set one, else the rate the
+	// stream was configured at. A zero here would make the budget infinite.
+	float fps = pending_framerate.load();
+	if (not(fps > 0))
+		fps = rc_fps;
+	if (not(fps > 0))
+		return;
+
+	rc_target_bytes = double(rc_bitrate) / 8.0 / double(fps);
+	const double actual = double(last_frame_bytes);
+
+	int step = 0;
+	if (actual > rc_target_bytes * 1.05)
+		step = actual > rc_target_bytes * 2.0 ? +2 : +1;
+	else if (actual < rc_target_bytes * 0.95)
+		step = actual * 2.0 < rc_target_bytes ? -2 : -1;
+	if (not step)
+		return;
+
+	const uint32_t want = uint32_t(std::clamp(int(current_qp) + step, int(rc_min_qp), int(rc_max_qp)));
+	if (want == current_qp)
+		return;
+
+	// A QP the codec refused is a QP this frame was not coded at, so it must not
+	// become the one the next report claims. Leave current_qp where it is and
+	// try again next frame.
+	if (codec->set_qp(want))
+		current_qp = want;
 }
 
 wivrn::video_encoder_nxwarp::~video_encoder_nxwarp()
@@ -617,16 +738,26 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	        .fov_down = fov.angleDown,
 	});
 
-	if (not logged_bitrate_note and pending_bitrate.load())
+	if (not logged_rc_mode and pending_bitrate.load())
 	{
-		logged_bitrate_note = true;
-		// Rate control is nx-warp's rc/ component and is not wired yet: the
-		// controller's number is accepted and ignored rather than silently
-		// mapped to a QP nobody measured. Fixed QP until then.
-		U_LOG_I("nxwarp: stream %d runs at fixed QP %u; the bitrate controller's %u bit/s is not applied yet",
-		        int(stream_idx),
-		        unsigned(base_qp),
-		        unsigned(pending_bitrate.load()));
+		logged_rc_mode = true;
+		const uint32_t bps = pending_bitrate.load();
+		if (rc_auto)
+			U_LOG_I("nxwarp: stream %d rate control on: %u bit/s is %.0f B/frame at %.0f Hz, QP band %u..%u",
+			        int(stream_idx),
+			        unsigned(bps),
+			        double(bps) / 8.0 / double(pending_framerate.load() > 0 ? pending_framerate.load() : rc_fps),
+			        double(pending_framerate.load() > 0 ? pending_framerate.load() : rc_fps),
+			        unsigned(rc_min_qp),
+			        unsigned(rc_max_qp));
+		else
+			// "rc": "fixed" was asked for explicitly, so the ceiling being
+			// ignored is the configuration working. Say which knob undoes it.
+			U_LOG_I("nxwarp: stream %d is at fixed QP %u by configuration; the bitrate controller's "
+			        "%u bit/s is ignored (unset \"rc\": \"fixed\" to honour it)",
+			        int(stream_idx),
+			        unsigned(base_qp),
+			        unsigned(bps));
 	}
 
 	// The GPU backend submits its own command buffers on vk.queue, and WiVRn
@@ -656,8 +787,17 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	}
 	// Encode wall time, once every two seconds per stream: on a CPU reference
 	// encoder this is the number that decides the frame rate a headset sees.
+	// The QP this frame was coded at. Everything below reports on the frame that
+	// was just encoded — the profile, and the tile records the transport puts on
+	// the wire — so none of it may see the quantiser the controller picks at the
+	// end of this function for the next frame.
+	const uint32_t coded_qp = current_qp;
+
 	{
 		const double ms = std::chrono::duration<double, std::milli>(t_enc1 - t_enc0).count();
+		prof_qp_sum += coded_qp;
+		prof_qp_lo = std::min(prof_qp_lo, coded_qp);
+		prof_qp_hi = std::max(prof_qp_hi, coded_qp);
 		prof_total_n++;
 		prof_total_ms += ms;
 		prof_total_max_ms = std::max(prof_total_max_ms, ms);
@@ -668,14 +808,39 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		prof_bytes += bitstream.size();
 		if (t_enc1 - prof_since > std::chrono::seconds(2))
 		{
-			U_LOG_I("nxwarp: stream %d encoded %llu frames in %.1f s: %.1f ms/frame (max %.1f), %.0f B/frame",
-			        int(stream_idx), (unsigned long long)prof_n,
-			        std::chrono::duration<double>(t_enc1 - prof_since).count(),
-			        prof_ms / prof_n, prof_max_ms, double(prof_bytes) / prof_n);
+			// The applied QP and the bytes it bought, next to the budget they
+			// were aimed at: those three numbers together are the whole of what
+			// a session needs to see to know whether the ceiling is being met,
+			// and whether it is being met at a quantiser anyone wants. A band
+			// that is one value wide is a settled controller; a QP pinned at
+			// min_qp or max_qp with the bytes still off target is a ceiling this
+			// stream cannot reach from inside its band.
+			const double achieved = double(prof_bytes) / double(prof_n);
+			const double mean_qp = double(prof_qp_sum) / double(prof_n);
+			if (rc_auto and rc_target_bytes > 0)
+				U_LOG_I("nxwarp: stream %d encoded %llu frames in %.1f s: %.1f ms/frame (max %.1f), "
+				        "%.0f B/frame vs %.0f target (%+.0f%%), QP %.1f [%u..%u]%s",
+				        int(stream_idx), (unsigned long long)prof_n,
+				        std::chrono::duration<double>(t_enc1 - prof_since).count(),
+				        prof_ms / prof_n, prof_max_ms,
+				        achieved, rc_target_bytes,
+				        100.0 * (achieved - rc_target_bytes) / rc_target_bytes,
+				        mean_qp, unsigned(prof_qp_lo), unsigned(prof_qp_hi),
+				        current_qp == rc_min_qp ? " (at min QP)"
+				                                : (current_qp == rc_max_qp ? " (at max QP)" : ""));
+			else
+				U_LOG_I("nxwarp: stream %d encoded %llu frames in %.1f s: %.1f ms/frame (max %.1f), "
+				        "%.0f B/frame at fixed QP %u",
+				        int(stream_idx), (unsigned long long)prof_n,
+				        std::chrono::duration<double>(t_enc1 - prof_since).count(),
+				        prof_ms / prof_n, prof_max_ms, achieved, unsigned(current_qp));
 			prof_n = 0;
 			prof_ms = 0;
 			prof_max_ms = 0;
 			prof_bytes = 0;
+			prof_qp_sum = 0;
+			prof_qp_lo = 63;
+			prof_qp_hi = 0;
 			prof_since = t_enc1;
 		}
 	}
@@ -745,7 +910,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		                              bitstream,
 		                              descs,
 		                              chunk_bytes,
-		                              base_qp,
+		                              coded_qp,
 		                              now_us,
 		                              uint16_t(std::min<uint64_t>(65535, (uint64_t(os_monotonic_get_ns()) - encode_end_ns) / 1000)));
 	}
@@ -769,6 +934,11 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	in[slot].have_view_info = false;
 	previous_frame_id = frame_id16;
 	have_previous_frame = true;
+
+	// The quantiser for the NEXT frame, from the size of this one. Last, because
+	// everything above describes the frame that was just sent and the controller
+	// is about to invalidate `current_qp` for it.
+	run_rate_control(bitstream.size());
 
 	// Nothing for the sender thread: everything is already on the wire. The
 	// watchdog knows this encoder sends synchronously (async_send == false in the

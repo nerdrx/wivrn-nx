@@ -100,6 +100,12 @@ public:
 		vk::Sampler sampler_a;
 		vk::Rect2D rect_a;
 		vk::ImageLayout layout_a;
+		// Frame smoothing: the colour image of the decoded frame this one replaces,
+		// from the same decoder (so the same sampler and the same geometry). Null
+		// means there is none to blend with, and the pass then binds rgb here and
+		// leaves the blend weight at zero.
+		vk::ImageView prev_rgb = nullptr;
+		vk::ImageLayout layout_prev_rgb = vk::ImageLayout::eGeneral;
 	};
 
 	// Post-processing folded into the defoveation pass, all values are neutral by default
@@ -131,6 +137,14 @@ public:
 		float step = 0;
 	};
 
+	// Frame smoothing (config.frame_smoothing). Share of the previous decoded frame
+	// blended into this one, on the refresh that first shows a new decoded frame and
+	// on no other. 0 disables it and the pass is then byte identical to not having it.
+	struct frame_blend
+	{
+		float weight = 0;
+	};
+
 	stream_defoveator(
 	        vk::raii::Device & device,
 	        vk::raii::PhysicalDevice & physical_device,
@@ -150,6 +164,7 @@ public:
 	        std::array<float, 4> bias,
 	        const post_processing & post,
 	        const motion_warp & motion,
+	        const frame_blend & blend,
 	        int destination,
 	        bool cas_full_kernel = false,
 	        bool fsr = false);

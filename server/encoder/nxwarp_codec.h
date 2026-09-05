@@ -48,8 +48,9 @@ struct nxwarp_codec_config
 {
 	uint32_t width = 0;  // luma samples, per eye
 	uint32_t height = 0;
-	// Fixed quantiser for the whole frame, 0..63. Rate control (nx-warp's rc/)
-	// is a later item; see video_encoder_nxwarp::apply_bitrate_to_qp.
+	// The quantiser, 0..63, every tile of a frame is coded at, until
+	// nxwarp_codec::set_qp says otherwise. With "rc": "auto" this is only the
+	// starting point the controller in video_encoder_nxwarp moves from.
 	uint32_t base_qp = 28;
 	// Inter prediction: the pose warp, per-tile motion vectors and the reference
 	// ring. Off makes every frame all-intra, which is the safe default for a
@@ -103,6 +104,19 @@ public:
 	// Pose and projection of the frame that is about to be encoded. Must be
 	// called before every encode(); without it the codec emits an identity warp.
 	virtual void set_view(const nxwarp_codec_view &) = 0;
+
+	// The quantiser, 0..63, for the frames that follow. This is the whole of the
+	// rate-control surface a backend exposes: no NX Warp codec moves the QP on
+	// its own, so the controller lives in video_encoder_nxwarp and this is how
+	// it speaks.
+	//
+	// Cheap by contract — nothing is recreated and nothing is allocated — so
+	// calling it before every frame is the intended use, and setting the QP the
+	// codec already has is a no-op. Returns false if the backend refused it,
+	// which for a rate controller means "keep the QP you thought you had"
+	// rather than "give up": a QP that did not take must not be reported as the
+	// one the frame was coded at.
+	virtual bool set_qp(uint32_t qp) = 0;
 
 	// Encode one frame from planar 8-bit 4:2:0. Returns the frame's bytes, valid
 	// until the next call, or an empty span on failure (which is logged by the

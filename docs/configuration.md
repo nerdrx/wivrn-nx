@@ -406,6 +406,35 @@ The backend needs an `nxvc` built with the Vulkan encoder
 `NX Warp Vulkan encoder: ON` when it found one; without it, asking for `"vk"` is an
 error at encoder construction and `"ref"` still works.
 
+#### Rate control
+
+NX Warp codes a whole frame at one quantiser and has no rate control inside the codec, so
+bytes per frame are the only output variable — and on the headset that one number is two
+things at once. It is the load on the link, and it is the frame rate: NX Warp decodes at
+roughly a millisecond per kilobyte on a Pico 4, so a 12 KB frame decodes inside a 90 Hz
+budget and a 52 KB frame arrives at about ten. The quantiser is therefore the knob for a
+steady session, and `"rc": "auto"` (the default) turns it, frame by frame, to hold the
+bytes per frame the session's bitrate ceiling implies.
+
+The controller takes the ceiling this stream was given — already its share of the link,
+and already net of the FEC parity overhead — divides by eight and by the compositor frame
+rate, and steps the quantiser one QP per frame toward the result, two while more than a
+factor of two out, with a 5% dead band so it stops rather than dithering. It re-reads the
+ceiling every frame, so automatic bitrate mode is followed live. `min-qp` and `max-qp`
+bound it: below `min-qp` the frames cost frame rate on the headset however much link there
+is, and above `max-qp` the picture is not worth sending. The two-second encode report
+prints the applied QP next to the bytes it bought and the budget they were aimed at.
+
+`"rc": "fixed"` is the old behaviour — this encoder's `qp` for the whole session, whatever
+the link is doing — and the ceiling is then ignored, which the log says once.
+
+| option | default | |
+| --- | --- | --- |
+| `rc` | `auto` | `auto` honours the bitrate ceiling, `fixed` pins `qp` |
+| `qp` | `28` | the quantiser, 0..63; with `auto`, where the controller starts |
+| `min-qp` | `20` | the finest quantiser the controller may reach |
+| `max-qp` | `44` | the coarsest |
+
 ```json
 {
 	"encoders": [

@@ -46,9 +46,11 @@
 //
 //   There are no sockets and no threads pretending to be a network: the harness calls
 //   `push_datagram` on the decoder directly from the encode loop, which is where WiVRn's
-//   network thread would call it. Ordering is therefore the sender's order. That is the
-//   one thing this test does not stress; `nxwarp-loopback --loss` covers reordering on the
-//   reassembly path.
+//   network thread would call it. `--reorder` permutes the delivery order across frame
+//   boundaries, which is the case a live 90 fps link produces constantly, but the calls are
+//   still synchronous: the datagrams of one frame arrive microseconds apart while whole
+//   frames are tens of milliseconds apart, so there is no jitter and the clock half of the
+//   band deadline policy is only ever exercised between frames.
 //
 // WHAT IT ASSERTS
 //
@@ -69,10 +71,18 @@
 //   5. Loss conceals rather than stalls. A five percent run must keep publishing frames and
 //      must terminate; frames with holes are dropped, which is this backend's documented
 //      behaviour (see nxwarp_packetize.h), but the stream must not wedge.
+//   6. Reordering costs nothing. With no loss on the link, every frame presented must
+//      reassemble whole however the datagrams were ordered -- judged on
+//      nxwarp_host::on_frame_unit, because a frame that reassembled and was then discarded
+//      as stale by the bounded worker queue is not a reassembly loss -- and frames must
+//      reach the worker in frame order.
+//   7. Tiles that arrived are counted as arrived. The transport marks a tile placed after
+//      its band deadline `late` and drops it from the feedback, so the encoder is told the
+//      headset does not have a tile it has. Under ten percent, or the run fails.
 //
 // Run:
 //   wivrn-nxwarp-e2e --yuv in.yuv --width W --height H [--frames N] [--loss 0.05]
-//                    [--seed S] [--nxv-out f.nxv] [--decoded-out f.yuv] [--nxv-dec PATH]
+//                    [--reorder 0.05] [--first-frame 65500] [--seed S] [--nxv-out f.nxv] [--decoded-out f.yuv] [--nxv-dec PATH]
 //                    [--backend ref|vk] [--qp N]
 //                    [--reconnect-at N] [--start-frame-id F]
 //
@@ -82,10 +92,10 @@
 //                      restarting does to a server session that stays up
 //                      (wivrn_session::resume_session), and what the harness could not
 //                      express before.
-//   --start-frame-id F frame ids start at F instead of 0. frame_id is 16 bits on the
-//                      wire, so a live session crosses zero every 65536 frames -- twelve
-//                      minutes at 90 Hz. Starting at 65400 reaches the wrap in a few
-//                      hundred frames.
+//   --start-frame-id F the other name for --first-frame: frame ids start at F instead of
+//                      0. frame_id is 16 bits on the wire, so a live session crosses zero
+//                      every 65536 frames -- twelve minutes at 90 Hz. Starting at 65400
+//                      reaches the wrap in a few hundred frames.
 //   --no-resume-notice reconnect without the reset_stream() call compositor::resume()
 //                      makes, i.e. the server as it behaved before that call existed.
 //                      Reproduces the failure: every datagram after the reconnect fails
@@ -110,6 +120,7 @@
 #include <nxvc/transport/aead.h>
 #include <nxvc/transport/receiver.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -374,9 +385,18 @@ class lossy_link : public video_encoder::packet_sink
 	nxwarp_decoder * dec;
 	std::mt19937 rng;
 	double loss;
+	// Fraction of datagrams held back by one to three datagram slots. At ~7 datagrams
+	// per frame that lands a held datagram behind the head of the *next* frame about
+	// three times in seven, which is the case a one-frame reassembler cannot survive:
+	// the tail of frame N arrives after the head of N+1. On the wire this is what two
+	// eye streams interleaved on one socket, plus any path reordering, actually do.
+	double reorder;
+	// Datagrams waiting for their slot to come up: {slot at which it is released, packet}.
+	std::vector<std::pair<uint64_t, to_headset::nxwarp_datagram>> held;
+	uint64_t slot_index = 0;
 
 public:
-	uint64_t sent = 0, dropped = 0;
+	uint64_t sent = 0, dropped = 0, delayed = 0;
 	// The stream header, and the shadow reassembly of every frame, so the harness can
 	// rebuild the exact .nxv the decoder was fed.
 	std::vector<uint8_t> stream_header;
@@ -386,8 +406,8 @@ public:
 	// header leaves a fresh decoder with no receiver at all.
 	uint64_t headers_sent = 0;
 
-	lossy_link(nxwarp_decoder & dec, double loss, uint32_t seed) :
-	        dec(&dec), rng(seed), loss(loss) {}
+	lossy_link(nxwarp_decoder & dec, double loss, double reorder, uint32_t seed) :
+	        dec(&dec), rng(seed), loss(loss), reorder(reorder) {}
 
 	// Point the link at the decoder that replaced the old one.
 	void retarget(nxwarp_decoder & d)
@@ -410,16 +430,62 @@ public:
 	void send_stream(to_headset::nxwarp_datagram && packet) override
 	{
 		++sent;
+		const uint64_t slot = slot_index++;
+		release_due(slot);
 		if (loss > 0 and std::uniform_real_distribution<double>(0, 1)(rng) < loss)
 		{
 			++dropped;
+			return;
+		}
+		if (reorder > 0 and std::uniform_real_distribution<double>(0, 1)(rng) < reorder)
+		{
+			++delayed;
+			const uint64_t d = 1 + (uint64_t(rng()) % 3);
+			held.emplace_back(slot + d, std::move(packet));
 			return;
 		}
 		raw_datagrams.push_back(packet.payload);
 		deliver(std::move(packet));
 	}
 
+	// The link has nothing more to carry: everything still held goes now, in the order
+	// it was due. Without this the last few frames of a reordered run would be judged
+	// on datagrams the harness never handed over, which says nothing about the decoder.
+	void flush()
+	{
+		std::stable_sort(held.begin(), held.end(),
+		                 [](const auto & a, const auto & b) { return a.first < b.first; });
+		auto pending = std::move(held);
+		held.clear();
+		for (auto & [due, packet]: pending)
+		{
+			raw_datagrams.push_back(packet.payload);
+			deliver(std::move(packet));
+		}
+	}
+
 private:
+	// Everything whose slot has come up, oldest due first. A datagram held at slot s with
+	// a delay of d is released while slot s+d+1 is being handled, so exactly d datagrams
+	// that were behind it on the wire go out in front of it. d=1 is a swap with the next
+	// datagram; d=3 puts it three behind, which at six or seven datagrams per frame is
+	// past the head of the following frame whenever it was near the end of its own.
+	void release_due(uint64_t slot)
+	{
+		for (size_t i = 0; i < held.size();)
+		{
+			if (held[i].first >= slot)
+			{
+				++i;
+				continue;
+			}
+			auto packet = std::move(held[i].second);
+			held.erase(held.begin() + long(i));
+			raw_datagrams.push_back(packet.payload);
+			deliver(std::move(packet));
+		}
+	}
+
 	void deliver(to_headset::nxwarp_datagram && packet)
 	{
 		// Real serializer, both directions. A field that does not survive this does not
@@ -714,9 +780,25 @@ int main(int argc, char ** argv)
 	// (the Vulkan compute encoder). Both must reach the same conclusions here,
 	// which is the point of running the test against each.
 	std::string backend = "ref";
+	// "auto" honours the bitrate ceiling below; "fixed" pins --qp for the run.
+	// Default "fixed" here and not in the server: a test whose bytes per frame
+	// drift is not a test whose byte-identity check means anything.
+	std::string rc = "fixed";
 	uint32_t qp = 26;
+	// Whole-link bitrate handed to the encoder's rate controller, bit/s. Zero
+	// means the controller is never told a ceiling, which is what every test
+	// that predates it expects.
+	uint64_t bitrate = 0;
+	// A second ceiling, applied halfway through the run: WiVRn's automatic
+	// bitrate mode moves the target mid-session, and a controller that only
+	// converged from its starting point would look correct here without ever
+	// having followed anything.
+	uint64_t bitrate2 = 0;
+	// The band the controller may move in, mirrored here so the assertions can
+	// tell "did not reach the ceiling" from "reached the end of the band".
+	uint32_t min_qp = 20, max_qp = 44;
 	uint32_t width = 320, height = 240, frames = 12, seed = 1;
-	double loss = 0.0;
+	double loss = 0.0, reorder = 0.0;
 	// The headset app restarted, or the link dropped and came back, while the server's
 	// session stayed up: the client end is thrown away and rebuilt -- new decoder, new
 	// nxt::Receiver, no memory of the stream -- and the encoder and its nxt::Sender keep
@@ -731,10 +813,11 @@ int main(int argc, char ** argv)
 	// as hiccup -- the receiver on the other end is still counting, so an encoder that
 	// restarted its transport here would break a session that was working.
 	uint32_t idr_at = 0;
-	// Where the frame counter starts. frame_id goes on the wire as 16 bits, so a session
-	// crosses zero every 65536 frames (12 minutes at 90 Hz); starting just below the wrap
-	// reaches it in a few hundred frames instead of an hour.
-	uint64_t start_frame_id = 0;
+	// Where the frame counter starts. video_encoder_nxwarp puts uint16_t(frame_id) on
+	// the wire, so starting near 65536 walks the stream through the 16-bit wrap -- about
+	// twelve minutes into a 90 fps session, and the point at which one went dark.
+	// --start-frame-id is the same option under its other name.
+	uint64_t first_frame = 0;
 
 	for (int i = 1; i < argc; ++i)
 	{
@@ -750,6 +833,10 @@ int main(int argc, char ** argv)
 			frames = uint32_t(std::stoul(next()));
 		else if (a == "--loss")
 			loss = std::stod(next());
+		else if (a == "--reorder")
+			reorder = std::stod(next());
+		else if (a == "--first-frame")
+			first_frame = std::stoull(next());
 		else if (a == "--seed")
 			seed = uint32_t(std::stoul(next()));
 		else if (a == "--nxv-out")
@@ -764,12 +851,22 @@ int main(int argc, char ** argv)
 			qp = uint32_t(std::stoul(next()));
 		else if (a == "--reconnect-at")
 			reconnect_at = uint32_t(std::stoul(next()));
-		else if (a == "--start-frame-id")
-			start_frame_id = std::stoull(next());
+		else if (a == "--start-frame-id") // the other name for --first-frame
+			first_frame = std::stoull(next());
 		else if (a == "--no-resume-notice")
 			no_resume_notice = true;
 		else if (a == "--idr-at")
 			idr_at = uint32_t(std::stoul(next()));
+		else if (a == "--rc")
+			rc = next();
+		else if (a == "--bitrate")
+			bitrate = std::stoull(next());
+		else if (a == "--bitrate2")
+			bitrate2 = std::stoull(next());
+		else if (a == "--min-qp")
+			min_qp = uint32_t(std::stoul(next()));
+		else if (a == "--max-qp")
+			max_qp = uint32_t(std::stoul(next()));
 		else
 		{
 			std::fprintf(stderr, "unknown argument %s\n", a.c_str());
@@ -792,8 +889,9 @@ int main(int argc, char ** argv)
 		return 2;
 	}
 	const uint32_t available = uint32_t(yuv.size() / frame_bytes);
-	std::printf("source: %s, %u frames of %ux%u available, running %u\n",
-	            yuv_path.c_str(), available, width, height, frames);
+	std::printf("source: %s, %u frames of %ux%u available, running %u from frame id %llu\n",
+	            yuv_path.c_str(), available, width, height, frames,
+	            (unsigned long long)first_frame);
 
 	vk_bundle vk;
 	std::printf("vulkan: %s\n", vk.physical_device.getProperties().deviceName.data());
@@ -805,16 +903,35 @@ int main(int argc, char ** argv)
 	settings.codec = video_codec::nxwarp;
 	settings.fps = 90;
 	settings.encoder_name = encoder_nxwarp;
-	settings.bitrate = 50'000'000;
+	settings.bitrate = bitrate ? bitrate : 50'000'000;
 	settings.bitrate_multiplier = 1.0;
 	settings.bit_depth = 8;
 	settings.src_layer = 0;
-	// Fixed QP: the rate controller is not wired (see video_encoder_nxwarp.cpp), and a
-	// test that let it drift would not be reproducible.
 	settings.options["qp"] = std::to_string(qp);
 	settings.options["backend"] = backend;
+	// Rate control off by default. The byte-identity check below compares this
+	// run's bitstream against nxv-dec's decode of it, which a moving quantiser
+	// does not disturb -- but the frame sizes and the loss pattern would stop
+	// being reproducible, and every assertion about the transport is written
+	// against a run whose frames are the same size every time.
+	settings.options["rc"] = rc;
+	settings.options["min-qp"] = std::to_string(min_qp);
+	settings.options["max-qp"] = std::to_string(max_qp);
 
 	video_encoder_nxwarp enc(vk, settings, 0);
+
+	// The whole-link ceiling, exactly as the session's bitrate controller sets
+	// it: video_encoder::set_bitrate takes this stream's share out of it (here a
+	// multiplier of 1.0 and no FEC parity, so the share is the whole number) and
+	// publishes it as pending_bitrate, which is what the encoder's controller
+	// reads. Nothing about the path from the ceiling to the QP is bypassed.
+	if (bitrate)
+	{
+		enc.set_bitrate(uint32_t(bitrate));
+		std::printf("rate control: %s, ceiling %llu bit/s -> %.0f B/frame at %.0f Hz\n",
+		            rc.c_str(), (unsigned long long)bitrate,
+		            double(bitrate) / 8.0 / double(settings.fps), double(settings.fps));
+	}
 
 	// ---- the decoder, as the headset builds it -------------------------------
 	to_headset::video_stream_description desc{};
@@ -833,18 +950,29 @@ int main(int argc, char ** argv)
 	};
 	auto dec = make_decoder();
 
-	lossy_link link(*dec, loss, seed);
+	lossy_link link(*dec, loss, reorder, seed);
 	enc.set_packet_sink(&link);
 
 	auto src = make_source_image(vk, width, height);
 
 	// ---- drive ----------------------------------------------------------------
 	uint64_t feedback_packets = 0, feedback_bytes = 0;
+	// One row per frame: the quantiser it was coded at and the bytes that
+	// bought. Filled from the encoder's own profile counters -- read once
+	// before the encode for the QP and once after for the byte total -- so it
+	// is the encoder's arithmetic, not a re-derivation of it.
+	struct rc_row
+	{
+		uint32_t qp;
+		uint64_t bytes;
+		double target;
+	};
+	std::vector<rc_row> rc_trace;
 	std::vector<view_info_t> presented;
 	std::vector<std::vector<uint8_t>> source_frames;
 	const uint8_t num_slots_used = 1;
 
-	// What the two new options are measured by: the published-frame and unit counts at
+	// What the reconnect option is measured by: the published-frame and unit counts at
 	// the moment the client was replaced, so that "did anything decode AFTER the
 	// reconnect" is a number rather than an impression.
 	size_t frames_at_reconnect = 0, units_at_reconnect = 0;
@@ -852,20 +980,21 @@ int main(int argc, char ** argv)
 	bool reconnected = false;
 	nxt::ReceiverStats post_stats{};
 
-	if (start_frame_id)
+	if (first_frame)
 		std::printf("frame ids start at %llu (16-bit wrap at %llu, %s crossed by this run)\n",
-		            (unsigned long long)start_frame_id,
-		            (unsigned long long)((start_frame_id / 65536 + 1) * 65536),
-		            start_frame_id % 65536 + frames > 65536 ? "is" : "is NOT");
+		            (unsigned long long)first_frame,
+		            (unsigned long long)((first_frame / 65536 + 1) * 65536),
+		            first_frame % 65536 + frames > 65536 ? "is" : "is NOT");
 
-	for (uint32_t f = 0; f < frames; ++f)
+	for (uint32_t i = 0; i < frames; ++i)
 	{
-		if (reconnect_at and f == reconnect_at)
+		const uint64_t f = first_frame + i;
+
+		if (reconnect_at and i == reconnect_at)
 		{
 			// Let the old client finish what it already holds, so the frame and unit
-			// counts on either side of the cut mean what they say. A frame whose
-			// datagrams are still arriving has no unit and no picture, and is lost on
-			// both sides at once -- which is what a real app restart does too.
+			// counts on either side of the cut mean what they say.
+			dec->flush_frames();
 			host.wait_for(host.units.empty() ? 0 : host.units.size(), std::chrono::seconds(10));
 			frames_at_reconnect = host.frames.size();
 			units_at_reconnect = host.units.size();
@@ -885,12 +1014,12 @@ int main(int argc, char ** argv)
 			reconnected = true;
 			std::printf("\n--- reconnect at frame %u: new decoder, new receiver, same encoder "
 			            "(%zu frames, %zu units so far)\n\n",
-			            f, frames_at_reconnect, units_at_reconnect);
+			            i, frames_at_reconnect, units_at_reconnect);
 		}
 
-		if (idr_at and f == idr_at)
+		if (idr_at and i == idr_at)
 		{
-			std::printf("\n--- keyframe request at frame %u: reset(), same client\n\n", f);
+			std::printf("\n--- keyframe request at frame %u: reset(), same client\n\n", i);
 			enc.reset();
 		}
 
@@ -906,10 +1035,22 @@ int main(int argc, char ** argv)
 		        .value = 0,
 		        .stageMask = vk::PipelineStageFlagBits2::eTransfer,
 		};
+		// The session's bitrate controller moving its mind, mid-stream, the only
+		// way it ever does: set_bitrate on the live encoder.
+		if (bitrate2 and i == frames / 2)
+		{
+			enc.set_bitrate(uint32_t(bitrate2));
+			std::printf("frame %u: ceiling moved to %llu bit/s\n", i,
+			            (unsigned long long)bitrate2);
+		}
+
 		const uint8_t slot = uint8_t(f % num_slots_used);
-		const uint64_t frame_id = start_frame_id + f;
-		enc.present_image(*src.image, sem_info, slot, frame_id, vi);
-		(void)enc.encode(slot, frame_id);
+		enc.present_image(*src.image, sem_info, slot, f, vi);
+		const auto before = enc.profile();
+		(void)enc.encode(slot, f);
+		const auto after = enc.profile();
+		if (after.frames > before.frames)
+			rc_trace.push_back({before.qp, after.bytes - before.bytes, after.target_bytes});
 
 		// Feedback the decoder produced while that frame was going through, straight back
 		// into the encoder, which is what the network thread does.
@@ -929,46 +1070,172 @@ int main(int argc, char ** argv)
 		}
 	}
 
-	// The decoder finishes a frame when a datagram for the next one arrives, so the last
-	// frame needs the worker to drain rather than another datagram.
-	const bool arrived = host.wait_for(frames > 0 ? frames - 1 : 0, std::chrono::seconds(20));
+	// The encode loop is over, so nothing more will arrive to push the tail through:
+	// the link hands over everything it is still holding back, and the decoder closes
+	// whatever is still inside its reassembly window. Without both, the last frames of a
+	// reordered run would be counted as lost when they were only late.
+	link.flush();
+	dec->flush_frames();
 
-	std::printf("\nlink: %llu datagrams, %llu dropped (%.1f%%)\n",
+	// The decoder finishes a frame when its last run arrives, when a newer frame pushes
+	// it out of the window, or at the flush above, so by here everything presented has
+	// been decided one way or the other.
+	const bool arrived = host.wait_for(frames > 0 ? frames - 1 : 0, std::chrono::seconds(20));
+	// And a short grace for the last one, so the counts printed below are the counts the
+	// assertions see. A run that lost frames simply spends it.
+	(void)host.wait_for(frames, std::chrono::milliseconds(500));
+
+	std::printf("\nlink: %llu datagrams, %llu dropped (%.1f%%), %llu delayed by 1-3 slots (%.1f%%)\n",
 	            (unsigned long long)link.sent, (unsigned long long)link.dropped,
-	            link.sent ? 100.0 * double(link.dropped) / double(link.sent) : 0.0);
+	            link.sent ? 100.0 * double(link.dropped) / double(link.sent) : 0.0,
+	            (unsigned long long)link.delayed,
+	            link.sent ? 100.0 * double(link.delayed) / double(link.sent) : 0.0);
+	std::printf("reassembly produced %zu complete frame units of %u presented\n", host.units.size(), frames);
 	std::printf("decoder published %zu frames\n\n", host.frames.size());
 
-	if (const auto * rs = dec->transport_stats())
+	if (const auto * rs = dec->receiver_stats())
 		post_stats = *rs;
+
+	if (bitrate and not rc_trace.empty())
+	{
+		// Frame by frame, then the tail. The tail is the number that matters:
+		// the controller is allowed to spend the first frames walking to the
+		// target, and what it must not do is sit away from it once it arrives.
+		std::printf("rate control trace (frame: QP, bytes, target):\n");
+		for (size_t i = 0; i < rc_trace.size(); ++i)
+			std::printf("  %3zu  QP %2u  %7llu B  target %7.0f B  %+6.1f%%\n",
+			            i, unsigned(rc_trace[i].qp),
+			            (unsigned long long)rc_trace[i].bytes, rc_trace[i].target,
+			            rc_trace[i].target > 0
+			                    ? 100.0 * (double(rc_trace[i].bytes) - rc_trace[i].target) / rc_trace[i].target
+			                    : 0.0);
+
+		const size_t tail_from = rc_trace.size() * 2 / 3;
+		double tail_bytes = 0, tail_target = 0;
+		uint32_t tail_qp_lo = 63, tail_qp_hi = 0;
+		size_t tail_n = 0;
+		for (size_t i = tail_from; i < rc_trace.size(); ++i)
+		{
+			tail_bytes += double(rc_trace[i].bytes);
+			tail_target += rc_trace[i].target;
+			tail_qp_lo = std::min(tail_qp_lo, rc_trace[i].qp);
+			tail_qp_hi = std::max(tail_qp_hi, rc_trace[i].qp);
+			++tail_n;
+		}
+		if (tail_n)
+		{
+			const double mean = tail_bytes / double(tail_n);
+			const double want = tail_target / double(tail_n);
+			std::printf("\nlast %zu frames: %.0f B/frame against a %.0f B target (%+.1f%%), QP %u..%u\n\n",
+			            tail_n, mean, want,
+			            want > 0 ? 100.0 * (mean - want) / want : 0.0,
+			            unsigned(tail_qp_lo), unsigned(tail_qp_hi));
+			if (rc == "auto")
+			{
+				check(want > 0, "the controller was given a byte budget");
+
+				// A ceiling is a ceiling: going over it is the failure, and the
+				// controller must not. Coming in under it is only correct when
+				// the quantiser has run out of band -- at min_qp the frames are
+				// as large as this encoder is willing to make them, and a
+				// ceiling above that is simply more link than the picture needs.
+				check(mean <= 1.25 * want,
+				      "bytes per frame stay within 25% above the ceiling's budget");
+				check(mean >= 0.75 * want or tail_qp_lo == min_qp,
+				      "bytes per frame come in under the budget only at the bottom of the QP band");
+
+				// And it has to have STOPPED. Bytes on target with the
+				// quantiser still swinging is a controller that is averaging,
+				// not converging, and the swing is visible as pumping.
+				check(tail_qp_hi - tail_qp_lo <= 2,
+				      "the quantiser settles into a band of at most 2 QP");
+			}
+			else
+			{
+				check(tail_qp_lo == tail_qp_hi and tail_qp_lo == qp,
+				      "\"rc\": \"fixed\" leaves the quantiser exactly where it was configured");
+			}
+		}
+	}
 
 	// ==== assertions ==========================================================
 	const bool clean = loss <= 0;
 
 	check(not host.frames.empty(), "frames decode");
-	// A reconnect costs the frame that was in flight when the client went away, and
-	// nothing else.
-	const uint32_t allowed_gap = reconnected ? 2 : 1;
-	// A decoder that cannot keep up raises the shared decode stride and decodes every
-	// nth frame; that is its documented behaviour and it is what a long run on this
-	// harness does, so "every frame presented" is only a fair thing to ask of a run
-	// short enough to have stayed at stride 1.
-	const bool decoded_everything = host.frames.size() + allowed_gap >= frames;
-	if (clean and host.units.size() + allowed_gap >= frames)
-		check(decoded_everything or host.frames.size() < host.units.size(),
-		      "clean run publishes every frame presented (less the one still in flight), "
-		      "or the decoder fell behind and strode over some");
-	else if (not clean)
+
+	// Reassembly is judged on its own, separately from what the worker later does with
+	// the queue: a frame that reassembled whole and was then dropped as stale
+	// (kMaxQueuedFrames) is not a reassembly loss. With nothing lost on the link every
+	// frame presented must reassemble whole no matter how the datagrams were ordered,
+	// which is the windowed reassembler's whole contract.
+	if (clean)
+		check(host.units.size() == frames,
+		      "every frame presented reassembled whole under reordering (" +
+		              std::to_string(host.units.size()) + "/" + std::to_string(frames) + ")");
+
+	// Frames must reach the worker in frame order. from_headset::feedback::frame_index is
+	// stamped as a frame is handed over, counting from 1, so the published sequence must
+	// be strictly increasing -- with gaps only where the bounded queue discarded a stale
+	// frame. This is what the reassembly window promises and the old one-frame path got
+	// for free by never having two frames open at once.
+	{
+		bool ordered = true;
+		uint64_t prev = 0;
+		for (size_t j = 0; j < host.frames.size(); ++j)
+		{
+			// A reconnect is the one place the counter legitimately goes backwards:
+			// it belongs to the decoder that stamped it, and the new client starts
+			// again at one. Offsetting by what the old client produced puts both
+			// halves on one scale, which is the same arithmetic the byte comparison
+			// below uses.
+			const uint64_t idx = ((reconnected and j >= frames_at_reconnect)
+			                              ? units_at_reconnect
+			                              : 0) +
+			                     host.frames[j].frame_index;
+			if (idx <= prev)
+				ordered = false;
+			prev = idx;
+		}
+		check(ordered, "frames reach the worker and are published in frame order");
+	}
+
+	// Tiles placed after their band's deadline had already fired. Those tiles arrived,
+	// and the encoder is told they did not: on a link with nothing wrong with it the
+	// count must be near zero. It was 97 percent on a live headset when a band closed on
+	// the first datagram of its own frame.
+	if (const auto * rs = dec->receiver_stats())
+	{
+		std::printf("transport: %llu tiles placed, %llu after their band deadline (%.1f%%), "
+		            "%llu duplicates, %llu stale-frame, %llu replay, %llu auth failures\n",
+		            (unsigned long long)rs->tiles_placed, (unsigned long long)rs->tiles_late,
+		            rs->tiles_placed ? 100.0 * double(rs->tiles_late) / double(rs->tiles_placed) : 0.0,
+		            (unsigned long long)rs->duplicates, (unsigned long long)rs->stale_frame,
+		            (unsigned long long)rs->replay, (unsigned long long)rs->auth_fail);
+		check(rs->tiles_placed > 0 and rs->tiles_late * 10 < rs->tiles_placed,
+		      "band deadlines leave the tiles that arrived counted as arrived (under 10% late)");
+		check(rs->stale_frame == 0 and rs->replay == 0 and rs->auth_fail == 0,
+		      "no datagram was refused by the transport as stale, replayed or unauthentic");
+	}
+
+	// How many frames get *published* is not a property of the decoder alone: the worker
+	// keeps at most kMaxQueuedFrames and discards the rest as stale, so on a loaded box,
+	// or at a resolution this machine cannot decode at the rate the loop presents, the
+	// count moves between runs by design ("late is worse than missing"). What must not
+	// move is that every frame is accounted for -- reassembled, or holed, or discarded as
+	// stale -- and that is what the two checks above state. So this is a report, not an
+	// assertion; asserting it would only make the test flaky about the machine.
+	if (clean)
+		std::printf("accounting: %u presented, %zu reassembled, %zu published, "
+		            "%zu discarded as stale by the bounded worker queue\n",
+		            frames, host.units.size(), host.frames.size(),
+		            host.units.size() - std::min(host.units.size(), host.frames.size()));
+	else
 	{
 		check(arrived or not host.frames.empty(),
 		      "lossy run keeps publishing rather than stalling");
 		check(host.frames.size() < frames,
 		      "lossy run drops the frames with holes rather than inventing them");
 	}
-
-	if (clean)
-		check(host.units.size() + allowed_gap >= frames,
-		      "clean run reassembles every frame presented (" + std::to_string(host.units.size()) +
-		              "/" + std::to_string(frames) + ")");
 
 	if (reconnected)
 	{
@@ -998,7 +1265,7 @@ int main(int argc, char ** argv)
 		check(post_stats.replay == 0,
 		      "no datagram was rejected by the new client's replay window (replay " +
 		              std::to_string(post_stats.replay) + ")");
-		check(clean ? units_after + allowed_gap >= presented_after : units_after > 0,
+		check(clean ? units_after == presented_after : units_after > 0,
 		      "every frame presented after the reconnect arrived whole (" +
 		              std::to_string(units_after) + "/" + std::to_string(presented_after) + ")");
 		check(after > 0, "the new client decoded and published frames (" + std::to_string(after) + ")");
@@ -1006,11 +1273,24 @@ int main(int argc, char ** argv)
 
 	// --- view_info -------------------------------------------------------------
 	{
-		size_t matched = 0, mismatched = 0;
+		size_t matched = 0, mismatched = 0, defaulted = 0;
 		for (size_t i = 0; i < host.frames.size(); ++i)
 		{
 			// frame_index counts published frames from 1; presented frames are in order,
 			// and a dropped frame simply never appears, so match on the pose itself.
+			//
+			// A default-constructed view_info is its own outcome, not a mismatch: the
+			// field rides the frame's first datagram and nothing else carries it, so a
+			// frame whose first datagram was lost and whose tiles the transport's FEC
+			// then rebuilt arrives whole with no pose. The decoder publishes it with a
+			// default rather than throwing away a picture that decoded (see
+			// nxwarp_decoder::decode_unit). It must not happen on a link that lost
+			// nothing.
+			if (host.frames[i].view_info.display_time == 0)
+			{
+				++defaulted;
+				continue;
+			}
 			bool found = false;
 			for (const auto & p: presented)
 			{
@@ -1022,13 +1302,15 @@ int main(int argc, char ** argv)
 			}
 			found ? ++matched : ++mismatched;
 		}
-		// Under loss the pose can be the thing that was lost: it rides the frame's
-		// first datagram and only that one, and the decoder documents publishing the
-		// frame anyway with no view_info (nxwarp_decoder::have_view_info). So a lossy
-		// run asks that every pose that arrived is exact, not that every frame had one.
-		check(clean ? (mismatched == 0 and matched == host.frames.size()) : matched > 0,
-		      "published view_info is bit-identical to the presented one (" +
+		check(mismatched == 0,
+		      "every published view_info that arrived is bit-identical to the presented one (" +
 		              std::to_string(matched) + "/" + std::to_string(host.frames.size()) + ")");
+		if (defaulted)
+			std::printf("note: %zu published frame%s had no view_info -- its first datagram was "
+			            "lost and its tiles were recovered by FEC\n",
+			            defaulted, defaulted == 1 ? "" : "s");
+		check(not clean or defaulted == 0,
+		      "a link that lost nothing publishes no frame with a default pose");
 
 		// And that it is not merely a default that happens to compare equal.
 		bool any_nonzero = false;
@@ -1092,33 +1374,85 @@ int main(int argc, char ** argv)
 			auto ref = read_file(ref_yuv);
 			check(not ref.empty(), "nxv-dec produced output");
 
-			// Aligned, not positional. The GPU decoder publishes a subset of the units
-			// the reference decoder sees: the last frame is always still in flight, a
-			// reconnect costs the one under assembly, and a decoder that cannot hold the
-			// frame period raises the shared decode stride and skips frames on purpose.
-			// Each published picture is therefore matched to the unit it came from --
-			// through the pose, which the check above proved survives the wire, and
-			// through the frame id the decoder reported with each unit.
+			// Aligned by index, not by position. `units` is every frame the
+			// reassembler produced, in order, so nxv-dec's nth picture is unit n --
+			// but the GPU decoder need not have published all of them: the worker's
+			// queue is bounded (kMaxQueuedFrames) and discards a frame that went
+			// stale while it was busy. from_headset::feedback::frame_index is stamped
+			// when the unit is handed over, counting from 1, so it is exactly the
+			// index of that frame in `units` plus one. Comparing positionally instead
+			// would report a byte difference the moment one frame was dropped late,
+			// which says nothing about either decoder.
+			//
+			// Across a reconnect that counter belongs to the decoder that stamped it:
+			// the new client starts it again at one, and its units sit after the old
+			// client's in the same `units` list. So a picture published after the
+			// reconnect is offset by however many units the old client had produced.
+			// The frame ids the decoder reports with each unit are what checks the
+			// arithmetic rather than assuming it.
 			const size_t frame_size = size_t(width) * height * 3 / 2;
 			const size_t ref_frames = ref.size() / frame_size;
 			const size_t gpu_frames = gpu.size() / frame_size;
-			std::printf("nxv-dec decoded %zu frames, the GPU decoder published %zu\n",
-			            ref_frames, gpu_frames);
-			check(ref_frames and gpu_frames, "both decoders produced frames to compare");
-			check(ref_frames >= gpu_frames,
-			      "the GPU decoder published no more frames than the reference decoder");
+			std::printf("nxv-dec decoded %zu frames, the GPU decoder published %zu "
+			            "(%zu unit%s dropped late by the worker's bounded queue)\n",
+			            ref_frames, gpu_frames,
+			            host.units.size() - std::min(host.units.size(), gpu_frames),
+			            host.units.size() - std::min(host.units.size(), gpu_frames) == 1 ? "" : "s");
+			check(gpu_frames > 0, "both decoders produced frames to compare");
+			check(ref_frames == host.units.size(),
+			      "nxv-dec decoded every unit the reassembler produced (" +
+			              std::to_string(ref_frames) + "/" +
+			              std::to_string(host.units.size()) + ")");
 
-			std::vector<size_t> unit_of_presented(presented.size(), SIZE_MAX);
-			for (size_t u = 0; u < host.unit_frame_ids.size(); ++u)
+			size_t compared = 0, differing = 0, first_diff_frame = 0, misplaced = 0;
+			for (size_t j = 0; j < gpu_frames and j < host.frames.size(); ++j)
 			{
-				// 16-bit ids, and a run may cross the wrap: the difference has to be
-				// taken in 16 bits before it means anything.
-				const size_t j = uint16_t(host.unit_frame_ids[u] - uint16_t(start_frame_id));
-				if (j < unit_of_presented.size())
-					unit_of_presented[j] = u;
+				const size_t base = (reconnected and j >= frames_at_reconnect)
+				                            ? units_at_reconnect
+				                            : 0;
+				const uint64_t idx = base + host.frames[j].frame_index;
+				if (idx == 0 or idx > ref_frames)
+					continue;
+				// The unit that index names has to be the frame this picture says it
+				// is. Both sides know the stream's own 16-bit frame id -- the decoder
+				// reports it with every unit, and the picture carries the pose it was
+				// presented with -- so the alignment is checked, not assumed.
+				if (idx - 1 < host.unit_frame_ids.size())
+				{
+					size_t src_idx = presented.size();
+					for (size_t k = 0; k < presented.size(); ++k)
+					{
+						if (same(presented[k], host.frames[j].view_info))
+						{
+							src_idx = k;
+							break;
+						}
+					}
+					if (src_idx < presented.size() and
+					    uint16_t(host.unit_frame_ids[idx - 1] - uint16_t(first_frame)) != src_idx)
+						++misplaced;
+				}
+				const size_t r = (idx - 1) * frame_size;
+				const size_t g = j * frame_size;
+				++compared;
+				if (std::memcmp(ref.data() + r, gpu.data() + g, frame_size) != 0)
+				{
+					if (not differing)
+						first_diff_frame = idx - 1;
+					++differing;
+				}
 			}
+			check(misplaced == 0,
+			      "every published picture lines up with the unit whose frame id it carries (" +
+			              std::to_string(misplaced) + " misplaced)");
+			const bool identical = compared > 0 and differing == 0;
+			check(identical,
+			      "GPU decoder output is byte-identical to nxv-dec's over all " +
+			              std::to_string(compared) + " published frames");
+			if (not identical)
+				std::printf("  %zu of %zu frames differ, first at unit %zu\n",
+				            differing, compared, first_diff_frame);
 
-			size_t compared = 0, differing = 0, unmatched = 0, first_bad = SIZE_MAX;
 			// PSNR against the source, per frame, which is what the number actually
 			// means to a viewer.
 			double worst = 1e9, total = 0;
@@ -1135,21 +1469,7 @@ int main(int argc, char ** argv)
 					}
 				}
 				if (src_idx >= source_frames.size())
-				{
-					++unmatched;
 					continue;
-				}
-				const size_t u = unit_of_presented[src_idx];
-				if (u != SIZE_MAX and u < ref_frames and host.pictures[i].size() == frame_size)
-				{
-					++compared;
-					if (std::memcmp(ref.data() + u * frame_size, host.pictures[i].data(),
-					                frame_size) != 0)
-					{
-						++differing;
-						first_bad = std::min(first_bad, src_idx);
-					}
-				}
 				const double v = psnr(host.pictures[i], source_frames[src_idx]);
 				if (v < 0)
 					continue;
@@ -1157,33 +1477,6 @@ int main(int argc, char ** argv)
 				total += v;
 				++counted;
 			}
-			// Both alignments run through the pose, and the pose rides one datagram
-			// per frame. Losing that one datagram is a legitimate outcome of a lossy
-			// run -- the frame is published with no view_info at all -- so under loss
-			// these are reported rather than asserted, and the byte comparison simply
-			// covers the frames that could be placed.
-			const std::string aligned = std::to_string(compared) + "/" +
-			                            std::to_string(host.pictures.size());
-			if (clean)
-			{
-				check(unmatched == 0,
-				      "every published picture was matched to a presented frame (" +
-				              std::to_string(unmatched) + " unmatched)");
-				check(compared == host.pictures.size(),
-				      "every published picture was matched to the .nxv unit it came from (" +
-				              aligned + ")");
-			}
-			else
-				std::printf("aligned %s published pictures to their units through the pose; "
-				            "%zu carried no view_info to align with\n",
-				            aligned.c_str(), unmatched);
-			check(compared > 0 and differing == 0,
-			      "GPU decoder output is byte-identical to nxv-dec's over all " +
-			              std::to_string(compared) + " frames it published");
-			if (differing)
-				std::printf("  %zu of %zu frames differ; earliest at presented frame %zu\n",
-				            differing, compared, first_bad);
-
 			if (counted)
 			{
 				std::printf("PSNR vs source over %zu frames: mean %.2f dB, worst %.2f dB\n",

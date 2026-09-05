@@ -202,6 +202,10 @@ private:
 		bool motion_on = false;
 		float motion_step = 0;
 		uint64_t motion_frame = uint64_t(-1);
+		// Frame smoothing: how much of the previous decoded frame is mixed in. Only ever
+		// non-zero on the refresh that first shows a new frame, which already differs by
+		// frame_index, but it belongs in the signature all the same.
+		float frame_blend = 0;
 		// GUI state that changes what the pass draws (through dimming) or whether the
 		// gate forces a render
 		bool gui_interactable = false;
@@ -337,6 +341,71 @@ private:
 
 	// Keep a reference to the resources needed to blit the images until vkWaitForFences
 	std::array<std::shared_ptr<wivrn::shard_accumulator::blit_handle>, decoder_count> current_blit_handles;
+
+	// --- Frame smoothing (config.frame_smoothing) --------------------------------------
+	// The eye images of the decoded frame the one on screen replaced, held by shared_ptr
+	// so the decoder's pool cannot hand them back out while the pass is still sampling
+	// them. That reference is the whole cost: no copy is made, and the pool is deep
+	// enough (image_buffer_size frames, five in the NX Warp decoder) that pinning one
+	// more frame does not starve it.
+	std::array<std::shared_ptr<wivrn::shard_accumulator::blit_handle>, view_count> smoothing_prev_handles;
+	// The same handles once the pass has been told to sample them: they stay pinned here
+	// until the next new decoded frame, which is at least one completed render away.
+	std::array<std::shared_ptr<wivrn::shard_accumulator::blit_handle>, view_count> smoothing_blend_handles;
+	// frame_index of the decoded frame currently on screen, so the render thread can tell
+	// the refresh that first shows a new one — the only refresh that blends — from the
+	// repeats after it. Sentinel until the first frame.
+	uint64_t smoothing_frame_index = uint64_t(-1);
+
+	// --- Frame rate readout (Statistics page, compact view) ----------------------------
+	// Monotonic counters, differenced every constants::stream::fps_sample_period into the
+	// rolling rates the GUI shows. displayed_frames is bumped by the render thread once
+	// per presented frame; decoded_frames by push_blit_handle, from the decoder threads.
+	uint64_t displayed_frames = 0;
+	std::array<std::atomic<uint64_t>, decoder_count> decoded_frames{};
+
+	// One second of rates, recomputed four times a second so the figures are readable
+	// rather than flickering. All render-thread state.
+	struct fps_readout
+	{
+		float displayed = 0;
+		std::array<float, view_count> decoded{};
+		// NX Warp only: what its own counters say, per second, plus the last
+		// two-second decode profile. nxwarp is false for every other codec and the
+		// second line is then not drawn at all.
+		bool nxwarp = false;
+		float nxwarp_closed = 0;
+		float nxwarp_decoded = 0;
+		float nxwarp_late = 0;
+		float nxwarp_holes = 0;
+		float nxwarp_ms = 0;
+	};
+	fps_readout fps;
+	// One snapshot of every counter the readout differences, with the time it was taken.
+	struct fps_counters
+	{
+		XrTime t = 0;
+		uint64_t displayed = 0;
+		std::array<uint64_t, view_count> decoded{};
+		uint64_t nxwarp_closed = 0, nxwarp_decoded = 0, nxwarp_late = 0, nxwarp_holes = 0;
+	};
+	// Snapshots taken every fps_sample_period; the rate is the difference between the
+	// newest and the one fps_window old, which is what makes the average roll rather
+	// than restart every period. One more slot than the window holds samples.
+	static constexpr size_t fps_ring_size = 1 + size_t(constants::stream::fps_window / constants::stream::fps_sample_period);
+	std::array<fps_counters, fps_ring_size> fps_ring{};
+	size_t fps_ring_head = 0;
+	size_t fps_ring_count = 0;
+	XrTime fps_last_sample = 0;
+	// Fold one window into `fps`. Called from accumulate_metrics, render thread.
+	void accumulate_fps(XrTime now);
+	// The two short lines that go under the latency figure. Empty strings are not drawn.
+	std::array<std::string, 2> fps_lines() const;
+	// Colour for one rate against the panel: muted at or above the refresh rate, warning
+	// below half of it, the plain text colour in between.
+	ImVec4 fps_colour(float rate) const;
+	// Panel refresh rate, from the runtime's own frame cadence. 0 until it is known.
+	float panel_refresh_rate() const;
 
 	XrTime running_application_req = 0;
 	thread_safe<to_headset::running_applications> running_applications;

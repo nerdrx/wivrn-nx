@@ -155,13 +155,51 @@ class video_encoder_nxwarp : public video_encoder
 	bool header_sent = false;
 	static constexpr uint64_t header_period_frames = 90;
 
+	// --- rate control -------------------------------------------------------
+	//
+	// NX Warp has no rate control inside the codec: a frame is coded at one
+	// quantiser and the encoder never moves it. Bytes per frame are therefore
+	// the only thing that decides both the link load and — because the Pico 4's
+	// NX Warp decode costs about a millisecond per kilobyte of frame — the frame
+	// rate the headset can actually sustain. 12 KB frames decode at 90 fps and
+	// 52 KB frames at about 10. So the quantiser is not one knob among several;
+	// it is the knob, and this is the loop that turns it.
+	//
+	// `base_qp` is where the loop starts (and, with "rc": "fixed", where it
+	// stays); `current_qp` is what the next frame will actually be coded at.
 	uint32_t base_qp;
-	bool logged_bitrate_note = false;
+	uint32_t current_qp;
+	// "rc": "auto" honours the bitrate ceiling; "fixed" is the old behaviour,
+	// this stream's `qp` for the whole session.
+	bool rc_auto = true;
+	// The band the controller may move in. Below min_qp the frames are large
+	// enough to cost frame rate on the headset whatever the link can carry;
+	// above max_qp the picture is not worth sending.
+	uint32_t rc_min_qp = 20;
+	uint32_t rc_max_qp = 44;
+	// Frame rate the byte budget is per-frame OF, when the session has not told
+	// the encoder a live one. From encoder_settings::fps at construction.
+	float rc_fps;
+	// Byte budget the last frame was measured against, and the encoder-share
+	// bitrate it came from. Kept for the two-second report; 0 before the
+	// bitrate controller has said anything.
+	double rc_target_bytes = 0;
+	uint32_t rc_bitrate = 0;
+	bool logged_rc_mode = false;
+
+	// Move `current_qp` toward the byte budget implied by the bitrate share and
+	// the frame rate. Called once per encoded frame with that frame's size.
+	void run_rate_control(size_t last_frame_bytes);
+
 	// Rolling encode timing, reported every two seconds (encode()).
 	std::chrono::steady_clock::time_point prof_since = std::chrono::steady_clock::now();
 	uint64_t prof_n = 0;
 	double prof_ms = 0, prof_max_ms = 0;
 	uint64_t prof_bytes = 0;
+	// The quantiser over that interval: the sum for a mean, and the extremes,
+	// which is what says whether the controller settled or is hunting.
+	uint64_t prof_qp_sum = 0;
+	uint32_t prof_qp_lo = 63, prof_qp_hi = 0;
 	bool logged_oversize = false;
 	// The same measurements as prof_*, but never reset, for profile().
 	uint64_t prof_total_n = 0;
@@ -204,10 +242,16 @@ public:
 		double total_ms = 0;
 		double max_ms = 0;
 		uint64_t bytes = 0;
+		// The quantiser the NEXT frame will be coded at, and the byte budget the
+		// controller is aiming it at (0 with "rc": "fixed", or before a bitrate
+		// has been decided). Read before an encode() they describe that frame;
+		// read after it, the QP is the one the controller just moved to.
+		uint32_t qp = 0;
+		double target_bytes = 0;
 	};
 	encode_profile profile() const
 	{
-		return {prof_total_n, prof_total_ms, prof_total_max_ms, prof_total_bytes};
+		return {prof_total_n, prof_total_ms, prof_total_max_ms, prof_total_bytes, current_qp, rc_target_bytes};
 	}
 };
 

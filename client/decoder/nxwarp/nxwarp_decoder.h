@@ -101,7 +101,7 @@ class nxwarp_decoder : public decoder
 	// Deepest the worker's backlog is allowed to get before the older frames are
 	// discarded in favour of the newest one. Two lets one frame decode while the
 	// next waits; anything more is latency.
-	static constexpr int64_t kMaxQueuedFrames = 2;
+	static constexpr int64_t kMaxQueuedFrames = 1;
 	uint64_t frames_dropped_late = 0;
 
 	// One frame's work, complete in itself: by the time the worker runs, the tile slots

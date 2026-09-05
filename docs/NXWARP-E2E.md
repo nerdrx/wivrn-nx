@@ -46,7 +46,13 @@ directory, and `git describe` there finds no repository and fails the build. An 
 `build/` needs neither.
 
 `WIVRN_USE_NXWARP=ON` requires an `nxvc` package. For the server alone, an nx-warp built
-with `NXWARP_BUILD_REF=ON -DNXWARP_BUILD_TRANSPORT=ON` is enough.
+with `NXWARP_BUILD_REF=ON -DNXWARP_BUILD_TRANSPORT=ON` is enough — but that gets you the
+CPU reference codec only. The GPU encoder behind `"backend": "vk"` needs `encoder` in
+`NXWARP_VK_SUBDIRS` as well; configure prints `NX Warp Vulkan encoder: ON` when it found
+one, and the server builds and runs normally when it did not.
+
+On a box with no system Vulkan SDK the encoder directory takes `NXVC_VK_HEADERS_DIR`
+like the rest of `vk/` does.
 
 ### The e2e test
 
@@ -57,7 +63,7 @@ nxvc does not carry, plus spdlog. Build nx-warp once with both halves:
 cmake -S ../nx-warp -B build/nxwarp \
     -DCMAKE_INSTALL_PREFIX=$NXWARP_INSTALL -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     -DNXWARP_BUILD_REF=ON -DNXWARP_BUILD_TRANSPORT=ON \
-    -DNXWARP_BUILD_VK=ON -DNXWARP_VK_SUBDIRS="common;decoder" \
+    -DNXWARP_BUILD_VK=ON -DNXWARP_VK_SUBDIRS="common;encoder;decoder" \
     -DNXVC_VK_HEADERS_DIR=$TOOLS/local/include -DNXWARP_VK_REQUIRED=ON
 cmake --build build/nxwarp -j4 --target install
 ```
@@ -187,7 +193,16 @@ ffmpeg -f lavfi -i "testsrc2=size=320x240:rate=30:duration=0.5" \
 
 wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 12
 wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 40 --loss 0.05 --seed 7
+
+# the same two runs on the GPU encoder
+wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 12 --backend vk
+wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 40 --loss 0.05 --seed 7 --backend vk
 ```
+
+`--backend ref|vk` picks the codec and `--qp N` the quantiser (default 26). Every
+assertion below holds for both backends; the run prints the encoder's own measurement of
+the interval around `codec->encode()` at the end, which is the number that decides
+whether a backend can hold a frame budget.
 
 `nxv-dec` must be on `PATH` (or pass `--nxv-dec /path/to/nxv-dec`) for the byte-identity
 check. Other flags: `--nxv-out`, `--decoded-out`, `--seed`.
@@ -209,7 +224,7 @@ field that does not serialize does not arrive. It asserts:
 * every published frame is within PSNR of its source, aligned through `view_info` rather
   than by position, because under loss a dropped frame simply never appears.
 
-Measured on RADV (RX 7900 XTX), 320x240, QP 26:
+Measured on RADV (RX 7900 XTX), 320x240, QP 26, `--backend ref`:
 
 | run | datagrams | published | byte-identical | PSNR vs source |
 |---|---|---|---|---|
@@ -219,6 +234,11 @@ Measured on RADV (RX 7900 XTX), 320x240, QP 26:
 The loss run is the interesting one: ten frames are lost outright and the PSNR of the
 survivors does not move. That is this backend's concealment — a frame with a hole is
 dropped, never half-decoded — and the stream does not stall.
+
+The same two runs on `--backend vk` pass every assertion, including the byte-identity
+one: 11/11 and 28/28 frames identical to `nxv-dec`. The GPU encoder's streams are larger
+and about 2.5 dB worse at the same QP (36.54 dB against 39.03 on the clean run), which is
+the intra-only trade described in section 5, not a defect.
 
 **What it does not cover:** reordering. The harness calls `push_datagram` straight from the
 encode loop, so packets arrive in send order. `nxwarp-loopback --loss` covers the
@@ -237,17 +257,50 @@ Works, end to end, in process:
 
 Does **not** work yet, and none of it is a bug to be filed:
 
+* **The GPU encoder is intra-only, and it costs bitrate.** `"backend": "vk"` implements
+  the DC-plane intra half of the v1 bitstream: no inter, no directional intra, no
+  chroma-from-luma, no 4x4 split, no custom tables. The reference backend has all of
+  those on by default. Measured at 1088x1088 on an RX 7900 XTX, 12 frames of `testsrc2`,
+  timed around `codec->encode()` inside `encode()`:
+
+  | backend | QP | mean | worst | bytes/frame |
+  |---|---|---|---|---|
+  | `ref` | 26 | 973.41 ms | 1037.82 ms | 34302 |
+  | `ref` | 30 | 937.06 ms | 1027.54 ms | 27720 |
+  | `vk`  | 26 | **17.11 ms** | 20.15 ms | 64183 |
+  | `vk`  | 30 | **17.22 ms** | 20.32 ms | 50152 |
+
+  About 55x faster for about 1.9x the bytes. That is the whole trade, and it is the right
+  one at 973 ms a frame.
+
+* **One readback the GPU path should not need.** `present_image` still copies the
+  compositor's image to host memory and `encode()` still de-interleaves CbCr, even for
+  the GPU backend, which then uploads it again. E0 exists and can read the two-plane
+  image directly, but the compositor creates it with a `VkImageFormatListCreateInfo`
+  naming only `R8_UNORM`, `R8G8_UNORM` and the planar format, and E0 binds its planes as
+  UINT storage views — which that list does not permit. Adding `R8_UINT` and `R8G8_UINT`
+  to `image_formats()` in `server/compositor/compositor.cpp` **and**
+  `server/compositor/quad_converter.cpp`, and pointing the encoder's `target_queue` at
+  the compute family instead of the transfer one, is what removes it. The e2e's own
+  source image needs widening too: it is created with `flags = 0` and no `STORAGE` usage.
+
 * **Fixed QP, no rate control.** nx-warp's `rc/` component is not wired. The `qp` option is
   the whole quality control; the bitrate controller's number is logged and ignored. A
   scene that gets busier gets bigger frames, not worse ones — and if a frame outgrows the
   tile grid the server logs "raise QP" and drops it.
-* **Chunk mapping, not one tile per tile.** The CPU reference codec's C ABI reports a
-  tile's length but not its offset, so the frame bitstream is cut into MTU-sized chunks
-  laid on the tile grid in raster order. Everything else is real, and the bytes round-trip
-  exactly, but per-tile independence is lost: a chunk that never arrives costs the whole
-  frame rather than one tile. This is why the 5 % loss run drops ten frames out of forty
-  instead of blurring ten tiles. It becomes the identity mapping when the Vulkan encoder
-  lands behind `nxwarp_codec`, and neither end changes when it does.
+* **Chunk mapping, not one tile per tile — still.** The frame bitstream is cut into
+  MTU-sized chunks laid on the tile grid in raster order, so a chunk that never arrives
+  costs the whole frame rather than one tile. This is why the 5 % loss run drops frames
+  instead of blurring tiles.
+
+  This was expected to fix itself when the Vulkan encoder landed, and it did not, though
+  the blocker has moved. `nxvc_vke_tile` **does** report each tile's byte offset and
+  length — that half is solved, and `nxwarp_codec_vk` has the numbers in hand. What is
+  left is above the codec: `nxwarp_tile_desc` has nowhere to put them, `nxwarp_send_frame`
+  slices by `t * chunk_bytes`, and the client's `nxwarp_reassemble` actively *rejects* a
+  frame with a hole and requires every non-last chunk to be exactly `chunk_bytes`. Making
+  it the identity mapping is a change to the packetizer and to the client's reassembly,
+  and the client does change, contrary to what `nxwarp_packetize.h` promises.
 * **No per-tile pose warp.** Every tile of a frame is reprojected from the frame's pose, as
   with every other codec. The per-tile warp of nx-warp PAPER 4.3 is the point of the codec
   and it is not connected.

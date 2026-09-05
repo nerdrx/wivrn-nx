@@ -378,6 +378,7 @@ Per-stream `options` (all optional):
 
 | key | default | meaning |
 |---|---|---|
+| `backend` | `ref` | which codec produces the bytes. `ref` is the CPU reference encoder (`nxvc_ref`), correct and far too slow — hundreds of milliseconds per eye. `vk` is the Vulkan compute encoder (`nxvc_vk_encoder`), which runs on the server's own GPU and is roughly **55x faster**, at the cost of the tools it does not implement (see below). An unrecognised value is an error, not a fallback |
 | `qp` | `28` | fixed quantiser, 0..63. There is no rate control yet: the bitrate controller's number is logged and ignored |
 | `inter` | `off` | inter prediction — the pose warp, per-tile motion vectors and the reference ring. `off` is all-intra, which is the safe bring-up default |
 | `intra-period` | `180` | rolling intra refresh period in frames; `1` forces every tile every frame |
@@ -386,6 +387,24 @@ Per-stream `options` (all optional):
 | `threads` | `0` | encoder worker threads for the tile pool: `0` uses every core (capped at 16), `1` is the serial path. Byte-identical either way |
 | `band-rows` | `6` | tile rows per transport band, which is the unit of pacing and of feedback |
 | `mtu` | `1280` | transport MTU. Leaves room for WiVRn's own packet envelope inside a 1400-byte datagram |
+
+**`"backend": "vk"` is intra-only, and that is not free.** It implements the DC-plane
+intra half of the v1 bitstream and nothing else: no inter prediction (`"inter": "on"`
+together with it is refused at startup rather than silently ignored), no directional
+intra, no chroma-from-luma, no 4x4 transform split, no custom probability tables. The
+reference backend has all of those on by default, and they are worth real bitrate — at
+1088x1088 and the same QP the GPU backend spends about **1.9x the bytes** for about
+**3 dB less** PSNR. It is the right trade when the alternative is under 2 fps, and the
+wrong one if you were getting frames out of the reference already.
+
+`set_view()` and the transport's per-tile feedback are still plumbed to the GPU backend
+and are accepted and ignored by it, because an all-intra frame has no reference to warp
+and no prediction a lost tile can corrupt. The transport itself still conceals normally.
+
+The backend needs an `nxvc` built with the Vulkan encoder
+(`-DNXWARP_BUILD_VK=ON -DNXWARP_VK_SUBDIRS="common;encoder;decoder"`). Configure prints
+`NX Warp Vulkan encoder: ON` when it found one; without it, asking for `"vk"` is an
+error at encoder construction and `"ref"` still works.
 
 ```json
 {

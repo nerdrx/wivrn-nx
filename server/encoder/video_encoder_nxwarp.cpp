@@ -93,6 +93,14 @@ bool option_bool(const std::map<std::string, std::string> & options,
 	return fallback;
 }
 
+std::string option_string(const std::map<std::string, std::string> & options,
+                          const char * key,
+                          const char * fallback)
+{
+	auto it = options.find(key);
+	return it == options.end() ? std::string(fallback) : it->second;
+}
+
 int16_t q15(float v)
 {
 	return int16_t(std::clamp(v, -1.f, 1.f) * 32767.f);
@@ -141,7 +149,44 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	        .preset = option_u32(settings.options, "preset", 1),
 	        .threads = option_u32(settings.options, "threads", 0),
 	};
-	codec = nxwarp_codec::make_reference(codec_cfg);
+	// "backend": "ref" (the default) is the CPU reference codec; "vk" is the
+	// Vulkan compute encoder, running on this server's own VkDevice. The
+	// default stays "ref" because it is the one that has been run end to end
+	// on every configuration, and because a build against an nxvc without the
+	// Vulkan encoder has no "vk" to offer.
+	//
+	// An unknown value is an error rather than a fallback: a typo that
+	// silently gives you the 200 ms CPU encoder looks exactly like the GPU
+	// encoder being slow.
+	const std::string backend = option_string(settings.options, "backend", "ref");
+	if (backend == "ref")
+	{
+		codec = nxwarp_codec::make_reference(codec_cfg);
+	}
+	else if (backend == "vk")
+	{
+#ifdef WIVRN_NXWARP_VK_ENCODER
+		codec_uses_vk_queue = true;
+		codec = nxwarp_codec::make_vulkan(codec_cfg,
+		                                  *vk.instance,
+		                                  *vk.physical_device,
+		                                  *vk.device,
+		                                  *vk.queue.queue,
+		                                  vk.queue.family_index);
+#else
+		throw std::runtime_error(
+		        "\"backend\": \"vk\" needs an nxvc built with the Vulkan encoder "
+		        "(-DNXWARP_BUILD_VK=ON with \"encoder\" in NXWARP_VK_SUBDIRS); "
+		        "this server was built without it");
+#endif
+	}
+	else
+	{
+		throw std::runtime_error(
+		        std::format("unknown NX Warp backend \"{}\"; expected \"ref\" or \"vk\"",
+		                    backend));
+	}
+	U_LOG_I("nxwarp: stream %d backend: %s", int(stream_idx), codec->description().c_str());
 
 	uint32_t cols = 0, rows = 0;
 	codec->tile_grid(cols, rows);
@@ -427,8 +472,23 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		        unsigned(pending_bitrate.load()));
 	}
 
+	// The GPU backend submits its own command buffers on vk.queue, and WiVRn
+	// guards that queue with a mutex the compositor also takes — vkQueueSubmit
+	// is externally synchronised, so two threads submitting at once is
+	// undefined behaviour, not a race to lose. nxvc_vk_encoder is documented
+	// as leaving that serialisation to its caller, so this is where it
+	// happens. The CPU backend touches no queue and takes no lock.
 	const auto t_enc0 = std::chrono::steady_clock::now();
-	auto bitstream = codec->encode(y, extent.width, cb_plane.data(), cr_plane.data(), cw);
+	std::span<const uint8_t> bitstream;
+	if (codec_uses_vk_queue)
+	{
+		std::unique_lock lock(vk.queue.mutex);
+		bitstream = codec->encode(y, extent.width, cb_plane.data(), cr_plane.data(), cw);
+	}
+	else
+	{
+		bitstream = codec->encode(y, extent.width, cb_plane.data(), cr_plane.data(), cw);
+	}
 	const auto t_enc1 = std::chrono::steady_clock::now();
 	if (bitstream.empty())
 	{
@@ -439,6 +499,10 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// encoder this is the number that decides the frame rate a headset sees.
 	{
 		const double ms = std::chrono::duration<double, std::milli>(t_enc1 - t_enc0).count();
+		prof_total_n++;
+		prof_total_ms += ms;
+		prof_total_max_ms = std::max(prof_total_max_ms, ms);
+		prof_total_bytes += bitstream.size();
 		prof_n++;
 		prof_ms += ms;
 		prof_max_ms = std::max(prof_max_ms, ms);

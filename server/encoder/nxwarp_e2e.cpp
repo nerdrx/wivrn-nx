@@ -73,6 +73,7 @@
 // Run:
 //   wivrn-nxwarp-e2e --yuv in.yuv --width W --height H [--frames N] [--loss 0.05]
 //                    [--seed S] [--nxv-out f.nxv] [--decoded-out f.yuv] [--nxv-dec PATH]
+//                    [--backend ref|vk] [--qp N]
 
 #include "encoder/encoder_settings.h"
 #include "encoder/video_encoder_nxwarp.h"
@@ -648,6 +649,11 @@ std::vector<uint8_t> readback(vk_bundle & vk, vk::Image image, uint32_t w, uint3
 int main(int argc, char ** argv)
 {
 	std::string yuv_path, nxv_out = "e2e.nxv", decoded_out, nxv_dec = "nxv-dec";
+	// Which codec backend the encoder runs: "ref" (the CPU reference) or "vk"
+	// (the Vulkan compute encoder). Both must reach the same conclusions here,
+	// which is the point of running the test against each.
+	std::string backend = "ref";
+	uint32_t qp = 26;
 	uint32_t width = 320, height = 240, frames = 12, seed = 1;
 	double loss = 0.0;
 
@@ -673,6 +679,10 @@ int main(int argc, char ** argv)
 			decoded_out = next();
 		else if (a == "--nxv-dec")
 			nxv_dec = next();
+		else if (a == "--backend")
+			backend = next();
+		else if (a == "--qp")
+			qp = uint32_t(std::stoul(next()));
 		else
 		{
 			std::fprintf(stderr, "unknown argument %s\n", a.c_str());
@@ -714,7 +724,8 @@ int main(int argc, char ** argv)
 	settings.src_layer = 0;
 	// Fixed QP: the rate controller is not wired (see video_encoder_nxwarp.cpp), and a
 	// test that let it drift would not be reproducible.
-	settings.options["qp"] = "26";
+	settings.options["qp"] = std::to_string(qp);
+	settings.options["backend"] = backend;
 
 	video_encoder_nxwarp enc(vk, settings, 0);
 
@@ -958,6 +969,21 @@ int main(int argc, char ** argv)
 				check(worst > 20.0, "every decoded frame resembles its source (PSNR > 20 dB)");
 			}
 		}
+	}
+
+	// What the encode actually cost, from the encoder's own measurement of the
+	// interval around codec->encode(). This is the number that decides whether
+	// a backend can hold a frame budget, so print it whether the run passed or
+	// failed.
+	{
+		const auto p = enc.profile();
+		if (p.frames)
+			std::printf("\nencode (%s backend, %ux%u, QP %u): mean %.2f ms, "
+			            "worst %.2f ms over %llu frames, %llu bytes/frame\n",
+			            backend.c_str(), width, height, qp,
+			            p.total_ms / double(p.frames), p.max_ms,
+			            (unsigned long long)p.frames,
+			            (unsigned long long)(p.bytes / p.frames));
 	}
 
 	std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures,

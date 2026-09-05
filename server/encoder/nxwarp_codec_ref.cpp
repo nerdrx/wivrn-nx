@@ -39,6 +39,14 @@ class nxwarp_codec_ref final : public wivrn::nxwarp_codec
 	nxvc_encoder * enc = nullptr;
 	nxvc_tile_layout layout{};
 
+	// The reference encoder's quantiser is fixed at create(), but its
+	// encode_frame takes a per-tile qp_map that overrides it — so the way to
+	// move the QP without rebuilding the encoder is to hand it a map of one
+	// value repeated. `qp_map` is empty until the first set_qp(), and an empty
+	// map means "use the base QP", which is a null pointer to the C ABI.
+	std::vector<uint8_t> qp_map;
+	uint32_t current_qp = 0;
+
 	std::vector<uint8_t> header;
 	std::vector<uint8_t> bitstream;
 	size_t bitstream_len = 0;
@@ -86,6 +94,7 @@ public:
 			                                     nxvc_status_string(st)));
 
 		nxvc_tile_layout_get_ex(c.width, c.height, cfg.eyes, &layout);
+		current_qp = c.base_qp;
 
 		header.resize(4096);
 		size_t len = 0;
@@ -138,6 +147,17 @@ public:
 		nxvc_encoder_set_views(enc, &view, 1);
 	}
 
+	bool set_qp(uint32_t qp) override
+	{
+		if (qp > 63 or layout.tile_count == 0)
+			return false;
+		if (qp == current_qp and not qp_map.empty())
+			return true;
+		qp_map.assign(layout.tile_count, uint8_t(qp));
+		current_qp = qp;
+		return true;
+	}
+
 	std::span<const uint8_t> encode(const uint8_t * y,
 	                                size_t y_stride,
 	                                const uint8_t * cb,
@@ -153,7 +173,9 @@ public:
 		img.stride[2] = int32_t(chroma_stride);
 
 		bitstream_len = 0;
-		nxvc_status st = nxvc_encoder_encode_frame(enc, &img, nullptr, nullptr,
+		nxvc_status st = nxvc_encoder_encode_frame(enc, &img,
+		                                          qp_map.empty() ? nullptr : qp_map.data(),
+		                                          nullptr,
 		                                          bitstream.data(), bitstream.size(),
 		                                          &bitstream_len);
 		if (st != NXVC_OK)

@@ -220,6 +220,37 @@ whether a backend can hold a frame budget.
 `nxv-dec` must be on `PATH` (or pass `--nxv-dec /path/to/nxv-dec`) for the byte-identity
 check. Other flags: `--nxv-out`, `--decoded-out`, `--seed`.
 
+### Rate control
+
+`--rc auto` turns on the encoder's rate controller and `--bitrate N` gives it a
+whole-link ceiling in bit/s, exactly as the session's own controller does — the run calls
+`video_encoder::set_bitrate`, so this stream's share and the FEC parity overhead are taken
+out of it on the real path. `--bitrate2 N` moves the ceiling halfway through the run,
+which is what WiVRn's automatic bitrate mode does mid-session and the only way to see the
+controller follow rather than merely converge. `--min-qp` / `--max-qp` mirror the encoder
+options of the same name so the assertions can tell "did not reach the ceiling" from
+"reached the end of the band".
+
+`--rc fixed` (the default here, and *not* the server's default) pins `--qp` for the whole
+run: every assertion about the transport is written against frames that are the same size
+every time, and a moving quantiser would make the loss pattern irreproducible.
+
+With `--bitrate` set the run prints a per-frame trace of the applied QP against the byte
+budget, then the tail average, and asserts that bytes per frame stay within 25% above the
+budget, come in under it only at the bottom of the QP band, and that the quantiser settles
+into a band of at most 2 QP. A representative run at 1088x1088, 90 Hz, GPU backend,
+starting at QP 28 with the ceiling doubled at 2.5 s:
+
+| window | QP | B/frame | budget | error |
+| --- | --- | --- | --- | --- |
+| 0.0–0.5 s | 28→42 | 22372 | 20833 | +7.4% |
+| 0.5–2.5 s | 40–42 | 20301 | 20833 | −2.6% |
+| 2.5–3.0 s | 41→22 | 34782 | 41667 | −16.5% |
+| 3.0–5.0 s | 22–24 | 38655 | 41667 | −7.2% |
+
+It reaches the first band in about 35 frames and the second in about 16, the difference
+being the double step the controller takes while more than a factor of two out.
+
 It drives the shipping `video_encoder_nxwarp` with a real `vk::Image` in the compositor's
 two-plane 4:2:0 layout, and the shipping `nxwarp_decoder` adopting the same Vulkan device.
 Every packet goes through WiVRn's real serializer and is read back out of the bytes, so a

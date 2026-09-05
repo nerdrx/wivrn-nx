@@ -31,7 +31,21 @@ namespace
 {
 // Same three formats the eye image uses: a single plane view for luma, a two
 // channel view for chroma, and the two plane 4:2:0 format they alias.
-std::array<vk::Format, 3> image_formats(int bit_depth)
+// The formats a view over the compositor's YCbCr image may take, and the
+// VkImageFormatListCreateInfo the image is created with.
+//
+// The two _UNORM plane formats are what the compositor itself writes through
+// (view_y and view_cbcr below). The two _UINT ones are for NX Warp's GPU
+// encoder: its E0 pass reads the stored codes of the planes through UINT
+// storage views — a sampled _UNORM read would apply a conversion the codec
+// must not have, and YCoCg-R is exactly invertible only over integers — and a
+// format list that does not name them makes those views invalid, which is a
+// driver's right to refuse. Naming them costs nothing when no encoder asks for
+// them, and without them the encoder has to read the whole frame back to the
+// host and upload it again.
+//
+// The planar format stays LAST: callers take it as `formats.back()`.
+std::array<vk::Format, 5> image_formats(int bit_depth)
 {
 	switch (bit_depth)
 	{
@@ -39,12 +53,16 @@ std::array<vk::Format, 3> image_formats(int bit_depth)
 			return {
 			        vk::Format::eR8Unorm,
 			        vk::Format::eR8G8Unorm,
+			        vk::Format::eR8Uint,
+			        vk::Format::eR8G8Uint,
 			        vk::Format::eG8B8R82Plane420Unorm,
 			};
 		case 10:
 			return {
 			        vk::Format::eR16Unorm,
 			        vk::Format::eR16G16Unorm,
+			        vk::Format::eR16Uint,
+			        vk::Format::eR16G16Uint,
 			        vk::Format::eG10X6B10X6R10X62Plane420Unorm3Pack16,
 			};
 	}

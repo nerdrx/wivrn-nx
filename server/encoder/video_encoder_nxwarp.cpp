@@ -49,11 +49,36 @@ public:
 	};
 };
 
-vk::raii::CommandPool make_cmd_pool(wivrn::vk_bundle & vk, uint8_t stream_idx)
+// Which queue family the compositor should hand this encoder's image to.
+//
+// The GPU backend reads the image with compute: E0 binds its planes as storage
+// images and nxvc_vk_encoder submits its passes on the queue it adopted, which
+// is WiVRn's graphics/compute queue. Releasing the image to the transfer family
+// would mean acquiring it back for a copy that no longer happens, so the "vk"
+// backend keeps the image where it was drawn. The CPU backend really does copy
+// it, and the transfer queue is the right place for that.
+//
+// This is read out of the options before the base class is constructed —
+// target_queue is const and set in its initialiser list — which is why it is a
+// free function over settings rather than a member.
+bool nxwarp_backend_is_vk(const wivrn::encoder_settings & settings)
+{
+	auto it = settings.options.find("backend");
+	return it != settings.options.end() and it->second == "vk";
+}
+
+uint32_t nxwarp_target_queue(wivrn::vk_bundle & vk, const wivrn::encoder_settings & settings)
+{
+	if (nxwarp_backend_is_vk(settings))
+		return vk.queue.family_index;
+	return vk.transfer_queue ? vk.transfer_queue.family_index : vk.queue.family_index;
+}
+
+vk::raii::CommandPool make_cmd_pool(wivrn::vk_bundle & vk, uint8_t stream_idx, uint32_t family)
 {
 	auto res = vk.device.createCommandPool(vk::CommandPoolCreateInfo{
 	        .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer | vk::CommandPoolCreateFlagBits::eTransient,
-	        .queueFamilyIndex = vk.transfer_queue ? vk.transfer_queue.family_index : vk.queue.family_index,
+	        .queueFamilyIndex = family,
 	});
 	vk.name(res, std::format("nxwarp encoder {} command pool", stream_idx));
 	return res;
@@ -118,14 +143,14 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
         uint8_t stream_idx) :
         video_encoder(vk,
                       stream_idx,
-                      vk.transfer_queue ? vk.transfer_queue.family_index : vk.queue.family_index,
+                      nxwarp_target_queue(vk, settings),
                       settings,
                       std::make_unique<dummy_idr_handler>(),
                       // Synchronous, like x264: the transport does its own framing
                       // and pacing, so there is nothing for the sender thread to do.
                       false),
         vk{vk},
-        cmd_pool{make_cmd_pool(vk, stream_idx)},
+        cmd_pool{make_cmd_pool(vk, stream_idx, nxwarp_target_queue(vk, settings))},
         eye{stream_idx < 2 ? stream_idx : 0u}
 {
 	if (settings.bit_depth != 8)
@@ -186,7 +211,11 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 		        std::format("unknown NX Warp backend \"{}\"; expected \"ref\" or \"vk\"",
 		                    backend));
 	}
-	U_LOG_I("nxwarp: stream %d backend: %s", int(stream_idx), codec->description().c_str());
+	codec_reads_image = codec->accepts_image();
+	U_LOG_I("nxwarp: stream %d backend: %s%s",
+	        int(stream_idx),
+	        codec->description().c_str(),
+	        codec_reads_image ? ", reading the compositor image directly" : "");
 
 	uint32_t cols = 0, rows = 0;
 	codec->tile_grid(cols, rows);
@@ -244,22 +273,30 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	for (size_t i = 0; i < num_slots; ++i)
 	{
 		in[i].cmd = std::move(command_buffers[i]);
-		in[i].buffer = buffer_allocation(
-		        vk.device,
-		        {
-		                .size = buffer_size,
-		                .usage = vk::BufferUsageFlagBits::eTransferDst,
-		        },
-		        {
-		                .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
-		                .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
-		        },
-		        std::format("nxwarp stream {} buffer", stream_idx));
+		// The readback buffer exists only for a codec that takes host planes.
+		// The image path never reads a pixel on the CPU, so allocating 1.7 MB
+		// of host-visible memory per slot for it would be 1.7 MB nothing ever
+		// touches.
+		if (not codec_reads_image)
+			in[i].buffer = buffer_allocation(
+			        vk.device,
+			        {
+			                .size = buffer_size,
+			                .usage = vk::BufferUsageFlagBits::eTransferDst,
+			        },
+			        {
+			                .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
+			                .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+			        },
+			        std::format("nxwarp stream {} buffer", stream_idx));
 		in[i].fence = vk::raii::Fence(vk.device, vk::FenceCreateInfo{.flags = vk::FenceCreateFlagBits::eSignaled});
 	}
 
-	cb_plane.resize(size_t(extent.width / 2) * (extent.height / 2));
-	cr_plane.resize(cb_plane.size());
+	if (not codec_reads_image)
+	{
+		cb_plane.resize(size_t(extent.width / 2) * (extent.height / 2));
+		cr_plane.resize(cb_plane.size());
+	}
 
 	U_LOG_I("nxwarp: stream %d %ux%u, %s, base QP %u, %ux%u tiles in %u band(s), %zu bytes per transport tile",
 	        int(stream_idx),
@@ -303,6 +340,39 @@ void wivrn::video_encoder_nxwarp::present_image(
 
 	auto & cmd = in[slot].cmd;
 	cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+
+	// --- the image path ----------------------------------------------------
+	//
+	// Nothing is copied. The codec reads the compositor's image itself, so all
+	// this submission exists for is the compositor semaphore: the encode has to
+	// wait for the frame to be finished, and encode() waits on this fence. The
+	// image stays where it was drawn — target_queue is the graphics/compute
+	// family for this backend, so the compositor's release barrier is already a
+	// plain memory barrier and there is no ownership to acquire.
+	//
+	// It stays untouched until encode() returns, which is what the slot state
+	// machine in video_encoder::present_image guarantees: the compositor cannot
+	// present into this slot again until the encode that reads it is done, and
+	// the codec's own submit is waited on inside encode().
+	if (codec_reads_image)
+	{
+		in[slot].image = y_cbcr;
+		cmd.end();
+
+		std::unique_lock lock(vk.queue.mutex);
+		vk::CommandBufferSubmitInfo cmd_info{.commandBuffer = *cmd};
+		compositor_sem.stageMask = vk::PipelineStageFlagBits2::eComputeShader;
+
+		vk.device.resetFences(*in[slot].fence);
+		vk.queue.queue.submit2(vk::SubmitInfo2{
+		                               .waitSemaphoreInfoCount = 1,
+		                               .pWaitSemaphoreInfos = &compositor_sem,
+		                               .commandBufferInfoCount = 1,
+		                               .pCommandBufferInfos = &cmd_info,
+		                       },
+		                       *in[slot].fence);
+		return;
+	}
 
 	if (need_transfer)
 	{
@@ -398,24 +468,33 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	}
 
 	// --- host side of the image -------------------------------------------
-	const uint8_t * base = (const uint8_t *)in[slot].buffer.map();
-	const uint8_t * y = base;
-	const uint8_t * cbcr = base + size_t(extent.width) * extent.height;
+	//
+	// Only for a codec that takes host planes. The image path does none of this:
+	// no readback, no de-interleave, no upload — E0 reads the compositor's two
+	// planes on the device. That readback and this loop were most of what
+	// encode() cost at 1088x1088.
+	const uint8_t * y = nullptr;
 	const size_t cw = extent.width / 2;
-	const size_t ch = extent.height / 2;
-
-	// NV12 out of the compositor, planar into the codec. A W/2 x H/2 pass, and
-	// the only pixel work this class does: the picture is already YCbCr 4:2:0 and
-	// already foveated (INTEGRATION-DECISIONS 1), so there is no conversion.
-	for (size_t row = 0; row < ch; ++row)
+	if (not codec_reads_image)
 	{
-		const uint8_t * src = cbcr + row * cw * 2;
-		uint8_t * dcb = cb_plane.data() + row * cw;
-		uint8_t * dcr = cr_plane.data() + row * cw;
-		for (size_t x = 0; x < cw; ++x)
+		const uint8_t * base = (const uint8_t *)in[slot].buffer.map();
+		y = base;
+		const uint8_t * cbcr = base + size_t(extent.width) * extent.height;
+		const size_t ch = extent.height / 2;
+
+		// NV12 out of the compositor, planar into the codec. A W/2 x H/2 pass, and
+		// the only pixel work this class does: the picture is already YCbCr 4:2:0 and
+		// already foveated (INTEGRATION-DECISIONS 1), so there is no conversion.
+		for (size_t row = 0; row < ch; ++row)
 		{
-			dcb[x] = src[2 * x];
-			dcr[x] = src[2 * x + 1];
+			const uint8_t * src = cbcr + row * cw * 2;
+			uint8_t * dcb = cb_plane.data() + row * cw;
+			uint8_t * dcr = cr_plane.data() + row * cw;
+			for (size_t x = 0; x < cw; ++x)
+			{
+				dcb[x] = src[2 * x];
+				dcr[x] = src[2 * x + 1];
+			}
 		}
 	}
 
@@ -483,7 +562,9 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	if (codec_uses_vk_queue)
 	{
 		std::unique_lock lock(vk.queue.mutex);
-		bitstream = codec->encode(y, extent.width, cb_plane.data(), cr_plane.data(), cw);
+		bitstream = codec_reads_image
+		                    ? codec->encode_image(in[slot].image, src_layer)
+		                    : codec->encode(y, extent.width, cb_plane.data(), cr_plane.data(), cw);
 	}
 	else
 	{

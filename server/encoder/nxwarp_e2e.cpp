@@ -425,23 +425,42 @@ source_image make_source_image(vk_bundle & vk, uint32_t w, uint32_t h)
 	s.w = w;
 	s.h = h;
 
-	// The exact format the compositor hands the encoder: one Y plane, one interleaved
-	// CbCr plane at half resolution.
-	s.image = vk::raii::Image(
-	        vk.device,
+	// The exact image the compositor hands the encoder: one Y plane, one
+	// interleaved CbCr plane at half resolution — and created the way
+	// server/compositor/compositor.cpp creates its own, which is the part that
+	// matters here. Mutable format, extended usage, storage usage and a format
+	// list naming the UINT plane views is what makes the GPU encoder's E0 able
+	// to read it; an image created with `flags = 0` and no eStorage is one the
+	// direct path cannot take, so the harness would silently exercise the
+	// readback path instead and prove nothing about the one that ships.
+	const std::array formats{
+	        vk::Format::eR8Unorm,
+	        vk::Format::eR8G8Unorm,
+	        vk::Format::eR8Uint,
+	        vk::Format::eR8G8Uint,
+	        vk::Format::eG8B8R82Plane420Unorm,
+	};
+	vk::StructureChain image_info{
 	        vk::ImageCreateInfo{
+	                .flags = vk::ImageCreateFlagBits::eExtendedUsage | vk::ImageCreateFlagBits::eMutableFormat,
 	                .imageType = vk::ImageType::e2D,
-	                .format = vk::Format::eG8B8R82Plane420Unorm,
+	                .format = formats.back(),
 	                .extent = {.width = w, .height = h, .depth = 1},
 	                .mipLevels = 1,
 	                .arrayLayers = 1,
 	                .samples = vk::SampleCountFlagBits::e1,
 	                .tiling = vk::ImageTiling::eOptimal,
-	                .usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eTransferSrc |
-	                         vk::ImageUsageFlagBits::eSampled,
+	                .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferDst |
+	                         vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eSampled,
 	                .sharingMode = vk::SharingMode::eExclusive,
 	                .initialLayout = vk::ImageLayout::eUndefined,
-	        });
+	        },
+	        vk::ImageFormatListCreateInfo{
+	                .viewFormatCount = formats.size(),
+	                .pViewFormats = formats.data(),
+	        },
+	};
+	s.image = vk::raii::Image(vk.device, image_info.get());
 
 	auto req = s.image.getMemoryRequirements();
 	s.memory = vk::raii::DeviceMemory(

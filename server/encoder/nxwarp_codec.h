@@ -113,6 +113,35 @@ public:
 	                                        const uint8_t * cr,
 	                                        size_t chroma_stride) = 0;
 
+	// True when this codec can encode straight out of the compositor's image,
+	// on the GPU, with no host copy of the picture: encode_image() below is
+	// then the entry point and encode() is never called.
+	//
+	// It is a property of the backend and of the build, not of a frame, so the
+	// encoder above asks once and shapes present_image around the answer — the
+	// image path needs no readback buffer, no de-interleave scratch and no
+	// ownership transfer to the transfer queue, and allocating them anyway
+	// would be dead weight per slot.
+	virtual bool accepts_image() const
+	{
+		return false;
+	}
+
+	// Encode one frame from a two-plane 4:2:0 image on the server's VkDevice —
+	// the compositor's own render target, in VK_IMAGE_LAYOUT_GENERAL and owned
+	// by the queue the codec was created with. `array_layer` is the eye's layer
+	// of the compositor's array image.
+	//
+	// Returns the frame's bytes, valid until the next call, or an empty span on
+	// failure. Same contract as encode() in every other respect, including that
+	// tiles() describes the frame it just produced. The call submits and waits,
+	// so the image is free again when it returns — and must not be written
+	// before that.
+	virtual std::span<const uint8_t> encode_image(VkImage, uint32_t array_layer)
+	{
+		return {};
+	}
+
 	// Per-tile records of the frame encode() just produced.
 	virtual std::span<const nxwarp_tile_desc> tiles() const = 0;
 

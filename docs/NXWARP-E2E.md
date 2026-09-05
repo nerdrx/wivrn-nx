@@ -267,22 +267,48 @@ Does **not** work yet, and none of it is a bug to be filed:
   |---|---|---|---|---|
   | `ref` | 26 | 973.41 ms | 1037.82 ms | 34302 |
   | `ref` | 30 | 937.06 ms | 1027.54 ms | 27720 |
-  | `vk`  | 26 | **17.11 ms** | 20.15 ms | 64183 |
-  | `vk`  | 30 | **17.22 ms** | 20.32 ms | 50152 |
+  | `vk`  | 30, host planes | 14.07 ms | 17.23 ms | 50152 |
+  | `vk`  | 30, image direct | **3.80 ms** | 6.84 ms | 50152 |
 
-  About 55x faster for about 1.9x the bytes. That is the whole trade, and it is the right
-  one at 973 ms a frame.
+  About 250x faster for about 1.9x the bytes. That is the whole trade, and it is the
+  right one at 937 ms a frame. The two `vk` rows are the same encoder over the same
+  picture and produce the same file byte for byte; the difference is the readback the
+  next item used to describe.
 
-* **One readback the GPU path should not need.** `present_image` still copies the
-  compositor's image to host memory and `encode()` still de-interleaves CbCr, even for
-  the GPU backend, which then uploads it again. E0 exists and can read the two-plane
-  image directly, but the compositor creates it with a `VkImageFormatListCreateInfo`
-  naming only `R8_UNORM`, `R8G8_UNORM` and the planar format, and E0 binds its planes as
-  UINT storage views — which that list does not permit. Adding `R8_UINT` and `R8G8_UINT`
-  to `image_formats()` in `server/compositor/compositor.cpp` **and**
-  `server/compositor/quad_converter.cpp`, and pointing the encoder's `target_queue` at
-  the compute family instead of the transfer one, is what removes it. The e2e's own
-  source image needs widening too: it is created with `flags = 0` and no `STORAGE` usage.
+* ~~One readback the GPU path should not need.~~ **Done.** The `vk` backend reads the
+  compositor's image on the GPU: E0 binds the two planes as `R8_UINT` / `R8G8_UINT`
+  storage views and writes the tile-major planes E3 consumes, and no pixel of the
+  picture touches host memory. What it took, all of it now in the tree:
+
+  * `image_formats()` in `server/compositor/compositor.cpp` and in
+    `server/compositor/quad_converter.cpp` names the two UINT formats as well as the
+    `_UNORM` plane formats, so the plane views are legal ones for that image. The
+    planar format stays last, because callers take it as `formats.back()`. RADV
+    accepted both without complaint; nothing had to be dropped.
+  * `video_encoder_nxwarp`'s `target_queue` is the graphics/compute family for this
+    backend rather than the transfer one — `nxvc_vk_encoder` submits its passes on the
+    queue it adopted, so a picture released to the transfer family would have to be
+    acquired back for a copy nobody makes any more. It is chosen from the `backend`
+    option before the base class is constructed, since `target_queue` is `const`.
+  * `present_image` copies nothing for this backend and allocates no readback buffer
+    per slot; the submission it makes exists only to carry the compositor semaphore to
+    the fence `encode()` waits on. The image is safe to read until `encode()` returns,
+    which the slot state machine in `video_encoder::present_image` is what guarantees.
+  * `nxwarp_codec` grew `accepts_image()` / `encode_image()`, and nx-warp grew
+    `nxvc_vk_encoder_encode_image()` behind it. `nxwarp_e2e`'s own source image is now
+    created the way the compositor's is — mutable format, extended usage, storage
+    usage, the same format list — so the in-process test exercises the shipping path
+    rather than the fallback.
+
+  Two host costs went with it, both inside nx-warp and both byte-neutral: the
+  coefficient readback is no longer copied out of its host-cached mapping before the
+  table-set choice reads it once, and that choice hoists its `log2` into a table built
+  with the probability tables and runs tile-parallel on a small pool. 14.07 ms a frame
+  became 3.80 ms, and the `.nxv` is identical to the byte.
+
+  The image entry point is pinned the same way the plane one is:
+  `tests/vk-encoder/api_acid.cmake` runs with `-DIMAGE=ON` as `vk.encoder.acid.api.image`
+  and requires the stream out of a VkImage to be byte-identical to `nxv-enc`'s.
 
 * **Fixed QP, no rate control.** nx-warp's `rc/` component is not wired. The `qp` option is
   the whole quality control; the bitrate controller's number is logged and ignored. A

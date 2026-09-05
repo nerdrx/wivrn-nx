@@ -38,19 +38,23 @@ namespace wivrn
 //
 // Shape, and why it is this shape:
 //
-//   present_image  copies the compositor's two-plane 4:2:0 image into host
-//                  memory on the transfer queue and remembers the pose the
-//                  frame was rendered for. Exactly video_encoder_raw's copy —
-//                  the CPU reference codec cannot read a VkImage — and exactly
-//                  raw_dump's placement, waiting on the same compositor
-//                  semaphore value the encoder waits on, with no queue family
-//                  ownership transfer because the compositor already released
-//                  the image to this family.
+//   present_image  remembers the pose the frame was rendered for, and waits on
+//                  the compositor semaphore. What else it does depends on what
+//                  the codec eats:
 //
-//   encode         de-interleaves CbCr into the two planes the codec wants,
-//                  runs the codec, cuts the frame into transport tiles and
-//                  hands each band to nxt::Sender, whose datagrams go out one
-//                  per to_headset::nxwarp_datagram.
+//                  * a codec that reads the image (the GPU backend) gets it as
+//                    it is — no copy at all, the image stays on the queue it
+//                    was drawn on, and this submission exists only to carry the
+//                    semaphore wait to the fence encode() waits on;
+//                  * a codec that takes host planes (the CPU reference, which
+//                    cannot read a VkImage) gets video_encoder_raw's copy into
+//                    host memory on the transfer queue.
+//
+//   encode         runs the codec — straight from the image, or from the two
+//                  planes it de-interleaves out of the readback — cuts the
+//                  frame into transport tiles and hands each band to
+//                  nxt::Sender, whose datagrams go out one per
+//                  to_headset::nxwarp_datagram.
 //
 // It sends synchronously from inside encode() and returns nothing, the way
 // video_encoder_x264 does: the transport owns its own framing, FEC, pacing and
@@ -83,6 +87,11 @@ class video_encoder_nxwarp : public video_encoder
 		vk::raii::Fence fence = nullptr;
 		vk::raii::CommandBuffer cmd = nullptr;
 		buffer_allocation buffer;
+		// The compositor image this slot was presented with, for the codec that
+		// reads it directly. Not owned: it belongs to the compositor, and the
+		// slot state machine is what keeps it alive and unwritten until encode()
+		// is done with it.
+		vk::Image image = nullptr;
 		// The pose the frame in this slot was rendered for, captured at present
 		// time (INTEGRATION-DECISIONS 9). The predictor needs it before any work
 		// is submitted, one call earlier than encode() would give it.
@@ -100,6 +109,10 @@ class video_encoder_nxwarp : public video_encoder
 	// The GPU backend submits on vk.queue and so must hold WiVRn's queue mutex
 	// across encode(); the CPU one never touches a queue. See encode().
 	bool codec_uses_vk_queue = false;
+	// The codec reads the compositor's image itself (nxwarp_codec::accepts_image).
+	// Set once from the codec, and it decides the shape of present_image, of
+	// encode(), and of what this class allocates per slot.
+	bool codec_reads_image = false;
 
 	// The transport. No sockets in it: it hands back datagram buffers and this
 	// class puts them on WiVRn's stream socket.

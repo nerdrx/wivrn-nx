@@ -20,6 +20,8 @@
 
 #include <nxvc/nxvc_vk_enc.h>
 
+#include "util/u_logging.h"
+
 #include <format>
 #include <stdexcept>
 #include <vector>
@@ -54,13 +56,29 @@ namespace
 //     conceals; it is only the encoder's own shadow that has nothing to do.
 //   * 10-bit, 4:4:4 and an alpha plane are refused by the library at create().
 //
-// The input path today is the same host planes the reference takes. The image
-// path — E0 reading the compositor's VkImage directly — needs one change
-// outside this file: the compositor creates its image with a
-// VkImageFormatListCreateInfo naming R8_UNORM and R8G8_UNORM, and E0 binds its
-// planes as UINT storage views, which that list does not permit. Until those
-// two formats are added to the list this backend takes the readback
-// video_encoder_nxwarp already does. It is the one remaining copy.
+// THE INPUT PATH is the compositor's image itself. E0 reads the two planes of
+// the VkImage the compositor drew, through R8_UINT / R8G8_UINT storage views,
+// and writes the tile-major planes E3 consumes — on the device, with no host
+// copy of the picture anywhere. What that needs of the caller, and where each
+// piece is:
+//
+//   * the image's VkImageFormatListCreateInfo must name R8_UINT and R8G8_UINT
+//     as well as the _UNORM plane formats, or the plane views are invalid;
+//     image_formats() in server/compositor/compositor.cpp and in
+//     quad_converter.cpp names all four;
+//   * VK_IMAGE_USAGE_STORAGE_BIT with EXTENDED_USAGE, which the compositor
+//     already sets for its own writes;
+//   * VK_IMAGE_LAYOUT_GENERAL, owned by the queue family this codec was
+//     created with — which is why video_encoder_nxwarp points its target_queue
+//     at the graphics/compute queue for this backend rather than at the
+//     transfer queue. nxvc_vk_encoder adopts a compute-capable queue and
+//     submits its passes there; a picture sitting on the transfer family would
+//     have to be acquired first, for a copy nobody makes any more.
+//
+// encode() — the host-plane entry point — is still implemented, and is what a
+// caller with pixels rather than an image gets. Both produce the same bytes;
+// nx-warp's tests/vk-encoder acid tests pin each of them against nxv-enc
+// separately.
 class nxwarp_codec_vk final : public wivrn::nxwarp_codec
 {
 	nxvc_vk_encoder * enc = nullptr;
@@ -68,6 +86,7 @@ class nxwarp_codec_vk final : public wivrn::nxwarp_codec
 	std::vector<uint8_t> header;
 	std::vector<wivrn::nxwarp_tile_desc> tile_descs;
 	uint32_t cols = 0, rows = 0;
+	uint32_t width = 0, height = 0;
 	std::string device;
 
 	// Wall time of the last encode(), milliseconds, as the library measured it
@@ -125,6 +144,8 @@ public:
 		}
 		header.resize(len);
 
+		width = c.width;
+		height = c.height;
 		nxvc_vk_encoder_tile_grid(enc, &cols, &rows);
 		device = nxvc_vk_encoder_device_name(enc);
 	}
@@ -150,6 +171,41 @@ public:
 	void set_view(const wivrn::nxwarp_codec_view &) override {}
 	void set_received_tiles(std::span<const uint8_t>) override {}
 
+	// The image path. See the class comment for what the image must be; the
+	// library checks what it can (geometry, layout) and refuses the rest at the
+	// only place it could be checked, which is the caller.
+	bool accepts_image() const override
+	{
+		return true;
+	}
+
+	std::span<const uint8_t> encode_image(VkImage image, uint32_t array_layer) override
+	{
+		nxvc_vke_image img{
+		        .image = image,
+		        .layout = VK_IMAGE_LAYOUT_GENERAL,
+		        .array_layer = array_layer,
+		        .width = width,
+		        .height = height,
+		        .flags = 0,
+		};
+		const uint8_t * bytes = nullptr;
+		size_t len = 0;
+		nxvc_vke_status st = nxvc_vk_encoder_encode_image(enc, &img, &bytes, &len);
+		if (st != NXVC_VKE_OK or not bytes)
+		{
+			U_LOG_W("nxwarp: the GPU encoder refused the compositor image: %s (%s)",
+			        nxvc_vk_encoder_status_string(st),
+			        nxvc_vk_encoder_last_error(enc));
+			tile_descs.clear();
+			return {};
+		}
+		last_ms = nxvc_vk_encoder_last_encode_ms(enc);
+		last_upload_ms = nxvc_vk_encoder_last_upload_ms(enc);
+		fill_tiles();
+		return std::span<const uint8_t>(bytes, len);
+	}
+
 	std::span<const uint8_t> encode(const uint8_t * y,
 	                                size_t y_stride,
 	                                const uint8_t * cb,
@@ -168,6 +224,12 @@ public:
 		last_ms = nxvc_vk_encoder_last_encode_ms(enc);
 		last_upload_ms = nxvc_vk_encoder_last_upload_ms(enc);
 
+		fill_tiles();
+		return std::span<const uint8_t>(bytes, len);
+	}
+
+	void fill_tiles()
+	{
 		uint32_t count = 0;
 		const nxvc_vke_tile * ti = nxvc_vk_encoder_tiles(enc, &count);
 		tile_descs.resize(count);
@@ -187,7 +249,6 @@ public:
 			        .ref_delta = ti[i].ref_delta,
 			};
 		}
-		return std::span<const uint8_t>(bytes, len);
 	}
 
 	std::span<const wivrn::nxwarp_tile_desc> tiles() const override

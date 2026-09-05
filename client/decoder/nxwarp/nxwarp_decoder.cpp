@@ -74,9 +74,11 @@ struct nxwarp_blit_handle : public wivrn::decoder::blit_handle
 	}
 };
 
-// path_id 0xFF is not a path: it marks the codec's raw stream header, sent on the control
-// socket. See server/encoder/nxwarp_packetize.h.
-constexpr uint8_t kStreamHeaderPath = 0xFF;
+// Kept for readability at the use site; the values themselves live in wivrn_packets.h so
+// the two ends cannot drift. Neither is a path: 0xFF marks the codec's raw stream header
+// and 0xFE a resync notice, both on the control socket.
+constexpr uint8_t kStreamHeaderPath = wivrn::to_headset::nxwarp_stream_header_path;
+constexpr uint8_t kResyncPath = wivrn::to_headset::nxwarp_resync_path;
 } // namespace
 
 namespace wivrn
@@ -316,6 +318,22 @@ void nxwarp_decoder::push_datagram(to_headset::nxwarp_datagram && dg)
 	if (dg.path_id == kStreamHeaderPath)
 	{
 		on_stream_header(dg.payload);
+		return;
+	}
+	if (dg.path_id == kResyncPath)
+	{
+		// "The frame with this id needs no reference." The encoder sends one after
+		// every all-zero receipt map, which is what our own report_frame_not_held
+		// asked for. Until that frame is decoded, everything this decoder produces
+		// is warped from a reference it does not have, and it must not be shown.
+		if (dg.payload.size() >= 2)
+		{
+			const uint16_t id = uint16_t(dg.payload[0] | (dg.payload[1] << 8));
+			std::lock_guard lock(resync_mutex);
+			resync_ids.push_back(id);
+			while (resync_ids.size() > kMaxPendingResync)
+				resync_ids.pop_front();
+		}
 		return;
 	}
 	if (not receiver or dg.payload.size() < nxt::kHeaderBytes)
@@ -708,6 +726,11 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 		// sent_to_decoder stays zero, which is the "never completed" marker.
 		++frames_dropped_holes;
 		host.report_frame_lost(f.fb);
+		// Both signals, and they are saying different things: the one above tells the
+		// bitrate controller the LINK lost something, this one tells the encoder this
+		// frame is not in the reference ring. A hole is the one case that is genuinely
+		// both.
+		host.report_frame_not_held(stream_index, f.frame_id, from_headset::nxwarp_frame_not_held::reason::hole);
 		return;
 	}
 
@@ -725,11 +748,18 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 	// decode grew the queue past 2000 frames on an Adreno 650, i.e. minutes of
 	// lag. Keep only the newest: on a live stream late is worse than missing.
 	//
-	// This is sound while the stream is all-intra (every frame stands alone).
-	// An inter stream must additionally tell the encoder what it dropped --
-	// nxvc_vk_decoder_mark_missing() plus the received-tiles feedback -- or the
-	// encoder's shadow of the client's reference ring drifts (SYNTAX 6.11,
-	// INTEGRATION-DECISIONS 6). Wire that up before enabling inter here.
+	// Dropping a frame is sound on an all-intra stream, where every frame stands
+	// alone. On an inter stream it is not sound by itself: the encoder's receipt map
+	// is built from the TRANSPORT's report, which was sent when the datagrams landed
+	// and truthfully said the tiles arrived, and every drop below happens after that.
+	// The encoder would go on coding the next frame as a warp of a picture this
+	// device never reconstructed (SYNTAX 6.11, INTEGRATION-DECISIONS 6), which on a
+	// headset looks like a few blocks of real image and the rest grey.
+	//
+	// So every drop below reports itself with report_frame_not_held(), and the server
+	// answers with an all-zero receipt map, which nxvc documents as the way to say
+	// "the client holds nothing" and which makes the next frame all-INTRA. That is
+	// what makes the drop sound again, and it is why these calls are not optional.
 	//
 	// And the drop must be the SAME decision on every stream: the render thread
 	// composes only a frame that every decoder has produced ("Failed to find a
@@ -743,12 +773,23 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 	if (stride > 1 and (job.frame_id % stride) != 0)
 	{
 		++frames_dropped_late;
+		host.report_frame_not_held(stream_index, job.frame_id, from_headset::nxwarp_frame_not_held::reason::stride);
 		return;
 	}
 	if (jobs_pending.load() >= kMaxQueuedFrames)
 	{
-		jobs.drop_until([](const decode_job &) { return false; });
+		// The queued frames are about to be discarded, and each of them is a frame
+		// the encoder currently believes this headset holds. Their ids are only
+		// knowable here, while they are still in the queue, so the predicate reads
+		// them on the way past rather than the count being incremented blindly.
+		std::vector<uint16_t> discarded;
+		jobs.drop_until([&discarded](const decode_job & j) {
+			discarded.push_back(j.frame_id);
+			return false;
+		});
 		frames_dropped_late += jobs_pending.exchange(0);
+		for (uint16_t id: discarded)
+			host.report_frame_not_held(stream_index, id, from_headset::nxwarp_frame_not_held::reason::backlog);
 	}
 	jobs_pending++;
 	jobs.push(std::move(job));
@@ -824,12 +865,21 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		}
 	});
 	if (refused)
+	{
+		host.report_frame_not_held(stream_index, job.frame_id, from_headset::nxwarp_frame_not_held::reason::refused);
 		return;
+	}
 
 	nxvc_vkd_images img{};
 	if (nxvc_vk_decoder_images(nxvc, &img) != NXVC_VKD_OK or img.count < 2)
 	{
+		// The decode was submitted, so the ring may well have advanced -- but a codec
+		// that will not hand back its images is one whose state cannot be reasoned
+		// about, and the two ways to be wrong here are not symmetric: an unnecessary
+		// resynchronisation costs one intra frame, and a missed one corrupts every
+		// frame until something else resets the stream.
 		++frames_dropped_codec;
+		host.report_frame_not_held(stream_index, job.frame_id, from_headset::nxwarp_frame_not_held::reason::refused);
 		drain_bin_sem();
 		return;
 	}
@@ -837,6 +887,12 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	auto item = get_free();
 	if (not item)
 	{
+		// Deliberately NOT reported as not held. The codec decoded this frame and its
+		// reference ring advanced; what failed is the copy out into the pool the
+		// render thread picks from. The frame is not displayed and it IS in the ring,
+		// so the encoder may still predict from it -- saying otherwise would cost an
+		// intra refresh for a picture the decoder actually has. "Not held" is about
+		// the reference ring, not about what reached the screen.
 		spdlog::warn("nxwarp[{}]: no image available in pool, discard frame", stream_index);
 		drain_bin_sem();
 		return;
@@ -992,6 +1048,57 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		spdlog::warn("nxwarp: waitForFences failed");
 
 	++frames_decoded;
+
+	// May this frame be shown?
+	//
+	// It decoded either way -- the codec's ring has to keep moving, and the encoder is
+	// about to reset it anyway -- but a frame warped from a reference this decoder
+	// never built is not a picture, it is a few tiles of image over a field of grey,
+	// and putting that on a headset is worse than showing the previous frame for
+	// another 11 ms. So such a frame is decoded and withheld.
+	//
+	// Two ways to be safe, and they are both decided here, on the worker, from what
+	// the worker itself knows:
+	//
+	//   * the frame continues the run: the previous frame id went through this codec,
+	//     so the reference it warps from is in the ring;
+	//   * or the encoder has said this frame needs no reference -- the resync notice
+	//     it sends after every all-zero receipt map, which is the answer to the
+	//     not-held report the drop sites above send.
+	//
+	// The first frame of a stream is safe by construction: the encoder has no
+	// reference to predict from either, so it codes it intra.
+	//
+	// Sequence arithmetic throughout, so the 16-bit wrap costs nothing.
+	const bool contiguous =
+	        have_last_decoded and uint16_t(job.frame_id - last_decoded_id) == 1;
+	bool at_resync = false;
+	{
+		std::lock_guard lock(resync_mutex);
+		auto it = std::find(resync_ids.begin(), resync_ids.end(), job.frame_id);
+		if (it != resync_ids.end())
+		{
+			at_resync = true;
+			// Consume this one and everything older: a notice the encoder sent
+			// before it has been overtaken by the frame in hand.
+			resync_ids.erase(resync_ids.begin(), it + 1);
+		}
+	}
+	const bool showable = not have_last_decoded or contiguous or at_resync;
+
+	// The ring advanced for this frame whether or not it is shown, so it is the
+	// reference the next one is measured against, and it is part of the list a
+	// reference decoder has to be given to stay in step with this one.
+	last_decoded_id = job.frame_id;
+	have_last_decoded = true;
+	host.on_frame_decoded(job.frame_id);
+
+	if (not showable)
+	{
+		frames_withheld.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+
 	host.publish(accumulator, std::move(handle));
 
 	// Where the time goes, once every two seconds per stream: the wait on the

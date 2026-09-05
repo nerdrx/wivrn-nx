@@ -158,6 +158,34 @@ class video_encoder_nxwarp : public video_encoder
 	// holds nothing, so the frame is coded with no temporal reference.
 	std::atomic<bool> client_holds_nothing{false};
 
+	// --- frames the headset received and did not reconstruct -----------------
+	//
+	// Set on the network thread by on_nxwarp_frame_not_held, consumed by the next
+	// encode(). See from_headset::nxwarp_frame_not_held for what the packet is; what
+	// matters here is the rule, and the rule is deliberately blunt:
+	//
+	//   ANY frame the headset did not reconstruct resets the receipt map, whichever
+	//   frame it names.
+	//
+	// Not "zero the tiles of that frame", because a frame the headset never built
+	// poisons the whole chain that predicts from it, and by the time the packet has
+	// crossed the network the encoder has usually moved on to a later frame anyway --
+	// so the tiles of the named frame are no longer the tiles anything is predicting
+	// from. The only statement that is still true when the packet lands is the general
+	// one: this headset's reference is not what the encoder thinks it is. An all-zero
+	// receipt map says exactly that, nxvc documents it as the way to say it, and it
+	// costs one all-intra frame.
+	//
+	// Several drops between two encodes cost one intra frame between them, not one
+	// each, which is what an atomic flag rather than a queue of ids buys.
+	std::atomic<bool> client_dropped_frame{false};
+	// The last one reported and why, for the two-second report. Written under no lock:
+	// they are for a log line, and a torn read of them costs a wrong number in a log.
+	std::atomic<uint16_t> last_not_held_id{0};
+	std::atomic<uint8_t> last_not_held_why{0};
+	std::atomic<uint64_t> not_held_total{0};
+	uint64_t not_held_reported = 0;
+
 	// The stream header goes out on the control (TCP) socket, because a client
 	// that misses it cannot decode anything at all. Repeated periodically so a
 	// decoder that was restarted mid-session recovers without a reconnect.
@@ -245,6 +273,8 @@ class video_encoder_nxwarp : public video_encoder
 	uint64_t prof_total_bytes = 0;
 
 	void send_stream_header();
+	// One "this frame needs no reference" notice, on the control socket.
+	void send_resync_notice(uint16_t frame_id);
 
 public:
 	video_encoder_nxwarp(wivrn::vk_bundle & vk, const encoder_settings & settings, uint8_t stream_idx);
@@ -259,6 +289,8 @@ public:
 	std::optional<data> encode(uint8_t slot, uint64_t frame_id) override;
 
 	void on_nxwarp_feedback(uint8_t path_id, std::span<const uint8_t> payload) override;
+	void on_nxwarp_frame_not_held(uint16_t frame_id,
+	                              from_headset::nxwarp_frame_not_held::reason why) override;
 
 	// The client holds nothing of the frame just sent: code the next one without a
 	// temporal reference. Same client, same transport -- the sender is left alone.

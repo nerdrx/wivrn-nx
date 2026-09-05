@@ -701,15 +701,36 @@ void wivrn::video_encoder_nxwarp::send_stream_header()
 	auto header = codec->stream_header();
 	to_headset::nxwarp_datagram pkt{
 	        .stream_item_idx = stream_idx,
-	        // 0xFF marks the codec's stream header rather than a transport
-	        // datagram: it is not an nxt datagram at all, it has no header the
-	        // receiver could parse, and the client must hand it straight to
-	        // nxvc_decoder_parse_stream_header.
-	        .path_id = 0xFF,
+	        // Not a path: see the reserved ids in wivrn_packets.h.
+	        .path_id = to_headset::nxwarp_stream_header_path,
 	        .payload = std::vector<uint8_t>(header.begin(), header.end()),
 	};
 	// Control socket: a client that misses this decodes nothing at all, so it is
 	// the one part of the stream that must not be lost.
+	SendControlPacket(std::move(pkt));
+}
+
+// "The frame with this id needs no reference; decode it and you are back in step."
+//
+// The other half of the not-held correction, and the half that only the encoder can
+// state. The headset knows when its reference chain broke -- it broke it -- but it
+// cannot tell from the outside when the chain is whole again: the wire's per-tile
+// ref_delta rides the CHUNK mapping, so on a frame with more codec tiles than chunks
+// the tiles whose modes are carried are not the whole frame, and "every tile I was told
+// about is intra" is not the same claim as "this frame is intra". The encoder has no
+// such ambiguity: it just fed nxvc an all-zero receipt map, which nxvc documents as
+// coding every tile INTRA on the next frame, so the next frame is a resync point and
+// this says which one it is.
+//
+// It rides a reserved path_id on the control socket, the way the stream header at 0xFF
+// does, so it costs nothing on the video path and cannot be lost.
+void wivrn::video_encoder_nxwarp::send_resync_notice(uint16_t frame_id)
+{
+	to_headset::nxwarp_datagram pkt{
+	        .stream_item_idx = stream_idx,
+	        .path_id = to_headset::nxwarp_resync_path,
+	        .payload = {uint8_t(frame_id & 0xFF), uint8_t(frame_id >> 8)},
+	};
 	SendControlPacket(std::move(pkt));
 }
 
@@ -778,11 +799,25 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// A reset() since the last frame: the client holds nothing of the previous one,
 	// either because it asked for a keyframe or because it is a different client
 	// altogether. An all-zero receipt map is how the codec is told so.
-	if (client_holds_nothing.exchange(false))
+	//
+	// The headset having told us it did not reconstruct a frame is the same statement
+	// as a reset, and gets the same answer: an all-zero map, every tile coded INTRA on
+	// this frame, the headset resynchronised from it. It is checked FIRST because it is
+	// the stronger claim -- the shadow below describes what the transport delivered,
+	// and the whole point of the not-held packet is that the transport's account is
+	// true and insufficient.
+	const bool dropped = client_dropped_frame.exchange(false);
+	if (client_holds_nothing.exchange(false) or dropped)
 	{
 		std::fill(received_tiles.begin(), received_tiles.end(), uint8_t(0));
 		codec->set_received_tiles(received_tiles);
 		have_previous_frame = false;
+		// The frame about to be coded is therefore all-intra. Tell the headset,
+		// so it knows when to start trusting its own output again: everything it
+		// decoded between breaking its chain and this frame was warped from a
+		// reference it does not have, and showing that is the "a few blocks of
+		// picture and the rest grey" the user reports.
+		send_resync_notice(uint16_t(frame_id));
 	}
 	else if (have_previous_frame)
 	{
@@ -917,6 +952,24 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				        int(stream_idx), (unsigned long long)prof_n,
 				        std::chrono::duration<double>(t_enc1 - prof_since).count(),
 				        prof_ms / prof_n, prof_max_ms, achieved, unsigned(current_qp));
+			// What the headset threw away since the last report, and why. Not on
+			// the line above: it is usually zero, and when it is not it is the
+			// thing to look at rather than a field to scan past. Every one of
+			// these cost an all-intra frame.
+			const uint64_t nh = not_held_total.load();
+			if (nh != not_held_reported)
+			{
+				static constexpr const char * why_name[] = {"a hole", "the decode stride",
+				                                            "the worker backlog", "a codec refusal"};
+				const uint8_t w = last_not_held_why.load();
+				U_LOG_I("nxwarp: stream %d the headset did not reconstruct %llu frame(s) since the "
+				        "last report; each cost an all-intra frame. Last was frame %u, dropped by %s",
+				        int(stream_idx),
+				        (unsigned long long)(nh - not_held_reported),
+				        unsigned(last_not_held_id.load()),
+				        w < 4 ? why_name[w] : "an unknown cause");
+				not_held_reported = nh;
+			}
 			prof_n = 0;
 			prof_ms = 0;
 			prof_max_ms = 0;
@@ -1029,6 +1082,17 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// watchdog knows this encoder sends synchronously (async_send == false in the
 	// base constructor), so an empty return is success here, not a stall.
 	return {};
+}
+
+void wivrn::video_encoder_nxwarp::on_nxwarp_frame_not_held(
+        uint16_t frame_id, from_headset::nxwarp_frame_not_held::reason why)
+{
+	// Network thread. Nothing here but the flag: the receipt map is the encode
+	// thread's, and the next encode() is the only place it may be touched.
+	last_not_held_id = frame_id;
+	last_not_held_why = uint8_t(why);
+	not_held_total.fetch_add(1, std::memory_order_relaxed);
+	client_dropped_frame = true;
 }
 
 void wivrn::video_encoder_nxwarp::on_nxwarp_feedback(uint8_t path_id, std::span<const uint8_t> payload)

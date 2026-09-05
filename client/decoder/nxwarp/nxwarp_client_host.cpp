@@ -73,6 +73,14 @@ void nxwarp_application_host::report_frame_lost(const wivrn::from_headset::feedb
 		scene->send_feedback(fb);
 }
 
+void nxwarp_application_host::report_frame_not_held(
+        uint8_t stream_index, uint16_t frame_id,
+        wivrn::from_headset::nxwarp_frame_not_held::reason why)
+{
+	if (auto scene = weak_scene.lock())
+		scene->send_nxwarp_frame_not_held(stream_index, frame_id, why);
+}
+
 void nxwarp_application_host::publish(shard_accumulator * accumulator, std::shared_ptr<decoder::blit_handle> handle)
 {
 	if (auto scene = weak_scene.lock())

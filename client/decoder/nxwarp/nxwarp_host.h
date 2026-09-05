@@ -90,6 +90,31 @@ public:
 	// it on the control socket, wivrn-nxwarp-e2e counts it).
 	virtual void report_frame_lost(const wivrn::from_headset::feedback &) {}
 
+	// A frame this decoder will NOT reconstruct, named by the stream's own 16-bit
+	// frame id. See from_headset::nxwarp_frame_not_held for why it exists and why it
+	// is not the same thing as report_frame_lost() above.
+	//
+	// The short version: report_frame_lost() is about the LINK and feeds the automatic
+	// bitrate, so it fires only for a frame whose bytes did not arrive. This one is
+	// about this DEVICE and feeds the encoder's receipt map, so it fires for every
+	// frame that is not reconstructed whatever the reason -- including the ones the
+	// link delivered perfectly and this decoder then skipped because it could not keep
+	// up. Conflating them would either have the bitrate controller punish the link for
+	// a slow decoder, or leave the encoder predicting from a picture that was never
+	// built. Called on the network thread and, for a codec refusal, on the worker.
+	virtual void report_frame_not_held(uint8_t stream_index, uint16_t frame_id,
+	                                   wivrn::from_headset::nxwarp_frame_not_held::reason why)
+	{}
+
+	// One frame this decoder actually put through the codec, named by wire frame id,
+	// in the order the codec consumed them. That order and that SET are what the
+	// codec's reference ring was built from -- which is not the same thing as the
+	// units the reassembler produced, because a frame can be reassembled and then
+	// dropped before the codec sees it. A harness comparing this decoder against a
+	// reference one has to feed the reference the same list or it is comparing two
+	// different reference chains. The client ignores it.
+	virtual void on_frame_decoded(uint16_t frame_id) {}
+
 	// A decoded frame, with the view_info it was rendered for.
 	virtual void publish(shard_accumulator * accumulator, std::shared_ptr<decoder::blit_handle> handle) = 0;
 };

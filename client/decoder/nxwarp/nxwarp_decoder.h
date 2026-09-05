@@ -98,6 +98,11 @@ class nxwarp_decoder : public decoder
 	std::chrono::steady_clock::time_point net_since = std::chrono::steady_clock::now();
 	uint64_t net_frames = 0, net_holes = 0;
 	std::atomic<int64_t> jobs_pending = 0;
+	// Deepest the worker's backlog is allowed to get before the older frames are
+	// discarded in favour of the newest one. Two lets one frame decode while the
+	// next waits; anything more is latency.
+	static constexpr int64_t kMaxQueuedFrames = 2;
+	uint64_t frames_dropped_late = 0;
 
 	// One frame's work, complete in itself: by the time the worker runs, the tile slots
 	// and the pending feedback already belong to the next frame.

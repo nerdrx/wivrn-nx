@@ -424,6 +424,22 @@ void nxwarp_decoder::finish_frame(uint8_t path_id)
 	job.fb = fb;
 	job.view_info = assembling_view_info;
 	job.have_view_info = have_view_info;
+	// The network delivers at the server's rate; the worker decodes at whatever
+	// rate this device manages. When the device cannot keep up, a queued frame is
+	// nothing but latency the user will wear -- 90 fps arriving against a 57 ms
+	// decode grew the queue past 2000 frames on an Adreno 650, i.e. minutes of
+	// lag. Keep only the newest: on a live stream late is worse than missing.
+	//
+	// This is sound while the stream is all-intra (every frame stands alone).
+	// An inter stream must additionally tell the encoder what it dropped --
+	// nxvc_vk_decoder_mark_missing() plus the received-tiles feedback -- or the
+	// encoder's shadow of the client's reference ring drifts (SYNTAX 6.11,
+	// INTEGRATION-DECISIONS 6). Wire that up before enabling inter here.
+	if (jobs_pending.load() >= kMaxQueuedFrames)
+	{
+		jobs.drop_until([](const decode_job &) { return false; });
+		frames_dropped_late += jobs_pending.exchange(0);
+	}
 	jobs_pending++;
 	jobs.push(std::move(job));
 }
@@ -635,6 +651,8 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			             stream_index, prof.n, ms(t_end - prof.since) / 1000.0, prof.bytes / n,
 			             prof.wait_ms / n, prof.wall_ms / n, prof.pass_a_ms / n, prof.pass_b_ms / n, prof.gpu_ms / n,
 			             frames_dropped_holes, frames_dropped_codec);
+			spdlog::info("nxwarp[{}]: {} frames dropped late (queue kept to {})",
+			             stream_index, frames_dropped_late, kMaxQueuedFrames);
 			prof = {};
 			prof.since = t_end;
 		}

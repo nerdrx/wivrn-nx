@@ -837,12 +837,6 @@ void application::initialize_vulkan()
 	optional_device_extensions.emplace(VK_IMG_FILTER_CUBIC_EXTENSION_NAME);
 	optional_device_extensions.emplace(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
 	optional_device_extensions.emplace(VK_EXT_FRAGMENT_DENSITY_MAP_EXTENSION_NAME);
-	// The decode queue asks for HIGH global priority. On the Adreno 650 that is
-	// worth more than everything else tried: with the compositor running, the
-	// decoder's submit-to-fence goes from 11.6 ms to 6.7 ms and the part of it
-	// that is not GPU work -- the wait to be scheduled at all -- from 5.3 ms to
-	// 0.77 ms, repeatably. MEDIUM measures identical to no priority at all.
-	optional_device_extensions.emplace(VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME);
 
 #ifdef __ANDROID__
 	vk_device_extensions.push_back(VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
@@ -970,51 +964,15 @@ void application::initialize_vulkan()
 	// frame.  A family with one queue clamps back to the old behaviour.
 	const uint32_t vk_queues_wanted =
 	        std::min<uint32_t>(2, queue_properties[vk_queue_family_index].queueCount);
-	// VK_EXT_global_priority lets ONE family appear twice in pQueueCreateInfos
-	// as long as the entries differ in globalPriority, which is the whole reason
-	// to reach for it here: the decode queue can be raised without raising the
-	// renderer's, and therefore without this process competing harder against
-	// the OpenXR runtime's own compositor, which is a separate process.
-	//
-	// The driver decides what it will grant, and this one grants LOW, MEDIUM and
-	// HIGH but NOT REALTIME, so HIGH is the ceiling for an unprivileged app and
-	// asking for more would only get vkCreateDevice refused with NOT_PERMITTED.
-	const bool vk_global_priority =
-	        vk_queues_wanted > 1 and
-	        utils::contains(vk_device_extensions, VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME);
 	// Equal priority: the decode is not less important than the frame it is
 	// decoded for, and a lower priority would only put it further behind.
 	float queuePriority[2] = {0.0f, 0.0f};
 
-	// Without the extension: one entry, both queues, no global priority.
-	// With it: the renderer's queue at the runtime's own default and the decode
-	// queue at HIGH.
-	vk::DeviceQueueGlobalPriorityCreateInfoEXT decode_priority{
-	        .globalPriority = vk::QueueGlobalPriorityEXT::eHigh,
+	vk::DeviceQueueCreateInfo queueCreateInfo{
+	        .queueFamilyIndex = vk_queue_family_index,
+	        .queueCount = vk_queues_wanted,
+	        .pQueuePriorities = queuePriority,
 	};
-	std::vector<vk::DeviceQueueCreateInfo> queueCreateInfos;
-	if (vk_global_priority)
-	{
-		queueCreateInfos.push_back(vk::DeviceQueueCreateInfo{
-		        .queueFamilyIndex = vk_queue_family_index,
-		        .queueCount = 1,
-		        .pQueuePriorities = queuePriority,
-		});
-		queueCreateInfos.push_back(vk::DeviceQueueCreateInfo{
-		        .pNext = &decode_priority,
-		        .queueFamilyIndex = vk_queue_family_index,
-		        .queueCount = 1,
-		        .pQueuePriorities = queuePriority,
-		});
-	}
-	else
-	{
-		queueCreateInfos.push_back(vk::DeviceQueueCreateInfo{
-		        .queueFamilyIndex = vk_queue_family_index,
-		        .queueCount = vk_queues_wanted,
-		        .pQueuePriorities = queuePriority,
-		});
-	}
 
 	vk::PhysicalDeviceFeatures device_features{
 	        .shaderClipDistance = true,
@@ -1022,8 +980,8 @@ void application::initialize_vulkan()
 
 	vk::StructureChain device_create_info{
 	        vk::DeviceCreateInfo{
-	                .queueCreateInfoCount = (uint32_t)queueCreateInfos.size(),
-	                .pQueueCreateInfos = queueCreateInfos.data(),
+	                .queueCreateInfoCount = 1,
+	                .pQueueCreateInfos = &queueCreateInfo,
 	                .enabledExtensionCount = (uint32_t)vk_device_extensions.size(),
 	                .ppEnabledExtensionNames = vk_device_extensions.data(),
 	                .pEnabledFeatures = &device_features,
@@ -1060,14 +1018,11 @@ void application::initialize_vulkan()
 	*vk_queue.lock() = vk_device.getQueue(vk_queue_family_index, 0);
 	if (vk_queues_wanted > 1)
 	{
-		// Two DeviceQueueCreateInfos of one queue each, or one of two queues:
-		// either way the decode queue is index 1 within the family.
 		*vk_decode_queue.lock() = vk_device.getQueue(vk_queue_family_index, 1);
 		vk_have_decode_queue = true;
-		spdlog::info("    queue family {} has {} queues; decoding on queue 1 at {} priority",
+		spdlog::info("    queue family {} has {} queues; decoding on queue 1",
 		             vk_queue_family_index,
-		             queue_properties[vk_queue_family_index].queueCount,
-		             vk_global_priority ? "HIGH global" : "default");
+		             queue_properties[vk_queue_family_index].queueCount);
 	}
 	else
 		spdlog::info("    queue family {} has one queue; decode shares it with the renderer",

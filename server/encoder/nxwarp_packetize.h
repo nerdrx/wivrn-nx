@@ -66,6 +66,14 @@ namespace wivrn
 //   2. Feed every other datagram to nxt::Receiver::on_datagram with its path_id.
 //   3. Run nxt::Receiver::band_deadline per band and send the bytes it returns
 //      back as from_headset::nxwarp_feedback.
+//   3b. Take the frame's pose off the *first* datagram of the frame: to_headset::
+//      nxwarp_datagram carries an optional view_info there and on no other datagram,
+//      the same rule video_stream_data_shard follows. It is the pose, fov and
+//      foveation the reprojection pass needs, and none of it is recoverable from the
+//      nxt::PoseHeader inside the payload, which is quantised, opaque to the
+//      transport, and has no fov. Publish the decoded frame with it. Reordering on
+//      the wire means the field may not arrive on the first datagram *seen*, so take
+//      it from whichever datagram of the frame carries it.
 //   4. Concatenate the delivered tiles of a frame in tile-index order, strip the
 //      4-byte little-endian length prefix that chunk 0 carries and check the
 //      frame really is that long — which is all nxwarp_reassemble below does —

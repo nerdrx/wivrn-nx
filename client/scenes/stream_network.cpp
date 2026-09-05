@@ -258,7 +258,9 @@ void scenes::stream::operator()(to_headset::nxwarp_datagram && dg)
 	uint8_t idx = dg.stream_item_idx;
 	if (idx >= decoders.size() or not decoders[idx].decoder)
 		return;
-#ifdef WIVRN_USE_NXWARP
+#include "wivrn_config.h"
+
+#if WIVRN_USE_NXWARP
 	auto * nx = dynamic_cast<nxwarp_decoder *>(decoders[idx].decoder->get_decoder().get());
 	if (not nx)
 		return;

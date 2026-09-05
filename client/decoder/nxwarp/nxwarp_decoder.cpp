@@ -9,10 +9,9 @@
 
 #include "nxwarp_decoder.h"
 
-#ifdef WIVRN_USE_NXWARP
+#include "wivrn_config.h"
 
-#include "application.h"
-#include "scenes/stream.h"
+#if WIVRN_USE_NXWARP
 
 #include <spdlog/spdlog.h>
 
@@ -83,7 +82,7 @@ nxwarp_decoder::nxwarp_decoder(vk::raii::Device & device,
                                uint32_t vk_queue_family_index,
                                const wivrn::to_headset::video_stream_description & description,
                                uint8_t stream_index,
-                               std::weak_ptr<scenes::stream> scene,
+                               nxwarp_host & host,
                                shard_accumulator * accumulator) :
         device(device),
         physical_device(physical_device),
@@ -110,7 +109,7 @@ nxwarp_decoder::nxwarp_decoder(vk::raii::Device & device,
                 .width = description.stream_size(stream_index).first,
                 .height = description.stream_size(stream_index).second,
         },
-        weak_scene(scene),
+        host(host),
         accumulator(accumulator)
 {
 	for (auto & item: image_pool)
@@ -195,10 +194,10 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 	nxvc_vk_decoder_create_info_default(&ci);
 	// Device adoption: the WiVRn client owns the VkDevice and the queue, and nxvc must
 	// allocate nothing it does not own (nxvc_vk.h, vk/common). All five handles or none.
-	ci.instance = *application::get_vulkan_instance();
+	ci.instance = host.instance();
 	ci.physical_device = *physical_device;
 	ci.device = *device;
-	ci.queue = **application::get_queue().lock();
+	host.with_queue([&](vk::Queue q) { ci.queue = q; });
 	ci.queue_family = queue_family_index;
 	// Two-plane 4:2:0 passthrough: what the reprojection shader already samples, and half
 	// the reference-ring memory of an RGBA8 store.
@@ -301,7 +300,17 @@ void nxwarp_decoder::push_datagram(to_headset::nxwarp_datagram && dg)
 		fb = from_headset::feedback{};
 		fb.frame_index = ++wivrn_frame_idx;
 		fb.stream_index = stream_index;
-		fb.received_first_packet = application::get_xr_instance().now();
+		fb.received_first_packet = host.now();
+		assembling_view_info = {};
+		have_view_info = false;
+	}
+
+	// The pose rides the frame's first datagram and only that one; take it whichever
+	// datagram it turns up on, so that reordering on the wire does not lose it.
+	if (dg.view_info)
+	{
+		assembling_view_info = *dg.view_info;
+		have_view_info = true;
 	}
 
 	std::vector<nxt::TileOutput> tiles;
@@ -320,7 +329,7 @@ void nxwarp_decoder::push_datagram(to_headset::nxwarp_datagram && dg)
 		slots[idx].assign(t.bytes.begin(), t.bytes.end());
 	}
 
-	fb.received_last_packet = application::get_xr_instance().now();
+	fb.received_last_packet = host.now();
 
 	// Deadlines, driven by arrival rather than by a clock.
 	//
@@ -340,16 +349,15 @@ void nxwarp_decoder::push_datagram(to_headset::nxwarp_datagram && dg)
 
 void nxwarp_decoder::fire_bands_through(uint16_t frame_id, uint8_t last_band, uint8_t path_id)
 {
-	auto scene = weak_scene.lock();
 	for (uint8_t b = 0; b <= last_band and b < band_fired.size(); ++b)
 	{
 		if (band_fired[b])
 			continue;
 		band_fired[b] = 1;
 		auto packet = receiver->band_deadline(frame_id, b, now_us(), 0, path_id);
-		if (packet.empty() or not scene)
+		if (packet.empty())
 			continue;
-		scene->send_nxwarp_feedback(stream_index, path_id, std::move(packet));
+		host.send_feedback(stream_index, path_id, std::move(packet));
 	}
 }
 
@@ -371,10 +379,14 @@ void nxwarp_decoder::finish_frame(uint8_t path_id)
 		return;
 	}
 
+	host.on_frame_unit(unit);
+
 	decode_job job;
 	job.frame_id = assembling_frame;
 	job.unit = std::move(unit);
 	job.fb = fb;
+	job.view_info = assembling_view_info;
+	job.have_view_info = have_view_info;
 	jobs.push(std::move(job));
 }
 
@@ -383,10 +395,10 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	size_t consumed = 0;
 	VkSemaphore dec_sem = VK_NULL_HANDLE;
 	uint64_t dec_val = 0;
-	{
-		// nxvc submits on the queue it adopted, which is WiVRn's one graphics queue; hold
-		// the same lock every other submitter in the client holds.
-		auto queue = application::get_queue().lock();
+	bool refused = false;
+	// nxvc submits on the queue it adopted, which is the host's one graphics queue; hold
+	// the same lock every other submitter in the process holds.
+	host.with_queue([&](vk::Queue) {
 		auto st = nxvc_vk_decode_frame_ex(nxvc, job.unit.data(), job.unit.size(),
 		                                  NXVC_VKD_SUBMIT_ASYNC, &consumed);
 		if (st != NXVC_VKD_OK)
@@ -394,11 +406,14 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			spdlog::warn("nxwarp[{}]: frame {} refused: {} ({})", stream_index, job.frame_id,
 			             nxvc_vk_decoder_status_string(st), nxvc_vk_decoder_last_error(nxvc));
 			++frames_dropped_codec;
+			refused = true;
 			return;
 		}
 		dec_sem = nxvc_vk_decoder_timeline(nxvc);
 		dec_val = nxvc_vk_decoder_timeline_value(nxvc);
-	}
+	});
+	if (refused)
+		return;
 
 	nxvc_vkd_images img{};
 	if (nxvc_vk_decoder_images(nxvc, &img) != NXVC_VKD_OK or img.count < 2)
@@ -481,24 +496,24 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	                    vk::PipelineStageFlagBits::eFragmentShader, {}, {}, {}, to_read);
 	cmd.end();
 
-	// The pose, the fov and the foveation runs the reprojection pass needs are not on the
-	// NX Warp wire: the codec's own 26-byte pose header is opaque to the transport and
-	// carries neither fov nor foveation, and to_headset::nxwarp_datagram has no view_info
-	// field. Until one of the two carries it, the frame is published with a default
-	// view_info and the projection is wrong. Said once, loudly, rather than every frame.
-	if (not warned_view_info)
+	// The pose, the fov and the foveation runs the reprojection pass needs come off the
+	// frame's first datagram (to_headset::nxwarp_datagram::view_info). A frame that
+	// reached here without one is a bug rather than a loss — under the chunk mapping a
+	// frame missing its first datagram never reassembles — so say it once, loudly, and
+	// publish the default rather than dropping a picture that did decode.
+	if (not job.have_view_info and not warned_view_info)
 	{
 		warned_view_info = true;
-		spdlog::warn("nxwarp[{}]: no view_info on the NX Warp wire; frames are published "
-		             "with a default pose and foveation (see docs/nxwarp.md)",
-		             stream_index);
+		spdlog::warn("nxwarp[{}]: frame {} decoded with no view_info on its first datagram; "
+		             "published with a default pose and foveation (see docs/nxwarp.md)",
+		             stream_index, job.frame_id);
 	}
 
-	job.fb.sent_to_decoder = application::get_xr_instance().now();
+	job.fb.sent_to_decoder = host.now();
 	job.fb.received_from_decoder = job.fb.sent_to_decoder;
 	auto handle = std::make_shared<nxwarp_blit_handle>(
 	        job.fb,
-	        to_headset::video_stream_data_shard::view_info_t{},
+	        job.view_info,
 	        *item->view_full,
 	        item->image,
 	        extent,
@@ -508,13 +523,12 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	        item->free);
 
 	device.resetFences(*fence);
-	{
-		auto queue = application::get_queue().lock();
+	host.with_queue([&](vk::Queue queue) {
 		const vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eTransfer;
 		const uint64_t signal_val = ++item->semaphore_val;
 		std::array<vk::Semaphore, 1> wait{dec_sem};
 		std::array<vk::Semaphore, 1> signal{*item->semaphore};
-		queue->submit(
+		queue.submit(
 		        vk::StructureChain{
 		                vk::SubmitInfo{
 		                        .waitSemaphoreCount = 1,
@@ -534,11 +548,10 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		        }
 		                .get(),
 		        *fence);
-	}
+	});
 
 	++frames_decoded;
-	if (auto scene = weak_scene.lock())
-		scene->push_blit_handle(accumulator, std::move(handle));
+	host.publish(accumulator, std::move(handle));
 }
 
 nxwarp_decoder::image * nxwarp_decoder::get_free()

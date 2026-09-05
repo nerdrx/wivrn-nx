@@ -134,6 +134,7 @@ android {
                           '-DWIVRN_USE_SYSTEM_FREETYPE=OFF',
                           '-DWIVRN_USE_ANDROID_BIN_LIBKTX=ON',
                           '-DWIVRN_BUILD_CLIENT=ON',
+                          '-DWIVRN_USE_NXWARP=ON',
                           '-DWIVRN_BUILD_SERVER=OFF',
                           '-DWIVRN_BUILD_SERVER_LIBRARY=OFF',
                           '-DWIVRN_BUILD_WIVRNCTL=OFF',

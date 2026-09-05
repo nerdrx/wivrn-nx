@@ -1589,6 +1589,24 @@ struct nxwarp_datagram
 	uint8_t stream_item_idx;
 	// nxt path id the sender striped this datagram onto (0 primary, 1 secondary)
 	uint8_t path_id;
+
+	// The pose and projection the frame was rendered for, exactly as
+	// video_stream_data_shard::view_info_t carries it: display time, per-eye pose
+	// and fov, the foveation runs, the alpha flag.
+	//
+	// Present on the first datagram of a frame and on no other, which is the same
+	// rule the shard path follows. It is not derivable from anything else on this
+	// wire: the codec's own 26-byte pose header (nxt::PoseHeader) is quantised,
+	// opaque to the transport, and carries neither fov nor foveation, so without
+	// this field the headset can decode a frame but not reproject it.
+	//
+	// It rides the *first* datagram rather than the control socket because it must
+	// arrive with its frame and no later: a pose that overtakes or trails its
+	// picture is worse than no pose. A frame whose first datagram is lost is
+	// already undecodable under the chunk mapping (see nxwarp_packetize.h), so this
+	// field is never the only casualty of that loss.
+	std::optional<video_stream_data_shard::view_info_t> view_info;
+
 	std::vector<uint8_t> payload;
 };
 

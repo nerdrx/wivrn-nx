@@ -27,6 +27,7 @@ struct nxwarp_datagram
 {
     uint8_t stream_item_idx;   // 0 left, 1 right, 2 alpha, 3 quad — as the shard path
     uint8_t path_id;           // nxt path 0 or 1 — or 0xFF, see below
+    std::optional<video_stream_data_shard::view_info_t> view_info;  // first datagram only
     std::vector<uint8_t> payload;
 };
 ```
@@ -35,6 +36,15 @@ struct nxwarp_datagram
   cleartext header, the ciphertext, the 16-byte tag — and goes straight to
   `nxt::Receiver::on_datagram(payload, path_id, now_us, &tiles)`. One datagram per packet,
   on the lossy (UDP) stream socket.
+* `view_info` is present on the **first datagram of a frame and on no other**, which is the
+  rule `video_stream_data_shard` already follows, and it is the same type: display time,
+  per-eye pose and fov, the foveation runs, the alpha flag. It is what the reprojection pass
+  needs and it is not derivable from anything else here — the codec's own 26-byte
+  `nxt::PoseHeader` is quantised, opaque to the transport, and carries neither fov nor
+  foveation. It rides the frame's own first datagram rather than the control socket because
+  it must arrive *with* its picture: a pose that overtakes or trails its frame is worse than
+  no pose. Losing it is not a separate failure mode — under the chunk mapping of section 2 a
+  frame whose first datagram is missing does not reassemble at all.
 * `path_id == 0xFF`: **not an nxt datagram**. It is the codec's raw `.nxv` stream header,
   sent on the control socket and repeated every 90 frames, and it goes to
   `nxvc_vk_decoder_parse_stream_header`. It is what creates both the decoder and the
@@ -190,14 +200,12 @@ frame.
 
 Named here rather than left to be discovered.
 
-* **No `view_info` on the NX Warp wire.** `to_headset::nxwarp_datagram` has no pose, fov or
-  foveation field, and the codec's own 26-byte pose header is opaque to the transport and
-  carries neither fov nor foveation. Frames are therefore published with a
-  default-constructed `view_info_t`, and the reprojection is wrong. The decoder says so once
-  in the log. This is the first thing to fix, and it needs a change on both ends: either an
-  optional `view_info` on `nxwarp_datagram` (cheapest — one field, present on the frame's
-  first datagram, exactly as `video_stream_data_shard` does it), or a pose-only shard
-  alongside.
+* ~~**No `view_info` on the NX Warp wire.**~~ **Fixed.** `to_headset::nxwarp_datagram`
+  carries an optional `view_info` on the frame's first datagram (section 1.2), the encoder
+  fills it from the `view_info_t` that `present_image` already receives, and the decoder
+  publishes the frame with it instead of a default. `wivrn-nxwarp-e2e` asserts the published
+  `view_info` is bit-identical to the presented one. What is still missing is *per-tile*
+  pose, below — every tile of a frame is warped from the one frame pose.
 * **The band deadline is arrival-driven, not clock-driven.** TRANSPORT.md 7.4 anchors it on
   the runtime's predicted display time; the decoder does not have one, so a band is closed
   when a datagram for a later band or a later frame arrives. `nxt::DeadlineController` still
@@ -211,5 +219,7 @@ Named here rather than left to be discovered.
   prediction across frames is untested from this side.
 * **No hybrid mode.** `nxwarp_hybrid` and the `AMediaCodec` base layer are not built.
 * `recvmmsg`'s `num_messages` is still 20 (INTEGRATION.md 2.5 argues for 64).
-* The decoder has never run against a live server or on a headset. Both ends build, and the
-  loopback proves the wire and the container round-trip, but the two have not been connected.
+* The decoder has never run on a headset. The two ends are now connected in process:
+  `wivrn-nxwarp-e2e` drives the real `video_encoder_nxwarp` and the real client decoder
+  through the real packet types over a lossy in-process link (see `docs/NXWARP-E2E.md`).
+  A live server-to-headset session has still not been run.

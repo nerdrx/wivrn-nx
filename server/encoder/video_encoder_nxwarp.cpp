@@ -29,6 +29,7 @@
 #include <charconv>
 #include <cmath>
 #include <format>
+#include <optional>
 #include <stdexcept>
 
 namespace
@@ -504,6 +505,12 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		SendPacket(to_headset::nxwarp_datagram{
 		                   .stream_item_idx = stream_idx,
 		                   .path_id = datagrams[i].path_id,
+		                   // First datagram of the frame carries the pose and
+		                   // projection it was rendered for, and no other does: the
+		                   // same rule the shard path follows, and the reason the
+		                   // headset can reproject an NX Warp frame at all. The
+		                   // transport's own pose header is quantised and has no fov.
+		                   .view_info = i == 0 ? std::optional(view_info) : std::nullopt,
 		                   .payload = std::move(datagrams[i].bytes),
 		           },
 		           i + 1 == datagrams.size());

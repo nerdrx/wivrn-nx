@@ -62,7 +62,9 @@ std::shared_ptr<wivrn::decoder> wivrn::decoder::make(
 			        acc);
 #endif
 		case nxwarp:
-#ifdef WIVRN_USE_NXWARP
+#include "wivrn_config.h"
+
+#if WIVRN_USE_NXWARP
 			return std::make_shared<wivrn::nxwarp_decoder>(
 			        device,
 			        phys_dev,
@@ -95,7 +97,7 @@ static std::vector<wivrn::video_codec> supported_codecs_()
 #else
 	wivrn::ffmpeg::decoder::supported_codecs(res);
 #endif
-#ifdef WIVRN_USE_NXWARP
+#if WIVRN_USE_NXWARP
 	// NX Warp is a pure-compute decoder: there is no hardware capability to probe, only a
 	// Vulkan device that either runs it or does not, and that device does not exist yet
 	// when this list is built. It is advertised last so that a server which supports it

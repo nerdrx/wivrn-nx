@@ -932,6 +932,11 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 void video_encoder::SendControlPacket(to_headset::nxwarp_datagram && packet)
 {
 	std::lock_guard lock(mutex);
+	if (nxwarp_sink)
+	{
+		nxwarp_sink->send_control(std::move(packet));
+		return;
+	}
 	try
 	{
 		cnx->send_control(std::move(packet));
@@ -945,6 +950,13 @@ void video_encoder::SendControlPacket(to_headset::nxwarp_datagram && packet)
 void video_encoder::SendPacket(to_headset::nxwarp_datagram && packet, bool end_of_frame)
 {
 	std::lock_guard lock(mutex);
+
+	if (nxwarp_sink)
+	{
+		frame_bytes += uint32_t(packet.payload.size());
+		nxwarp_sink->send_stream(std::move(packet));
+		return;
+	}
 
 	if (frame_offset == 0 and frame_bytes == 0)
 	{

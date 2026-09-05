@@ -46,7 +46,9 @@
 // changes: the defoveator sees an image view and a sampler and does not care where they
 // came from.
 
-#ifdef WIVRN_USE_NXWARP
+#include "wivrn_config.h"
+
+#if WIVRN_USE_NXWARP
 
 #include "decoder/decoder.h"
 #include "decoder/nxwarp/nxwarp_reassemble.h"
@@ -57,6 +59,8 @@
 #include <atomic>
 #include <memory>
 #include <thread>
+
+#include "nxwarp_host.h"
 
 #include <nxvc/nxvc_vk.h>
 #include <nxvc/transport/aead.h>
@@ -86,9 +90,15 @@ class nxwarp_decoder : public decoder
 		std::vector<uint8_t> unit;
 		from_headset::feedback fb;
 		uint16_t frame_id = 0;
+		bool have_view_info = false;
+		// The pose the frame was rendered for, off its first datagram. Carried on the
+		// job rather than read from the member state, because by the time the worker
+		// runs the network thread is already assembling the next frame.
+		to_headset::video_stream_data_shard::view_info_t view_info{};
 	};
 
 public:
+	// The client's constructor: builds the application host below and owns it.
 	nxwarp_decoder(vk::raii::Device & device,
 	               vk::raii::PhysicalDevice & physical_device,
 	               uint32_t vk_queue_family_index,
@@ -96,6 +106,18 @@ public:
 	               uint8_t stream_index,
 	               std::weak_ptr<scenes::stream> scene,
 	               shard_accumulator * accumulator);
+
+	// The same decoder against any host (see nxwarp_host.h). `host` must outlive it.
+	// This is the one wivrn-nxwarp-e2e uses; the client's constructor above delegates
+	// to it, so there is exactly one code path.
+	nxwarp_decoder(vk::raii::Device & device,
+	               vk::raii::PhysicalDevice & physical_device,
+	               uint32_t vk_queue_family_index,
+	               const wivrn::to_headset::video_stream_description & description,
+	               uint8_t stream_index,
+	               nxwarp_host & host,
+	               shard_accumulator * accumulator);
+
 	~nxwarp_decoder() override;
 
 	// The shard path is not used: NX Warp has its own datagram type.
@@ -135,7 +157,10 @@ private:
 
 	std::array<image, image_count> image_pool;
 
-	std::weak_ptr<scenes::stream> weak_scene;
+	// Owned only when the client constructor made it; `host` is the reference actually
+	// used and may point at somebody else's.
+	std::unique_ptr<nxwarp_host> owned_host;
+	nxwarp_host & host;
 	shard_accumulator * accumulator;
 
 	// --- codec and transport, both created when the stream header arrives
@@ -153,6 +178,10 @@ private:
 	std::vector<uint8_t> band_fired;
 	from_headset::feedback fb{};
 	uint64_t wivrn_frame_idx = 0;
+	// view_info off the frame's first datagram (to_headset::nxwarp_datagram::view_info).
+	// have_view_info stays false when that datagram was the one that got lost.
+	to_headset::video_stream_data_shard::view_info_t assembling_view_info{};
+	bool have_view_info = false;
 
 	// --- worker
 	utils::sync_queue<decode_job> jobs;

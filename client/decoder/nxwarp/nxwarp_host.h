@@ -1,0 +1,84 @@
+/*
+ * WiVRn VR streaming
+ * Copyright (C) 2026  WiVRn NX contributors
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#include "decoder/decoder.h"
+#include "wivrn_packets.h"
+
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <span>
+#include <vector>
+#include <vulkan/vulkan_raii.hpp>
+
+namespace wivrn
+{
+
+class shard_accumulator;
+
+// Everything nxwarp_decoder needs from the process it runs in, and nothing else.
+//
+// The decoder used to reach for `application` and `scenes::stream` directly, which
+// made it un-runnable anywhere but inside a client that had already brought up an
+// OpenXR session — so the one thing nobody could do was decode a frame from the real
+// encoder and check the picture. Four things is all it actually wanted: the Vulkan
+// instance behind the device it was handed, the process-wide queue lock, a clock, and
+// somewhere to put feedback and finished frames.
+//
+// Two implementations exist: nxwarp_application_host, which is the client and forwards
+// to exactly those two singletons, and the one inside wivrn-nxwarp-e2e, which is a
+// headless Vulkan device and a pair of queues. The decoder cannot tell them apart, which
+// is the point: what the test exercises is the shipping class.
+class nxwarp_host
+{
+public:
+	virtual ~nxwarp_host() = default;
+
+	// The instance the decoder's VkDevice came from. nxvc adopts instance, physical
+	// device, device, queue and queue family together or allocates its own — never a
+	// mixture — so this has to be the real one.
+	virtual vk::Instance instance() = 0;
+
+	// The queue nxvc submits on, and the lock every other submitter in the process
+	// holds while it does. `fn` runs with the lock held; it must not block on anything
+	// that needs the same lock. Used both to adopt the queue at decoder-create time and
+	// to wrap each decode submit.
+	virtual void with_queue(const std::function<void(vk::Queue)> & fn) = 0;
+
+	// The clock the feedback timestamps are in. In the client this is the OpenXR
+	// instance's; the numbers only ever get compared with each other.
+	virtual XrTime now() = 0;
+
+	// One transport feedback packet, already formed by nxt::Receiver::band_deadline,
+	// bound for from_headset::nxwarp_feedback on the control socket.
+	virtual void send_feedback(uint8_t stream_index, uint8_t path_id, std::vector<uint8_t> payload) = 0;
+
+	// One reassembled .nxv frame unit, exactly as it is about to be handed to the codec.
+	// The client ignores it; wivrn-nxwarp-e2e uses it to rebuild the byte stream the
+	// decoder was actually fed, so that nx-warp's own nxv-dec can be run over the same
+	// bytes and the two decoders' output compared. Called on the network thread, before
+	// the decode job is queued.
+	virtual void on_frame_unit(std::span<const uint8_t>) {}
+
+	// A decoded frame, with the view_info it was rendered for.
+	virtual void publish(shard_accumulator * accumulator, std::shared_ptr<decoder::blit_handle> handle) = 0;
+};
+
+} // namespace wivrn

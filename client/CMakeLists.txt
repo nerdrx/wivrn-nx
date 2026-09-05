@@ -172,7 +172,7 @@ if(EXISTS "${WIVRN_NXWARP_DIR}/CMakeLists.txt")
         BINARY_DIR ${NXWARP_PREFIX}/build
         INSTALL_DIR ${NXWARP_INSTALL}
         CMAKE_ARGS ${NXWARP_CMAKE_ARGS}
-        BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target nxvc_vk_decoder nxvc_transport
+        BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target nxvc_vk_decoder nxvc_vk_common nxvc_transport
         # `cmake --install` rather than the install target, which would first *build*
         # everything -- including nx-warp's nxvc-vkdec CLI, which links vkWaitSemaphores
         # and so cannot link against the NDK's android-29 libvulkan.so. The libraries are
@@ -239,7 +239,6 @@ target_link_libraries(wivrn
 
 if(WIVRN_HAVE_NXWARP)
     target_link_libraries(wivrn nxvc_vk_decoder nxvc_vk_common nxvc_transport)
-    target_compile_definitions(wivrn PRIVATE WIVRN_USE_NXWARP=1)
 
     # The depacketize-and-reassemble path, exercisable without a headset. See the file
     # header for what it proves.

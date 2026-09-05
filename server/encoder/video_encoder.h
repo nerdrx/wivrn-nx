@@ -151,7 +151,7 @@ private:
 	std::mutex mutex;
 
 	// temporary data
-	wivrn_session * cnx;
+	wivrn_session * cnx = nullptr;
 
 	// shard to send
 	to_headset::video_stream_data_shard shard;
@@ -283,6 +283,27 @@ public:
 
 	video_encoder(vk_bundle &, uint8_t stream_idx, uint32_t target_queue, const encoder_settings & settings, std::unique_ptr<idr_handler>, bool async_send);
 	virtual ~video_encoder();
+
+	// Where NX Warp's datagrams go when they are not going to a headset.
+	//
+	// SendPacket normally hands them to the wivrn_session, which is a concrete class
+	// wrapped around real sockets, a crypto handshake and an xrt_system_devices — none
+	// of which an in-process test can stand up. This is the one seam that lets
+	// wivrn-nxwarp-e2e drive the shipping encoder: a sink here takes the datagrams
+	// instead, and nothing else about the class changes. Null in the server, always.
+	struct packet_sink
+	{
+		virtual ~packet_sink() = default;
+		// The lossy path: what the UDP stream socket would carry.
+		virtual void send_stream(to_headset::nxwarp_datagram &&) = 0;
+		// The reliable path: the codec stream header, on TCP.
+		virtual void send_control(to_headset::nxwarp_datagram &&) = 0;
+	};
+	void set_packet_sink(packet_sink * sink)
+	{
+		std::lock_guard lock(mutex);
+		nxwarp_sink = sink;
+	}
 
 	// `view_info` is the pose and projection the frame was rendered for. It is the
 	// same object encode() is handed one call later; a codec whose predictor warps
@@ -422,6 +443,9 @@ protected:
 	// The same on the control (TCP) socket, for the one part of an NX Warp stream
 	// that must not be lost: the codec's stream header.
 	void SendControlPacket(to_headset::nxwarp_datagram && packet);
+
+private:
+	packet_sink * nxwarp_sink = nullptr;
 };
 
 } // namespace wivrn

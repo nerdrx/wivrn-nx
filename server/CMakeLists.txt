@@ -207,6 +207,62 @@ if (WIVRN_BUILD_SERVER)
 		target_include_directories(wivrn-nxwarp-loopback PRIVATE .)
 		target_compile_features(wivrn-nxwarp-loopback PRIVATE cxx_std_20)
 		target_link_libraries(wivrn-nxwarp-loopback PRIVATE nxvc::ref nxvc::transport)
+
+		# Both ends of NX Warp in one process: the shipping server encoder and the
+		# shipping client decoder, connected by the real packet types over a lossy
+		# in-process link. See the header of nxwarp_e2e.cpp for what it proves.
+		#
+		# It needs the Vulkan decoder, which the server does not otherwise link, so it
+		# is only built when the nxvc package actually carries one -- an nxvc built
+		# with NXWARP_BUILD_VK=OFF is a perfectly good server dependency and must not
+		# become a configure error here.
+		# The client decoder logs through spdlog; the server logs through monado's
+		# u_logging, so the server build has no spdlog target of its own.
+		find_package(spdlog QUIET)
+		if (TARGET nxvc::vk_decoder AND TARGET spdlog::spdlog)
+			add_executable(wivrn-nxwarp-e2e
+				encoder/nxwarp_e2e.cpp
+				encoder/video_encoder_nxwarp.cpp
+				encoder/nxwarp_codec_ref.cpp
+				encoder/nxwarp_packetize.cpp
+				encoder/video_encoder.cpp
+				encoder/nxwarp_e2e_stubs.cpp
+				encoder/idr_handler.cpp
+				driver/clock_offset.cpp
+				utils/wivrn_trace.cpp
+				utils/wivrn_vk_bundle.cpp
+				${CMAKE_SOURCE_DIR}/client/decoder/nxwarp/nxwarp_decoder.cpp
+				${CMAKE_SOURCE_DIR}/client/decoder/nxwarp/nxwarp_reassemble.cpp
+				)
+			target_include_directories(wivrn-nxwarp-e2e PRIVATE
+				.
+				${CMAKE_SOURCE_DIR}/client
+				# wivrn-server_shaders.h, which wivrn_compile_glsl writes here at
+				# configure time and wivrn_vk_bundle.cpp includes.
+				${CMAKE_CURRENT_BINARY_DIR}
+				)
+			target_compile_features(wivrn-nxwarp-e2e PRIVATE cxx_std_23)
+			target_compile_definitions(wivrn-nxwarp-e2e PRIVATE VULKAN_HPP_NO_STRUCT_CONSTRUCTORS)
+			target_link_libraries(wivrn-nxwarp-e2e PRIVATE
+				nxvc::ref
+				nxvc::transport
+				nxvc::vk_decoder
+				nxvc::vk_common
+				wivrn-common
+				wivrn-common-server
+				# The encoder is monado-facing: os_time, u_logging and the xrt
+				# interfaces come with these, exactly as they do for wivrn-server.
+				aux_os
+				aux_util
+				aux_vk
+				comp_util
+				xrt-interfaces
+				Vulkan::Vulkan
+				spdlog::spdlog
+				)
+		else()
+			message(STATUS "\tNX Warp e2e test: OFF (needs an nxvc with the Vulkan decoder, and spdlog)")
+		endif()
 	endif()
 
 	if(WIVRN_USE_X264)

@@ -183,6 +183,32 @@ constexpr XrDuration fps_window = 1'000'000'000;
 // halves, which is the whole point; more of the old frame would lag the image behind the
 // head, less would barely soften anything.
 constexpr float frame_smoothing_weight = 0.5f;
+
+// The two frames being blended were rendered by the server for two different head poses,
+// and the pass draws both at the same texture coordinates under one layer pose: whatever
+// the head moved between them shows up as a ghost, offset by that much, appearing and
+// vanishing at the decoded frame rate. That is what "very jittery" was. So the blend is
+// only allowed where the ghost cannot be seen — full weight below the first threshold,
+// fading to nothing at the second, taking the worse of rotation and translation and the
+// worse of the two eyes.
+//
+// The scale is set by how far a degree moves the picture: roughly 90 degrees of field of
+// view across a couple of thousand pixels, so about 22 px per degree. 0.1 deg is a two to
+// three pixel ghost, which is invisible; 0.4 deg is nearly ten, which is not. For
+// translation, a centimetre at arm's length is about half a degree of parallax.
+//
+// This means the blend engages when the head is still and switches itself off during head
+// motion. That is the right way round: with the head moving, the runtime's own timewarp
+// is already reprojecting the frame every refresh and the step the blend would soften is
+// the smaller artefact of the two.
+constexpr float frame_smoothing_full_angle = 0.0017f; // ~0.1 degrees, in radians
+constexpr float frame_smoothing_zero_angle = 0.0070f; // ~0.4 degrees
+constexpr float frame_smoothing_full_shift = 0.002f;  // metres
+constexpr float frame_smoothing_zero_shift = 0.010f;
+// A frame further back than this is not the one this frame replaced — the buffer can hold
+// stale frames when the decoder skips by a stride — and blending against it would smear
+// content that moved a long way, so it is left alone.
+constexpr XrDuration frame_smoothing_max_age = 50'000'000;
 constexpr size_t transport_history = 120;
 // A radio trend below this many dB between the fast and slow average is noise, not the
 // user walking somewhere. The two averages are fed at the 1 Hz the radio is sampled at.

@@ -204,7 +204,7 @@ nxwarp_decoder::~nxwarp_decoder()
 	if (nxvc)
 		nxvc_vk_decoder_destroy(nxvc);
 	spdlog::info("nxwarp[{}]: {} frames decoded, {} dropped with a hole, {} refused by the codec",
-	             stream_index, frames_decoded, frames_dropped_holes, frames_dropped_codec);
+	             stream_index, frames_decoded.load(), frames_dropped_holes.load(), frames_dropped_codec.load());
 }
 
 // Network thread. The first thing that arrives on an NX Warp stream, and the only thing
@@ -408,15 +408,17 @@ void nxwarp_decoder::finish_frame(uint8_t path_id)
 	// and how deep the worker's queue is. Printed here because a stalled worker
 	// prints nothing at all, which is exactly the case this line exists for.
 	{
-		net_frames++;
+		// net_frames is monotonic (the GUI differences it); the line below wants the
+		// count for this window, so it keeps its own mark of where the window began.
+		const uint64_t closed = net_frames.fetch_add(1, std::memory_order_relaxed) + 1;
 		if (unit.empty())
 			net_holes++;
 		const auto now = std::chrono::steady_clock::now();
 		if (now - net_since > std::chrono::seconds(2))
 		{
 			spdlog::info("nxwarp[{}] net: {} frames closed in {:.1f} s, {} with a hole, {} queued for the worker, {} decoded so far, {} stragglers dropped",
-			             stream_index, net_frames, std::chrono::duration<double>(now - net_since).count(), net_holes, jobs_pending.load(), frames_decoded, stragglers_dropped);
-			net_frames = 0;
+			             stream_index, closed - net_frames_mark, std::chrono::duration<double>(now - net_since).count(), net_holes, jobs_pending.load(), frames_decoded.load(), stragglers_dropped);
+			net_frames_mark = closed;
 			net_holes = 0;
 			net_since = now;
 		}
@@ -679,9 +681,15 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			spdlog::info("nxwarp[{}]: {} frames in {:.1f} s: {:.0f} B/frame, wait-prev {:.1f} ms, wall {:.1f} ms, nxvc passA {:.1f} passB {:.1f} gpu {:.1f} ms; holes {}, refused {}",
 			             stream_index, prof.n, ms(t_end - prof.since) / 1000.0, prof.bytes / n,
 			             prof.wait_ms / n, prof.wall_ms / n, prof.pass_a_ms / n, prof.pass_b_ms / n, prof.gpu_ms / n,
-			             frames_dropped_holes, frames_dropped_codec);
+			             frames_dropped_holes.load(), frames_dropped_codec.load());
 			spdlog::info("nxwarp[{}]: {} frames dropped late (queue kept to {})",
-			             stream_index, frames_dropped_late, kMaxQueuedFrames);
+			             stream_index, frames_dropped_late.load(), kMaxQueuedFrames);
+
+			// The same window, republished for stats(): the GUI shows these under the
+			// latency figure instead of anybody reading the lines above out of the log.
+			prof_wall_ms.store(float(prof.wall_ms / n), std::memory_order_relaxed);
+			prof_gpu_ms.store(float(prof.gpu_ms / n), std::memory_order_relaxed);
+			prof_bytes.store(float(prof.bytes / n), std::memory_order_relaxed);
 			// Feed the shared stride from this stream's measured cost: ceil(wall / period).
 			// Streams only ever raise it quickly and lower it by one step per report, so
 			// a momentary hiccup does not flip the selection back and forth.

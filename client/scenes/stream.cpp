@@ -690,6 +690,10 @@ void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_p
 			if (stream == 0)
 				dejitter.sample(handle->feedback.received_from_decoder, handle->view_info.display_time);
 
+			// One decoded frame on this stream, for the frame rate readout. Monotonic
+			// and never reset: the render thread differences it over a rolling window.
+			decoded_frames[stream].fetch_add(1, std::memory_order_relaxed);
+
 			std::swap(handle, decoders[stream].latest_frames[handle->feedback.frame_index % decoders[stream].latest_frames.size()]);
 		}
 
@@ -962,6 +966,10 @@ void scenes::stream::render(const XrFrameState & frame_state)
 
 	// We don't need those after vkWaitForFences
 	current_blit_handles.fill(nullptr);
+	// Frame smoothing: the pass that sampled these has now retired, so the decoder's pool
+	// can have them back. Only the frame on screen (smoothing_prev_handles) stays pinned,
+	// which is one image per eye, the same order of pinning current_blit_handles does.
+	smoothing_blend_handles = {};
 
 	gpu_timestamps timestamps;
 	if (query_pool_filled)
@@ -1301,6 +1309,63 @@ void scenes::stream::render(const XrFrameState & frame_state)
 				}
 			}
 
+			// Frame smoothing. The decoded frame rate can sit far below the panel's
+			// (NX Warp on a Pico 4 runs at a fraction of 90 Hz), so one decoded frame is
+			// held for several refreshes and the picture steps rather than moves. On the
+			// first refresh that shows a new decoded frame, and on no other, mix half of
+			// the frame it replaces into it: the step is split in two and reads as a
+			// short blur. Nothing is synthesized — every refresh still shows a real
+			// decoded frame, or a blend of two consecutive ones.
+			//
+			// Off, the weight is zero, nothing is bound differently and the pass output
+			// is bit identical to not having the feature.
+			stream_defoveator::frame_blend blend;
+			if (not config.frame_smoothing)
+			{
+				// Off pins nothing and remembers nothing: the decoder's image pool
+				// sees exactly what it saw before this feature existed, and the
+				// first frame after the setting is turned back on has no
+				// predecessor to blend with, which is the honest answer.
+				smoothing_prev_handles = {};
+				smoothing_frame_index = uint64_t(-1);
+			}
+			else if (current_blit_handles[0])
+			{
+				const uint64_t idx = current_blit_handles[0]->feedback.frame_index;
+				if (idx != smoothing_frame_index)
+				{
+					// The frames this refresh may sample move to
+					// smoothing_blend_handles, which pins their images until the
+					// top of the next render(): the frame fence has been waited
+					// on by then, so the pass that read them has retired and the
+					// decoder's pool can have them back.
+					smoothing_blend_handles = std::move(smoothing_prev_handles);
+					for (size_t v = 0; v < view_count; ++v)
+						smoothing_prev_handles[v] = current_blit_handles[v];
+					smoothing_frame_index = idx;
+
+					// Only when both eyes have a predecessor of the same geometry:
+					// the pass reuses this frame's texture coordinates for the
+					// previous image, which is only meaningful while the decoded
+					// size is unchanged.
+					bool usable = true;
+					for (size_t v = 0; v < view_count; ++v)
+						usable = usable and smoothing_blend_handles[v] and
+						         current_blit_handles[v] and
+						         smoothing_blend_handles[v]->extent == current_blit_handles[v]->extent;
+
+					if (usable)
+					{
+						for (size_t v = 0; v < view_count; ++v)
+						{
+							images[v].prev_rgb = smoothing_blend_handles[v]->image_view;
+							images[v].layout_prev_rgb = smoothing_blend_handles[v]->current_layout;
+						}
+						blend.weight = constants::stream::frame_smoothing_weight;
+					}
+				}
+			}
+
 			// Everything the defoveation pass output depends on this refresh. Any
 			// difference from the image in the swapchain forces a real render.
 			state.extents = extents_packed;
@@ -1316,6 +1381,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			state.motion_on = motion.field != nullptr and motion.step > 0;
 			state.motion_step = motion.step;
 			state.motion_frame = motion.field ? motion.field->frame_idx : uint64_t(-1);
+			state.frame_blend = blend.weight;
 			state.gui_interactable = is_gui_interactable();
 			state.gui_status = int(gui_status);
 			for (size_t i = 0; i < decoder_count; ++i)
@@ -1343,6 +1409,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 				                      {bias, bias, bias, 0.},
 				                      post,
 				                      motion,
+				                      blend,
 				                      image_index,
 				                      config.cas_full_kernel,
 				                      fsr_on);
@@ -1507,6 +1574,9 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			if (composition_layer_color_scale_bias_supported and dimming > 0)
 				set_color_scale_bias({scale, scale, scale, 1}, {bias, bias, bias, 0});
 		}
+
+		// One frame the render thread actually presented, for the frame rate readout.
+		++displayed_frames;
 
 		accumulate_metrics(frame_state.predictedDisplayTime, current_blit_handles, timestamps);
 

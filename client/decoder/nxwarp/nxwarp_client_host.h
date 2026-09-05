@@ -50,6 +50,7 @@ public:
 	void with_queue(const std::function<void(vk::Queue)> & fn) override;
 	XrTime now() override;
 	void send_feedback(uint8_t stream_index, uint8_t path_id, std::vector<uint8_t> payload) override;
+	void report_frame_lost(const wivrn::from_headset::feedback &) override;
 	void publish(shard_accumulator * accumulator, std::shared_ptr<decoder::blit_handle> handle) override;
 };
 

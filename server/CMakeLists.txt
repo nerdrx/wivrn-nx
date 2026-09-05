@@ -247,6 +247,7 @@ if (WIVRN_BUILD_SERVER)
 		if (TARGET nxvc::vk_decoder AND TARGET spdlog::spdlog)
 			add_executable(wivrn-nxwarp-e2e
 				encoder/nxwarp_e2e.cpp
+				driver/bitrate_controller.cpp
 				encoder/video_encoder_nxwarp.cpp
 				encoder/nxwarp_codec_ref.cpp
 				encoder/nxwarp_packetize.cpp

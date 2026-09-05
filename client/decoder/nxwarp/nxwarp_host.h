@@ -79,6 +79,17 @@ public:
 	// stream without guessing at the order they close in.
 	virtual void on_frame_unit(uint16_t frame_id, std::span<const uint8_t>) {}
 
+	// A frame that will never be decoded: it closed with a hole. The feedback carries
+	// the frame's index, its stream and the arrival of its first datagram, and no
+	// sent_to_decoder -- which is precisely how every other decoder in this client
+	// reports a frame that never arrived, and what the server's automatic bitrate
+	// counts as a lost frame. Called on the network thread.
+	//
+	// Deliberately separate from publish(): there is no picture and no blit handle to
+	// hang one on, and the two callers want different things from it (the client puts
+	// it on the control socket, wivrn-nxwarp-e2e counts it).
+	virtual void report_frame_lost(const wivrn::from_headset::feedback &) {}
+
 	// A decoded frame, with the view_info it was rendered for.
 	virtual void publish(shard_accumulator * accumulator, std::shared_ptr<decoder::blit_handle> handle) = 0;
 };

@@ -364,7 +364,30 @@ private:
 	uint16_t newest_frame = 0; // highest frame id seen
 	uint16_t retired_frame = 0;
 	bool any_retired = false;
-	uint64_t wivrn_frame_idx = 0;
+	// The 64-bit frame index every from_headset::feedback for this stream carries.
+	//
+	// It is the SENDER's frame id, widened, and it has to be: the server's bitrate
+	// controller joins the per-stream feedback of one frame by this number (its frame
+	// ring keys on it), and the render thread pairs the eyes by it. A client-local
+	// counter over "frames this decoder managed to reassemble" -- which is what this
+	// used to be -- is neither. It advances once per surviving frame, so the instant
+	// one eye loses a frame the other did not, the two eyes number every later frame
+	// differently and never agree again: the eyes stop pairing ("Failed to find a
+	// common frame for all decoders") and, worse, the bitrate controller starts
+	// joining two DIFFERENT frames into one of its ring entries and measuring the
+	// span between their arrivals as though it were one frame's time on the wire.
+	// That reads as a link delivering a frame in a whole frame period, i.e. as severe
+	// congestion, on a link with nothing wrong with it -- which is exactly how the
+	// automatic bitrate ended up pinned at its floor and never probing back up.
+	//
+	// The wire id is the same number on both eyes for one compositor frame (the
+	// server stamps uint16_t(frame_id) on every stream), survives a frame this
+	// decoder drops, and is what every other part of this class already keys on.
+	// Widening it is only about the 16-bit wrap; see wire_frame_index().
+	uint64_t wire_epoch = 1; // 1-based so an id behind a wrap can look one back
+	uint16_t wire_newest = 0;
+	bool wire_seeded = false;
+	uint64_t wire_frame_index(uint16_t frame_id);
 
 
 	// --- worker

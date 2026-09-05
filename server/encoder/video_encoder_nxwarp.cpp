@@ -898,6 +898,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	if (not pace_admit(std::chrono::steady_clock::now()))
 	{
 		++prof_paced_out;
+		++paced_out_total;
 		// The pose in this slot belongs to a frame that was not sent, so nothing may
 		// encode from it later.
 		in[slot].have_view_info = false;
@@ -1152,15 +1153,22 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 			// thing to look at rather than a field to scan past. Every one of
 			// these cost an all-intra frame.
 			const uint64_t nh = not_held_total.load();
+			const uint64_t answered = not_held_already_answered.load();
 			if (nh != not_held_reported)
 			{
+				const uint64_t already = answered - not_held_answered_reported;
+				not_held_answered_reported = answered;
 				static constexpr const char * why_name[] = {"a hole", "the decode stride",
 				                                            "the worker backlog", "a codec refusal"};
 				const uint8_t w = last_not_held_why.load();
 				U_LOG_I("nxwarp: stream %d the headset did not reconstruct %llu frame(s) since the "
-				        "last report; each cost an all-intra frame. Last was frame %u, dropped by %s",
+				        "last report; %llu of them cost an all-intra frame and %llu named a frame "
+				        "older than one already coded intra and cost nothing. Last was frame %u, "
+				        "dropped by %s",
 				        int(stream_idx),
 				        (unsigned long long)(nh - not_held_reported),
+				        (unsigned long long)((nh - not_held_reported) - already),
+				        (unsigned long long)already,
 				        unsigned(last_not_held_id.load()),
 				        w < 4 ? why_name[w] : "an unknown cause");
 				not_held_reported = nh;
@@ -1269,9 +1277,14 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	sent_frame_id = frame_id16;
 	sent_frame_id_seeded = true;
 	++sent_frames;
-	// And now the headset can be told which frame it may trust again.
+	// And now the headset can be told which frame it may trust again -- and the
+	// network thread can start discarding the not-held reports this frame answers.
 	if (resync_this_frame)
+	{
+		last_resync_id.store(frame_id16, std::memory_order_relaxed);
+		have_resync.store(true, std::memory_order_release);
 		send_resync_notice(frame_id16);
+	}
 	previous_frame_id = frame_id16;
 	have_previous_frame = true;
 
@@ -1291,8 +1304,24 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 void wivrn::video_encoder_nxwarp::on_nxwarp_frame_not_held(
         uint16_t frame_id, from_headset::nxwarp_frame_not_held::reason why)
 {
-	// Network thread. Nothing here but the flag: the receipt map is the encode
+	// Network thread. Nothing here but the flags: the receipt map is the encode
 	// thread's, and the next encode() is the only place it may be touched.
+	//
+	// A report naming a frame older than the last resync point is already answered --
+	// nothing the encoder has in flight predicts from it, because everything since
+	// that point chains back to a frame that was coded intra. See last_resync_id. It
+	// is still counted, because "the headset threw away 60 frames" is worth seeing
+	// whether or not each one cost anything.
+	if (have_resync.load(std::memory_order_acquire) and
+	    int16_t(frame_id - last_resync_id.load(std::memory_order_relaxed)) < 0)
+	{
+		not_held_total.fetch_add(1, std::memory_order_relaxed);
+		not_held_already_answered.fetch_add(1, std::memory_order_relaxed);
+		if (why == from_headset::nxwarp_frame_not_held::reason::stride)
+			stride_not_held.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+
 	last_not_held_id = frame_id;
 	last_not_held_why = uint8_t(why);
 	// The pace controller reads only the stride reason: it is the one that means "you

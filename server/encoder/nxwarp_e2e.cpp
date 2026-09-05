@@ -128,6 +128,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <deque>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -902,6 +903,14 @@ int main(int argc, char ** argv)
 	// 90 Hz. With --present-hz 90 the frames arrive when a compositor would make them,
 	// and "how many of them did the pace send" is the number the headset would see.
 	double present_hz = 0;
+	// Hold each not-held report back this many presented frames before handing it to
+	// the encoder. Zero is the harness's own behaviour -- the report is delivered in
+	// the same loop iteration that produced it, which no network does. On a live link
+	// it crosses the control socket, so the encoder has coded several more frames by
+	// the time it lands, and a report that names a frame the encoder has already
+	// answered with an all-intra one is the common case rather than the rare one.
+	// That is the case last_resync_id exists for, and this is how it gets exercised.
+	uint32_t feedback_delay = 0;
 	uint32_t width = 320, height = 240, frames = 12, seed = 1;
 	double loss = 0.0, reorder = 0.0;
 	// The headset app restarted, or the link dropped and came back, while the server's
@@ -992,6 +1001,8 @@ int main(int argc, char ** argv)
 			client_decode_ms = std::stod(next());
 		else if (a == "--present-hz")
 			present_hz = std::stod(next());
+		else if (a == "--feedback-delay")
+			feedback_delay = uint32_t(std::stoul(next()));
 		else
 		{
 			std::fprintf(stderr, "unknown argument %s\n", a.c_str());
@@ -1168,6 +1179,7 @@ int main(int argc, char ** argv)
 	// declares them, and the presented-frame index of the last stride one -- which is
 	// what says whether the pace settled or is still being told it is too fast.
 	std::array<uint64_t, 4> not_held_by_reason{};
+	std::deque<std::pair<uint32_t, from_headset::nxwarp_frame_not_held>> not_held_in_flight;
 	uint64_t last_stride_not_held_at = 0;
 	bool any_stride_not_held = false;
 	std::vector<view_info_t> presented;
@@ -1309,6 +1321,20 @@ int main(int argc, char ** argv)
 				std::lock_guard lock(host.m);
 				nh.swap(host.not_held);
 			}
+			// The control socket's latency, when one was asked for: the report is
+			// queued and handed over `feedback_delay` presented frames later.
+			if (feedback_delay)
+			{
+				for (auto & p: nh)
+					not_held_in_flight.emplace_back(i + feedback_delay, p);
+				nh.clear();
+				while (not not_held_in_flight.empty() and
+				       not_held_in_flight.front().first <= i)
+				{
+					nh.push_back(not_held_in_flight.front().second);
+					not_held_in_flight.pop_front();
+				}
+			}
 			for (const auto & p: nh)
 			{
 				++not_held_packets;
@@ -1372,6 +1398,14 @@ int main(int argc, char ** argv)
 		            (unsigned long long)not_held_by_reason[1],
 		            (unsigned long long)not_held_by_reason[2],
 		            (unsigned long long)not_held_by_reason[3]);
+		{
+			const auto p = enc.profile();
+			std::printf("not-held reports the encoder charged for: %llu of %llu; %llu named a "
+			            "frame older than one already coded intra and cost nothing\n",
+			            (unsigned long long)(p.not_held - p.not_held_already_answered),
+			            (unsigned long long)p.not_held,
+			            (unsigned long long)p.not_held_already_answered);
+		}
 		std::printf("all-intra resyncs: %llu of %llu sent frames (%.1f%%) were coded with no "
 		            "temporal reference because the headset had reported one not held\n",
 		            (unsigned long long)link.resync_notices, (unsigned long long)sent_frames,

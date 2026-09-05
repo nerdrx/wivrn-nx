@@ -605,7 +605,8 @@ void nxwarp_decoder::fire_bands_through(inflight_frame & f, uint8_t last_band)
 		auto packet = receiver->band_deadline(f.frame_id, b, now_us(), 0, f.path_id);
 		if (packet.empty())
 			continue;
-		host.send_feedback(stream_index, f.path_id, std::move(packet));
+		host.send_feedback(stream_index, f.path_id, std::move(packet),
+		                   decode_us_report.load(std::memory_order_relaxed));
 	}
 }
 
@@ -735,6 +736,23 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 	}
 
 	host.on_frame_unit(f.frame_id, unit);
+
+	// The interval between arriving frames, which is what the decode stride is
+	// measured against. Counted over every frame that arrives whole, including the
+	// ones the stride is about to discard: it is the SERVER's send rate, and the
+	// stride's own decisions must not feed back into it.
+	{
+		const auto now = std::chrono::steady_clock::now();
+		if (arrival_seeded)
+		{
+			const double dt = std::chrono::duration<double, std::milli>(now - arrival_last).count();
+			const double prev = double(arrival_period_ms.load(std::memory_order_relaxed));
+			arrival_period_ms.store(float(prev > 0 ? prev + 0.2 * (dt - prev) : dt),
+			                        std::memory_order_relaxed);
+		}
+		arrival_last = now;
+		arrival_seeded = true;
+	}
 
 	decode_job job;
 	job.frame_id = f.frame_id;
@@ -869,6 +887,11 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		host.report_frame_not_held(stream_index, job.frame_id, from_headset::nxwarp_frame_not_held::reason::refused);
 		return;
 	}
+	// A slow device, on purpose (see sim_decode_ms). Inside the measured interval, so
+	// everything downstream -- the stride, the queue bound, the decode figure the
+	// server paces to -- sees it as the decode cost it is pretending to be.
+	if (sim_decode_ms > 0)
+		std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(sim_decode_ms));
 
 	nxvc_vkd_images img{};
 	if (nxvc_vk_decoder_images(nxvc, &img) != NXVC_VKD_OK or img.count < 2)
@@ -1116,6 +1139,18 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		prof.pass_b_ms += st.pass_b_ms;
 		prof.gpu_ms += st.gpu_ms;
 		prof.bytes += job.unit.size();
+
+		// What this frame cost, published for the server. The same wall time the
+		// stride below is derived from, smoothed with a fifth-weight EWMA so a
+		// single slow frame moves it a little and a sustained change moves it
+		// within a handful of frames. Saturated at the 16-bit field's range.
+		{
+			const double wall_us = ms(t_end - t_decode0) * 1000.0;
+			const double prev = double(decode_us_report.load(std::memory_order_relaxed));
+			const double next = prev > 0 ? prev + 0.2 * (wall_us - prev) : wall_us;
+			decode_us_report.store(uint16_t(std::clamp(next, 0.0, 65535.0)),
+			                       std::memory_order_relaxed);
+		}
 		if (t_end - prof.since > std::chrono::seconds(2))
 		{
 			const double n = prof.n;
@@ -1134,8 +1169,17 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			// Feed the shared stride from this stream's measured cost: ceil(wall / period).
 			// Streams only ever raise it quickly and lower it by one step per report, so
 			// a momentary hiccup does not flip the selection back and forth.
+			//
+			// The period is the measured interval between ARRIVING frames, not the 90 Hz
+			// the server composites at: the stride exists to drop the frames this device
+			// cannot keep up with, and "keep up" is relative to the rate they turn up at.
+			// A server pacing its sends to what this decoder reported it can manage
+			// (from_headset::nxwarp_feedback::decode_us) would otherwise still have had
+			// two frames in three thrown away here. Falls back to the frame period the
+			// stream description gave when nothing has arrived yet.
 			{
-				constexpr double period_ms = 1000.0 / 90.0;
+				const double arrival = double(arrival_period_ms.load(std::memory_order_relaxed));
+				const double period_ms = arrival > 0.1 ? arrival : double(frame_period_us) / 1000.0;
 				const uint32_t want = std::clamp<uint32_t>(uint32_t(std::ceil((prof.wall_ms / n) / period_ms)), 1u, 8u);
 				uint32_t cur = g_decode_stride.load();
 				const uint32_t next = want > cur ? want : (cur > 1 ? cur - 1 : 1);

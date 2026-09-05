@@ -415,7 +415,10 @@ public:
 	// One NX Warp feedback packet from the headset, verbatim, on the network
 	// thread. Only the NX Warp encoder does anything with it; every other backend
 	// is on the shard path and hears about loss through on_feedback and nack.
-	virtual void on_nxwarp_feedback(uint8_t path_id, std::span<const uint8_t> payload) {}
+	// `decode_us` is the headset's own decode cost per frame for this stream, or 0
+	// before it has decoded anything; see from_headset::nxwarp_feedback::decode_us.
+	virtual void on_nxwarp_feedback(uint8_t path_id, std::span<const uint8_t> payload,
+	                                uint16_t decode_us) {}
 	// One frame the headset received and did not reconstruct. See
 	// from_headset::nxwarp_frame_not_held: it is the correction the transport's own
 	// feedback structurally cannot carry, because that is sent before the decoder has

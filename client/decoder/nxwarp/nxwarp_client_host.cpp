@@ -59,10 +59,11 @@ XrTime nxwarp_application_host::now()
 	return application::get_xr_instance().now();
 }
 
-void nxwarp_application_host::send_feedback(uint8_t stream_index, uint8_t path_id, std::vector<uint8_t> payload)
+void nxwarp_application_host::send_feedback(uint8_t stream_index, uint8_t path_id,
+                                           std::vector<uint8_t> payload, uint16_t decode_us)
 {
 	if (auto scene = weak_scene.lock())
-		scene->send_nxwarp_feedback(stream_index, path_id, std::move(payload));
+		scene->send_nxwarp_feedback(stream_index, path_id, std::move(payload), decode_us);
 }
 
 void nxwarp_application_host::report_frame_lost(const wivrn::from_headset::feedback & fb)

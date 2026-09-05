@@ -162,22 +162,36 @@ class video_encoder_nxwarp : public video_encoder
 	//
 	// Set on the network thread by on_nxwarp_frame_not_held, consumed by the next
 	// encode(). See from_headset::nxwarp_frame_not_held for what the packet is; what
-	// matters here is the rule, and the rule is deliberately blunt:
+	// matters here is the rule:
 	//
-	//   ANY frame the headset did not reconstruct resets the receipt map, whichever
-	//   frame it names.
+	//   a frame the headset did not reconstruct resets the receipt map, UNLESS it is
+	//   older than a frame this encoder has already coded intra.
 	//
-	// Not "zero the tiles of that frame", because a frame the headset never built
-	// poisons the whole chain that predicts from it, and by the time the packet has
-	// crossed the network the encoder has usually moved on to a later frame anyway --
-	// so the tiles of the named frame are no longer the tiles anything is predicting
-	// from. The only statement that is still true when the packet lands is the general
-	// one: this headset's reference is not what the encoder thinks it is. An all-zero
-	// receipt map says exactly that, nxvc documents it as the way to say it, and it
-	// costs one all-intra frame.
+	// The reset is not "zero the tiles of that frame", because a frame the headset
+	// never built poisons the whole chain that predicts from it, and by the time the
+	// packet has crossed the network the encoder has usually moved on -- so the tiles
+	// of the named frame are no longer the tiles anything is predicting from. The only
+	// statement still true when the packet lands is the general one: this headset's
+	// reference is not what the encoder thinks it is. An all-zero receipt map says
+	// exactly that, nxvc documents it as the way to say it, and it costs one all-intra
+	// frame.
 	//
-	// Several drops between two encodes cost one intra frame between them, not one
-	// each, which is what an atomic flag rather than a queue of ids buys.
+	// The exception is what keeps that cost bounded, and last_resync_id below is the
+	// whole of it: everything the encoder has in flight chains back to the last frame
+	// it coded intra, so a report naming anything older is already answered.
+	//
+	// Two things therefore keep a burst of reports to one intra frame: this atomic
+	// flag rather than a queue of ids, which coalesces the ones that arrive between
+	// two encodes, and last_resync_id, which discards the ones that arrive after the
+	// answer has already gone out.
+	//
+	// What is deliberately NOT here is falling back to an OLDER reference than the
+	// last frame -- keeping frame N-2 as the prediction source when the headset lost
+	// N-1. nxvc has a four-slot ring and both its encoders address it internally, but
+	// neither C API (nxvc.h, nxvc_vk_enc.h) exposes a way to choose a slot: the only
+	// lever a caller has is set_received_tiles() over the tiles of the frame just
+	// encoded, and its all-zero form. Doing better needs an nxvc encoder API that does
+	// not exist yet.
 	std::atomic<bool> client_dropped_frame{false};
 	// The last one reported and why, for the two-second report. Written under no lock:
 	// they are for a log line, and a torn read of them costs a wrong number in a log.
@@ -185,6 +199,124 @@ class video_encoder_nxwarp : public video_encoder
 	std::atomic<uint8_t> last_not_held_why{0};
 	std::atomic<uint64_t> not_held_total{0};
 	uint64_t not_held_reported = 0;
+
+	// --- which not-held reports are already answered -------------------------
+	//
+	// The wire frame id of the last frame this encoder coded with an all-zero receipt
+	// map -- the last resync point -- written by the encode thread and read by the
+	// network thread.
+	//
+	// It is what makes a not-held report cost at most one intra frame between two
+	// resyncs rather than one each. A report crosses the network, so by the time it
+	// lands the encoder has usually moved on several frames, and a burst of them (two
+	// eyes, or the client's bounded queue discarding four frames at once and naming
+	// all four) arrives spread over several encodes. Every one of those used to force
+	// its own all-intra frame.
+	//
+	// The rule is exact rather than a heuristic. Every frame after the resync point R
+	// predicts, through its predecessors, from R; R itself predicts from nothing. So a
+	// report naming a frame OLDER than R names a picture nothing in flight depends on:
+	// the newest reference the encoder's shadow still holds is R, R is intra, and the
+	// headset can decode it whatever it did with the older frame. There is nothing
+	// left to answer, and answering anyway costs an intra frame and, at 29 KB a frame
+	// on a Pico 4, makes the next decode slower -- which is how the storm fed itself.
+	//
+	// N == R is NOT older: if the headset did not reconstruct the resync frame itself,
+	// everything predicting from it is contaminated and a new one is owed.
+	std::atomic<uint16_t> last_resync_id{0};
+	std::atomic<bool> have_resync{false};
+	// Reports the rule above discarded, for the two-second line.
+	std::atomic<uint64_t> not_held_already_answered{0};
+	uint64_t not_held_answered_reported = 0;
+
+	// --- what the headset costs to decode ------------------------------------
+	//
+	// Microseconds per frame, as the headset measures it, off every feedback packet
+	// (from_headset::nxwarp_feedback::decode_us). Written on the network thread, read
+	// by the encode thread. Zero until the headset has decoded something.
+	//
+	// This is the number the whole pacing question turns on. The server composites at
+	// 90 Hz and used to encode and send all 90 of them; a headset whose decoder takes
+	// 31 ms a frame can take 32 a second, and each of the other 58 was received, thrown
+	// away, reported as not held, and answered with an all-intra frame -- which is
+	// larger, which makes the decode slower still.
+	std::atomic<uint16_t> client_decode_us{0};
+
+	// --- send pacing ---------------------------------------------------------
+	//
+	// THE PROBLEM. The compositor produces 90 frames a second and this encoder used to
+	// encode and send every one of them. The Pico 4's NX Warp decoder takes 15-17 ms
+	// per eye and keeps a queue of one, so it decoded about one frame in four and threw
+	// the rest away -- and it is not free to throw a frame away: the headset reports
+	// each one (from_headset::nxwarp_frame_not_held) and the answer is an all-intra
+	// frame, which is three times the size, which makes the decode slower, which
+	// throws away more. Measured on a live session: 614 frames dropped late per two
+	// seconds per stream, 60 all-intra resyncs in the same window, inter prediction
+	// never engaging once, every frame ~29 KB. The bytes for three frames in four were
+	// spent to make the picture worse.
+	//
+	// THE FIX. Do not send what the headset cannot decode. The headset says what a
+	// frame costs it (from_headset::nxwarp_feedback::decode_us); a composited frame
+	// that arrives sooner than that cost since the last SENT frame is dropped HERE --
+	// no encode, no bytes, no shadow update, no wire frame id. What the headset then
+	// receives is a stream at its own rate, which it decodes whole, which means it
+	// stops reporting frames it did not reconstruct, which means the encoder stops
+	// coding intra and inter prediction engages, which makes the frames smaller and
+	// the decode faster.
+	//
+	// WHY THE FRAME IDS MOVE WITH IT. `sent_frame_id` counts sent frames, not
+	// composited ones. The client's reassembly window and its widening of the 16-bit
+	// id (nxwarp_decoder::wire_frame_index) read a gap in the sequence as a frame that
+	// was lost, and the delivery reports built from it are what WiVRn's automatic
+	// bitrate calls congestion. A paced gap is not loss and must not look like it, so
+	// there is no gap: the wire sequence is dense over the frames that were sent.
+	enum class pace_mode_t
+	{
+		off,       // "pace": "off" -- send every composited frame, the old behaviour
+		automatic, // "pace": "auto" -- follow the headset's reported decode cost
+		fixed,     // "pace": "<fps>" -- an explicit rate, whatever the headset says
+	};
+	pace_mode_t pace_mode = pace_mode_t::automatic;
+	// Seconds between sent frames. Starts at the fastest the band allows, so a stream
+	// whose headset has not reported anything yet behaves exactly as it did before.
+	double pace_interval = 1.0 / 90.0;
+	// The band the controller may move in. 90 fps because there is nothing above the
+	// compositor's rate to pace to, and 15 fps because a headset that cannot decode
+	// 15 frames a second has a problem pacing cannot solve and slowing further only
+	// makes the picture staler.
+	static constexpr double pace_min_interval = 1.0 / 90.0;
+	static constexpr double pace_max_interval = 1.0 / 15.0;
+	std::chrono::steady_clock::time_point pace_last_sent{};
+	bool pace_have_last = false;
+	// Not-held reports whose reason was the decode stride, and the count the pace
+	// controller has already acted on. Only the stride: it is the one reason that
+	// means "you are sending faster than I can decode". A hole is the link's fault, a
+	// codec refusal is the codec's, and pacing down for either would be treating a
+	// different problem.
+	std::atomic<uint64_t> stride_not_held{0};
+	uint64_t pace_stride_seen = 0;
+
+	// Composited frames dropped by the pace, over the two-second report window and
+	// over the life of the stream.
+	uint64_t prof_paced_out = 0;
+	uint64_t paced_out_total = 0;
+
+	// The frame id on the wire. Counts SENT frames: seeded from the first frame the
+	// encoder actually sends and incremented once per frame that reaches the socket,
+	// so the sequence the client sees has no holes in it that pacing put there.
+	uint16_t sent_frame_id = 0;
+	bool sent_frame_id_seeded = false;
+	// Sent frames since the stream started, which is what the stream header's period
+	// counts in -- a paced stream still gets a header every header_period_frames
+	// frames the client can actually see.
+	uint64_t sent_frames = 0;
+
+	// Move `pace_interval` toward what the headset's reported decode cost asks for.
+	// Called once per composited frame, before the admission test below.
+	void run_pace_control();
+	// Should this composited frame be sent? Takes the pace decision and, when the
+	// answer is yes, marks `now` as the last send.
+	bool pace_admit(std::chrono::steady_clock::time_point now);
 
 	// The stream header goes out on the control (TCP) socket, because a client
 	// that misses it cannot decode anything at all. Repeated periodically so a
@@ -288,7 +420,8 @@ public:
 
 	std::optional<data> encode(uint8_t slot, uint64_t frame_id) override;
 
-	void on_nxwarp_feedback(uint8_t path_id, std::span<const uint8_t> payload) override;
+	void on_nxwarp_feedback(uint8_t path_id, std::span<const uint8_t> payload,
+	                        uint16_t decode_us) override;
 	void on_nxwarp_frame_not_held(uint16_t frame_id,
 	                              from_headset::nxwarp_frame_not_held::reason why) override;
 
@@ -318,10 +451,27 @@ public:
 		// read after it, the QP is the one the controller just moved to.
 		uint32_t qp = 0;
 		double target_bytes = 0;
+		// Frames the headset reported it did not reconstruct, and how many of those
+		// named a frame older than one already coded intra and so cost nothing. The
+		// difference is what the not-held path actually charged the stream.
+		uint64_t not_held = 0;
+		uint64_t not_held_already_answered = 0;
+		// Composited frames the pace declined to send, and the interval it is at.
+		uint64_t paced_out = 0;
+		double pace_fps = 0;
 	};
 	encode_profile profile() const
 	{
-		return {prof_total_n, prof_total_ms, prof_total_max_ms, prof_total_bytes, current_qp, rc_target_bytes};
+		return {prof_total_n,
+		        prof_total_ms,
+		        prof_total_max_ms,
+		        prof_total_bytes,
+		        current_qp,
+		        rc_target_bytes,
+		        not_held_total.load(std::memory_order_relaxed),
+		        not_held_already_answered.load(std::memory_order_relaxed),
+		        paced_out_total,
+		        pace_mode == pace_mode_t::off ? 0.0 : (pace_interval > 0 ? 1.0 / pace_interval : 0.0)};
 	}
 };
 

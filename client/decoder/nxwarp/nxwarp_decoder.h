@@ -96,6 +96,18 @@ class nxwarp_decoder : public decoder
 		double wait_ms = 0, wall_ms = 0, pass_a_ms = 0, pass_b_ms = 0, gpu_ms = 0;
 		uint64_t bytes = 0;
 	} prof;
+	// What one frame of this stream currently costs this device to decode, in
+	// microseconds, published for the network thread to put on every feedback packet
+	// (from_headset::nxwarp_feedback::decode_us). Written by the worker after every
+	// frame as an exponential moving average of the same wall time prof.wall_ms
+	// accumulates and the decode stride is derived from -- deliberately the same
+	// number, so the rate the server paces to and the rate this decoder selects
+	// frames at are answers to one measurement rather than two.
+	//
+	// An EWMA rather than the two-second mean the log line prints: the server's pace
+	// controller does its own smoothing, and feeding it a figure that only moves twice
+	// a minute would make that loop as slow as the report interval.
+	std::atomic<uint16_t> decode_us_report = 0;
 	// Network-thread counters for the same report.
 	std::chrono::steady_clock::time_point net_since = std::chrono::steady_clock::now();
 	uint64_t net_holes = 0, stragglers_dropped = 0;
@@ -110,6 +122,34 @@ class nxwarp_decoder : public decoder
 	// Value of net_frames when the current two-second window opened.
 	uint64_t net_frames_mark = 0;
 	nxwarp_wire::reassemble_report last_hole;
+	// --- how fast frames actually arrive -------------------------------------
+	//
+	// When the previous frame unit was handed toward the worker, and a smoothed
+	// interval between them: the rate this stream is being SENT at, measured on the
+	// network thread.
+	//
+	// The decode stride below is "how many arriving frames does one decode take", and
+	// that question has an arrival rate in it. It used to be answered against a
+	// hard-coded 90 Hz, which is the rate the server composites at and was the rate it
+	// sent at -- so a 31 ms decode gave a stride of 3 and the decoder threw away two
+	// frames in three for ever. It kept giving 3 no matter what the server did about
+	// it: a server that paced its sends down to the rate this device can actually
+	// manage would still have had two frames in three discarded here, each one
+	// reported as not held and answered with an all-intra frame. Against the measured
+	// arrival period the same 31 ms decode gives a stride of 1 as soon as the frames
+	// are 31 ms apart, which is what closes that loop.
+	std::chrono::steady_clock::time_point arrival_last{};
+	bool arrival_seeded = false;
+	std::atomic<float> arrival_period_ms = 0;
+
+	// Harness hook: pretend a decode costs this many milliseconds on top of what it
+	// really costs (set_simulated_decode_ms). Zero everywhere but in
+	// wivrn-nxwarp-e2e, whose desktop GPU decodes far too fast to reproduce a
+	// headset's decode stride otherwise. It is a real wait on the worker thread, so
+	// the stride, the bounded queue, the not-held reports and the decode figure sent
+	// to the server are all the shipping ones reacting to a slow device.
+	double sim_decode_ms = 0;
+
 	std::atomic<int64_t> jobs_pending = 0;
 	// Deepest the worker's backlog is allowed to get before the older frames are
 	// discarded in favour of the newest one. Two lets one frame decode while the
@@ -251,6 +291,12 @@ public:
 	               shard_accumulator * accumulator);
 
 	~nxwarp_decoder() override;
+
+	// See sim_decode_ms. For wivrn-nxwarp-e2e; must be set before the first frame.
+	void set_simulated_decode_ms(double ms)
+	{
+		sim_decode_ms = ms;
+	}
 
 	// The shard path is not used: NX Warp has its own datagram type.
 	void push_data(std::span<std::span<const uint8_t>> data, uint64_t frame_index, bool partial) override {}

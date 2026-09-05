@@ -385,6 +385,7 @@ Per-stream `options` (all optional):
 | `intra-dir` | `on` | directional intra prediction (tool 17). It is most of the CPU encoder's time at headset resolutions; `off` codes the DC-plane predictor only, for more bits and a much faster encode |
 | `preset` | `1` | nxvc effort preset: `0` medium, `1` fast, `2` slow. Encoder-side only |
 | `threads` | `0` | encoder worker threads for the tile pool: `0` uses every core (capped at 16), `1` is the serial path. Byte-identical either way |
+| `pace` | `auto` | send pacing: `auto` follows the rate the headset reports it can decode at, `off` sends every composited frame, a number is a fixed frame rate. See below |
 | `band-rows` | `6` | tile rows per transport band, which is the unit of pacing and of feedback |
 | `mtu` | `1280` | transport MTU. Leaves room for WiVRn's own packet envelope inside a 1400-byte datagram |
 
@@ -427,6 +428,41 @@ prints the applied QP next to the bytes it bought and the budget they were aimed
 
 `"rc": "fixed"` is the old behaviour — this encoder's `qp` for the whole session, whatever
 the link is doing — and the ceiling is then ignored, which the log says once.
+
+#### Send pacing
+
+The compositor produces 90 frames a second. A Pico 4's NX Warp decoder takes 15–17 ms per
+eye and keeps a queue of one, so it decodes about one frame in four — and dropping the
+other three is not free. The headset reports every frame it does not reconstruct, and the
+server's answer is an all-intra frame: three times the size, slower to decode, so more get
+dropped. Measured on a live session, that loop held inter prediction off entirely, at 614
+frames dropped per two seconds per stream.
+
+`"pace": "auto"` breaks it by not sending what cannot be decoded. The headset puts its own
+measured decode cost on every feedback packet; the encoder keeps an interval derived from
+it — the decode time plus a tenth of it plus a millisecond — and a composited frame that
+arrives sooner than that since the last frame it **sent** is dropped before anything is
+spent on it: no encode, no bytes, no transport state, no frame id. The interval slews a
+twentieth of the way to the target every frame and jumps five percent slower on every
+frame the headset reports it dropped by its decode stride, clamped to 90…15 fps. The
+asymmetry is the point: being too slow costs frame rate, being too fast costs an intra
+frame *and* the frame rate.
+
+Frame ids on the wire count sent frames, not composited ones, so a paced gap never reaches
+the client as a gap — a hole in the sequence is loss to its reassembler and to the delivery
+reports WiVRn's automatic bitrate reads, and a paced frame is not lost.
+
+A headset that has not reported a decode cost is not paced at all, so the first frames of a
+session, and a client too old to carry the field, behave exactly as they did before.
+
+The two-second encode report carries the pace, the decode figure it came from, and how many
+composited frames were not sent.
+
+| option | default | |
+| --- | --- | --- |
+| `pace` | `auto` | follow the headset's reported decode cost |
+| | `off` | send every composited frame — the behaviour before pacing existed |
+| | `30` | a fixed frame rate, honoured exactly whatever the headset reports |
 
 | option | default | |
 | --- | --- | --- |

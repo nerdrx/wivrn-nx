@@ -306,6 +306,15 @@ void nxwarp_decoder::push_datagram(to_headset::nxwarp_datagram && dg)
 	if (not nxt::decode_header(dg.payload.data(), &h))
 		return;
 
+	// A straggler from a frame that was already retired must not reopen it: it would
+	// close the frame under assembly with a hole, and the next datagram of that frame
+	// would reopen *it* -- a cascade that holed every frame of a live session once the
+	// two eye streams' timing lined up. Frame ids are sequential modulo 2^16.
+	if (assembling and int16_t(uint16_t(h.frame_id) - uint16_t(assembling_frame)) < 0)
+	{
+		++stragglers_dropped;
+		return;
+	}
 	// A new frame retires the previous one: fire whatever band deadlines it still owes,
 	// so its feedback goes out, then decode what arrived.
 	if (assembling and h.frame_id != assembling_frame)
@@ -400,8 +409,8 @@ void nxwarp_decoder::finish_frame(uint8_t path_id)
 		const auto now = std::chrono::steady_clock::now();
 		if (now - net_since > std::chrono::seconds(2))
 		{
-			spdlog::info("nxwarp[{}] net: {} frames closed in {:.1f} s, {} with a hole, {} queued for the worker, {} decoded so far",
-			             stream_index, net_frames, std::chrono::duration<double>(now - net_since).count(), net_holes, jobs_pending.load(), frames_decoded);
+			spdlog::info("nxwarp[{}] net: {} frames closed in {:.1f} s, {} with a hole, {} queued for the worker, {} decoded so far, {} stragglers dropped",
+			             stream_index, net_frames, std::chrono::duration<double>(now - net_since).count(), net_holes, jobs_pending.load(), frames_decoded, stragglers_dropped);
 			net_frames = 0;
 			net_holes = 0;
 			net_since = now;

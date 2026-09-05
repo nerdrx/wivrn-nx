@@ -84,7 +84,7 @@
 //   wivrn-nxwarp-e2e --yuv in.yuv --width W --height H [--frames N] [--loss 0.05]
 //                    [--reorder 0.05] [--first-frame 65500] [--seed S] [--nxv-out f.nxv] [--decoded-out f.yuv] [--nxv-dec PATH]
 //                    [--backend ref|vk] [--qp N] [--inter on|off]
-//                    [--intra-period N]
+//                    [--intra-period N] [--coded-vectors default|none|static]
 //                    [--reconnect-at N] [--start-frame-id F]
 //
 //   --reconnect-at N   at frame N the client is thrown away and rebuilt -- new decoder,
@@ -816,6 +816,8 @@ int main(int argc, char ** argv)
 	// all-intra stream its assertions were written against.
 	std::string inter = "false";
 	uint32_t intra_period = 180;
+	// "default" (STATIC when inter is on), "none", or "static".
+	std::string coded_vectors = "default";
 	// "auto" honours the bitrate ceiling below; "fixed" pins --qp for the run.
 	// Default "fixed" here and not in the server: a test whose bytes per frame
 	// drift is not a test whose byte-identity check means anything.
@@ -898,6 +900,8 @@ int main(int argc, char ** argv)
 		}
 		else if (a == "--intra-period")
 			intra_period = uint32_t(std::stoul(next()));
+		else if (a == "--coded-vectors")
+			coded_vectors = next();
 		else if (a == "--qp")
 			qp = uint32_t(std::stoul(next()));
 		else if (a == "--reconnect-at")
@@ -964,6 +968,7 @@ int main(int argc, char ** argv)
 	settings.options["backend"] = backend;
 	settings.options["inter"] = inter;
 	settings.options["intra-period"] = std::to_string(intra_period);
+	settings.options["coded-vectors"] = coded_vectors;
 	// Rate control off by default. The byte-identity check below compares this
 	// run's bitstream against nxv-dec's decode of it, which a moving quantiser
 	// does not disturb -- but the frame sizes and the loss pattern would stop

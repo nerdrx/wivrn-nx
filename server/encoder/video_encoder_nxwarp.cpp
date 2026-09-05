@@ -118,6 +118,24 @@ bool option_bool(const std::map<std::string, std::string> & options,
 	return fallback;
 }
 
+// "coded-vectors": "default" | "none" | "static".  An unknown value is an
+// error rather than a fallback, for the same reason "backend" is: a typo that
+// silently gives a different stream shape is worse than a refusal.
+wivrn::nxwarp_codec_config::coded_vectors_t nxwarp_coded_vectors_from(const std::string & v)
+{
+	using cv = wivrn::nxwarp_codec_config::coded_vectors_t;
+	if (v == "default")
+		return cv::def;
+	if (v == "none")
+		return cv::none;
+	if (v == "static")
+		return cv::statik;
+	throw std::runtime_error(
+	        std::format("nxwarp: \"coded-vectors\": \"{}\" is not one of "
+	                    "default, none, static",
+	                    v));
+}
+
 std::string option_string(const std::map<std::string, std::string> & options,
                           const char * key,
                           const char * fallback)
@@ -197,6 +215,8 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	        .base_qp = current_qp,
 	        .inter = option_bool(settings.options, "inter", false),
 	        .intra_period = option_u32(settings.options, "intra-period", 180),
+	        .coded_vectors = nxwarp_coded_vectors_from(
+	                option_string(settings.options, "coded-vectors", "default")),
 	        .intra_dir = option_bool(settings.options, "intra-dir", true),
 	        .preset = option_u32(settings.options, "preset", 1),
 	        .threads = option_u32(settings.options, "threads", 0),

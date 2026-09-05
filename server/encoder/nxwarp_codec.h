@@ -58,6 +58,22 @@ struct nxwarp_codec_config
 	bool inter = false;
 	// Rolling intra refresh period in frames. 1 forces every tile every frame.
 	uint32_t intra_period = 180;
+	// Which coded-vector mode the inter decision may choose on top of
+	// WARP_SKIP and INTRA. Only the Vulkan backend reads it; the reference
+	// codec runs its own mode search and has every mode.
+	//
+	// The default is STATIC, because on the Vulkan encoder it is free: at
+	// 1088x1088 QP 30 it takes the stream from 13446 to 9303 bytes a frame
+	// AND the encode from 4.79 ms to 4.69, since a frame with fewer coded
+	// tiles is cheaper in the passes that scale with coded tiles than the
+	// search costs before them. `none` exists to pin the older stream shape.
+	enum class coded_vectors_t
+	{
+		def = 0,  // STATIC
+		none = 1, // WARP_SKIP and INTRA only
+		statik = 2,
+	};
+	coded_vectors_t coded_vectors = coded_vectors_t::def;
 	// Encoder-side speed knobs; none of them changes how a stream decodes.
 	// Directional intra (tool 17): costs the CPU encoder most of its time at
 	// this resolution; off codes the DC-plane predictor only.

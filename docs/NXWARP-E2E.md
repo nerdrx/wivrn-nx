@@ -58,15 +58,15 @@ cmake -S ../nx-warp -B build/nxwarp \
     -DCMAKE_INSTALL_PREFIX=$NXWARP_INSTALL -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     -DNXWARP_BUILD_REF=ON -DNXWARP_BUILD_TRANSPORT=ON \
     -DNXWARP_BUILD_VK=ON -DNXWARP_VK_SUBDIRS="common;decoder" \
-    -DNXVC_VK_HEADERS_DIR=$TOOLS/local/include
+    -DNXVC_VK_HEADERS_DIR=$TOOLS/local/include -DNXWARP_VK_REQUIRED=ON
 cmake --build build/nxwarp -j4 --target install
 ```
 
 `NXVC_VK_HEADERS_DIR` is not optional on a box without a system Vulkan SDK: when
 nx-warp's configure finds no Vulkan headers it prints a warning, **skips the Vulkan
 runtime and still succeeds**, and the install then leaves whatever `libnxvc_vk_decoder.a`
-was already in the prefix. Check the library's timestamp after an install you meant to
-refresh the decoder with.
+was already in the prefix. `NXWARP_VK_REQUIRED=ON` turns that skip into a configure
+failure, which is what an install prefix built for a client wants.
 
 Point the server build's `CMAKE_PREFIX_PATH` at that prefix and the target appears. When
 it is missing, configure prints

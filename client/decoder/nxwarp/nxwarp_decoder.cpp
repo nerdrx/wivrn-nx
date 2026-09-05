@@ -399,6 +399,11 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	// nxvc submits on the queue it adopted, which is the host's one graphics queue; hold
 	// the same lock every other submitter in the process holds.
 	host.with_queue([&](vk::Queue) {
+		// The decoder owns one command buffer, one staging buffer and (since the
+		// inter path) a reference ring that frame N writes and frame N+1 reads.
+		// Until nxvc grows a command-buffer ring, an async submit must be fenced
+		// before the next record: wait here, not at present time.
+		nxvc_vk_decoder_wait(nxvc, UINT64_MAX);
 		auto st = nxvc_vk_decode_frame_ex(nxvc, job.unit.data(), job.unit.size(),
 		                                  NXVC_VKD_SUBMIT_ASYNC, &consumed);
 		if (st != NXVC_VKD_OK)

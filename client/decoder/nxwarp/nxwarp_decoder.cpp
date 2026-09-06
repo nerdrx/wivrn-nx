@@ -26,6 +26,22 @@ static std::atomic<uint32_t> g_decode_stride{1};
 
 uint64_t wivrn::nxwarp_client_tools(const vk::PhysicalDeviceProperties & props)
 {
+#ifdef NXVC_VK_DECODER_TOOLS_FOR
+	// nxvc derives the per-device mask itself, from the same table the decoder
+	// uses, so a handshake answered before the decoder exists cannot disagree with
+	// the decoder created later. One call, one rule, on nxvc's side of the line.
+	//
+	// The drift check in on_stream_header() stays. It costs nothing and it is now
+	// pinning something slightly different but still worth pinning: that the mask
+	// the handshake sent is the mask the decoder this build actually created will
+	// accept.
+	return nxvc_vk_decoder_tools_for(props.vendorID, props.deviceName);
+#else
+	// Fallback for an nxvc from before that export, which this branch still has to
+	// build against during the rollout. It is the same rule written a second time,
+	// which is the thing the export exists to remove; delete this arm once the
+	// floor moves past it.
+	//
 	// The PER-DEVICE mask, which is what a handshake must send: nxvc's decoder clears
 	// XFORM_LARGE (bit 27) on an Adreno, because it decodes 16x16 and 32x32 streams
 	// wrong there and WEDGES on the 4:4:4 32x32 conformance vector -- a fence that never
@@ -53,6 +69,7 @@ uint64_t wivrn::nxwarp_client_tools(const vk::PhysicalDeviceProperties & props)
 	}
 	const uint64_t all = nxvc_vk_decoder_tools_supported();
 	return adreno ? (all & ~nxvc_tool_xform_large) : all;
+#endif
 }
 
 #include <nxvc/transport/wire.h>

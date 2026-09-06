@@ -1122,7 +1122,15 @@ void wivrn::video_encoder_nxwarp::run_decode_rate_control()
 	if (decode_s > budget)
 	{
 		const uint32_t step = decode_s > budget * 1.5 ? 2u : 1u;
-		const uint32_t want = std::min(rc_max_qp, rc_decode_floor + step);
+		// The floor is an ABSOLUTE quantiser, so the first step has to start from the
+		// quantiser actually in use -- not from zero. Counting up from zero was the
+		// first version and it is silently inert: with min-qp 24 the floor spends
+		// twenty-four steps below the floor that is already binding, and measured on a
+		// 400-frame run it reached +2 while the picture sat at QP 24 the whole time.
+		const uint32_t base = rc_decode_floor > 0
+		                              ? rc_decode_floor
+		                              : std::max(current_qp, rc_min_qp);
+		const uint32_t want = std::min(rc_max_qp, base + step);
 		if (want != rc_decode_floor)
 		{
 			rc_decode_floor = want;
@@ -1133,9 +1141,15 @@ void wivrn::video_encoder_nxwarp::run_decode_rate_control()
 	}
 	else if (rc_decode_floor > 0 and decode_s < budget * release_frac)
 	{
+		// Released one step at a time, and dropped entirely once it falls back to the
+		// operator's own floor: at or below min-qp this controller is no longer the
+		// thing deciding the picture, and saying it is would misreport the binding.
 		--rc_decode_floor;
-		if (rc_decode_floor == 0)
+		if (rc_decode_floor <= rc_min_qp)
+		{
+			rc_decode_floor = 0;
 			rc_binding = rc_binding_t::none;
+		}
 	}
 }
 

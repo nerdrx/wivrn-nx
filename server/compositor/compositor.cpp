@@ -1662,6 +1662,30 @@ compositor::compositor(wivrn_session & session) :
 		encoders[i] = video_encoder::create(vk, settings, i);
 	}
 
+	// The hybrid base layer's tee. A stream whose role is `base` feeds the
+	// stream it serves, so that encoder can put base-sourced tiles in its atlas
+	// instead of coding them again. Set once, here, because this is the only
+	// place that holds every encoder at the same time.
+	//
+	// Nothing to do for a session with no base layer, which is every session
+	// that has not opted in: encoder_settings leaves the role at its default and
+	// serves_stream at 0xff.
+	for (auto [i, s]: std::ranges::enumerate_view(settings))
+	{
+		if (not s.enabled or s.role != stream_role::base)
+			continue;
+		if (s.serves_stream >= num_streams or not encoders[s.serves_stream])
+		{
+			U_LOG_W("hybrid: stream %u is a base layer serving stream %u, which "
+			        "has no encoder -- base-sourced tiles are off",
+			        unsigned(i),
+			        unsigned(s.serves_stream));
+			continue;
+		}
+		if (encoders[i])
+			encoders[i]->set_base_consumer(encoders[s.serves_stream].get());
+	}
+
 	// The quad layer stream is a bonus, not a requirement: a fourth encode session
 	// is one more than this build has ever asked for and some hardware refuses it.
 	// Losing it must cost the panel's sharpness, not the session.

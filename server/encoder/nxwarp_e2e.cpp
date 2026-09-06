@@ -159,6 +159,14 @@
 #include "driver/bitrate_controller.h"
 #include "encoder/encoder_settings.h"
 #include "encoder/nxwarp_base_patch.h"
+#include "encoder/nxwarp_base_route.h"
+
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavutil/log.h>
+#include <libavutil/opt.h>
+}
+
 #include "encoder/video_encoder_nxwarp.h"
 #include "utils/wivrn_vk_bundle.h"
 
@@ -1228,6 +1236,103 @@ std::vector<uint8_t> make_right_eye(std::span<const uint8_t> left, uint32_t w, u
 // This is what pair_compose is supposed to hand the codec and therefore what the
 // decoded picture has to resemble -- the harness's own arithmetic, so a compose
 // that gets the halves wrong shows up as PSNR against a picture it never built.
+// A real HEVC base layer, for the base-route proof below.
+//
+// libx265 through libavcodec, configured exactly as encoder_settings.cpp
+// configures the hybrid base stream: CTB 64, no B-frames, and -- the part that
+// matters -- FULL-RANGE BT.709, because the atlas's coded sample domain under
+// CT_NONE is full-range BT.709 and a limited-range base is a fixed offset on
+// every patched sample (NXWARP-HYBRID.md 9).
+//
+// `full_range` is a parameter rather than a constant so the harness can encode
+// the WRONG thing on purpose and watch the guard fire. A guard that has only
+// ever been run against correct input is not a guard.
+class base_hevc_encoder
+{
+	AVCodecContext * ctx = nullptr;
+	AVFrame * frm = nullptr;
+	AVPacket * pkt = nullptr;
+
+public:
+	base_hevc_encoder(uint32_t w, uint32_t h, bool full_range)
+	{
+		const AVCodec * c = avcodec_find_encoder_by_name("libx265");
+		if (not c)
+			throw std::runtime_error("no libx265 in libavcodec");
+		ctx = avcodec_alloc_context3(c);
+		ctx->width = int(w);
+		ctx->height = int(h);
+		ctx->time_base = AVRational{1, 90};
+		ctx->framerate = AVRational{90, 1};
+		ctx->pix_fmt = full_range ? AV_PIX_FMT_YUVJ420P : AV_PIX_FMT_YUV420P;
+		ctx->color_range = full_range ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
+		ctx->colorspace = AVCOL_SPC_BT709;
+		ctx->color_primaries = AVCOL_PRI_BT709;
+		ctx->color_trc = AVCOL_TRC_BT709;
+		ctx->max_b_frames = 0;
+		ctx->gop_size = 180;
+		// One in, one out on the ENCODER too. Without it x265 buffers a
+		// lookahead's worth of frames and the first access unit comes out
+		// several frames after the picture that made it -- which would make
+		// the frame-number alignment this test is about untestable.
+		ctx->thread_count = 1;
+		av_opt_set(ctx->priv_data, "preset", "ultrafast", 0);
+		av_opt_set(ctx->priv_data, "tune", "zerolatency", 0);
+		av_opt_set(ctx->priv_data, "x265-params",
+		           full_range ? "ctu=64:bframes=0:range=full:colorprim=bt709:colormatrix=bt709:log-level=none"
+		                      : "ctu=64:bframes=0:range=limited:colorprim=bt709:colormatrix=bt709:log-level=none",
+		           0);
+		if (avcodec_open2(ctx, c, nullptr) < 0)
+			throw std::runtime_error("libx265 avcodec_open2 failed");
+		frm = av_frame_alloc();
+		frm->format = ctx->pix_fmt;
+		frm->width = ctx->width;
+		frm->height = ctx->height;
+		av_frame_get_buffer(frm, 0);
+		pkt = av_packet_alloc();
+	}
+
+	~base_hevc_encoder()
+	{
+		av_packet_free(&pkt);
+		av_frame_free(&frm);
+		avcodec_free_context(&ctx);
+	}
+
+	base_hevc_encoder(const base_hevc_encoder &) = delete;
+	base_hevc_encoder & operator=(const base_hevc_encoder &) = delete;
+
+	// Encode one yuv420p picture at the configured geometry; returns its access
+	// unit, or an empty vector if the encoder buffered it.
+	std::vector<uint8_t> encode(std::span<const uint8_t> pic, int64_t pts)
+	{
+		const size_t y_size = size_t(ctx->width) * ctx->height;
+		const size_t c_size = y_size / 4;
+		if (pic.size() < y_size + 2 * c_size)
+			return {};
+		av_frame_make_writable(frm);
+		for (int r = 0; r < ctx->height; ++r)
+			std::memcpy(frm->data[0] + size_t(r) * frm->linesize[0],
+			            pic.data() + size_t(r) * ctx->width, size_t(ctx->width));
+		const int cw = ctx->width / 2, ch = ctx->height / 2;
+		for (int r = 0; r < ch; ++r)
+		{
+			std::memcpy(frm->data[1] + size_t(r) * frm->linesize[1],
+			            pic.data() + y_size + size_t(r) * cw, size_t(cw));
+			std::memcpy(frm->data[2] + size_t(r) * frm->linesize[2],
+			            pic.data() + y_size + c_size + size_t(r) * cw, size_t(cw));
+		}
+		frm->pts = pts;
+		if (avcodec_send_frame(ctx, frm) < 0)
+			return {};
+		if (avcodec_receive_packet(ctx, pkt) < 0)
+			return {};
+		std::vector<uint8_t> au(pkt->data, pkt->data + pkt->size);
+		av_packet_unref(pkt);
+		return au;
+	}
+};
+
 std::vector<uint8_t> compose_pair(std::span<const uint8_t> l, std::span<const uint8_t> r,
                                   uint32_t w, uint32_t h)
 {
@@ -1412,6 +1517,7 @@ int main(int argc, char ** argv)
 	// default so every existing invocation of this harness keeps producing the
 	// all-intra stream its assertions were written against.
 	bool base_patch = false;
+	bool base_route_test = false;
 	bool atlas_tool = false;
 	std::string inter = "false";
 	uint32_t intra_period = 180;
@@ -1567,6 +1673,8 @@ int main(int argc, char ** argv)
 			backend = next();
 		else if (a == "--base-patch")
 			base_patch = true;
+		else if (a == "--base-route")
+			base_route_test = true;
 		else if (a == "--atlas")
 			atlas_tool = (next() == "on");
 		else if (a == "--inter")
@@ -3426,6 +3534,173 @@ int main(int argc, char ** argv)
 			{
 				std::printf("base patch: %s\n", e.what());
 				check(false, "the base patcher initialises");
+			}
+		}
+	}
+
+	// --- the base route: encoded base bytes to base-sourced tiles ------------
+	//
+	// The whole road, on real HEVC: libx265 encodes each source picture as the
+	// hybrid base stream would, and base_route decodes it with a conforming
+	// decoder, stages it, and patches the atlas at src_frame = the frame number
+	// the picture came from.
+	//
+	// It runs on a codec of its own for the same reason --base-patch does: the
+	// shipping client decoder refuses an atlas stream header, so an atlas stream
+	// cannot be carried through the rest of this harness. What that costs is
+	// specific and worth naming -- the TEE is not exercised here. In the server
+	// the access units arrive through video_encoder::encode(), which hands them
+	// to video_encoder_nxwarp::on_base_access_unit(), wired once by the
+	// compositor from encoder_settings::serves_stream. Those three steps are
+	// compile-checked and no more. What is measured below is everything from
+	// the access unit onwards, which is where all the behaviour is.
+	if (base_route_test)
+	{
+		std::printf("\n");
+		if (backend != "vk")
+		{
+			check(false, "--base-route needs --backend vk");
+		}
+		else if (source_frames.size() < 3)
+		{
+			check(false, "there are enough frames to drive a base route");
+		}
+		else
+		{
+			// The undecodable-unit check below feeds libavcodec deliberate
+			// garbage, and its complaint about it lands in the middle of this
+			// harness's own output. Muted the way the server mutes it, with
+			// the same escape hatch.
+			if (not getenv("FFMPEG_LOG_LEVEL"))
+				av_log_set_level(AV_LOG_QUIET);
+			try
+			{
+				const uint32_t pair_w = width * eyes;
+				wivrn::nxwarp_codec_config bc{};
+				bc.width = width;
+				bc.height = height;
+				bc.eyes = eyes;
+				bc.base_qp = qp;
+				bc.inter = true;
+				bc.atlas = true;
+				auto bcodec = wivrn::nxwarp_codec::make_vulkan(
+				        bc, *vk.instance, *vk.physical_device, *vk.device,
+				        *vk.queue.queue, vk.queue.family_index);
+				wivrn::base_route route(*bcodec, *vk.physical_device, *vk.device, eyes);
+				const uint32_t tiles = route.layout().cols_per_eye *
+				                       route.layout().rows * eyes;
+
+				base_hevc_encoder benc(pair_w, height, true);
+
+				// Frame numbers start at 1, not 0: src_frame 0 is what an
+				// unwritten atlas position already holds, so a patch at 0
+				// would not advance it and every tile would be superseded --
+				// a real trap, and the reason this says so out loud.
+				uint32_t n_fed = 0;
+				for (size_t f = 0; f < source_frames.size(); ++f)
+				{
+					auto au = benc.encode(source_frames[f], int64_t(f + 1));
+					if (au.empty())
+						continue;
+					route.submit(uint64_t(f + 1), au);
+					++n_fed;
+				}
+				const auto & s1 = route.get_stats();
+				std::printf("base route: %u access units fed, %llu decoded, "
+				            "%llu patched, %llu tiles applied, %llu superseded\n",
+				            n_fed,
+				            (unsigned long long)s1.decoded,
+				            (unsigned long long)s1.patched,
+				            (unsigned long long)s1.applied,
+				            (unsigned long long)s1.superseded);
+				std::printf("base route: colour guard says \"%s\"\n",
+				            route.colour_fault().empty() ? "ok"
+				                                         : route.colour_fault().c_str());
+
+				check(n_fed >= 3, "libx265 produced access units to route");
+				// One in, one out. A frame-threaded decoder would buffer and
+				// the frame numbers would stop lining up with the pictures --
+				// which is why the shadow decoder is opened thread_count 1 and
+				// LOW_DELAY, and why this is worth asserting rather than
+				// assuming.
+				check(s1.decoded == s1.submitted,
+				      "the shadow decode is one access unit in, one picture out");
+				check(route.colour_fault().empty(),
+				      "a correctly configured base passes the colour guard");
+				check(s1.refused_colour == 0 and s1.refused_geometry == 0 and
+				              s1.refused_decode == 0 and s1.refused_order == 0,
+				      "a well-formed base stream is refused for no reason");
+				check(s1.patched == s1.submitted,
+				      "every access unit reaches the atlas");
+				// Each frame's number advances the last, so every tile the
+				// previous frame wrote is overwritten and nothing is dropped.
+				check(s1.applied == uint64_t(tiles) * s1.patched,
+				      "an advancing base patches every tile of every frame");
+				check(s1.superseded == 0,
+				      "an in-order base supersedes nothing");
+
+				// THE BASE FALLS BEHIND. An access unit for a frame that does
+				// not advance the one already routed is refused before the
+				// decoder sees it -- feeding a conforming decoder pictures out
+				// of order corrupts its reference state for every later frame,
+				// which outlives the frame that caused it.
+				const uint64_t patched_before = s1.patched;
+				const uint64_t decoded_before = s1.decoded;
+				auto late = benc.encode(source_frames[0], 1);
+				const bool took_late = late.empty() ? false : route.submit(1, late);
+				check(not took_late,
+				      "an access unit for an older frame is refused");
+				check(route.get_stats().refused_order == 1,
+				      "the late access unit is counted as an ordering refusal");
+				check(route.get_stats().patched == patched_before,
+				      "a refused access unit patches nothing");
+				check(route.get_stats().decoded == decoded_before,
+				      "a refused access unit never reaches the decoder");
+
+				// And a garbled one is refused by the decoder rather than
+				// patched from whatever the last picture was.
+				std::vector<uint8_t> junk(64, 0x5a);
+				const bool took_junk = route.submit(10000, junk);
+				check(not took_junk, "an undecodable access unit is refused");
+				check(route.get_stats().refused_decode >= 1,
+				      "the undecodable unit is counted as a decode refusal");
+				check(route.get_stats().patched == patched_before,
+				      "an undecodable access unit patches nothing");
+
+				// THE COLOUR GUARD, against a base that is really encoded
+				// limited-range. This is the failure NXWARP-HYBRID.md 9 exists
+				// for: it decodes perfectly and every patched sample is wrong
+				// by a fixed offset, which reads as a gamma bug somewhere else.
+				auto ccodec = wivrn::nxwarp_codec::make_vulkan(
+				        bc, *vk.instance, *vk.physical_device, *vk.device,
+				        *vk.queue.queue, vk.queue.family_index);
+				wivrn::base_route croute(*ccodec, *vk.physical_device, *vk.device, eyes);
+				base_hevc_encoder cenc(pair_w, height, false);
+				for (size_t f = 0; f < 3 and f < source_frames.size(); ++f)
+				{
+					auto au = cenc.encode(source_frames[f], int64_t(f + 1));
+					if (not au.empty())
+						croute.submit(uint64_t(f + 1), au);
+				}
+				const auto & s2 = croute.get_stats();
+				std::printf("base route: limited-range base -- guard says \"%s\", "
+				            "%llu decoded, %llu patched\n",
+				            croute.colour_fault().empty() ? "ok"
+				                                          : croute.colour_fault().c_str(),
+				            (unsigned long long)s2.decoded,
+				            (unsigned long long)s2.patched);
+				check(not croute.colour_fault().empty(),
+				      "a limited-range base is caught by the colour guard");
+				check(s2.decoded > 0,
+				      "the limited-range base decoded -- it is a COLOUR fault, "
+				      "not a decode one");
+				check(s2.patched == 0,
+				      "a limited-range base patches nothing");
+			}
+			catch (const std::exception & e)
+			{
+				std::printf("base route: %s\n", e.what());
+				check(false, "the base route initialises");
 			}
 		}
 	}

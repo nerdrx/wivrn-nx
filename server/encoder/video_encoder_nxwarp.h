@@ -19,6 +19,7 @@
 #pragma once
 #include <chrono>
 
+#include "nxwarp_base_route.h"
 #include "nxwarp_codec.h"
 #include "video_encoder.h"
 #include "vk/allocation.h"
@@ -108,6 +109,11 @@ class video_encoder_nxwarp : public video_encoder
 	std::vector<uint8_t> cr_plane;
 
 	std::unique_ptr<nxwarp_codec> codec;
+	// The base layer's decode-and-patch road. Null unless this stream has an
+	// atlas AND a base stream is feeding it; built on the first access unit,
+	// because that is the first moment both facts are known.
+	std::unique_ptr<base_route> base;
+	bool base_failed = false;
 	// The GPU backend submits on vk.queue and so must hold WiVRn's queue mutex
 	// across encode(); the CPU one never touches a queue. See encode().
 	bool codec_uses_vk_queue = false;
@@ -587,6 +593,18 @@ public:
 	{
 		return *codec;
 	}
+
+	// One access unit of the HYBRID BASE LAYER, for the frame it was encoded
+	// from. Called by the base stream's own encoder (video_encoder::encode tees
+	// it here through set_base_consumer), so it runs inside frame F and the
+	// tiles it writes are in the atlas before frame F+1's mode decision -- which
+	// is the deadline nxwarp_base_route.h describes.
+	//
+	// Silently does nothing when there is no atlas to patch: the base layer is
+	// opt-in, an atlas needs a headset that advertises nxvc tool bit 31, and a
+	// session with the base enabled and the atlas off is a legitimate (if
+	// pointless) configuration rather than an error.
+	void on_base_access_unit(uint64_t frame_index, std::span<const uint8_t> au) override;
 
 	void present_image(vk::Image y_cbcr,
 	                   vk::SemaphoreSubmitInfo info,

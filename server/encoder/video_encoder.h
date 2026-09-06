@@ -396,6 +396,29 @@ public:
 	// again: send a keyframe. It is the SAME client on the other end, with the same
 	// transport state, so an encoder that carries per-client sequence numbers must not
 	// disturb them here.
+	// ------------------------------------------------------- hybrid base layer
+	//
+	// A stream whose role is `base` serves another stream: its encoded pictures
+	// are not only sent to the headset, they are ALSO the source of base-sourced
+	// atlas tiles in the encoder that serves. encode() tees them here.
+	//
+	// The consumer is the served encoder (an NX Warp one), and the tee is set up
+	// once by the compositor from encoder_settings::serves_stream. A plain
+	// session sets none and pays nothing.
+	void set_base_consumer(video_encoder * consumer)
+	{
+		base_consumer = consumer;
+	}
+
+	// Receive one base-layer access unit. Only video_encoder_nxwarp overrides
+	// it; for anything else a base stream pointed at it is a wiring mistake
+	// that costs nothing.
+	virtual void on_base_access_unit(uint64_t frame_index, std::span<const uint8_t> au)
+	{
+		(void)frame_index;
+		(void)au;
+	}
+
 	virtual void reset();
 
 	// The session was resumed and the client on the other end is a NEW one: it has
@@ -519,6 +542,7 @@ protected:
 	// called when command buffer finished executing
 	virtual std::optional<data> encode(uint8_t slot, uint64_t frame_index) = 0;
 
+
 	// Called once by a backend that configured a rolling intra refresh over `sweep_frames`
 	// frames, from its constructor. From then on the IDR handler asks for a sweep rather
 	// than a keyframe when a frame is lost, until set_intra_refresh(false) says otherwise.
@@ -541,6 +565,8 @@ protected:
 	// `pacer` and `spill` are built by the sender thread for whole-frame sends on
 	// the stream socket; default constructed ones never sleep and never split, which
 	// is what the encoders that send synchronously from inside encode() (x264) get.
+	video_encoder * base_consumer = nullptr;
+
 	void SendData(std::span<uint8_t> data, bool end_of_frame, bool control = false, shard_pacer pacer = {}, spill_scheduler spill = {});
 
 	// Put one already-formed packet on the stream (UDP) socket, outside the shard

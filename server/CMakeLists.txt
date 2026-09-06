@@ -205,7 +205,7 @@ if (WIVRN_BUILD_SERVER)
 		# server built against one simply has no "vk" backend to offer and says
 		# so at construction rather than failing to configure.
 		if (TARGET nxvc::vk_encoder)
-			target_sources(wivrn-server PRIVATE encoder/nxwarp_codec_vk.cpp encoder/pair_compose.cpp encoder/nxwarp_base_patch.cpp)
+			target_sources(wivrn-server PRIVATE encoder/nxwarp_codec_vk.cpp encoder/pair_compose.cpp encoder/nxwarp_base_patch.cpp encoder/nxwarp_base_route.cpp)
 			target_link_libraries(wivrn-server PRIVATE nxvc::vk_encoder nxvc::vk_common)
 			target_compile_definitions(wivrn-server PRIVATE WIVRN_NXWARP_VK_ENCODER)
 			message(STATUS "\tNX Warp Vulkan encoder: ON")
@@ -298,8 +298,11 @@ if (WIVRN_BUILD_SERVER)
 			# The e2e proves the shipping encoder, so it has to be able to prove
 			# both backends; --backend vk is what selects the second one.
 			if (TARGET nxvc::vk_encoder)
-				target_sources(wivrn-nxwarp-e2e PRIVATE encoder/nxwarp_codec_vk.cpp encoder/pair_compose.cpp encoder/nxwarp_base_patch.cpp)
-				target_link_libraries(wivrn-nxwarp-e2e PRIVATE nxvc::vk_encoder)
+				target_sources(wivrn-nxwarp-e2e PRIVATE encoder/nxwarp_codec_vk.cpp encoder/pair_compose.cpp encoder/nxwarp_base_patch.cpp encoder/nxwarp_base_route.cpp)
+				# The base layer's shadow decode is libavcodec, which the server
+				# already links for its FFmpeg encoders -- so this adds a link,
+				# not a dependency.
+				target_link_libraries(wivrn-nxwarp-e2e PRIVATE nxvc::vk_encoder PkgConfig::LIBAV)
 				target_compile_definitions(wivrn-nxwarp-e2e PRIVATE WIVRN_NXWARP_VK_ENCODER)
 			endif()
 			target_link_libraries(wivrn-nxwarp-e2e PRIVATE

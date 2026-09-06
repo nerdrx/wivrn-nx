@@ -1089,6 +1089,48 @@ void wivrn::video_encoder_nxwarp::present_image(
 // The transport's path budget, kept in step with what the session's bitrate controller
 // allows this stream. Called once per encoded frame; the comparison is what keeps it from
 // reconfiguring the striper on every frame for a number that wobbles by a few percent.
+// One access unit of the hybrid base layer, for the frame it was coded from.
+// See nxwarp_base_route.h for what happens to it and why the frame number is
+// the part that matters.
+void wivrn::video_encoder_nxwarp::on_base_access_unit(uint64_t frame_index,
+                                                      std::span<const uint8_t> au)
+{
+	if (base_failed)
+		return;
+	if (not base)
+	{
+		// Built on the first access unit rather than in the constructor: this
+		// is the first moment BOTH facts are known -- that the codec has an
+		// atlas, and that a base stream is actually feeding it. A stream with
+		// an atlas and no base layer must not carry a shadow decoder and a
+		// staging buffer it will never use.
+		if (not codec->supports_base_patch())
+		{
+			base_failed = true;
+			U_LOG_I("nxwarp: a base layer is feeding this stream but it has no "
+			        "atlas (nxvc tool bit 31 is off), so its pictures cannot be "
+			        "patched in -- the base is still sent to the headset");
+			return;
+		}
+		try
+		{
+			base = std::make_unique<base_route>(*codec,
+			                                    *vk.physical_device,
+			                                    *vk.device,
+			                                    stereo_eyes);
+		}
+		catch (const std::exception & e)
+		{
+			base_failed = true;
+			U_LOG_W("nxwarp: the base layer's patch route could not be built (%s) "
+			        "-- base-sourced tiles are off for this session",
+			        e.what());
+			return;
+		}
+	}
+	base->submit(frame_index, au);
+}
+
 void wivrn::video_encoder_nxwarp::follow_path_budget()
 {
 	const uint32_t allowed = pending_bitrate.load();

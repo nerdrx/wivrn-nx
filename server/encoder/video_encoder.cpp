@@ -742,6 +742,16 @@ void video_encoder::encode(wivrn_session & cnx,
 
 	cnx.dump_time("encode_begin", frame_index, encode_begin, stream_idx);
 	cnx.dump_time("encode_end", frame_index, os_monotonic_get_ns(), stream_idx);
+	// The hybrid base layer's tee, BEFORE the send. The served encoder wants
+	// these pixels in its atlas before it codes the next frame, and the send is
+	// a queue hand-off to another thread -- so doing it here is what makes the
+	// deadline in nxwarp_base_route.h a property of the calling order rather
+	// than a race with the sender.
+	//
+	// Cheap for every session that is not hybrid: one null check.
+	if (data and base_consumer)
+		base_consumer->on_base_access_unit(frame_index, data->span);
+
 	if (data)
 	{
 		timing_info.encode_end = clock.to_headset(os_monotonic_get_ns());

@@ -21,6 +21,8 @@
 
 #include "stream.h"
 
+#include "utils/view_geometry.h"
+
 #include "fps_window.h"
 
 #include "application.h"
@@ -491,6 +493,23 @@ void scenes::stream::rebuild_fps_lines()
 	// in the window carried one, for the same reason the period above is.
 	if (fps.pose_age_ms > 0)
 		fps_line_cache[0] += fmt::format(_F(" · pose age {:.1f} ms"), fps.pose_age_ms);
+
+	// Edge bleed, on the same line as the pose age on purpose: the pose age is how late
+	// the frame on the panel is, and the margin is how much of that lateness the picture
+	// can absorb before a black band appears at the edge of the view. Reading one without
+	// the other is how you conclude the bleed is not working when the margin is simply
+	// smaller than the head is fast.
+	//
+	// Placed before the NX Warp gate below because this is a client-side render feature
+	// and is just as active on an H.264 session. Absent entirely when both halves are
+	// off, which is a state worth being able to see at a glance.
+	if (server_overscan > 0)
+		fps_line_cache[0] += fmt::format(_F(" · bleed {:.1f}% encoded"), server_overscan * 100);
+	else if (bleed_margin > 0)
+		fps_line_cache[0] += fmt::format(_F(" · bleed {:.1f}% {}"),
+		                                 bleed_margin * 100,
+		                                 wivrn::view_geometry::name(
+		                                         wivrn::view_geometry::edge_extension(uint8_t(bleed_extension))));
 
 	if (not fps.nxwarp)
 		return;

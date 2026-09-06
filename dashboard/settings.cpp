@@ -18,6 +18,8 @@
 
 #include "settings.h"
 
+#include "client/utils/view_geometry.h"
+
 #include "encoder/stream_scale.h"
 #include "escape_string.h"
 #include "gui_config.h"
@@ -138,6 +140,8 @@ void Settings::emitAllChanged()
 	portChanged();
 	hostnameChanged();
 	streamScaleChanged();
+	edgeBleedOverscanChanged();
+	edgeBleedExtensionChanged();
 	nxwarpEntropyChanged();
 	nxwarpPaceChanged();
 	nxwarpPaceFpsChanged();
@@ -695,6 +699,116 @@ void Settings::set_streamScale(const float & value)
 		streamScaleChanged();
 }
 
+// Edge bleed. One object, "edge_bleed", because the two controls are one feature and a
+// person turning it off should be deleting one thing. The server clamps every member and
+// ignores an unknown one, so writing a partial object is safe; the dashboard still erases
+// the whole key when both controls sit at their defaults, the same rule the rest of this
+// file follows.
+namespace
+{
+constexpr const char * edge_bleed_key = "edge_bleed";
+
+const nlohmann::json * find_edge_bleed(const nlohmann::json & settings)
+{
+	auto it = settings.find(edge_bleed_key);
+	if (it == settings.end())
+		it = settings.find("edge-bleed");
+	return (it != settings.end() and it->is_object()) ? &*it : nullptr;
+}
+
+// The object to write into, created on demand. Kept in one place because both setters
+// need it and both must also drop the "edge-bleed" spelling so the two cannot disagree.
+nlohmann::json & edge_bleed_object(nlohmann::json & settings)
+{
+	settings.erase("edge-bleed");
+	auto & o = settings[edge_bleed_key];
+	if (not o.is_object())
+		o = nlohmann::json::object();
+	return o;
+}
+} // namespace
+
+float Settings::edgeBleedOverscan() const
+{
+	if (const auto * o = find_edge_bleed(m_jsonSettings))
+	{
+		if (auto it = o->find("overscan"); it != o->end() and it->is_number())
+		{
+			const double v = it->get<double>();
+			if (v >= 0 and v <= double(wivrn::view_geometry::max_overscan))
+				return float(v);
+		}
+	}
+	// The value the server applies for an absent key, so the slider shows what will
+	// actually run rather than zero.
+	return wivrn::view_geometry::default_overscan;
+}
+
+void Settings::set_edgeBleedOverscan(const float & value)
+{
+	const auto old = edgeBleedOverscan();
+	// Snapped to the slider's own step, in whole percent: the file should hold the number
+	// the person chose, not a float that drifted through a QML binding.
+	const double clamped = std::clamp(std::round(double(value) * 100.0) / 100.0,
+	                                  0.0,
+	                                  double(wivrn::view_geometry::max_overscan));
+	auto & o = edge_bleed_object(m_jsonSettings);
+	// The default is a float and `clamped` is a double snapped to whole percent, so they
+	// are compared at the slider's own resolution: double(0.05f) is 0.050000000745, which
+	// is not 0.05, and a bare == would write the default out as if it were a choice.
+	const double dflt = std::round(double(wivrn::view_geometry::default_overscan) * 100.0) / 100.0;
+	if (clamped == dflt)
+		o.erase("overscan");
+	else
+		o["overscan"] = clamped;
+	if (o.empty())
+		m_jsonSettings.erase(edge_bleed_key);
+	if (old != edgeBleedOverscan())
+		edgeBleedOverscanChanged();
+}
+
+Settings::edge_extension Settings::edgeBleedExtension() const
+{
+	if (const auto * o = find_edge_bleed(m_jsonSettings))
+	{
+		if (auto it = o->find("extension"); it != o->end() and it->is_string())
+		{
+			const auto v = it->get<std::string>();
+			if (v == "none" or v == "off")
+				return ExtensionNone;
+			if (v == "clamp")
+				return ExtensionClamp;
+			if (v == "fade")
+				return ExtensionFade;
+		}
+	}
+	return ExtensionFade;
+}
+
+void Settings::set_edgeBleedExtension(const edge_extension & value)
+{
+	const auto old = edgeBleedExtension();
+	auto & o = edge_bleed_object(m_jsonSettings);
+	switch (value)
+	{
+		case ExtensionNone:
+			o["extension"] = "none";
+			break;
+		case ExtensionClamp:
+			o["extension"] = "clamp";
+			break;
+		case ExtensionFade:
+		default:
+			// The default the server applies for an absent key.
+			o.erase("extension");
+			break;
+	}
+	if (o.empty())
+		m_jsonSettings.erase(edge_bleed_key);
+	if (old != edgeBleedExtension())
+		edgeBleedExtensionChanged();
+}
+
 QSize Settings::encodedEyeSize(int headsetWidth, int headsetHeight) const
 {
 	if (headsetWidth <= 0 or headsetHeight <= 0)
@@ -1019,6 +1133,9 @@ void Settings::restore_defaults()
 	// The NX Warp options live inside "encoder", which is erased above, so they go with it.
 	// "stream_scale" is top level and has to be named.
 	m_jsonSettings.erase("stream_scale");
+	// Edge bleed is top level too, and one key covers both of its controls.
+	m_jsonSettings.erase("edge_bleed");
+	m_jsonSettings.erase("edge-bleed");
 	emitAllChanged();
 }
 

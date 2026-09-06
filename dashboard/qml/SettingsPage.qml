@@ -101,6 +101,86 @@ Kirigami.ScrollablePage {
             }
 
             // ---------------------------------------------------------------------
+            // Edge bleed. At a low frame rate the headset reprojects a late frame to the
+            // newest head pose, and where the frame's field of view runs out there is
+            // nothing to show: a black band sweeps in at the edge of the view. Not gated
+            // on the encoder -- the overscan is a property of the rendered field of view
+            // and the extension is a headset render pass, so both apply to every codec.
+            // ---------------------------------------------------------------------
+            Kirigami.Separator {
+                Kirigami.FormData.isSection: true
+            }
+
+            Kirigami.Heading {
+                text: i18n("Edge bleed")
+                level: 1
+                type: Kirigami.Heading.Type.Primary
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: i18n("Overscan margin:")
+                Layout.fillWidth: true
+                Controls.Slider {
+                    id: edge_bleed_overscan
+                    Layout.fillWidth: true
+                    from: 0.0
+                    to: 0.20
+                    stepSize: 0.01
+                    snapMode: Controls.Slider.SnapAlways
+                    value: Settings.edgeBleedOverscan
+                    // Written live so the percentage readout beside it follows the handle
+                    // rather than the last saved value, the same as the stream scale.
+                    onValueChanged: if (settings.allowUpdates) { Settings.edgeBleedOverscan = value }
+                }
+                Controls.Label {
+                    text: Math.round(edge_bleed_overscan.value * 100) + "%"
+                    Layout.preferredWidth: 45
+                    Layout.alignment: Qt.AlignRight
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("How much wider than the headset's own field of view the application renders, per side. Those are real pixels, so a reprojection has picture to move into instead of black. The encoded size does not change, so the same pixels cover a wider angle and the image is correspondingly less sharp: 5%% costs about 4.5%% of the resolution. 0 turns it off and leaves the fallback below to fill the margin.")
+                }
+            }
+
+            // What the margin actually costs, live, so the trade is on screen next to the
+            // control that makes it rather than in the documentation.
+            Controls.Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                opacity: 0.7
+                text: edge_bleed_overscan.value > 0
+                      ? i18n("Real pixels in the margin. About %1%% of the encoded area falls outside the panel, and the picture is about %2%% less sharp.",
+                             Math.round((1 - 1 / ((1 + edge_bleed_overscan.value) * (1 + edge_bleed_overscan.value))) * 1000) / 10,
+                             Math.round((1 - 1 / (1 + edge_bleed_overscan.value)) * 1000) / 10)
+                      : i18n("No overscan: the margin, if any, is invented by the headset from the picture's own edge.")
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: i18n("Edge extension:")
+                Controls.ComboBox {
+                    id: edge_bleed_extension
+                    model: [
+                        {
+                            label: i18nc("no edge extension", "None"),
+                            value: Settings.ExtensionNone
+                        },
+                        {
+                            label: i18n("Clamp (stretch the edge)"),
+                            value: Settings.ExtensionClamp
+                        },
+                        {
+                            label: i18n("Fade (stretch, then blend to the edge colour)"),
+                            value: Settings.ExtensionFade
+                        }
+                    ]
+                    textRole: "label"
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("What the headset does when the overscan above is 0. It widens its own projection layer and fills the invented margin out of the picture's edge: Clamp stretches the outermost row and column outward, Fade stretches and then decays into that edge's own colour, which reads as the picture continuing off the side of the view. None is the old behaviour and shows a black band. Nothing is decoded for this margin; it is a smear, and it is only ever used where the alternative is black.")
+                }
+            }
+
+            // ---------------------------------------------------------------------
             // NX Warp encoder. Every control here is a server configuration key that
             // previously had no GUI. The whole section is hidden unless NX Warp is the
             // selected encoder, because none of these mean anything for H.264/HEVC/AV1.
@@ -682,6 +762,10 @@ Kirigami.ScrollablePage {
 
         Settings.bitrateAuto = bitrate_auto.checked;
 
+        // Edge bleed. The margin is written live by its slider, for the readout; the mode
+        // is written here on OK like every other combo box.
+        Settings.edgeBleedExtension = edge_bleed_extension.model[edge_bleed_extension.currentIndex].value;
+
         // NX Warp. streamScale is already written live by the slider so its size readout can
         // follow the handle; the rest are written here, on OK, like every other control.
         if (Settings.nxwarpSelected) {
@@ -717,6 +801,8 @@ Kirigami.ScrollablePage {
         bitrate_auto.checked = Settings.bitrateAuto;
 
         stream_scale.value = Settings.streamScale;
+        edge_bleed_overscan.value = Settings.edgeBleedOverscan;
+        edge_bleed_extension.currentIndex = edge_bleed_extension.model.findIndex(i => i.value === Settings.edgeBleedExtension);
         nxwarp_entropy.currentIndex = nxwarp_entropy.model.findIndex(i => i.value === Settings.nxwarpEntropy);
         nxwarp_pace.currentIndex = nxwarp_pace.model.findIndex(i => i.value === Settings.nxwarpPace);
         nxwarp_pace_fps.value = Settings.nxwarpPaceFps;

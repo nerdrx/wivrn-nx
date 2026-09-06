@@ -63,6 +63,17 @@ public:
 	};
 	Q_ENUM(video_codec)
 
+	// "edge_bleed.extension": what the headset does over the margin when the server did
+	// not overscan. `None` is the pre-feature behaviour: a black band at the edge of the
+	// view whenever a reprojection outruns the frame.
+	enum edge_extension
+	{
+		ExtensionNone,
+		ExtensionClamp,
+		ExtensionFade,
+	};
+	Q_ENUM(edge_extension)
+
 	// "entropy": which entropy coder the NX Warp bitstream uses.
 	enum nxwarp_entropy
 	{
@@ -124,6 +135,11 @@ public:
 	// for an H.264/HEVC/AV1 encoder.
 	Q_PROPERTY(bool nxwarpSelected READ nxwarpSelected NOTIFY encoderChanged)
 	Q_PROPERTY(float streamScale READ streamScale WRITE set_streamScale NOTIFY streamScaleChanged)
+	// Edge bleed. Top level, and NOT gated on nxwarpSelected: the overscan is a property
+	// of the field of view the application renders and the extension is a client-side
+	// render pass, so both apply to an H.264 session exactly as they do to an NX Warp one.
+	Q_PROPERTY(float edgeBleedOverscan READ edgeBleedOverscan WRITE set_edgeBleedOverscan NOTIFY edgeBleedOverscanChanged)
+	Q_PROPERTY(edge_extension edgeBleedExtension READ edgeBleedExtension WRITE set_edgeBleedExtension NOTIFY edgeBleedExtensionChanged)
 	Q_PROPERTY(nxwarp_entropy nxwarpEntropy READ nxwarpEntropy WRITE set_nxwarpEntropy NOTIFY nxwarpEntropyChanged)
 	Q_PROPERTY(nxwarp_pace nxwarpPace READ nxwarpPace WRITE set_nxwarpPace NOTIFY nxwarpPaceChanged)
 	Q_PROPERTY(int nxwarpPaceFps READ nxwarpPaceFps WRITE set_nxwarpPaceFps NOTIFY nxwarpPaceFpsChanged)
@@ -170,6 +186,8 @@ public:
 	SETTER_GETTER_NOTIFY(QString, hostname)
 	SETTER_GETTER_NOTIFY(QString, openvr)
 	SETTER_GETTER_NOTIFY(float, streamScale)
+	SETTER_GETTER_NOTIFY(float, edgeBleedOverscan)
+	SETTER_GETTER_NOTIFY(edge_extension, edgeBleedExtension)
 	SETTER_GETTER_NOTIFY(nxwarp_entropy, nxwarpEntropy)
 	SETTER_GETTER_NOTIFY(nxwarp_pace, nxwarpPace)
 	SETTER_GETTER_NOTIFY(int, nxwarpPaceFps)

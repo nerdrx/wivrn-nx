@@ -20,6 +20,7 @@
 // Copyright 2025-2026, NVIDIA CORPORATION.
 
 #include "compositor.h"
+#include "client/utils/view_geometry.h"
 
 // Monado includes
 #include "driver/xrt_cast.h"
@@ -1563,6 +1564,19 @@ void compositor::send_video_stream_description()
 		desc.quad_width = uint16_t(quad->extent().width);
 		desc.quad_height = uint16_t(quad->extent().height);
 	}
+	// Edge bleed. The overscan is already inside every FOV this session produces (the
+	// driver widened them where the runtime asks for them), so what goes on the wire is
+	// only what the headset cannot see for itself: how much of the margin is real, and
+	// what to do about the part that is not.
+	{
+		const auto config = configuration();
+		namespace vg = wivrn::view_geometry;
+		desc.edge_bleed_overscan = vg::clamp_overscan(config.edge_bleed.overscan);
+		desc.edge_bleed_fallback = vg::clamp_overscan(config.edge_bleed.overscan_fallback);
+		desc.edge_bleed_fade = vg::clamp_fade_distance(config.edge_bleed.fade_distance);
+		desc.edge_bleed_extension = uint8_t(config.edge_bleed.extension);
+	}
+
 	session.send_control(std::move(desc));
 }
 

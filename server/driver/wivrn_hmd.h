@@ -77,6 +77,12 @@ class wivrn_hmd : public xrt_device
 	// Counts and rate limits the "we had to replace a pose" warnings.
 	void warn_sanitized(int64_t now, const char * what);
 
+	// Edge bleed overscan, as a fraction of each side's tangent; 0 is off. Read from the
+	// configuration once, at construction, like every other driver-level setting here.
+	float overscan = 0;
+
+	xrt_fov apply_overscan(const xrt_fov &) const;
+
 public:
 	using base_t = xrt_device;
 	wivrn_hmd(wivrn::wivrn_session * cnx,

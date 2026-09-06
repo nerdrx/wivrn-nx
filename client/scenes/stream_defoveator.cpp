@@ -55,7 +55,15 @@ struct vert_pc
 	std::array<float, 4> atlas_size;
 	std::array<float, 4> atlas_geom;
 	std::array<float, 4> atlas_range;
+	std::array<float, 4> bleed;
+	std::array<float, 4> bleed_uv;
 };
+
+// 208 bytes. Above Vulkan's guaranteed 128 -- this block has been above it for a while --
+// but inside the 256 every device this client has ever run on reports, the Pico 4's
+// Adreno 650 included. Checked here rather than discovered as a validation error on a
+// headset.
+static_assert(sizeof(vert_pc) == 208);
 
 // The motion field is stored as one signed byte per axis, scaled by the longest
 // vector in the field. R8G8Snorm is one of the formats every implementation must
@@ -463,6 +471,40 @@ void stream_defoveator::ensure_motion_image(vk::raii::CommandBuffer & command_bu
 	motion_height = height;
 	motion_frame = uint64_t(-1);
 	motion_ready = false;
+}
+
+// Total source pixels one foveation run covers, which is the picture's size in the decoded
+// image: the grid's uv accumulator walks exactly this far.
+static uint32_t source_extent(const std::vector<uint16_t> & param)
+{
+	uint32_t res = 0;
+	for (auto n: param)
+		res += n;
+	return res;
+}
+
+// This eye's picture inside the decoded colour image, in normalized coordinates, inset by
+// half a texel: (x_lo, x_hi, y_lo, y_hi), the shape the shader's `bleed_uv` wants.
+//
+// `rect.offset` is where this eye's picture starts and `rect.extent` is the WHOLE image,
+// because the shader normalizes with (uv + rgb_rect.xy) / rgb_rect.zw. At one eye per
+// stream the offset is zero and this is very nearly (0, 1, 0, 1); with the NX Warp encoder
+// pairing the eyes it is one half of the image or the other.
+static std::array<float, 4> eye_uv_limits(const vk::Rect2D & rect,
+                                          const wivrn::to_headset::foveation_parameter & p)
+{
+	const float w = float(std::max(1u, rect.extent.width));
+	const float h = float(std::max(1u, rect.extent.height));
+	const float x0 = float(rect.offset.x);
+	const float y0 = float(rect.offset.y);
+	const float pw = float(source_extent(p.x));
+	const float ph = float(source_extent(p.y));
+	return {
+	        (x0 + 0.5f) / w,
+	        (x0 + pw - 0.5f) / w,
+	        (y0 + 0.5f) / h,
+	        (y0 + ph - 0.5f) / h,
+	};
 }
 
 static size_t required_vertices(const wivrn::to_headset::foveation_parameter & p)
@@ -1020,6 +1062,19 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		        // signed about the midpoint. 65535/257 puts luma back on 0..255 and
 		        // the chroma terms recentre it.
 		        .atlas_range = {65535.f / 257.f, 65535.f / 128.f, 255.f, 0},
+		        // Edge bleed: the invented ring outside the picture. All zero unless the
+		        // server declined to overscan and the headset is filling the margin
+		        // itself -- see the shader's `bleed`.
+		        .bleed = {post.bleed_margin, post.bleed_extension, post.bleed_fade_distance, 0},
+		        // Which part of the decoded colour image is THIS eye's picture, half a
+		        // texel in from its own edges. With the eyes coded as one stereo frame it
+		        // is half the image, and stretching against the image border instead
+		        // would smear the other eye in from the side.
+		        //
+		        // The picture's size is the source size the vertex grid was laid out
+		        // over, which is the sum of the foveation run -- the same number the grid
+		        // walks its `in` accumulator up to.
+		        .bleed_uv = eye_uv_limits(input.rect_rgb, foveation[view]),
 		};
 
 		device.updateDescriptorSets(descriptor_writes, {});

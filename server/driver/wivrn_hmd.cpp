@@ -36,6 +36,7 @@
 #include <openxr/openxr.h>
 
 #include "configuration.h"
+#include "client/utils/view_geometry.h"
 
 #ifndef NDEBUG
 #include "math/m_api.h"
@@ -132,6 +133,39 @@ wivrn_hmd::wivrn_hmd(wivrn::wivrn_session * cnx,
 	// FOV from headset info packet
 	hmd->distortion.fov[0] = xrt_cast(info.fov[0]);
 	hmd->distortion.fov[1] = xrt_cast(info.fov[1]);
+
+	// Edge bleed overscan. Kept as the fraction rather than pre-widened angles because
+	// the fallback FOV in get_view_poses() and the per-frame one both have to be widened
+	// by the SAME rule, and because the display FOV is what the visible-region maths in
+	// view_geometry.h is written against.
+	overscan = wivrn::view_geometry::clamp_overscan(config.edge_bleed.overscan);
+	if (overscan > 0)
+	{
+		const auto & f = hmd->distortion.fov[0];
+		U_LOG_I("edge bleed: rendering %.1f%% overscan, %.2f deg left / %.2f deg up on eye 0 "
+		        "(same encoded size, so about %.1f%% less sharp)",
+		        double(overscan * 100),
+		        double(-wivrn::view_geometry::to_degrees(f.angle_left, overscan)),
+		        double(wivrn::view_geometry::to_degrees(f.angle_up, overscan)),
+		        double(100 * (1 - 1 / (1 + overscan))));
+	}
+}
+
+// One FOV widened by the configured overscan. Every side grows by the same fraction of its
+// own tangent, so an asymmetric FOV stays asymmetric and the view stays centred where it
+// was; only the outside moves.
+xrt_fov wivrn_hmd::apply_overscan(const xrt_fov & fov) const
+{
+	if (overscan <= 0)
+		return fov;
+
+	namespace vg = wivrn::view_geometry;
+	return {
+	        .angle_left = vg::overscan_angle(fov.angle_left, overscan),
+	        .angle_right = vg::overscan_angle(fov.angle_right, overscan),
+	        .angle_up = vg::overscan_angle(fov.angle_up, overscan),
+	        .angle_down = vg::overscan_angle(fov.angle_down, overscan),
+	};
 }
 
 xrt_result_t wivrn_hmd::update_inputs()
@@ -237,7 +271,14 @@ xrt_result_t wivrn_hmd::get_view_poses(const xrt_vec3 * default_eye_relation,
 		out_poses[eye] = pose;
 
 		// Fall back to the fov the headset announced at connection time.
-		out_fovs[eye] = is_finite(view.fovs[eye]) ? view.fovs[eye] : hmd->distortion.fov[eye];
+		//
+		// Widened by the edge bleed overscan on the way out, which is the single
+		// point the whole feature acts at: the application renders this FOV, the
+		// compositor squashes and foveates THIS FOV, the encoder encodes it, and the
+		// headset gets it back in view_info and hands it to its own compositor as the
+		// projection layer's FOV. So the extra ring is real pixels from end to end and
+		// nothing downstream has to know the setting exists.
+		out_fovs[eye] = apply_overscan(is_finite(view.fovs[eye]) ? view.fovs[eye] : hmd->distortion.fov[eye]);
 	}
 	return XRT_SUCCESS;
 }

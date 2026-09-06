@@ -128,6 +128,22 @@ private:
 	{
 		return stream_role_of(stream_index) == wivrn::stream_role::alpha;
 	}
+
+	// --- Edge bleed --------------------------------------------------------
+	// Cached out of the stream description for the same reason the roles are: the render
+	// thread reads it every refresh and the description is an optional.
+	//
+	// `bleed_margin` is the ring the CLIENT invents, and is already the answer to "did
+	// the server overscan": zero when it did, because the margin is then real decoded
+	// pixels sitting inside the picture and there is nothing to invent. The rest is what
+	// to fill it with. Defaults are off, so a session against a server that has never
+	// heard of the feature behaves exactly as before.
+	float bleed_margin = 0;
+	float bleed_extension = 0;
+	float bleed_fade_distance = 0;
+	// What the SERVER did, kept for the HUD line: the two numbers answer different
+	// questions and showing only one of them is how you end up debugging the wrong half.
+	float server_overscan = 0;
 	// The hybrid base layer: decoded like any other stream, then handed to the atlas and
 	// never presented. See handle_base_frame(), which is the only consumer it has.
 	bool is_base(size_t stream_index) const
@@ -341,6 +357,12 @@ private:
 		float low_poly = 0;
 		float low_poly_levels = 0;
 		bool low_poly_full = false;
+		// Edge bleed: the invented ring's width, its mode and its fade distance. Same
+		// reason as the low poly fields above -- the ring is drawn into the swapchain,
+		// so a settings change to it must not be re-presented away.
+		float bleed_margin = 0;
+		float bleed_extension = 0;
+		float bleed_fade = 0;
 		// Motion smoothing: whether it warps this refresh, how far, along which field
 		bool motion_on = false;
 		float motion_step = 0;

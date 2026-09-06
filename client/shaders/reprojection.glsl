@@ -55,6 +55,26 @@ layout(push_constant) uniform pc
 	vec4 atlas_geom;
 	// x: luma rescale out of u16, y: chroma rescale, z: chroma midpoint offset.
 	vec4 atlas_range;
+	// Edge bleed, the client's half: the invented ring drawn OUTSIDE the picture so the
+	// headset's own late reprojection has something other than black to pull into view
+	// when the pose has moved since the frame was rendered. Only used when the server did
+	// not overscan -- when it did, the margin is real decoded pixels and this is zero.
+	// x: width of the ring, as a fraction of the half image (0 disables the whole thing
+	//    and the pass is then byte identical to not having the feature)
+	// y: extension mode, 1 = clamp (stretch the edge texel over the ring), 2 = fade
+	//    (clamp, then blend toward the edge's own averaged colour)
+	// z: how far into the ring the stretch survives before the fade starts, as a
+	//    fraction of the ring; `fade` only
+	vec4 bleed;
+	// The sub-rectangle of the colour image THIS eye's picture occupies, in normalized
+	// coordinates, inset by half a texel: (x_lo, x_hi, y_lo, y_hi).
+	//
+	// It is not (0, 1, 0, 1) in general. When the NX Warp encoder codes both eyes as one
+	// stereo frame the decoded image holds the pair side by side, `rgb_rect` normalizes
+	// against the WHOLE image, and this eye's picture is only half of it. Stretching the
+	// edge outward against the image border would then walk straight into the other eye's
+	// picture, which is a far worse artefact than the black it replaces.
+	vec4 bleed_uv;
 };
 
 #ifdef VERT_SHADER
@@ -64,11 +84,36 @@ layout (location = 1) in uvec2 vUV;
 
 layout(location = 0) out vec4 outUV;
 layout(location = 1) out vec2 outPosition;
+// How far into the edge bleed ring this fragment is, per axis: 0 everywhere the picture
+// is real, rising to 1 at the outer border. Zero everywhere when the ring is off.
+layout(location = 2) out vec2 outBleed;
 
 void main()
 {
-	gl_Position = vec4(vPosition, 0.0, 1.0);
+	vec2 p = vPosition;
+	vec2 in_ring = vec2(0.0);
+
+	if (bleed.x > 0.0)
+	{
+		// The ring is made out of the grid rather than out of a second draw. Every
+		// interior vertex moves inward by 1 / (1 + margin) while the vertices already
+		// on the border stay put, so the OUTERMOST band of grid cells -- and only
+		// that band -- is stretched across the margin. No new geometry, no extra
+		// pass, and the interior is a uniform rescale of what it always was.
+		//
+		// The border test is a comparison against 1 with a tolerance, because the
+		// grid's boundary vertices are placed at exactly +/-1 by the defoveator and
+		// float arithmetic on the way here is not exact.
+		vec2 at_border = step(vec2(1.0 - 1e-4), abs(p));
+		p = mix(p / (1.0 + bleed.x), sign(p), at_border);
+		in_ring = at_border;
+	}
+
+	gl_Position = vec4(p, 0.0, 1.0);
+	// The picture's own coordinate, NOT the shrunk one: the vignette and the ambient
+	// glow are placed against the image, and shrinking the image must not move them.
 	outPosition = vPosition;
+	outBleed = in_ring;
 	vec2 uv = vUV;
 	outUV.xy = (uv + rgb_rect.xy) / rgb_rect.zw;
 	outUV.zw = (uv + a_rect.xy) / a_rect.zw;
@@ -165,6 +210,7 @@ layout(set = 0, binding = 5) uniform atlas_table_t
 
 layout(location = 0) in vec4 inUV;
 layout(location = 1) in vec2 inPosition;
+layout(location = 2) in vec2 inBleed;
 
 layout(location = 0) out vec4 outColor;
 
@@ -457,6 +503,72 @@ vec3 ambient_glow(vec3 base, vec2 uv, vec2 position, float strength, float margi
 	return mix(base, acc, w * strength);
 }
 
+// Edge bleed, the sampling side. At a low application frame rate the headset's compositor
+// reprojects a late frame to the newest head pose, and where the frame's field of view
+// runs out it has nothing to show: a black band sweeps in at the edge of the view, wider
+// the later the frame and the faster the head. It is the single most legible symptom of
+// lag there is, because it is the one artefact that is not part of the picture.
+//
+// The real fix is overscan -- the server renders a wider field of view than the panel
+// shows, and the reprojection then moves into decoded pixels. This is what happens when it
+// is off: the pass draws the ring anyway and fills it out of the picture's own edge. That
+// content is invented, and it is a smear if you go looking for it, but it is a smear of
+// the right colour and the alternative is black.
+//
+// Two things happen here, in order:
+//
+//   clamp -- the sample is pulled to the outermost texel of the side being extended, over
+//     the width of the ring, so the last row and column are stretched outward. `t` is 0 at
+//     the picture's border and 1 at the ring's outer edge, so the join is continuous: at
+//     t = 0 this returns the coordinate the grid already gave.
+//
+//   fade -- past `bleed.z` of the ring, the stretched colour is blended toward that edge's
+//     own averaged colour. A stretch of a hard edge is a streak; a stretch that decays
+//     into the colour it came from reads as the picture continuing off the side of the
+//     view, which is the whole illusion.
+//
+// Both are per axis, so a corner does the right thing on both at once.
+
+// The sample coordinate, clamped outward over the ring. `limits` is the sub-rectangle
+// THIS eye's picture occupies, as (x_lo, x_hi, y_lo, y_hi) -- see `bleed_uv` above for why
+// that is not simply the whole image.
+vec2 bleed_clamp(vec2 uv, vec2 position, vec2 t, vec4 limits)
+{
+	// The outermost texel centre of this eye's picture, on the side this fragment is
+	// being extended past.
+	vec2 edge = mix(limits.xz, limits.yw, step(0.0, position));
+	// Smooth rather than linear so the derivative at the join is zero and the stretch
+	// does not start with a visible crease.
+	vec2 w = smoothstep(vec2(0.0), vec2(1.0), clamp(t, 0.0, 1.0));
+	return mix(uv, edge, w);
+}
+
+// That edge's averaged colour: three taps spread ALONG the edge, so the wash is a colour
+// field rather than a mirror of whatever detail happened to sit at one texel. Same shape
+// as ambient_glow() above and for the same reason; kept separate because that one washes
+// the inside of the picture and this one fills the outside of it.
+vec3 bleed_edge_colour(vec2 uv, vec2 position, vec2 t)
+{
+	vec2 texel = 1.0 / vec2(rgb_rect.zw);
+	// This eye's picture, not the whole image: the tangential taps below walk along the
+	// edge and would otherwise be free to walk off it into the other eye.
+	vec2 lo = bleed_uv.xz;
+	vec2 hi = bleed_uv.yw;
+
+	// Blur along the edge the fragment is nearest to. In a corner either choice is as
+	// good as the other, so the deeper axis wins and the two corners of a side agree
+	// with the side between them.
+	const float rt = 8.0; // tangential blur radius, in texels
+	bool vertical_edge = t.x >= t.y;
+	vec2 tangent = vertical_edge ? vec2(0.0, 1.0) : vec2(1.0, 0.0);
+
+	vec2 c = clamp(uv, lo, hi);
+	vec3 acc = texture(rgb[0], c).rgb;
+	acc += texture(rgb[0], clamp(c + tangent * texel * rt, lo, hi)).rgb;
+	acc += texture(rgb[0], clamp(c - tangent * texel * rt, lo, hi)).rgb;
+	return acc * (1.0 / 3.0);
+}
+
 // Motion smoothing. The field is measured, and is given here, in normalized
 // coordinates of the defoveated eye image; what this pass samples is the foveated
 // image. The two are related by the vertex grid, which maps positions to texture
@@ -640,6 +752,31 @@ void main()
 	vec2 uv = inUV.xy;
 	vec2 uv_a = inUV.zw;
 
+	// How deep into the edge bleed ring this fragment is, per axis. Zero for every
+	// fragment of the picture itself, and zero everywhere when the ring is off -- the
+	// vertex shader only ever makes it nonzero over the outermost band of grid cells, so
+	// the branch below is coherent and the interior pays nothing.
+	vec2 bleed_t = inBleed;
+	bool in_bleed = bleed.x > 0.0 && bleed.y > 0.0 && max(bleed_t.x, bleed_t.y) > 0.0;
+	if (in_bleed)
+	{
+		// Stretch the edge outward. Done before the motion warp so a warped sample and
+		// a bled one compose the way they read: the warp moves the picture, the stretch
+		// then extends whatever the picture's edge became.
+		uv = bleed_clamp(uv, inPosition, bleed_t, bleed_uv);
+		if (alpha == 1)
+		{
+			// The alpha plane always carries the pair side by side, so this eye's
+			// half is derived here the way the motion warp below already derives it,
+			// from which side of the split the untouched coordinate sits on.
+			vec2 texel_a = 0.5 / vec2(a_rect.zw);
+			vec4 limits_a = inUV.z > 0.5
+			                        ? vec4(0.5 + texel_a.x, 1.0 - texel_a.x, texel_a.y, 1.0 - texel_a.y)
+			                        : vec4(texel_a.x, 0.5 - texel_a.x, texel_a.y, 1.0 - texel_a.y);
+			uv_a = bleed_clamp(uv_a, inPosition, bleed_t, limits_a);
+		}
+	}
+
 	if (motion.x > 0.0)
 	{
 		vec2 texel = 0.5 / vec2(rgb_rect.zw);
@@ -792,6 +929,18 @@ void main()
 	// content near the edge without ever making transparent periphery opaque.
 	if (glow.x > 0.0)
 		colour.rgb = ambient_glow(colour.rgb, uv, inPosition, glow.x, glow.y);
+
+	// Edge bleed, second half: past bleed.z of the ring, decay the stretched edge into
+	// that edge's own averaged colour. Only the colour channels, and only in the ring, so
+	// the alpha that carries passthrough transparency is untouched and a transparent
+	// periphery stays transparent instead of being painted over with a smear.
+	if (in_bleed && bleed.y >= 2.0)
+	{
+		float d = max(bleed_t.x, bleed_t.y);
+		float f = smoothstep(clamp(bleed.z, 0.0, 0.999), 1.0, d);
+		if (f > 0.0)
+			colour.rgb = mix(colour.rgb, bleed_edge_colour(uv, inPosition, bleed_t), f);
+	}
 
 	// Frame smoothing. The decoded frame rate can sit far below the panel's, and each
 	// decoded frame is then held for several refreshes: the picture stands still and then

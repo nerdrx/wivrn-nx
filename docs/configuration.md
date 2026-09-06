@@ -369,6 +369,111 @@ nxwarp: stream 0 encodes 896x896 per eye (stream_scale 0.8, headset asked 1088x1
 Encode 896x896 per eye when the headset asks for 1088x1088, trading peak sharpness for about a
 third less decode work per frame.
 
+## `edge_bleed`
+Default value: `{ "overscan": 0.05, "extension": "fade" }`
+
+The fix for the black band at the edge of the view at low frame rates.
+
+When the application cannot produce a frame for every display refresh, the headset's compositor
+reprojects the last frame it has to the newest head pose. Where that frame's field of view runs out
+it has nothing to show, so a black band sweeps in at the edge of the view — wider the later the
+frame and the faster the head. It is the most legible symptom of lag there is, because it is the one
+artefact that is not part of the picture.
+
+Two independent halves, and only one of them ever runs in a given session.
+
+### `overscan`
+A fraction in `[0, 0.5]`, default `0.05`. `0` disables it.
+
+The server widens the field of view it hands the application by this fraction of each side's
+**tangent**: at `0.05` every edge of the projection plane moves outward by 5 % of its own half
+extent, so the application renders, and the encoder encodes, about 5 % more picture beyond each
+edge. Those are real pixels, decoded on the headset like any other, so a reprojection has content to
+move into and nothing has to be invented.
+
+It is a fraction of the plane rather than a number of degrees because that is the quantity the
+pixels are uniform in. A projection layer is a flat image: 5 % of the plane is 5 % more pixels on
+that side whatever the field of view happens to be, while "5 degrees" is a wildly different number
+of pixels at the centre of a wide field of view than at its edge. The headset's HUD converts it back
+to degrees for display.
+
+**The trade.** The encoded size does not change — a Pico 4 still streams 1088x1088 per eye — so the
+same pixels now cover a wider angle and the picture is correspondingly less sharp. At `0.05` that is
+about 4.5 % of the linear resolution, and about 9 % of the encoded area falls outside the panel and
+is only ever seen during a reprojection. At `0.10` it is about 9 % and 17 %. This is the same
+currency `stream_scale` spends, and the two compose: overscan at `0.05` with `stream_scale` at `0.8`
+is about 24 % less linear resolution than neither.
+
+Applied where the runtime asks the driver for the view field of view, which is the single point the
+whole feature acts at: the application renders it, the compositor squashes and foveates it, the
+encoder encodes it, and the headset gets it back per frame and hands it to its own compositor as the
+projection layer's field of view. Nothing downstream has to know the setting exists. It takes effect
+on the next frame, and the resulting margin is logged at info level:
+
+```
+edge bleed: rendering 5.0% overscan, 0.06 deg left / 0.06 deg up on eye 0 (same encoded size, so about 4.8% less sharp)
+```
+
+The **foveation** and the **NX Warp tile grid** are unaffected, and deliberately so: both are
+derived from the encoded size and from a gaze direction, not from the field of view. A wider field
+of view at the same encoded size moves the foveal region to a slightly different normalised
+coordinate — the correct behaviour, since the gaze still points where it pointed — and leaves the
+tile grid at exactly the same 17x17 it was.
+
+### `extension`
+`"none"`, `"clamp"` or `"fade"`, default `"fade"`.
+
+What the **headset** does when `overscan` is `0`. This is the fallback that keeps "never black"
+true with no encoded margin at all, and it costs no resolution because it produces no new picture:
+the headset widens its own projection layer by `overscan_fallback` and fills the invented ring out
+of the picture's own edge.
+
+  * `none` — nothing. The pre-feature behaviour, and a black band whenever a reprojection outruns
+    the frame. Useful for seeing what the setting is for.
+  * `clamp` — the outermost row and column of the picture are stretched outward across the ring.
+    Exact at one pixel out, and increasingly obviously a smear the further out it goes.
+  * `fade` — clamp, and then past `fade_distance` of the ring the stretched colour decays into that
+    edge's own averaged colour. A stretch of a hard edge is a streak; a stretch that decays into the
+    colour it came from reads as the picture continuing off the side of the view.
+
+Nothing is decoded for this ring. It is invented, and it is a smear if you go looking for it — but
+it is a smear of the right colour, and it is only ever used where the alternative is black.
+
+When `overscan` is above `0` the ring is off whatever this says, because the margin is then real
+decoded pixels arriving inside the picture and there is nothing to invent. Exactly one of the two
+halves applies.
+
+### `overscan_fallback`
+A fraction in `[0, 0.5]`, default `0.05`. The width of the ring the headset invents, in the same
+units as `overscan`. Only read when `overscan` is `0` and `extension` is not `"none"`.
+
+### `fade_distance`
+A fraction in `[0, 0.25]`, default `0.02`. How far into the invented ring the stretch survives
+before the fade to the edge colour begins, as a fraction of the ring. `"fade"` only.
+
+Sent to the headset once, with the rest of the stream geometry, so a change takes effect on the next
+connection. `edge-bleed` is accepted as a spelling of the same key, and every member is optional;
+an out-of-range value is clamped and an unknown `extension` spelling is logged and ignored rather
+than refused, because the whole object is cosmetic and a session that starts with a silly margin is
+a better outcome than one that does not start.
+
+Both controls have a GUI: **dashboard → Settings → Edge bleed**. The headset's HUD shows the margin
+in play on the "Shown … pose age" line, beside the pose age on purpose — the pose age is how late
+the frame on the panel is, and the margin is how much of that lateness the picture can absorb.
+
+### Example
+```json
+{
+	"edge_bleed": {
+		"overscan": 0.08,
+		"extension": "fade"
+	}
+}
+```
+Render 8 % wider than the panel shows, spending about 7 % of the linear resolution to buy a margin
+a reprojection can move into. The extension mode is inert here, and is what would take over if the
+overscan were turned back to `0`.
+
 ## `encoder`
 The encoder to use, either a single string or object applied to all streams, or a list of string or objects with values for left, right and alpha.
 When a string it is used, it is equivalent to the `encoder` item of the object.

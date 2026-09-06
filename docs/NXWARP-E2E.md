@@ -945,6 +945,148 @@ Does **not** work yet, and none of it is a bug to be filed:
   one may well find something this test cannot: real packet reordering, real jitter, a real
   display-time clock.
 
+## 6. Edge bleed
+
+At a low application frame rate the headset's compositor reprojects the last frame it has to
+the newest head pose. Where that frame's field of view runs out it has nothing to show, so a
+black band sweeps in at the edge of the view — wider the later the frame and the faster the
+head. It is the most legible symptom of lag there is, precisely because it is the one
+artefact that is not part of the picture: everything else degrades, and this appears.
+
+Two halves. Exactly one of them runs in any given session.
+
+### Overscan — the real fix
+
+The server widens the field of view it hands the application by a fraction of each side's
+tangent (`edge_bleed.overscan`, default 5 %). The application renders it, the compositor
+foveates it, the encoder encodes it, and the headset gets it back per frame in `view_info`
+and hands it to its own compositor as the projection layer's field of view. So the ring
+beyond the panel is **real decoded pixels** from end to end, and the reprojection moves into
+picture instead of into nothing.
+
+It acts at exactly one place, `wivrn_hmd::get_view_poses()`, where the runtime asks the
+driver what field of view the views have. Nothing downstream knows the setting exists, which
+is the reason it composes with everything: the squash, the foveation, the quad promotion, the
+NX Warp stereo pairing.
+
+**The trade, stated plainly.** The encoded size does not change — 1088x1088 per eye on a Pico
+4, with or without — so the same pixels cover a wider angle and the picture is that much less
+sharp. At 5 % that is about 4.5 % of the linear resolution, and about 9 % of the encoded area
+is spent outside the panel, seen only during a reprojection. It is the same currency
+`stream_scale` spends, and the two multiply.
+
+**What it does not disturb.** The foveation remap and the nxvc tile grid are both derived from
+the *encoded size* and a gaze direction, never from the field of view. A wider field of view
+at 1088x1088 leaves the grid at 17x17 tiles, byte for byte, and moves the foveal rectangle to a
+slightly different normalised coordinate — which is correct, because the gaze still points
+where it pointed. Checked with `nxv-info` on a captured stream: same geometry, same tile count.
+
+### Edge extension — the fallback
+
+With `edge_bleed.overscan` at 0 there are no real pixels to move into, and the guarantee has to
+come from somewhere else. The headset then widens **its own** projection layer by
+`edge_bleed.overscan_fallback` and fills the invented ring out of the picture's own edge, in the
+reprojection pass, at no resolution cost because it produces no new picture.
+
+The ring is made out of the existing defoveation grid rather than out of a second draw: the
+vertex shader moves every interior vertex inward by `1 / (1 + margin)` and leaves the vertices
+already on the border where they are, so the outermost band of grid cells — and only that band —
+is stretched across the margin. No new geometry, no extra pass, and the interior is a uniform
+rescale of what it always was. A varying carries "how far into the ring am I", zero everywhere
+else, so the fragment branch is coherent and the interior pays nothing.
+
+Inside the ring:
+
+  * `clamp` pulls the sample to the outermost texel of the side being extended, smoothstepped
+    from the border outward so the join has a zero derivative and no visible crease;
+  * `fade` does that and then, past `edge_bleed.fade_distance` of the ring, blends toward that
+    edge's own averaged colour — three taps spread *along* the edge, so the result is a colour
+    field rather than a mirror of whatever detail sat at one texel.
+
+Both are per axis, so a corner does the right thing on both at once. The alpha stream that
+carries passthrough transparency is never touched, so a transparent periphery stays transparent
+instead of being painted over with a smear.
+
+None of this is decoded. It is invented, and it is a smear if you go looking for it — but it is a
+smear of the right colour, and it is only ever used where the alternative is black.
+
+### Where the numbers live
+
+`client/utils/view_geometry.h` is the one place the geometry is computed: the tangent widening,
+the visible sub-rectangle of an overscanned image, the extension enum and its wire values. The
+server includes it (the repository root is on `wivrn-common-base`'s public include path), the
+client includes it, the dashboard includes it, and `tests/view_geometry_test.cpp` checks it.
+
+It is shared on purpose. The **lens mask** skips tiles that fall entirely outside the visible
+lens region — and the overscan margin is exactly the part of the image that is outside the panel
+*and must not be skipped*, since being pulled into view later is the whole reason it exists.
+`view_geometry::is_maskable()` is the question both features have to ask, and asking it in one
+place is what keeps them from disagreeing by a tile.
+
+### Settings
+
+Dashboard → Settings → **Edge bleed**: an overscan margin slider (with a live readout of what the
+margin costs in sharpness and encoded area) and an edge extension combo box. Server side they are
+the `edge_bleed` object in `config.json`; `docs/configuration.md` has the full key reference.
+
+The headset's HUD shows the margin in play on the first line, beside the pose age:
+
+```
+Shown 45 · decoded 45 fps · loop 90/s · period 11.1 ms · pose age 31.4 ms · bleed 5.0% encoded
+```
+
+or, when the headset is inventing the margin rather than decoding it:
+
+```
+... · pose age 31.4 ms · bleed 5.0% fade
+```
+
+Beside the pose age deliberately: the pose age is how late the frame on the panel is, and the
+margin is how much of that lateness the picture can absorb before a band appears. Reading one
+without the other is how you conclude the bleed is not working when the margin is simply smaller
+than the head is fast.
+
+### Proving it without a headset
+
+`tests/edge_bleed_test.cpp` renders the **real** `client/shaders/reprojection.glsl` — compiled at
+test time with `glslangValidator`, on a headless Vulkan device, with the same descriptor layout
+and the same 192-byte push constant block the client uses — over a synthetic picture, with a
+motion-field displacement large enough to push the sampling well outside the source. The target
+is cleared to pure black, and the test asserts that after the pass **no pixel anywhere is the
+clear colour**, in `clamp` and in `fade` and at a margin more than twice the default.
+
+The "before" leg is the same render with the grid shrunk and the ring left undrawn, which is
+exactly the situation the feature exists for: a layer wider than the picture with nothing filling
+the margin. That leg is *required to fail* the same assertion — a proof that nothing can be black
+is worth nothing if the arrangement could not produce black in the first place.
+
+It also writes PNGs of each configuration, plus a 3x crop of the left border region, so the
+result can be looked at rather than only asserted. Those are checked in under `docs/assets/`
+and laid out side by side in [`docs/GALLERY.md`](GALLERY.md), which is the shortest way to
+see what the setting does.
+
+```sh
+g++ -std=c++23 -O2 -I. -o edge_bleed_test tests/edge_bleed_test.cpp -lvulkan -lz
+./edge_bleed_test client/shaders/reprojection.glsl <output dir>
+```
+
+`tests/view_geometry_test.cpp` is the arithmetic half and needs nothing but a compiler:
+
+```sh
+g++ -std=c++23 -O2 -I. -o view_geometry_test tests/view_geometry_test.cpp && ./view_geometry_test
+```
+
+It asserts the widening scales the *tangent* and not the angle (on a Pico 4's half field of view
+those differ by degrees), that `visible_rect()` agrees with a hand re-derivation from the widened
+angles, that an asymmetric field of view keeps asymmetric margins in pixels, and that the wire
+values of the extension enum are 0/1/2 and are not free to change.
+
+### A protocol break
+
+`to_headset::video_stream_description` grew four fields, so this is another change to the
+protocol version hash. A client and a server from this branch talk only to each other — which was
+already true on `nx-warp-e2e`, and is now true for one more reason.
+
 ## Live session with nobody wearing the headset
 
 The Pico keeps its display on and its compositor at 90 Hz with the proximity

@@ -192,6 +192,8 @@ static const QList<control> controls{
         // separately below rather than by this table, which sets everything at once.
         {"edgeBleedOverscan", 0.10},
         {"edgeBleedExtension", QVariant::fromValue(int(Settings::ExtensionClamp))},
+        {"nxwarpAtlas", QVariant::fromValue(int(Settings::AtlasAuto))},
+        {"nxwarpAtlasPictureThreshold", 12},
         {"nxwarpEntropy", QVariant::fromValue(int(Settings::EntropyLite))},
         {"nxwarpPace", QVariant::fromValue(int(Settings::PaceFixed))},
         {"nxwarpPaceFps", 90},
@@ -249,6 +251,9 @@ static void part_b()
 	      "edge_bleed.overscan is written as a number");
 	check(written["edge_bleed"].value("extension", std::string()) == "clamp",
 	      "edge_bleed.extension is written as the server's spelling");
+	check(nxd::nxwarp_option(written, "atlas").value_or("") == "auto", "atlas=auto");
+	check(nxd::nxwarp_option(written, "atlas-picture-threshold").value_or("") == "12",
+	      "atlas-picture-threshold is written as a string, like every other option");
 	check(nxd::nxwarp_option(written, "entropy").value_or("") == "lite", "entropy=lite");
 	check(nxd::nxwarp_option(written, "pace").value_or("") == "90", "pace=90");
 	check(nxd::nxwarp_option(written, "rc").value_or("") == "fixed", "rc=fixed");
@@ -514,6 +519,36 @@ static void part_b()
 		      "and reads back out of the document it wrote");
 	}
 
+	// The atlas defaults are what the SERVER applies for an absent option, so a config left
+	// at them must carry neither key. Otherwise every config.json the dashboard touched
+	// would pin "atlas": "off" and a threshold of 0 -- and pinning 0 is worse than it looks,
+	// because 0 means "the codec's own default" and upstream is free to move it.
+	{
+		Settings d;
+		d.load_json(json::parse(R"({"encoder": {"encoder": "nxwarp", "options": {"atlas": "auto", "atlas-picture-threshold": "16"}}})"));
+		check(d.property("nxwarpAtlas").toInt() == int(Settings::AtlasAuto), "atlas=auto is read");
+		check(d.property("nxwarpAtlasPictureThreshold").toInt() == 16, "the threshold is read");
+
+		d.setProperty("nxwarpAtlas", int(Settings::AtlasOff));
+		d.setProperty("nxwarpAtlasPictureThreshold", 0);
+		check(not nxd::nxwarp_option(d.configuration(), "atlas").has_value() and
+		              not nxd::nxwarp_option(d.configuration(), "atlas-picture-threshold").has_value(),
+		      "both defaults erase both options");
+	}
+
+	// The threshold is clamped rather than refused, and 0 stays reachable because it is the
+	// value that means "the codec decides".
+	{
+		Settings d;
+		d.load_json(json::parse(R"({"encoder": "nxwarp"})"));
+		d.setProperty("nxwarpAtlasPictureThreshold", 999);
+		check(nxd::nxwarp_option(d.configuration(), "atlas-picture-threshold").value_or("") == "64",
+		      "an absurd threshold is clamped to the top of the slider, not written out");
+		d.setProperty("nxwarpAtlasPictureThreshold", -5);
+		check(not nxd::nxwarp_option(d.configuration(), "atlas-picture-threshold").has_value(),
+		      "a negative threshold clamps to 0, which is the default and so is erased");
+	}
+
 	// An inverted quantiser range would make the server refuse the session, so the GUI cannot
 	// produce one.
 	{
@@ -683,6 +718,8 @@ static void part_d(const char * qml_path)
 	        // hence false; the mode beside it is written on OK like every other combo.
 	        {"edge_bleed_overscan", false},
 	        {"edge_bleed_extension", true},
+	        {"nxwarp_atlas", true},
+	        {"nxwarp_atlas_picture_d", true},
 	        {"nxwarp_entropy", true},
 	        {"nxwarp_pace", true},
 	        {"nxwarp_pace_fps", true},

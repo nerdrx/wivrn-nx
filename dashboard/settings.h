@@ -74,6 +74,18 @@ public:
 	};
 	Q_ENUM(edge_extension)
 
+	// "atlas": the ATLAS coding mode ([SYN] 13.12, tool bits 31 and 34). Two values and
+	// deliberately no third: `Auto` turns on the atlas together with the per-frame
+	// ATLAS/PICTURE mode switch and lets the displacement trigger choose, and there is no
+	// "atlas without the switch" because that is the form whose reference goes stale under
+	// fast head motion.
+	enum nxwarp_atlas
+	{
+		AtlasOff,
+		AtlasAuto,
+	};
+	Q_ENUM(nxwarp_atlas)
+
 	// "entropy": which entropy coder the NX Warp bitstream uses.
 	enum nxwarp_entropy
 	{
@@ -140,6 +152,8 @@ public:
 	// render pass, so both apply to an H.264 session exactly as they do to an NX Warp one.
 	Q_PROPERTY(float edgeBleedOverscan READ edgeBleedOverscan WRITE set_edgeBleedOverscan NOTIFY edgeBleedOverscanChanged)
 	Q_PROPERTY(edge_extension edgeBleedExtension READ edgeBleedExtension WRITE set_edgeBleedExtension NOTIFY edgeBleedExtensionChanged)
+	Q_PROPERTY(nxwarp_atlas nxwarpAtlas READ nxwarpAtlas WRITE set_nxwarpAtlas NOTIFY nxwarpAtlasChanged)
+	Q_PROPERTY(int nxwarpAtlasPictureThreshold READ nxwarpAtlasPictureThreshold WRITE set_nxwarpAtlasPictureThreshold NOTIFY nxwarpAtlasPictureThresholdChanged)
 	Q_PROPERTY(nxwarp_entropy nxwarpEntropy READ nxwarpEntropy WRITE set_nxwarpEntropy NOTIFY nxwarpEntropyChanged)
 	Q_PROPERTY(nxwarp_pace nxwarpPace READ nxwarpPace WRITE set_nxwarpPace NOTIFY nxwarpPaceChanged)
 	Q_PROPERTY(int nxwarpPaceFps READ nxwarpPaceFps WRITE set_nxwarpPaceFps NOTIFY nxwarpPaceFpsChanged)
@@ -188,6 +202,8 @@ public:
 	SETTER_GETTER_NOTIFY(float, streamScale)
 	SETTER_GETTER_NOTIFY(float, edgeBleedOverscan)
 	SETTER_GETTER_NOTIFY(edge_extension, edgeBleedExtension)
+	SETTER_GETTER_NOTIFY(nxwarp_atlas, nxwarpAtlas)
+	SETTER_GETTER_NOTIFY(int, nxwarpAtlasPictureThreshold)
 	SETTER_GETTER_NOTIFY(nxwarp_entropy, nxwarpEntropy)
 	SETTER_GETTER_NOTIFY(nxwarp_pace, nxwarpPace)
 	SETTER_GETTER_NOTIFY(int, nxwarpPaceFps)

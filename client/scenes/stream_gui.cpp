@@ -271,6 +271,12 @@ void scenes::stream::accumulate_fps(XrTime now)
 		float pass_w_ms = 0, pass_b_skip_ms = 0, pass_b_coded_ms = 0, pass_b_dir_ms = 0;
 		float tiles_skip = 0, tiles_coded = 0, tiles_dir = 0;
 		bool pass_segments = false;
+		// The atlas window. Frame-mode figures are counts and are summed over the eyes;
+		// the tile figures describe one eye's work and take the max, like the segment
+		// counts beside them.
+		uint32_t atlas_picture_frames = 0, atlas_frames = 0;
+		float atlas_assembled = 0, atlas_warped = 0, atlas_identity = 0, atlas_superseded = 0;
+		bool atlas_active = false, atlas_known = false, atlas_superseded_known = false;
 		uint32_t stride = 1, width = 0, height = 0;
 		uint64_t tools = 0;
 		uint32_t frame_tiles = 0, grid_tiles = 0;
@@ -313,6 +319,15 @@ void scenes::stream::accumulate_fps(XrTime now)
 			tiles_coded = std::max(tiles_coded, st.tiles_coded_seg);
 			tiles_dir = std::max(tiles_dir, st.tiles_dir_seg);
 			pass_segments = pass_segments or st.pass_segments_known;
+			atlas_picture_frames += st.atlas_picture_frames;
+			atlas_frames += st.atlas_frames;
+			atlas_assembled = std::max(atlas_assembled, st.atlas_tiles_assembled);
+			atlas_warped = std::max(atlas_warped, st.atlas_tiles_warped_skip);
+			atlas_identity = std::max(atlas_identity, st.atlas_tiles_identity);
+			atlas_superseded = std::max(atlas_superseded, st.atlas_tiles_superseded);
+			atlas_active = atlas_active or st.atlas_active;
+			atlas_known = atlas_known or st.atlas_stats_known;
+			atlas_superseded_known = atlas_superseded_known or st.atlas_superseded_known;
 
 			// Hand this eye's window to the server the first time we see it, so the
 			// dashboard can show what the HUD shows. Keyed on the decoder's own
@@ -374,6 +389,15 @@ void scenes::stream::accumulate_fps(XrTime now)
 		fps.nxwarp_tiles_coded = tiles_coded;
 		fps.nxwarp_tiles_dir = tiles_dir;
 		fps.nxwarp_pass_segments = pass_segments;
+		fps.nxwarp_atlas_picture_frames = atlas_picture_frames;
+		fps.nxwarp_atlas_frames = atlas_frames;
+		fps.nxwarp_atlas_assembled = atlas_assembled;
+		fps.nxwarp_atlas_warped = atlas_warped;
+		fps.nxwarp_atlas_identity = atlas_identity;
+		fps.nxwarp_atlas_superseded = atlas_superseded;
+		fps.nxwarp_atlas_active = atlas_active;
+		fps.nxwarp_atlas_known = atlas_known;
+		fps.nxwarp_atlas_superseded_known = atlas_superseded_known;
 		fps.nxwarp_bytes = bytes;
 		fps.nxwarp_arrival_ms = arrival_ms;
 		fps.nxwarp_stride = stride;
@@ -634,6 +658,52 @@ void scenes::stream::rebuild_fps_lines()
 			                                 fps.nxwarp_tiles_skip,
 			                                 fps.nxwarp_tiles_coded,
 			                                 fps.nxwarp_tiles_dir);
+	}
+
+	// The ATLAS coding mode ([SYN] 13.12), when the stream is coded with it.
+	//
+	// Written so it says as much as the build can honestly say and no more. Against an
+	// nxvc with the full counters it is the whole line; against one with only
+	// `tiles_superseded` -- the counter that shipped with the atlas decoder itself -- it
+	// is the frame count and that one number; against a prefix with neither it says the
+	// atlas is on and that nothing is measured, which is a different statement from a row
+	// of zeroes and has to look different.
+	//
+	// Absent entirely on a stream without the atlas, rather than showing "0 PICTURE": a
+	// mode that is not in use has no rate to report.
+	if (fps.nxwarp and fps.nxwarp_atlas_active)
+	{
+		if (fps.nxwarp_atlas_known)
+		{
+			const uint32_t total = fps.nxwarp_atlas_picture_frames + fps.nxwarp_atlas_frames;
+			fps_line_cache[7] = fmt::format(
+			        _F("atlas: {} PICTURE / {} ATLAS frames"),
+			        fps.nxwarp_atlas_picture_frames,
+			        fps.nxwarp_atlas_frames);
+			// The share, which is the number the `D` threshold is actually tuned
+			// against. Suppressed when the window held no frames at all, where a
+			// percentage would be a division by zero dressed as a measurement.
+			if (total)
+				fps_line_cache[7] += fmt::format(_F(" ({:.0f}% PICTURE)"),
+				                                 100.f * float(fps.nxwarp_atlas_picture_frames) / float(total));
+			fps_line_cache[7] += fmt::format(
+			        _F(" · warps/frame {:.0f} · assembled {:.0f} · identity {:.0f}"),
+			        fps.nxwarp_atlas_warped,
+			        fps.nxwarp_atlas_assembled,
+			        fps.nxwarp_atlas_identity);
+		}
+		else
+		{
+			fps_line_cache[7] = _("atlas: on, per-frame counters not in this nxvc");
+		}
+		// Superseded tiles came with the atlas decoder and predate the rest, so this
+		// is appended on its own and appears even when the line above could not be
+		// built. Not a loss -- the position already held a newer generation -- so it
+		// is only shown when it is non-zero, where it means a base-layer patch ran
+		// ahead of the stream.
+		if (fps.nxwarp_atlas_superseded_known and fps.nxwarp_atlas_superseded > 0)
+			fps_line_cache[7] += fmt::format(_F(" · superseded {:.0f}"),
+			                                 fps.nxwarp_atlas_superseded);
 	}
 
 	// The performance levels: what we ASKED the runtime for, and the last thing

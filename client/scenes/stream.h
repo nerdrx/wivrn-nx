@@ -588,6 +588,20 @@ private:
 		float nxwarp_tiles_coded = 0;
 		float nxwarp_tiles_dir = 0;
 		bool nxwarp_pass_segments = false;
+		// The atlas coding mode over the decoder's last window. Counts for the two frame
+		// modes, means per frame for the tile figures. `nxwarp_atlas_active` says the
+		// stream is coded with the atlas at all, which is what decides whether the line
+		// appears; the two `_known` flags say whether the numbers beside it mean
+		// anything, so "not measured" never renders as a convincing row of zeroes.
+		uint32_t nxwarp_atlas_picture_frames = 0;
+		uint32_t nxwarp_atlas_frames = 0;
+		float nxwarp_atlas_assembled = 0;
+		float nxwarp_atlas_warped = 0;
+		float nxwarp_atlas_identity = 0;
+		float nxwarp_atlas_superseded = 0;
+		bool nxwarp_atlas_active = false;
+		bool nxwarp_atlas_known = false;
+		bool nxwarp_atlas_superseded_known = false;
 		float nxwarp_bytes = 0;
 		float nxwarp_arrival_ms = 0;
 		// Fixed for the stream: how many arriving frames one decode takes, the size
@@ -657,7 +671,9 @@ private:
 	// Built once per sample window by accumulate_fps and cached here, NOT formatted per
 	// frame: both call sites draw them every frame, and the numbers in them only move when
 	// the decoder's two-second profile window turns over.
-	static constexpr size_t fps_line_count = 7;
+	// One more line for the atlas coding mode, which is its own subject: it is the only
+	// line that reports what the CODEC decided rather than what the decode cost.
+	static constexpr size_t fps_line_count = 8;
 	std::array<std::string, fps_line_count> fps_line_cache{};
 	// The decoder window sequence last reported to the server, per stream. Zero is the
 	// value a decoder that has published nothing reports, so nothing is sent until a

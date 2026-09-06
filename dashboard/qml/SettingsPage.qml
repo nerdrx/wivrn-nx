@@ -345,6 +345,48 @@ Kirigami.ScrollablePage {
             }
 
             RowLayout {
+                Kirigami.FormData.label: i18n("Atlas coding:")
+                visible: Settings.nxwarpSelected
+                Controls.ComboBox {
+                    id: nxwarp_atlas
+                    model: [
+                        {
+                            label: i18nc("atlas coding mode", "Off"),
+                            value: Settings.AtlasOff
+                        },
+                        {
+                            label: i18n("Auto (per-frame ATLAS / PICTURE)"),
+                            value: Settings.AtlasAuto
+                        }
+                    ]
+                    textRole: "label"
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("The reference stops being the previous decoded picture and becomes a per-tile atlas: for each tile position, the pixels of the most recent frame that coded it, plus the warp from this frame's pose back to that one. A skipped tile then costs the headset nothing, which is where the decode time goes. Auto also lets the encoder fall back to a whole-picture frame when the atlas has drifted too far, so the two are one codec at two operating points. Off until it is measured on a headset. Needs inter prediction, and takes effect on the next connection.")
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: i18n("PICTURE threshold:")
+                visible: Settings.nxwarpSelected && nxwarp_atlas.model[nxwarp_atlas.currentIndex].value === Settings.AtlasAuto
+                Controls.SpinBox {
+                    id: nxwarp_atlas_picture_d
+                    from: 0
+                    to: 64
+                    editable: true
+                }
+                Controls.Label {
+                    text: nxwarp_atlas_picture_d.value === 0
+                          ? i18n("luma samples (0 = the codec's default, 8)")
+                          : i18n("luma samples")
+                    opacity: 0.7
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("How far the atlas may drift before the encoder codes a whole-picture frame instead. Measured as the worst corner displacement in the atlas, in luma samples, this frame's advance included. Lower fires the picture model more often and pays its time more often; higher bounds how often that happens at the price of a staler mosaic. 0 asks the codec for its own default.")
+                }
+            }
+
+            RowLayout {
                 Kirigami.FormData.label: i18n("Entropy coder:")
                 visible: Settings.nxwarpSelected
                 Controls.ComboBox {
@@ -769,6 +811,8 @@ Kirigami.ScrollablePage {
         // NX Warp. streamScale is already written live by the slider so its size readout can
         // follow the handle; the rest are written here, on OK, like every other control.
         if (Settings.nxwarpSelected) {
+            Settings.nxwarpAtlas = nxwarp_atlas.model[nxwarp_atlas.currentIndex].value;
+            Settings.nxwarpAtlasPictureThreshold = nxwarp_atlas_picture_d.value;
             Settings.nxwarpEntropy = nxwarp_entropy.model[nxwarp_entropy.currentIndex].value;
             // The pace mode has to be set before the rate: the rate is only stored in the
             // fixed mode, and the setter reads the mode to decide.
@@ -803,6 +847,8 @@ Kirigami.ScrollablePage {
         stream_scale.value = Settings.streamScale;
         edge_bleed_overscan.value = Settings.edgeBleedOverscan;
         edge_bleed_extension.currentIndex = edge_bleed_extension.model.findIndex(i => i.value === Settings.edgeBleedExtension);
+        nxwarp_atlas.currentIndex = nxwarp_atlas.model.findIndex(i => i.value === Settings.nxwarpAtlas);
+        nxwarp_atlas_picture_d.value = Settings.nxwarpAtlasPictureThreshold;
         nxwarp_entropy.currentIndex = nxwarp_entropy.model.findIndex(i => i.value === Settings.nxwarpEntropy);
         nxwarp_pace.currentIndex = nxwarp_pace.model.findIndex(i => i.value === Settings.nxwarpPace);
         nxwarp_pace_fps.value = Settings.nxwarpPaceFps;

@@ -94,6 +94,52 @@ constexpr bool nxwarp_pass_segments_supported()
 #endif
 }
 
+// Whether this build's nxvc reports what the ATLAS coding mode did with a frame.
+//
+// Same shape and same reason as the segments above: the fields are APPENDED to
+// nxvc_vkd_stats, so only a macro can be asked about them, and the answer has to be a
+// value the UI can show rather than a set of fields that silently do not exist. The
+// atlas lands in two halves on two branches, so during the rollout this client is built
+// against prefixes that have the decoder but not these counters.
+//
+// What it gates: frame_mode, atlas_entries_valid, tiles_assembled, tiles_warped_skip,
+// tiles_identity_seg and picture_frames. `tiles_superseded` is deliberately NOT in here
+// -- it arrived with the atlas decoder itself and is asked about separately below, so a
+// prefix that has the decoder but not the counters still shows the one number it does
+// have instead of showing nothing.
+// [SYN] 13.12, tool bit 31: the stream's reference is the per-tile atlas. Bit 34
+// (ATLAS_REBASE) is the per-frame ATLAS/PICTURE mode switch on top of it. Spelled here
+// rather than taken from nxvc because a tool BIT is a bitstream constant, not an ABI one:
+// it is the same number against every prefix, including the ones that cannot name it.
+constexpr uint64_t nxwarp_tool_atlas = 1ull << 31;
+constexpr uint64_t nxwarp_tool_atlas_rebase = 1ull << 34;
+
+constexpr bool nxwarp_atlas_stats_supported()
+{
+#ifdef NXVC_VK_DECODER_ATLAS_STATS
+	return true;
+#else
+	return false;
+#endif
+}
+
+// Whether nxvc_vkd_stats carries `tiles_superseded`, which came with the atlas decoder
+// and predates the fuller counters above.
+//
+// There is no upstream macro for this one -- it was appended without a feature test --
+// so WIVRN_NXVC_ATLAS_STATS is set by this tree's own probe: a compile check on the
+// server (cmake/NxvcAtlasFeatures.cmake) and a scan of the header the client is about to
+// build (client/CMakeLists.txt), because the client BUILDS nxvc and has no installed
+// header to compile against at configure time.
+constexpr bool nxwarp_atlas_superseded_supported()
+{
+#if defined(WIVRN_NXVC_ATLAS_STATS) || defined(NXVC_VK_DECODER_ATLAS_STATS)
+	return true;
+#else
+	return false;
+#endif
+}
+
 // Decoupled display: publish every frame COMPLETE, so the render thread waits on
 // nothing.
 //
@@ -158,6 +204,23 @@ class nxwarp_decoder : public decoder
 		double pass_b_skip_ms = 0, pass_b_coded_ms = 0, pass_b_dir_ms = 0;
 		// Tiles in each segment, so a zero segment says whether it was cheap or empty.
 		double tiles_skip = 0, tiles_coded = 0, tiles_dir = 0;
+		// --- the ATLAS coding mode ([SYN] 13.12), all zero on a stream without it.
+		//
+		// `frame_mode` is 0 for an ATLAS frame and 1 for a PICTURE frame (frame flags
+		// bit 5), which is the one thing about this mode a client cannot work out for
+		// itself: it is a bitstream property, and the alternative to nxvc reporting it
+		// is the client parsing frame headers it has no business parsing.
+		//
+		// `tiles_superseded` is a REPORT and not a loss: the position already held a
+		// generation from this frame or a later one, which a base-layer patch can
+		// produce, and the encoder must not answer it with a refresh.
+		uint32_t frame_mode = 0;
+		uint32_t atlas_entries_valid = 0;
+		uint32_t tiles_assembled = 0;
+		uint32_t tiles_warped_skip = 0;
+		uint32_t tiles_identity_seg = 0;
+		uint32_t tiles_superseded = 0;
+		uint32_t picture_frames = 0;
 		uint64_t bytes = 0;
 		// --- where the wall time actually goes, stage by stage.
 		//
@@ -589,6 +652,29 @@ public:
 		float tiles_skip_seg = 0;
 		float tiles_coded_seg = 0;
 		float tiles_dir_seg = 0;
+		// --- the ATLAS coding mode, over the same two-second window.
+		//
+		// `picture_frames` and `atlas_frames` are counts, not means: "how the mode
+		// switch decided" is a question about the window, and a mean of a boolean is
+		// harder to read than the two numbers it came from. The rest are means per
+		// frame, like the segment counts above.
+		uint32_t atlas_picture_frames = 0;
+		uint32_t atlas_frames = 0;
+		float atlas_entries_valid = 0;
+		float atlas_tiles_assembled = 0;
+		float atlas_tiles_warped_skip = 0;
+		float atlas_tiles_identity = 0;
+		float atlas_tiles_superseded = 0;
+		// Whether the stream is coded with the atlas at all. Distinguishes "the atlas
+		// is off" from "the atlas is on and did nothing this window", which look
+		// identical in the counters and mean opposite things.
+		bool atlas_active = false;
+		// Whether the counters above mean anything: false when built or running against
+		// an nxvc without them, so a reader can tell "not measured" from "measured as
+		// zero", exactly as pass_segments_known does. `atlas_superseded_known` is the
+		// narrower one -- tiles_superseded predates the rest.
+		bool atlas_stats_known = false;
+		bool atlas_superseded_known = false;
 		// Bumped once every time the decoder republishes its two-second window. It is
 		// what lets a reader send each window exactly once without a timer of its own
 		// and without sending the same numbers twice.
@@ -643,6 +729,20 @@ public:
 		        .tiles_skip_seg = prof_tiles_skip.load(std::memory_order_relaxed),
 		        .tiles_coded_seg = prof_tiles_coded.load(std::memory_order_relaxed),
 		        .tiles_dir_seg = prof_tiles_dir.load(std::memory_order_relaxed),
+		        // The atlas, over this window. `atlas_active` is read from the stream's
+		        // own tool mask rather than from the counters, so "the atlas is off"
+		        // and "the atlas is on and did nothing" stay distinguishable -- they
+		        // are identical in the numbers and mean opposite things.
+		        .atlas_picture_frames = prof_atlas_picture_frames.load(std::memory_order_relaxed),
+		        .atlas_frames = prof_atlas_frames.load(std::memory_order_relaxed),
+		        .atlas_entries_valid = prof_atlas_entries_valid.load(std::memory_order_relaxed),
+		        .atlas_tiles_assembled = prof_atlas_tiles_assembled.load(std::memory_order_relaxed),
+		        .atlas_tiles_warped_skip = prof_atlas_tiles_warped_skip.load(std::memory_order_relaxed),
+		        .atlas_tiles_identity = prof_atlas_tiles_identity.load(std::memory_order_relaxed),
+		        .atlas_tiles_superseded = prof_atlas_tiles_superseded.load(std::memory_order_relaxed),
+		        .atlas_active = (hdr_tools.load(std::memory_order_relaxed) & nxwarp_tool_atlas) != 0,
+		        .atlas_stats_known = nxwarp_atlas_stats_supported(),
+		        .atlas_superseded_known = nxwarp_atlas_superseded_supported(),
 		        .window_seq = prof_window_seq.load(std::memory_order_relaxed),
 		        .pass_segments_known = nxwarp_pass_segments_supported(),
 		        .frames_withheld = frames_withheld.load(std::memory_order_relaxed),
@@ -816,6 +916,18 @@ private:
 	std::atomic<float> prof_pass_a_ms = 0, prof_pass_b_ms = 0;
 	std::atomic<float> prof_pass_w_ms = 0;
 	std::atomic<float> prof_pass_b_skip_ms = 0, prof_pass_b_coded_ms = 0, prof_pass_b_dir_ms = 0;
+	// The atlas window. Counts for the two frame modes, means for the tile figures.
+	std::atomic<uint32_t> prof_atlas_picture_frames = 0, prof_atlas_frames = 0;
+	std::atomic<float> prof_atlas_entries_valid = 0, prof_atlas_tiles_assembled = 0;
+	std::atomic<float> prof_atlas_tiles_warped_skip = 0, prof_atlas_tiles_identity = 0;
+	std::atomic<float> prof_atlas_tiles_superseded = 0;
+	// nxvc's running PICTURE total as of the previous window, so the per-window count is
+	// a difference rather than another thing to reset in step with the window.
+	uint64_t atlas_picture_frames_prev = 0;
+	// Whether this stream's display pass samples the ATLAS view rather than the derived
+	// picture. Set once per stream header; false for every non-atlas stream, and for an
+	// atlas stream whose view nxvc refused.
+	bool atlas_view_active = false;
 	std::atomic<float> prof_tiles_skip = 0, prof_tiles_coded = 0, prof_tiles_dir = 0;
 	std::atomic<uint64_t> prof_window_seq = 0;
 	// What the stream header said, published once for live_stats above.

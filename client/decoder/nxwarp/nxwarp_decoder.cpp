@@ -606,6 +606,55 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 	hdr_height.store(si.height, std::memory_order_relaxed);
 	hdr_tools.store(si.tools, std::memory_order_relaxed);
 
+	// The ATLAS display view ([SYN] 13.12.5).
+	//
+	// Under the atlas the picture nxvc_vk_decoder_images() hands back is DERIVED from the
+	// atlas and is explicitly not normative -- conformance compares the atlas. What a
+	// display pass wants is a SAMPLER over the atlas, which nxvc produces beside it on
+	// request, and asking for it is the whole of what this client has to do differently.
+	//
+	// R8 where the stream allows it: NV12-shaped, one luma tap plus one chroma tap,
+	// measured at 1.086 ms a pair on a Pico 4 against 2.124 for the three-plane R16 form.
+	// The two carry identical samples for a CT_NONE stream -- the atlas holds the stream's
+	// own YCbCr at its own bit depth, so an 8-bit sample is already a byte -- and nxvc's
+	// vk.atlas.view test pins that sample for sample.
+	//
+	// R8 is REFUSED on a stream with a colour transform, and correctly: under CT_YCOCGR
+	// the chroma planes carry the extra bit that transform produces, which an 8-bit UNORM
+	// cannot hold. So the transform is checked here rather than the refusal being caught,
+	// and R16 is asked for instead.
+	atlas_view_active = false;
+	if (si.tools & nxwarp_tool_atlas)
+	{
+#ifdef WIVRN_NXVC_ATLAS_DECODE
+		const auto want = si.color_transform == 0 ? NXVC_VKD_ATLAS_VIEW_R8
+		                                          : NXVC_VKD_ATLAS_VIEW_R16;
+		if (nxvc_vk_decoder_set_atlas_view(nxvc, want) == NXVC_VKD_OK)
+		{
+			atlas_view_active = true;
+			spdlog::info("nxwarp[{}]: atlas stream, display view {} ({})",
+			             stream_index,
+			             want == NXVC_VKD_ATLAS_VIEW_R8 ? "R8" : "R16",
+			             want == NXVC_VKD_ATLAS_VIEW_R8
+			                     ? "one luma tap plus one chroma tap"
+			                     : "three R16_UINT planes, the stream has a colour transform");
+		}
+		else
+		{
+			// Not fatal: the derived picture is still a picture, and a display pass
+			// over it is what every non-atlas stream already does. It is worth a
+			// warning because the cheap path was available and was refused.
+			spdlog::warn("nxwarp[{}]: atlas stream but the display view was refused; "
+			             "falling back to the derived picture",
+			             stream_index);
+		}
+#else
+		spdlog::warn("nxwarp[{}]: atlas stream, but this build's nxvc has no display view; "
+		             "using the derived picture",
+		             stream_index);
+#endif
+	}
+
 	spdlog::info("nxwarp[{}]: {}x{} per eye, {} {}, on {}, {} x {} tiles, {} bytes per tile",
 	             stream_index, si.width, si.height, si.eyes, si.eyes == 1 ? "eye" : "eyes",
 	             nxvc_vk_decoder_device_name(nxvc), cfg.cols, cfg.rows, chunk);
@@ -1374,7 +1423,38 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	const auto t_submitted = std::chrono::steady_clock::now();
 
 	nxvc_vkd_images img{};
-	if (nxvc_vk_decoder_images(nxvc, &img) != NXVC_VKD_OK or img.count < 2)
+	bool got_images = false;
+#ifdef WIVRN_NXVC_ATLAS_DECODE
+	if (atlas_view_active)
+	{
+		// The sampled atlas, not the derived picture. Reshaped into the same two-plane
+		// form the rest of this path already expects -- plane 0 luma, plane 1
+		// interleaved chroma -- so nothing downstream changes.
+		//
+		// The FORMATS differ from the derived picture's: the view is R8_UNORM /
+		// R8G8_UNORM where nxvc_vk_decoder_images() gives r8ui / rg8ui. They carry the
+		// same numbers, but a sampler reading a UNORM returns them scaled to 0..1, so
+		// whichever the display pass binds has to agree with what its shader expects.
+		// This is the one part of the atlas display path that a desktop cannot check.
+		nxvc_vkd_atlas_images aimg{};
+		if (nxvc_vk_decoder_atlas_images(nxvc, &aimg) == NXVC_VKD_OK and aimg.image[0] != VK_NULL_HANDLE)
+		{
+			img.count = aimg.image[2] == VK_NULL_HANDLE ? 2u : 3u;
+			for (uint32_t i = 0; i < img.count; ++i)
+			{
+				img.image[i] = aimg.image[i];
+				img.view[i] = aimg.view[i];
+				img.format[i] = aimg.format[i];
+				img.width[i] = aimg.width[i];
+				img.height[i] = aimg.height[i];
+			}
+			got_images = true;
+		}
+	}
+#endif
+	if (not got_images and nxvc_vk_decoder_images(nxvc, &img) != NXVC_VKD_OK)
+		img.count = 0;
+	if (img.count < 2)
 	{
 		// The decode was submitted, so the ring may well have advanced -- but a codec
 		// that will not hand back its images is one whose state cannot be reasoned
@@ -1704,6 +1784,28 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		prof.tiles_coded += st.tiles_coded_seg;
 		prof.tiles_dir += st.tiles_dir_seg;
 #endif
+#if defined(WIVRN_NXVC_ATLAS_STATS) || defined(NXVC_VK_DECODER_ATLAS_STATS)
+		// The one atlas counter that came with the atlas decoder itself, rather than
+		// with the fuller set below. Accumulated on its own so a prefix that has the
+		// decoder but not the counters still reports it.
+		prof.tiles_superseded += st.tiles_superseded;
+#endif
+#ifdef NXVC_VK_DECODER_ATLAS_STATS
+		// What the mode switch did with this frame, and what the atlas was made of
+		// when it did. `frame_mode` is the only one of these a client cannot derive:
+		// it is frame flags bit 5, a bitstream property, and the alternative to
+		// reading it here is parsing frame headers in the client.
+		//
+		// picture_frames is nxvc's own running total, so it is taken rather than
+		// summed; the per-window count is the difference, taken where the window is
+		// published.
+		prof.frame_mode = st.frame_mode;
+		prof.picture_frames = st.picture_frames;
+		prof.atlas_entries_valid += st.atlas_entries_valid;
+		prof.tiles_assembled += st.tiles_assembled;
+		prof.tiles_warped_skip += st.tiles_warped_skip;
+		prof.tiles_identity_seg += st.tiles_identity_seg;
+#endif
 		prof.gpu_ms += st.gpu_ms;
 		prof.bytes += job.unit.size();
 		prof.gap_ms += have_last_iter ? ms(t_iter0 - last_iter_end) : 0.0;
@@ -1866,6 +1968,33 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			prof_tiles_skip.store(float(prof.tiles_skip / n), std::memory_order_relaxed);
 			prof_tiles_coded.store(float(prof.tiles_coded / n), std::memory_order_relaxed);
 			prof_tiles_dir.store(float(prof.tiles_dir / n), std::memory_order_relaxed);
+			// The atlas window. The tile figures are means per frame like the segment
+			// counts above; the two frame-mode figures are COUNTS, because "how the
+			// mode switch decided over these two seconds" is a question about the
+			// window and a mean of a boolean is harder to read than the pair it came
+			// from.
+			//
+			// picture_frames is nxvc's own running total, so the window's share of it
+			// is a difference. Keeping the previous total here rather than resetting a
+			// counter in step with the window means a missed window costs a number,
+			// never a negative one.
+			prof_atlas_entries_valid.store(float(double(prof.atlas_entries_valid) / n), std::memory_order_relaxed);
+			prof_atlas_tiles_assembled.store(float(double(prof.tiles_assembled) / n), std::memory_order_relaxed);
+			prof_atlas_tiles_warped_skip.store(float(double(prof.tiles_warped_skip) / n), std::memory_order_relaxed);
+			prof_atlas_tiles_identity.store(float(double(prof.tiles_identity_seg) / n), std::memory_order_relaxed);
+			prof_atlas_tiles_superseded.store(float(double(prof.tiles_superseded) / n), std::memory_order_relaxed);
+			{
+				const uint64_t total = prof.picture_frames;
+				const uint32_t in_window = total >= atlas_picture_frames_prev
+				                                   ? uint32_t(total - atlas_picture_frames_prev)
+				                                   : 0u;
+				atlas_picture_frames_prev = total;
+				prof_atlas_picture_frames.store(in_window, std::memory_order_relaxed);
+				// Every frame this window that was not a PICTURE frame was an ATLAS
+				// frame; there is no third kind.
+				prof_atlas_frames.store(uint32_t(n) >= in_window ? uint32_t(n) - in_window : 0u,
+				                        std::memory_order_relaxed);
+			}
 			// Last, and after every value above: a reader that sees the new sequence
 			// must find the new numbers already there, not a half-updated window.
 			prof_window_seq.fetch_add(1, std::memory_order_release);

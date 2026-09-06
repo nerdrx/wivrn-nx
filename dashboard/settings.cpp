@@ -142,6 +142,8 @@ void Settings::emitAllChanged()
 	streamScaleChanged();
 	edgeBleedOverscanChanged();
 	edgeBleedExtensionChanged();
+	nxwarpAtlasChanged();
+	nxwarpAtlasPictureThresholdChanged();
 	nxwarpEntropyChanged();
 	nxwarpPaceChanged();
 	nxwarpPaceFpsChanged();
@@ -831,6 +833,47 @@ int Settings::encodedTiles(int headsetWidth, int headsetHeight) const
 	if (size.isEmpty())
 		return 0;
 	return (size.width() / wivrn::encode_alignment) * (size.height() / wivrn::encode_alignment);
+}
+
+// The ATLAS coding mode, and its PICTURE-frame trigger.
+Settings::nxwarp_atlas Settings::nxwarpAtlas() const
+{
+	const auto v = nxd::nxwarp_option(m_jsonSettings, "atlas").value_or(std::string(nxd::nxwarp_default_atlas));
+	return v == "auto" ? AtlasAuto : AtlasOff;
+}
+
+void Settings::set_nxwarpAtlas(const nxwarp_atlas & value)
+{
+	const auto old = nxwarpAtlas();
+	nxd::set_nxwarp_option_or_default(m_jsonSettings,
+	                                  "atlas",
+	                                  value == AtlasAuto ? "auto" : "off",
+	                                  nxd::nxwarp_default_atlas);
+	if (old != nxwarpAtlas())
+		nxwarpAtlasChanged();
+}
+
+int Settings::nxwarpAtlasPictureThreshold() const
+{
+	return int(nxd::nxwarp_option_u32(m_jsonSettings,
+	                                  "atlas-picture-threshold",
+	                                  nxd::nxwarp_default_atlas_picture_d));
+}
+
+void Settings::set_nxwarpAtlasPictureThreshold(const int & value)
+{
+	const auto old = nxwarpAtlasPictureThreshold();
+	// 0 is a real choice and the one the server ships: it means "nxvc's own default".
+	// Clamped rather than refused, and to a range a person can reach on a slider -- the
+	// trigger is a displacement in luma samples, so past a few dozen it has stopped
+	// bounding anything.
+	const uint32_t v = uint32_t(std::clamp(value, 0, 64));
+	nxd::set_nxwarp_option_u32(m_jsonSettings,
+	                                      "atlas-picture-threshold",
+	                                      v,
+	                                      nxd::nxwarp_default_atlas_picture_d);
+	if (old != nxwarpAtlasPictureThreshold())
+		nxwarpAtlasPictureThresholdChanged();
 }
 
 Settings::nxwarp_entropy Settings::nxwarpEntropy() const

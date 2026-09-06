@@ -53,6 +53,15 @@ inline constexpr std::string_view nxwarp_name = "nxwarp";
 // the same convention the rest of Settings follows (an empty hostname erases "hostname", encoder
 // "Auto" erases "encoder").
 inline constexpr std::string_view nxwarp_default_entropy = "auto";
+// The ATLAS coding mode is OFF by default, and stays off until it is measured on a headset:
+// it removes the decoder's skip warp, but the figure on the nx-warp side is a desktop
+// measurement that has not been reproduced on an Adreno, and a default that is faster on a
+// workstation and slower on the target is worse than no default at all.
+inline constexpr std::string_view nxwarp_default_atlas = "off";
+// The mode trigger `D`, in luma samples. 0 means "ask nxvc for its own default", which is 8
+// -- the value ADR-0029's sweep settled on. Written out only when it is not 0, so a config
+// that has not chosen one does not pin a number that upstream may want to move.
+inline constexpr uint32_t nxwarp_default_atlas_picture_d = 0;
 inline constexpr std::string_view nxwarp_default_pace = "auto";
 inline constexpr std::string_view nxwarp_default_rc = "auto";
 inline constexpr std::string_view nxwarp_default_coded_vectors = "default";

@@ -1592,6 +1592,11 @@ int main(int argc, char ** argv)
 	std::string client_tools = "none";
 	// "auto" (the server default), "rans" or "lite".
 	std::string entropy = "auto";
+	// The ATLAS coding mode, "off" (the default, as the server's) or "auto". A leg that
+	// asks for it also needs inter prediction, which the encoder refuses the pair without.
+	std::string atlas = "off";
+	// The mode trigger D in luma samples; 0 leaves it to nxvc, which uses 8.
+	uint32_t atlas_picture_d = 0;
 	// The encoder effort level, "0" or "1". The server's default is 1 and so is this
 	// one: the harness runs the configuration the server runs, or it is measuring
 	// something nobody ships. `--effort 0` is how a run reaches the pre-effort
@@ -1648,6 +1653,10 @@ int main(int argc, char ** argv)
 			client_tools = next();
 		else if (a == "--entropy")
 			entropy = next();
+		else if (a == "--atlas")
+			atlas = next();
+		else if (a == "--atlas-picture-threshold")
+			atlas_picture_d = uint32_t(std::stoul(next()));
 		else if (a == "--effort")
 			effort = next();
 		else if (a == "--qp")
@@ -1844,6 +1853,9 @@ int main(int argc, char ** argv)
 	// .nxv files.
 	settings.options["stereo-compose"] = stereo_compose;
 	settings.options["entropy"] = entropy;
+	settings.options["atlas"] = atlas;
+	if (atlas_picture_d)
+		settings.options["atlas-picture-threshold"] = std::to_string(atlas_picture_d);
 	settings.options["effort"] = effort;
 	// The simulated headset mask. "all" is every bit set, which is a headset that can
 	// decode anything this encoder emits and is what keeps every existing run in this

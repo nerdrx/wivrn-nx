@@ -1087,6 +1087,167 @@ values of the extension enum are 0/1/2 and are not free to change.
 protocol version hash. A client and a server from this branch talk only to each other — which was
 already true on `nx-warp-e2e`, and is now true for one more reason.
 
+## 7. The atlas coding mode, wired
+
+[SYN] 13.12's ATLAS mode (tool bit 31) replaces the reference: instead of the previous
+decoded picture, each tile position holds the pixels of the most recent frame that CODED
+it, plus the composed warp from this frame's pose back to that one. A skipped tile then
+produces no reference pixels and touches nothing, which is where the decoder's whole skip
+warp goes. ATLAS_REBASE (bit 34) puts a per-frame mode switch on top: each frame is either
+an ATLAS frame or a PICTURE frame, decoded by the ordinary process against one coherent
+picture assembled from the atlas, whose reconstruction then becomes the atlas.
+
+This branch is the WiVRn side of it, wired so the headset build is ready the moment the
+nxvc branches merge. Nothing here turns it on by default.
+
+### The private prefix
+
+Built from nxvc `origin/main` merged with `origin/atlas-encoder`. One conflict,
+`vk/decoder/atlas/atlas_layout.h`, add/add, and not a divergence: the file was introduced
+on each side by the same patch applied twice, so git has no common ancestor for the path.
+Resolved to main's side, verified a strict superset -- all 96 lines of the encoder side's
+version appear verbatim and in order in main's 280, none unique to the encoder side.
+
+`ctest` on that prefix: **139/139 passed**, one skip (`python.pytest`, no numpy venv).
+Atlas legs green on both ICDs -- `vk.atlas.compose`, `.state`, `.vs_ref`, `.gpu_vs_cpu`
+(and `_radv`, `_lavapipe`), `ref.atlas`, `vk.encoder.atlas.acid.rans`/`.lite`/`.layout`/
+`.mode`/`.host`, `vk.decoder.conformance` (+ lavapipe).
+
+`nxvc_vk_decoder_tools_supported()` there is `0x00000005ff7a1fff`: bits 31 and 34 present,
+**bit 35 (planar) absent**, as it will be until lowpoly-gpu lands. The client sends this
+mask through unchanged, so nothing forces a tool the decoder has not got.
+
+### The guards
+
+The atlas ABI arrives in pieces, so every use of it is behind a feature test, and the
+tests are decided in one place rather than rediscovered per site.
+
+| macro | what it gates | how it is decided |
+| --- | --- | --- |
+| `NXVC_VK_DECODER_TOOLS_FOR` | `nxvc_vk_decoder_tools_for()` | upstream macro |
+| `NXVC_VK_DECODER_ATLAS_STATS` | `frame_mode`, `picture_frames`, `atlas_entries_valid`, `tiles_assembled`, `tiles_warped_skip`, `tiles_identity_seg` | upstream macro |
+| `WIVRN_NXVC_ATLAS_DECODE` | `nxvc_vk_decoder_set_atlas_view()`, `nxvc_vk_decoder_atlas_images()` | this tree's probe |
+| `WIVRN_NXVC_ATLAS_ENCODE` | `nxvc_vke_create_info::atlas`, `::atlas_mode`, `::atlas_picture_d` | this tree's probe |
+| `WIVRN_NXVC_ATLAS_STATS` | `nxvc_vkd_stats::tiles_superseded` | this tree's probe |
+
+The upstream macros are used directly; a macro is the only thing that can be asked about
+an appended struct field. The rest have no upstream feature test, so
+`cmake/NxvcAtlasFeatures.cmake` compiles the smallest program that uses each one. That
+works for the server, which builds against an installed prefix. It cannot work for the
+client, which BUILDS nxvc -- at configure time its include directory is an empty directory
+ExternalProject has not filled yet -- so `client/CMakeLists.txt` reads the same answer out
+of the source header that is about to be installed. Same file, one copy earlier.
+
+Configure prints what it found:
+
+```
+-- NX Warp atlas: decoder ON, encoder ON, stats ON, tools_for ON
+-- NX Warp atlas (client): decoder ON, stats ON, tools_for ON
+```
+
+### Server
+
+`"atlas": "off" | "auto"` and `"atlas-picture-threshold"`, reaching
+`nxvc_vke_create_info::atlas`, `::atlas_mode` and `::atlas_picture_d`.
+
+`"auto"` sets BOTH tool bits. There is deliberately no setting for bit 31 alone: leaving
+the mode switch clear makes every frame an ATLAS frame, which is the configuration whose
+reference goes stale under fast head motion, and shipping it as a reachable choice would
+be offering a worse operating point that nothing outside the encoder could see had been
+chosen.
+
+The threshold is `D` from 13.12.11.1, in LUMA SAMPLES: a PICTURE frame is coded when the
+worst corner displacement in the atlas, this frame's advance included, exceeds it. 0 asks
+nxvc for its own default, which is 8.
+
+Default off until it is measured on a headset. The atlas removes the 8.8 ms an eye that
+skipped tiles cost in the picture model, but the figure on the nx-warp side is a desktop
+measurement with a 1.57x caveat that has not been reproduced on an Adreno, and a default
+that is faster on a workstation and slower on the target is worse than no default.
+
+`"atlas"` with `"inter": false` is refused in `video_encoder_nxwarp.cpp` rather than at
+nxvc's `create()`, so the message can name the two options the person wrote. Asking for it
+against an nxvc without the encoder half is refused too, not silently ignored.
+
+### Client
+
+The advertised tool mask already came from `nxvc_vk_decoder_tools_for()`, so bits 31 and
+34 flow through the existing handshake with no change at all.
+
+The display path asks for the ATLAS display view (13.12.5) on an atlas stream. Under the
+atlas the picture `nxvc_vk_decoder_images()` returns is DERIVED and explicitly not
+normative -- conformance compares the atlas -- and what a display pass wants is a sampler
+over the atlas, which nxvc produces beside it on request. R8 where the stream allows it:
+NV12-shaped, one luma tap plus one chroma tap, 1.086 ms a pair on a Pico 4 against 2.124
+for the three-plane R16 form. R8 is refused on a stream with a colour transform, because
+under CT_YCOCGR the chroma planes carry an extra bit an 8-bit UNORM cannot hold, so the
+transform is checked here rather than the refusal being caught.
+
+**One thing a desktop cannot check.** The view's formats are `R8_UNORM` / `R8G8_UNORM`
+where the derived picture is `r8ui` / `rg8ui`. They carry the same numbers, but a sampler
+reading a UNORM returns them scaled to 0..1, so the display pass's shader has to agree
+with whichever it is bound. That is the first thing to look at if the atlas path shows a
+washed-out or blown-out picture on a headset.
+
+### HUD
+
+```
+atlas: 3 PICTURE / 87 ATLAS frames (3% PICTURE) · warps/frame 144 · assembled 578 · identity 12
+```
+
+Absent entirely on a stream without the atlas -- a mode that is not in use has no rate to
+report. Against a prefix with only `tiles_superseded` it degrades to the frame counts plus
+that one number; against a prefix with neither it says
+
+```
+atlas: on, per-frame counters not in this nxvc
+```
+
+which is a different statement from a row of zeroes and has to look different.
+
+### Dashboard
+
+**Settings → NX Warp encoder → Atlas coding** (Off / Auto) and **PICTURE threshold**, the
+latter shown only when the mode is Auto. Both erase their key when left at the value the
+server applies for an absent option -- the threshold especially, because 0 means "the
+codec's own default" and pinning it would freeze a number upstream is free to move.
+`tests/dashboard_nxwarp_settings_test.cpp` covers the round trip, the erase-at-default and
+the clamp: 251 checks.
+
+### The legs, and what they do not prove
+
+vrroom, 2176x1088 side by side (1088x1088 per eye, `--eyes 2`), QP 30, 32 frames, the
+Vulkan backend, inter on, `--atlas off` against `--atlas auto`:
+
+| clip / mode | B/frame | PSNR | stream tools | decoder check |
+| --- | --- | --- | --- | --- |
+| rest / off | 67920 | 34.33 dB | `0x…06600c45` | byte-identical to `nxv-dec` |
+| rest / auto | 74456 | 39.54 dB | `0x…486600c45` | byte-identical to `nxv-dec` |
+| mid / off | 68958 | 34.13 dB | `0x…06600c45` | byte-identical to `nxv-dec` |
+| mid / auto | 74800 | 39.51 dB | `0x…486600c45` | byte-identical to `nxv-dec` |
+| still / off | 65187 | 39.51 dB | `0x…06600c45` | byte-identical to `nxv-dec` |
+| still / auto | 73998 | 39.51 dB | `0x…486600c45` | byte-identical to `nxv-dec` |
+
+All six pass. The tool masks are the point of the table: `0x4_8000_0000` over the baseline
+is bits 31 and 34, so the `auto` legs really are atlas streams and the `off` legs really
+are not, and the GPU decoder reproduces `nxv-dec` byte for byte on both.
+
+**The PICTURE share is 0 % on every leg, and that is not a measurement.** It is 0 by
+construction: `nxv-info` shows one distinct pose across every frame of every capture,
+because the harness has no pose track and writes a zero pose. The mode trigger is a
+DISPLACEMENT threshold, so with no head motion it can never fire, and the ATLAS/PICTURE
+switch -- the entire point of bit 34 -- is untested here.
+
+The fixtures already carry the missing half: `rest.poses.json`, `mid.poses.json` and
+`still.poses.json` sit beside the YUV, and `rest` / `mid` / `still` differ precisely in how
+the head moves. What is needed is a `--poses` flag on `wivrn-nxwarp-e2e` to feed them into
+`view_info`. Until then the A/B above measures the atlas as a REFERENCE MODEL and says
+nothing about the mode switch.
+
+Read the byte column from the run log, not from the `.nxv`: that file holds the units the
+GPU decoder actually consumed, which the bounded worker queue decides -- 3 to 7 of the 32
+frames here.
+
 ## Live session with nobody wearing the headset
 
 The Pico keeps its display on and its compositor at 90 Hz with the proximity

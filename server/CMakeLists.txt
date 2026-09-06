@@ -327,6 +327,14 @@ if (WIVRN_BUILD_SERVER)
 				target_sources(wivrn-nxwarp-e2e PRIVATE encoder/nxwarp_codec_vk.cpp encoder/pair_compose.cpp)
 				target_link_libraries(wivrn-nxwarp-e2e PRIVATE nxvc::vk_encoder)
 				target_compile_definitions(wivrn-nxwarp-e2e PRIVATE WIVRN_NXWARP_VK_ENCODER)
+				# The harness compiles nxwarp_codec_vk.cpp itself rather than sharing the
+				# server's object, so it needs the atlas guard on its own. Without it the
+				# harness accepts "--atlas auto" and then refuses it at codec creation
+				# with a message about the BUILD -- which is correct, and confusing, when
+				# the server built from the same tree has the mode.
+				if (WIVRN_NXVC_ATLAS_ENCODE)
+					target_compile_definitions(wivrn-nxwarp-e2e PRIVATE WIVRN_NXVC_ATLAS_ENCODE)
+				endif()
 			endif()
 			target_link_libraries(wivrn-nxwarp-e2e PRIVATE
 				nxvc::ref

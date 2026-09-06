@@ -450,6 +450,15 @@ A frame with any tile larger than a transport slot cannot be carried at one tile
 and falls back whole, so an all-fallback line under `auto` means the quantiser is low
 enough that tiles are outgrowing the MTU — raise `qp`, or `mtu` if the link allows it.
 
+There is no need to read the log for it. **Settings → Tile mapping** sets it, and the
+dashboard's headset statistics page reports what actually happened over the last window
+("`128 frames on per-tile spans, 4 on fixed chunks`") — counts rather than the setting,
+because the choice is per frame and a mix is a normal answer. The in-headset HUD says it
+too, on the stream's geometry line, told from what arrived rather than from anything on
+the wire: under fixed chunks a frame carries one transport tile per MTU-sized piece of its
+bitstream and under spans it carries every tile it coded, which on a paired 1088x1088 is 45
+against 578.
+
 **`"backend": "vk"` is intra-only, and that is not free.** It implements the DC-plane
 intra half of the v1 bitstream and nothing else: no inter prediction (`"inter": "on"`
 together with it is refused at startup rather than silently ignored), no directional

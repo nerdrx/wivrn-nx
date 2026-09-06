@@ -1014,6 +1014,7 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 		any_retired = true;
 	}
 
+	last_frame_tiles.store(f.tiles_present, std::memory_order_relaxed);
 	const auto t_reasm0 = std::chrono::steady_clock::now();
 	auto unit = nxwarp_wire::reassemble(cfg, f.slots, chunk);
 	{

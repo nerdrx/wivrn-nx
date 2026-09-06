@@ -58,6 +58,7 @@ inline constexpr std::string_view nxwarp_default_rc = "auto";
 inline constexpr std::string_view nxwarp_default_coded_vectors = "default";
 inline constexpr bool nxwarp_default_inter = false;
 inline constexpr std::string_view nxwarp_default_stereo_frame = "auto";
+inline constexpr std::string_view nxwarp_default_tile_map = "auto";
 inline constexpr uint32_t nxwarp_default_intra_period = 180;
 inline constexpr uint32_t nxwarp_default_min_qp = 20;
 inline constexpr uint32_t nxwarp_default_max_qp = 44;
@@ -289,6 +290,68 @@ inline void set_nxwarp_stereo_frame(nlohmann::json & settings, stereo_frame_mode
 			return;
 		case stereo_frame_mode::off:
 			set_nxwarp_option(settings, "stereo-frame", "off");
+			return;
+	}
+}
+
+// "tile-map": how a frame's bytes are laid on the transport's tile grid.
+//
+// With per-tile spans a codec tile's own bytes travel at its own tile index, so a lost
+// datagram costs the tiles it carried instead of the whole frame, and the per-tile receipt
+// map the encoder predicts from finally names real tiles. Without them the frame is cut
+// into fixed MTU-sized chunks and chunk i rides tile i, which is what this encoder did
+// before the spans landed.
+//
+// It is a switch and not simply "on" for two reasons. It is the A/B for anything the new
+// mapping is suspected of costing -- the same clip at the same quantiser sent both ways,
+// which is the only way to separate the mapping from the content -- and it is somewhere to
+// stand if a live session regresses, which one did: the client's reassembler sized its
+// output buffer to the whole tile grid rather than to the frame, and under spans a 51 kB
+// frame reserved 658 kB of it, every frame.
+//
+//   auto    the default: spans when the codec reports byte offsets AND every coded tile
+//           fits a transport slot, the chunk fallback otherwise, decided per frame
+//   spans   the same -- a frame whose tiles do not fit still falls back, because it
+//           physically cannot be carried that way -- said explicitly, for a run that
+//           means to be measuring the span mapping
+//   chunks  never spans
+//
+// "auto" and "spans" therefore behave identically today. Both are offered because the
+// third value is the one that changes behaviour and a two-item control would make "auto"
+// look like it might mean something other than "yes".
+enum class tile_map_mode
+{
+	automatic,
+	spans,
+	chunks,
+};
+
+inline tile_map_mode nxwarp_tile_map_mode(const nlohmann::json & settings)
+{
+	auto v = nxwarp_option(settings, "tile-map");
+	if (not v or *v == "auto")
+		return tile_map_mode::automatic;
+	if (*v == "spans")
+		return tile_map_mode::spans;
+	if (*v == "chunks")
+		return tile_map_mode::chunks;
+	// A value the server would refuse is reported as the default rather than as a
+	// setting the user cannot see, exactly as "pace" and "stereo-frame" do.
+	return tile_map_mode::automatic;
+}
+
+inline void set_nxwarp_tile_map(nlohmann::json & settings, tile_map_mode mode)
+{
+	switch (mode)
+	{
+		case tile_map_mode::automatic:
+			set_nxwarp_option(settings, "tile-map", std::nullopt);
+			return;
+		case tile_map_mode::spans:
+			set_nxwarp_option(settings, "tile-map", "spans");
+			return;
+		case tile_map_mode::chunks:
+			set_nxwarp_option(settings, "tile-map", "chunks");
 			return;
 	}
 }

@@ -535,6 +535,10 @@ private:
 		// Stream 1 then has no decoder and its counters never move, so the readout must
 		// not list it: a permanent "/0" reads as a dead eye, not an absent stream.
 		bool nxwarp_paired = false;
+		// Transport tiles the last closed frame carried, and the grid's total. The HUD
+		// turns the pair into "spans" or "chunks": see stream_gui.cpp.
+		uint32_t nxwarp_frame_tiles = 0;
+		uint32_t nxwarp_grid_tiles = 0;
 		// Not a codec figure at all: how often render() is entered, and the mean
 		// interval the runtime is predicting between displayed frames. These are the
 		// two numbers the "render: N iterations in ... display period ..." log line

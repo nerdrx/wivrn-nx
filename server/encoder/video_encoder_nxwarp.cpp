@@ -1706,11 +1706,16 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 			// anything that changed with it. Logged unconditionally, including
 			// the all-chunks case, because "it took the fallback" is exactly the
 			// answer that was unobtainable.
+			// Taken once, before either reader: the log line below and the stats
+			// struct further down are two views of the SAME window, and a counter
+			// that each of them advanced would give the second one zero.
+			const uint64_t window_span_frames = prof_span_frames - prof_span_reported;
+			const uint64_t window_chunk_frames = prof_chunk_frames - prof_chunk_reported;
+			prof_span_reported = prof_span_frames;
+			prof_chunk_reported = prof_chunk_frames;
 			{
-				const uint64_t sf = prof_span_frames - prof_span_reported;
-				const uint64_t cf = prof_chunk_frames - prof_chunk_reported;
-				prof_span_reported = prof_span_frames;
-				prof_chunk_reported = prof_chunk_frames;
+				const uint64_t sf = window_span_frames;
+				const uint64_t cf = window_chunk_frames;
 				if (sf or cf)
 					U_LOG_I("nxwarp: stream %d tile mapping: %llu frame(s) with "
 					        "per-tile spans, %llu with the fixed-chunk fallback "
@@ -1817,6 +1822,8 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				st.encoded_width = stats_width;
 				st.encoded_height = stats_height;
 				st.encode_scale = encode_scale_reported;
+				st.span_frames = window_span_frames;
+				st.chunk_frames = window_chunk_frames;
 
 				// The latency budget, from the feedback the headset returned over
 				// this window. Zero until a complete report arrives -- and it was

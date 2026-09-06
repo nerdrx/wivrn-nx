@@ -503,6 +503,14 @@ public:
 		uint32_t encoded_width = 0;
 		uint32_t encoded_height = 0;
 		uint64_t stream_tools = 0;
+		// Transport tiles the last closed frame actually carried, out of the grid's
+		// total. This is how the CLIENT can tell which mapping the server is using
+		// without being told: under the fixed-chunk mapping a frame is a prefix of the
+		// grid and carries as many tiles as it has MTU-sized pieces (45 of 578 on a
+		// 2176x1088 stereo pair), and under per-tile spans it carries every tile it
+		// coded. Zero until a frame has closed.
+		uint32_t frame_tiles = 0;
+		uint32_t grid_tiles = 0;
 	};
 
 	live_stats stats() const
@@ -524,6 +532,8 @@ public:
 		        .encoded_width = hdr_width.load(std::memory_order_relaxed),
 		        .encoded_height = hdr_height.load(std::memory_order_relaxed),
 		        .stream_tools = hdr_tools.load(std::memory_order_relaxed),
+		        .frame_tiles = last_frame_tiles.load(std::memory_order_relaxed),
+		        .grid_tiles = uint32_t(cfg.tiles_per_frame()),
 		};
 	}
 
@@ -679,6 +689,8 @@ private:
 	// Frames the reassembler closed, decoded or not: the rate the server is actually
 	// putting on the wire, as seen from here.
 	std::atomic<uint64_t> net_frames = 0;
+	// Transport tiles the last closed frame carried; see live_stats::frame_tiles.
+	std::atomic<uint32_t> last_frame_tiles = 0;
 	// Last completed two-second profile window, republished for stats() below.
 	std::atomic<float> prof_wall_ms = 0, prof_gpu_ms = 0, prof_bytes = 0;
 	// The pass split of the same window, for live_stats above.

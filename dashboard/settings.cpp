@@ -145,6 +145,7 @@ void Settings::emitAllChanged()
 	nxwarpMinQpChanged();
 	nxwarpMaxQpChanged();
 	nxwarpStereoFrameChanged();
+	nxwarpTileMapChanged();
 	nxwarpCodedVectorsChanged();
 	nxwarpInterChanged();
 	nxwarpIntraPeriodChanged();
@@ -850,6 +851,31 @@ void Settings::set_nxwarpStereoFrame(const nxwarp_stereo & value)
 	nxd::set_nxwarp_stereo_frame(m_jsonSettings, mode);
 	if (old != nxwarpStereoFrame())
 		nxwarpStereoFrameChanged();
+}
+
+Settings::nxwarp_tile_map Settings::nxwarpTileMap() const
+{
+	switch (nxd::nxwarp_tile_map_mode(m_jsonSettings))
+	{
+		case nxd::tile_map_mode::spans:
+			return TileSpans;
+		case nxd::tile_map_mode::chunks:
+			return TileChunks;
+		case nxd::tile_map_mode::automatic:
+			break;
+	}
+	return TileAuto;
+}
+
+void Settings::set_nxwarpTileMap(const nxwarp_tile_map & value)
+{
+	const auto old = nxwarpTileMap();
+	const auto mode = value == TileSpans ? nxd::tile_map_mode::spans
+	                                     : (value == TileChunks ? nxd::tile_map_mode::chunks
+	                                                            : nxd::tile_map_mode::automatic);
+	nxd::set_nxwarp_tile_map(m_jsonSettings, mode);
+	if (old != nxwarpTileMap())
+		nxwarpTileMapChanged();
 }
 
 bool Settings::willPairEyes() const

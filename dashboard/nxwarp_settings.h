@@ -57,6 +57,9 @@ inline constexpr std::string_view nxwarp_default_pace = "auto";
 inline constexpr std::string_view nxwarp_default_rc = "auto";
 inline constexpr std::string_view nxwarp_default_coded_vectors = "default";
 inline constexpr bool nxwarp_default_inter = false;
+// "lens-mask": do not spend bits on the 64x64 tiles the headset's optics cannot show. On by
+// default in the encoder, so the box starts checked and an UNCHECKED box is what gets written.
+inline constexpr bool nxwarp_default_lens_mask = true;
 // "effort": 1 is the default the server applies, so an unchecked box is what gets written out.
 inline constexpr uint32_t nxwarp_default_effort = 1;
 inline constexpr std::string_view nxwarp_default_stereo_frame = "auto";

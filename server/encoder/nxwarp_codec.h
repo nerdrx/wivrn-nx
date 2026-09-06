@@ -360,6 +360,38 @@ public:
 		(void)held;
 	}
 
+	// --- tiles that are never worth coding -----------------------------------
+	//
+	// The lens mask: 64x64 tiles whose whole area falls outside what the headset's
+	// optics can show (client/utils/view_geometry.h). They are encoded, sent and
+	// decoded today and no eye ever sees them.
+	//
+	// `skip[t] != 0` asks for tile t to be coded as WARP_SKIP in the NEXT frame, over
+	// the codec's own tile grid -- which spans the eye PAIR on a stereo stream, the
+	// same indexing tiles() and set_received_tiles() use. It is nxvc's
+	// nxvc_encoder_set_skip_map, and the important half of its contract is that the
+	// LIBRARY OVERRIDES THE REQUEST wherever correctness needs a coded tile: a tile due
+	// for rolling intra refresh, a frame with no eligible reference, a stream with an
+	// alpha plane. A caller must rely on that rather than reproduce the conditions,
+	// which is why this is a request and not an assertion.
+	//
+	// The map is consumed by ONE encode; it is set every frame or not at all.
+	//
+	// Default: nothing, and supports_skip_map() says so. The GPU encoder has no such
+	// input -- nxvc_vk_enc.h has set_views, set_received_tiles and set_frame_held and
+	// no per-tile mode override -- so on that backend the mask is computed, reported
+	// and used to flatten the pixels (the compositor paints masked tiles a constant
+	// grey, so the mode search chooses WARP_SKIP for them by itself), but nothing here
+	// forces it. video_encoder_nxwarp logs which of the two it got.
+	virtual bool supports_skip_map() const
+	{
+		return false;
+	}
+	virtual void set_skip_map(std::span<const uint8_t> skip)
+	{
+		(void)skip;
+	}
+
 	// Human readable identification of the backend, logged once at stream start.
 	virtual std::string description() const = 0;
 

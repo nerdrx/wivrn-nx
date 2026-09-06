@@ -1620,6 +1620,57 @@ compositor::compositor(wivrn_session & session) :
 	comp_base * c_base = this;
 	// Ensure we can safely cast pointers
 	assert(intptr_t(&base) == intptr_t(this));
+
+	// --- the lens mask ---------------------------------------------------------------
+	//
+	// The foveation pass writes a constant grey into the 64x64 tiles no lens can show, so
+	// that every encoder on the stream codes them as a skip. It follows the NX Warp
+	// encoder's own "lens-mask" option -- the setting the dashboard writes -- because
+	// that is where the mask is configured and there is no sense in the two halves of one
+	// mechanism disagreeing. A stream with no NX Warp encoder leaves it off: the mask is
+	// correct for any codec, but turning it on for a session that never asked would be a
+	// change of picture nobody requested.
+	{
+		bool want = false;
+		uint32_t margin = 1;
+		for (const auto & s: settings)
+		{
+			if (s.codec != video_codec::nxwarp)
+				continue;
+			bool on = true;
+			if (auto it = s.options.find("lens-mask"); it != s.options.end())
+				on = not(it->second == "0" or it->second == "off" or
+				         it->second == "false" or it->second == "no");
+			if (not on)
+				continue;
+			want = true;
+			if (auto it = s.options.find("lens-mask-margin"); it != s.options.end())
+			{
+				try
+				{
+					margin = uint32_t(std::stoul(it->second));
+				}
+				catch (...)
+				{}
+			}
+			break;
+		}
+		// Overscan 0, and that is not "edge bleed is off": the FOVs that reach the
+		// compositor have ALREADY been widened by wivrn_hmd::get_view_poses(), so the
+		// protected region is the widened one and asking for the margin again would
+		// grow it twice. view_geometry.h states the identity this rests on.
+		foveation.set_lens_mask(want, margin, 0.f);
+		if (want)
+		{
+			const auto counts = foveation.lens_mask_counts();
+			U_LOG_I("compositor: lens mask on, margin %u tile%s; the foveation pass "
+			        "flattens what it covers (%u of %u tiles per eye so far)",
+			        unsigned(margin),
+			        margin == 1 ? "" : "s",
+			        unsigned(counts[0]),
+			        unsigned(foveation.lens_mask_total()));
+		}
+	}
 	auto res = vk_init_from_given(
 	        &c_base->vk,
 	        (PFN_vkGetInstanceProcAddr)vk.instance.getProcAddr("vkGetInstanceProcAddr"),

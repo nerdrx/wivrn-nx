@@ -242,6 +242,24 @@ Kirigami.ScrollablePage {
                         }
 
                         RowLayout {
+                            Kirigami.FormData.label: i18n("Invisible tiles:")
+                            Controls.Label {
+                                text: !modelData.lensMaskOn
+                                      ? i18n("not skipped")
+                                      : (modelData.lensMaskEnforced
+                                         ? i18n("%1 of %2 tiles per eye masked, margin %3",
+                                                modelData.lensMaskMasked, modelData.lensMaskTiles,
+                                                modelData.lensMaskMargin)
+                                         : i18n("%1 of %2 tiles per eye masked, margin %3 (flattened only)",
+                                                modelData.lensMaskMasked, modelData.lensMaskTiles,
+                                                modelData.lensMaskMargin))
+                            }
+                            Kirigami.ContextualHelpButton {
+                                toolTipText: i18n("The lens shows a round region; the encoded picture is a rectangle. These are the 64x64 tiles whose whole area falls outside it, plus a margin ring of tiles that is deliberately still coded. Zero is a real answer and not a failure: a strongly foveated encode compresses the periphery so hard that no tile is entirely outside any more. 'Flattened only' means this backend has no way to be told to skip a tile, so the tiles are filled with a flat grey and the codec decides for itself.")
+                            }
+                        }
+
+                        RowLayout {
                             Kirigami.FormData.label: i18n("Tile mapping:")
                             visible: modelData.spanFrames + modelData.chunkFrames > 0
                             Controls.Label {

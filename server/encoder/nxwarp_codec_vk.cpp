@@ -101,6 +101,10 @@ class nxwarp_codec_vk final : public wivrn::nxwarp_codec
 	// 90 Hz and hide whatever came next.
 	bool warned_view = false;
 	bool warned_recv = false;
+	bool warned_held = false;
+	// Whether the caller wants the held reports acted on at all; see
+	// nxwarp_codec_config::frame_held.
+	bool frame_held = true;
 	uint32_t width = 0, height = 0;
 	std::string device;
 
@@ -142,6 +146,17 @@ public:
 		// the option's own default is already 180.
 		ci.inter = c.inter ? 1u : 0u;
 		ci.intra_period = c.inter ? c.intra_period : 0u;
+		// The headset confirms the frames it reconstructs, so require a confirmation
+		// from the first frame rather than waiting for one to arrive: the frames
+		// between the initial INTRA and the first confirmation are exactly the ones a
+		// headset that is already behind refuses, and the chain-derived record cannot
+		// help there because it is optimistic for one round trip.
+		//
+		// Safe to assume unconditionally: protocol_version is a hash of the packet
+		// types, from_headset::nxwarp_feedback carries the confirmation, so a client
+		// that does not send one cannot complete the handshake with this server.
+		ci.ref_confirm = (c.inter and c.frame_held) ? 1u : 0u;
+		frame_held = c.frame_held;
 		// The library refuses a non-default value without `inter`, the same
 		// way it refuses a period without it, so this is only passed with it.
 		// The two enumerations are deliberately the same three values in the
@@ -297,6 +312,28 @@ public:
 		{
 			warned_recv = true;
 			U_LOG_W("nxwarp: the GPU encoder refused a receipt map: %s (%s)",
+			        nxvc_vk_encoder_status_string(st),
+			        nxvc_vk_encoder_last_error(enc));
+		}
+	}
+
+	// The frame-level report, which is what lets a dropped frame cost one
+	// ref_sel step instead of a whole intra frame.  nxvc keeps the chain --
+	// a frame predicted from an unheld frame is itself unheld -- so this
+	// forwards the report and nothing more.
+	bool supports_frame_held() const override
+	{
+		return frame_held;
+	}
+
+	void set_frame_held(uint32_t frame_number, bool held) override
+	{
+		const nxvc_vke_status st =
+		        nxvc_vk_encoder_set_frame_held(enc, frame_number, held ? 1 : 0);
+		if (st != NXVC_VKE_OK and not warned_held)
+		{
+			warned_held = true;
+			U_LOG_W("nxwarp: the GPU encoder refused a frame-held report: %s (%s)",
 			        nxvc_vk_encoder_status_string(st),
 			        nxvc_vk_encoder_last_error(enc));
 		}

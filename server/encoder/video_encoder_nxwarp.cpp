@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cstdlib>
 #include <cmath>
 #include <format>
 #include <optional>
@@ -339,6 +340,14 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	        .preset = option_u32(settings.options, "preset", 1),
 	        .threads = option_u32(settings.options, "threads", 0),
 	};
+	// NXWARP_FRAME_HELD=0 restores the answer this encoder gave before the headset's
+	// verdict on a frame was acted on at all: one all-intra frame per burst of not-held
+	// reports, and no confirmations. It is a kill switch rather than a tuning knob --
+	// the blunt answer is always correct, only expensive -- and it is what lets the two
+	// behaviours be measured against each other on one build.
+	if (const char * v = std::getenv("NXWARP_FRAME_HELD"); v and v[0] == '0')
+		codec_cfg.frame_held = false;
+
 	// "backend": "ref" (the default) is the CPU reference codec; "vk" is the
 	// Vulkan compute encoder, running on this server's own VkDevice. The
 	// default stays "ref" because it is the one that has been run end to end
@@ -1143,7 +1152,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	//
 	// First, before anything is spent on this frame: no de-interleave, no codec, no
 	// receipt map, no wire frame id, no bytes. The two flags the network thread sets
-	// (client_holds_nothing, client_dropped_frame) are deliberately NOT read here --
+	// (client_holds_nothing) and the not-held queue are deliberately NOT read here --
 	// they are answered by the next frame that is actually sent, and consuming them on
 	// a frame that never leaves would throw the answer away.
 	if (not pace_admit(std::chrono::steady_clock::now()))
@@ -1224,13 +1233,96 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// the stronger claim -- the shadow below describes what the transport delivered,
 	// and the whole point of the not-held packet is that the transport's account is
 	// true and insufficient.
+	// --- what the headset did NOT reconstruct ------------------------------
+	//
+	// The reports name frames, and a codec that can act on them is told which ones:
+	// it makes each named frame, and everything that predicted from it, unusable as
+	// a reference, and then asks for the newest frame that survives. One dropped
+	// frame then costs one step of ref_sel instead of a whole intra frame, and only
+	// a client that has lost the entire reference range still costs a resync.
+	//
+	// A backend that cannot take the report gets the old answer below.
+	bool report_fallback = held_fallback_reset.exchange(false, std::memory_order_relaxed);
+	{
+		std::vector<uint16_t> ids;
+		uint16_t abase = 0;
+		uint32_t amask = 0;
+		{
+			std::lock_guard lock(not_held_mutex);
+			ids.swap(not_held_ids);
+			if (ack_valid)
+			{
+				abase = ack_base;
+				amask = ack_mask;
+			}
+		}
+		// The confirmations first, because they are the stronger statement: a frame
+		// the headset says it built is one the encoder may predict from whatever the
+		// chain deduced, and applying them before the negatives keeps a stale
+		// negative from having to be undone.
+		//
+		// The whole window is replayed every time rather than only what is new. It
+		// is 32 bits, the codec's own record is idempotent, and the alternative --
+		// tracking which bits have been sent -- is state that can be wrong in a way
+		// this cannot.
+		if (amask and codec->supports_frame_held())
+		{
+			for (uint32_t k = 0; k < 32; ++k)
+			{
+				if (not(amask & (1u << k)))
+					continue;
+				const uint16_t id = uint16_t(abase - k);
+				wire_to_codec & e = frame_map[id % kFrameMapDepth];
+				if (not e.used or e.wire != id)
+					continue;
+				codec->set_frame_held(e.codec, true);
+				if (not e.confirmed)
+				{
+					// First time this frame's confirmation is acted on: how long
+					// it took, in encoder frames and in milliseconds. Only the
+					// first, because the window is replayed every encode.
+					e.confirmed = true;
+					const uint64_t df = sent_frames - e.sent_index;
+					const double dms = std::chrono::duration<double, std::milli>(
+					                           std::chrono::steady_clock::now() - e.sent_at)
+					                           .count();
+					++confirm_n;
+					confirm_frames_sum += df;
+					confirm_ms_sum += dms;
+					if (df > confirm_frames_max)
+						confirm_frames_max = df;
+					if (dms > confirm_ms_max)
+						confirm_ms_max = dms;
+				}
+			}
+		}
+		for (uint16_t id: ids)
+		{
+			if (not codec->supports_frame_held())
+			{
+				report_fallback = true;
+				continue;
+			}
+			const wire_to_codec & e = frame_map[id % kFrameMapDepth];
+			if (not e.used or e.wire != id)
+			{
+				// A frame this encoder no longer remembers sending. It cannot
+				// be named to the codec, so the honest answer is the blunt one.
+				report_fallback = true;
+				continue;
+			}
+			codec->set_frame_held(e.codec, false);
+			chain_broken = true;
+		}
+	}
+
 	bool resync_this_frame = false;
-	const bool dropped = client_dropped_frame.exchange(false);
-	if (client_holds_nothing.exchange(false) or dropped)
+	if (client_holds_nothing.exchange(false) or report_fallback)
 	{
 		std::fill(received_tiles.begin(), received_tiles.end(), uint8_t(0));
 		codec->set_received_tiles(received_tiles);
 		have_previous_frame = false;
+		chain_broken = true;
 		// The frame about to be coded is therefore all-intra. Tell the headset,
 		// so it knows when to start trusting its own output again: everything it
 		// decoded between breaking its chain and this frame was warped from a
@@ -1240,6 +1332,12 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		// Sent below, once the frame has an id on the wire: a notice naming a frame
 		// that then failed to encode would leave the headset waiting for a resync
 		// point that never arrives.
+		//
+		// Provisional: whether this frame really is a resync point is settled after
+		// the encode, from the modes the codec chose. A receipt-map reset always
+		// produces an all-intra frame, so this holds -- but the ref_sel path can
+		// also produce one without a reset having been asked for, and that frame is
+		// just as much a point the headset may start trusting again.
 		resync_this_frame = true;
 	}
 	else if (have_previous_frame)
@@ -1324,6 +1422,34 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 			client_holds_nothing = true;
 		return {};
 	}
+	// --- is this frame a point the headset may start trusting again? ------
+	//
+	// It is exactly when every tile of it is INTRA, and that is a property of the
+	// frame the codec produced, not of what was asked for before it. A receipt-map
+	// reset always produces one; the ref_sel path produces one only when nothing
+	// within the reference range was held, which is the case worth telling the
+	// headset about and the only one that answers an outstanding report.
+	//
+	// Deriving it here rather than from the request is what stops the notice going
+	// out on an ordinary inter frame that merely stepped ref_sel out -- the headset
+	// would then start trusting output that is still warped from a reference it does
+	// not have, which is the "a few blocks of picture and the rest grey" this notice
+	// exists to prevent.
+	{
+		bool all_intra = true;
+		for (const auto & d: codec->tiles())
+		{
+			if (d.mode != 3 /* NXVC_MODE_INTRA */)
+			{
+				all_intra = false;
+				break;
+			}
+		}
+		resync_this_frame = all_intra and (resync_this_frame or chain_broken);
+		if (resync_this_frame)
+			chain_broken = false;
+	}
+
 	// Encode wall time, once every two seconds per stream: on a CPU reference
 	// encoder this is the number that decides the frame rate a headset sees.
 	// The QP this frame was coded at. Everything below reports on the frame that
@@ -1541,6 +1667,20 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 
 	in[slot].have_view_info = false;
 	// The frame is on the wire, so its id is spent and the next one follows it.
+	// Record which frame the CODEC thinks it just made -- the u16 at the start of
+	// its own frame header (nx-warp docs/SYNTAX.md 3.1) -- against the id the
+	// headset will name it by, so a later not-held report can be translated. The
+	// two are equal in a session that starts from zero and are not after a resume.
+	if (bitstream.size() >= 2)
+	{
+		wire_to_codec & e = frame_map[frame_id16 % kFrameMapDepth];
+		e.wire = frame_id16;
+		e.codec = uint32_t(bitstream[0]) | (uint32_t(bitstream[1]) << 8);
+		e.used = true;
+		e.sent_index = sent_frames;
+		e.sent_at = std::chrono::steady_clock::now();
+		e.confirmed = false;
+	}
 	sent_frame_id = frame_id16;
 	sent_frame_id_seeded = true;
 	++sent_frames;
@@ -1597,13 +1737,59 @@ void wivrn::video_encoder_nxwarp::on_nxwarp_frame_not_held(
 	if (why == from_headset::nxwarp_frame_not_held::reason::stride)
 		stride_not_held.fetch_add(1, std::memory_order_relaxed);
 	not_held_total.fetch_add(1, std::memory_order_relaxed);
-	client_dropped_frame = true;
+	// WHICH frame, not merely that one was lost. The codec walks ref_sel out to the
+	// newest frame that survives, and it can only do that if it is told the ids; a
+	// coalesced flag can only be answered with an intra frame. The queue is bounded
+	// by the same argument last_resync_id makes -- a report older than the last
+	// resync is discarded above -- but bound it anyway, because an unbounded queue
+	// fed by the network and drained by the encoder is a queue fed by the network.
+	{
+		std::lock_guard lock(not_held_mutex);
+		if (not_held_ids.size() < 256)
+			not_held_ids.push_back(frame_id);
+		else
+			// More reports than the encoder can answer one at a time. Say the
+			// blunt thing instead, which is always correct and costs one frame.
+			held_fallback_reset.store(true, std::memory_order_relaxed);
+	}
 }
 
 void wivrn::video_encoder_nxwarp::on_nxwarp_feedback(uint8_t path_id,
                                                      std::span<const uint8_t> payload,
-                                                     uint16_t decode_us)
+                                                     uint16_t decode_us,
+                                                     uint16_t held_base,
+                                                     uint32_t held_mask)
 {
+	// The frames the headset says it RECONSTRUCTED. Merged here on the network thread
+	// and applied by the next encode, which is where the wire-id map can be read
+	// without racing the thread that writes it -- and costs nothing, because the codec
+	// would not have looked at them before then either.
+	//
+	// Merging rather than replacing: feedback packets go out several times a frame and
+	// arrive in any order, and an older packet's window is still true. Two windows are
+	// combined by shifting the older one onto the newer base.
+	if (held_mask)
+	{
+		std::lock_guard lock(not_held_mutex);
+		if (not ack_valid)
+		{
+			ack_base = held_base;
+			ack_mask = held_mask;
+			ack_valid = true;
+		}
+		else if (int16_t(held_base - ack_base) > 0)
+		{
+			const uint16_t d = uint16_t(held_base - ack_base);
+			ack_mask = (d >= 32 ? 0u : (ack_mask << d)) | held_mask;
+			ack_base = held_base;
+		}
+		else
+		{
+			const uint16_t d = uint16_t(ack_base - held_base);
+			if (d < 32)
+				ack_mask |= (held_mask >> d);
+		}
+	}
 	// The headset's decode cost, for the pace controller. Zero means it has not decoded
 	// anything yet and is not a measurement, so it is not one.
 	if (decode_us)

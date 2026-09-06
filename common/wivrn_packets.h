@@ -1088,6 +1088,44 @@ struct nxwarp_feedback
 	// Saturates at 65535 us. A decode slower than 65 ms is already below the pace
 	// floor, so the exact figure past that point changes nothing.
 	uint16_t decode_us = 0;
+
+	// The frames this headset HAS reconstructed: `held_base` is the newest, and bit k
+	// of `held_mask` says the frame `held_base - k` was reconstructed too. Bit 0 is
+	// therefore always set when the field means anything, so `held_mask == 0` is "this
+	// headset has reconstructed nothing yet" and needs no separate flag.
+	//
+	// It is the POSITIVE half of nxwarp_frame_not_held below, and the encoder needs
+	// both for different reasons. The negative report is a correction and arrives on
+	// its own message as soon as the headset knows; it is fast, and it is what stops
+	// the encoder spending another frame predicting from something already lost. But
+	// it is negative, so silence means "held" -- and silence is also exactly what a
+	// frame dropped a moment ago produces. The encoder codes frame N believing N-1 is
+	// held and only learns otherwise after N has already been refused, and no amount of
+	// reasoning on the encoder closes that window, because the information does not
+	// exist there yet.
+	//
+	// This closes it. A frame the headset says it reconstructed is one it can predict
+	// from, whatever happened before or after, so an inter frame that references only
+	// confirmed frames cannot be refused. nxvc takes it through
+	// nxvc_vk_encoder_set_frame_held(enc, f, 1) and picks the newest confirmed frame
+	// within ref_sel's three-frame reach, falling to an all-intra frame -- which is
+	// decodable -- when there is none.
+	//
+	// It rides this packet rather than one of its own for the reason decode_us does:
+	// it is the same kind of statement, it wants the same cadence, and a packet of its
+	// own would cost a control-socket write per report for six bytes. The cadence
+	// MATTERS and is not free to change: measured at 1088x1088 over a client
+	// reconstructing every other frame, a confirmation that arrives within the frame
+	// costs 3 % more bytes than a client that drops nothing, one frame of latency costs
+	// 31 %, and two frames cost 3.9x, because the encoder must reach further back for a
+	// confirmed reference and runs out of ring at three. This packet goes out once per
+	// transport band -- several times a frame -- which is why it is the right one.
+	//
+	// 32 bits of history is about a third of a second at 90 Hz, far more than the three
+	// frames ref_sel can reach; the surplus is what makes a lost feedback packet cost
+	// nothing, since the next one repeats the same window.
+	uint16_t held_base = 0;
+	uint32_t held_mask = 0;
 };
 
 // A frame the headset will NOT reconstruct, named by the stream's own 16-bit frame id.

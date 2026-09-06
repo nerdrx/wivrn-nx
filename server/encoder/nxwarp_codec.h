@@ -106,6 +106,13 @@ struct nxwarp_codec_config
 	uint32_t preset = 1;
 	// Encoder worker threads: 0 = all cores (capped at 16), 1 = serial.
 	uint32_t threads = 0;
+	// Act on what the headset says it did and did not reconstruct: reference only
+	// frames it has confirmed, and strike out the ones it reports lost. Off restores
+	// the answer this encoder gave before either existed -- one all-intra frame per
+	// burst of not-held reports -- which is always correct and only expensive, and
+	// which is what makes the two measurable against each other in one binary.
+	// NXWARP_FRAME_HELD=0 in the environment clears it.
+	bool frame_held = true;
 };
 
 // One eye's view for one frame, OpenXR conventions: a unit quaternion and the
@@ -204,6 +211,35 @@ public:
 	// shadow copy so that the next frame is predicted from what the client has,
 	// not from what was sent. `received[t] == 0` means lost.
 	virtual void set_received_tiles(std::span<const uint8_t> received) = 0;
+
+	// Whether the headset reconstructed a frame it was sent, by the frame
+	// number that frame's own bitstream header carries.
+	//
+	// The frame-level counterpart of set_received_tiles(), and a different
+	// question: a receipt map says which tiles the transport delivered, this
+	// says whether the decoder produced a picture. They differ exactly when a
+	// frame whose every datagram landed is dropped from a decode queue that
+	// cannot keep up, which on a headset is the common case.
+	//
+	// A `false` report makes that frame, and every later frame that predicted
+	// from it, unusable as a reference; the codec then asks for the newest one
+	// that is still usable instead of coding an all-intra resync. It only has
+	// to resync when nothing within the reference range is held.
+	//
+	// Default: nothing. The reference codec's C API has no equivalent -- it
+	// keeps an exact client shadow instead and its reference distance is fixed
+	// at create() -- so a backend that cannot act on this says so by not
+	// overriding it, and the encoder above falls back to the receipt-map reset.
+	// `supports_frame_held()` is how it asks.
+	virtual bool supports_frame_held() const
+	{
+		return false;
+	}
+	virtual void set_frame_held(uint32_t frame_number, bool held)
+	{
+		(void)frame_number;
+		(void)held;
+	}
 
 	// Human readable identification of the backend, logged once at stream start.
 	virtual std::string description() const = 0;

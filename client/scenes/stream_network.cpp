@@ -269,7 +269,8 @@ void scenes::stream::operator()(to_headset::nxwarp_datagram && dg)
 }
 
 void scenes::stream::send_nxwarp_feedback(uint8_t stream_index, uint8_t path_id,
-                                          std::vector<uint8_t> payload, uint16_t decode_us)
+                                          std::vector<uint8_t> payload, uint16_t decode_us,
+                                          uint16_t held_base, uint32_t held_mask)
 {
 	if (not network_session)
 		return;
@@ -281,6 +282,8 @@ void scenes::stream::send_nxwarp_feedback(uint8_t stream_index, uint8_t path_id,
 	        .path_id = path_id,
 	        .payload = std::move(payload),
 	        .decode_us = decode_us,
+	        .held_base = held_base,
+	        .held_mask = held_mask,
 	});
 }
 

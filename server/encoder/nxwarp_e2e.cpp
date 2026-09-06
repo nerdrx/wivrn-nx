@@ -331,6 +331,9 @@ public:
 		uint8_t path_id;
 		std::vector<uint8_t> payload;
 		uint16_t decode_us;
+		// The frames the decoder confirmed it reconstructed, as they travelled.
+		uint16_t held_base;
+		uint32_t held_mask;
 	};
 	std::vector<feedback_packet> feedback;
 	// The OTHER feedback: from_headset::feedback, the per-frame delivery report the
@@ -368,7 +371,7 @@ public:
 	}
 
 	void send_feedback(uint8_t stream_index, uint8_t path_id, std::vector<uint8_t> payload,
-	                   uint16_t decode_us) override
+	                   uint16_t decode_us, uint16_t held_base, uint32_t held_mask) override
 	{
 		// Through the real packet type and the real serializer, like everything else.
 		from_headset::nxwarp_feedback fb{
@@ -376,11 +379,14 @@ public:
 		        .path_id = path_id,
 		        .payload = std::move(payload),
 		        .decode_us = decode_us,
+		        .held_base = held_base,
+		        .held_mask = held_mask,
 		};
 		auto wire = to_wire(fb);
 		auto back = from_wire<from_headset::nxwarp_feedback>(std::move(wire));
 		std::lock_guard lock(m);
-		feedback.push_back({back.path_id, std::move(back.payload), back.decode_us});
+		feedback.push_back({back.path_id, std::move(back.payload), back.decode_us,
+		                    back.held_base, back.held_mask});
 	}
 
 	// Wire frame ids the decoder actually put through the codec, in the order it did.
@@ -1367,7 +1373,8 @@ int main(int argc, char ** argv)
 			// Straight into the encoder, which folds it into nxt::Sender's client
 			// shadow. This is the return half of the loop: without it the encoder
 			// predicts from tiles the headset never received.
-			enc.on_nxwarp_feedback(p.path_id, p.payload, p.decode_us);
+			enc.on_nxwarp_feedback(p.path_id, p.payload, p.decode_us, p.held_base,
+			                       p.held_mask);
 		}
 
 		// And the correction the transport cannot carry: frames the decoder received
@@ -1463,6 +1470,18 @@ int main(int argc, char ** argv)
 			            (unsigned long long)(p.not_held - p.not_held_already_answered),
 			            (unsigned long long)p.not_held,
 			            (unsigned long long)p.not_held_already_answered);
+		}
+		{
+			const auto p = enc.profile();
+			if (p.confirms)
+				std::printf("confirmation latency: %llu frames confirmed, mean %.2f encoder "
+				            "frames / %.1f ms, worst %llu frames / %.1f ms (ref_sel reaches "
+				            "3)\n",
+				            (unsigned long long)p.confirms, p.confirm_frames_mean,
+				            p.confirm_ms_mean, (unsigned long long)p.confirm_frames_max,
+				            p.confirm_ms_max);
+			else
+				std::printf("confirmation latency: no frame was confirmed\n");
 		}
 		std::printf("all-intra resyncs: %llu of %llu sent frames (%.1f%%) were coded with no "
 		            "temporal reference because the headset had reported one not held\n",

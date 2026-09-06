@@ -62,6 +62,17 @@ public:
 	// to wrap each decode submit.
 	virtual void with_queue(const std::function<void(vk::Queue)> & fn) = 0;
 
+	// The same, for a host that can offer more than one decode queue: `slot` is the
+	// stream index, so the two eyes ask for different queues where the device has
+	// them. Measured on a Pico 4: both eyes' decoders on one queue never overlapped
+	// once in 68 frames, and each eye's copy began 12.6-16.4 ms after the other eye's
+	// copy ended -- one eye's whole decode. A host with one queue keeps the old
+	// behaviour by inheriting this, which is what wivrn-nxwarp-e2e does.
+	virtual void with_queue(unsigned slot, const std::function<void(vk::Queue)> & fn)
+	{
+		with_queue(fn);
+	}
+
 	// The clock the feedback timestamps are in. In the client this is the OpenXR
 	// instance's; the numbers only ever get compared with each other.
 	virtual XrTime now() = 0;

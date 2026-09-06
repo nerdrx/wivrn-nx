@@ -976,8 +976,33 @@ bool scenes::stream::is_gui_interactable() const
 	return is_interactable(gui_status);
 }
 
+// --- how fast does the render loop actually turn, and what holds it up?
+//
+// The compositor reported 33 of 90 while streaming and the decode rate was also 33, which
+// is two facts and not yet a cause: a loop that iterates 90 times and submits 33 of them
+// is a different bug from a loop that only iterates 33 times. These counters separate
+// them, and time every place in render() that can block, so "it waits on the decoder" is
+// something the numbers say rather than something the shape of the code suggests.
+//
+// Statics rather than members: render() is called from one thread and this is a probe.
+namespace
+{
+struct render_probe
+{
+	std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
+	uint64_t iters = 0, gated_out = 0, no_render = 0, cache_hits = 0;
+	double period_ms = 0, fence_ms = 0, query_ms = 0, submit_ms = 0, blit_ms = 0;
+	double app_gpu_ms = 0;
+	double worst_fence_ms = 0;
+} g_rp;
+} // namespace
+
 void scenes::stream::render(const XrFrameState & frame_state)
 {
+	const auto rp_t0 = std::chrono::steady_clock::now();
+	const auto rp_ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
+	g_rp.iters++;
+
 	if (state_ == state::shutdown)
 		application::pop_scene();
 
@@ -1005,6 +1030,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		// has retired. This path returns before the fence wait below, so the fence is
 		// tested rather than waited on: releasing a handle gives its image back to the
 		// decoder, which must not happen while the GPU is still sampling it.
+		g_rp.no_render++;
 		smoothing_frame_index = uint64_t(-1);
 		if (*fence and fence.getStatus() == vk::Result::eSuccess)
 			smoothing_blend_handles = {};
@@ -1027,8 +1053,14 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		application::pop_scene();
 	}
 
+	const auto rp_fence0 = std::chrono::steady_clock::now();
 	if (device.waitForFences(*fence, VK_TRUE, UINT64_MAX) == vk::Result::eTimeout)
 		throw std::runtime_error("Vulkan fence timeout");
+	{
+		const double f = rp_ms(std::chrono::steady_clock::now() - rp_fence0);
+		g_rp.fence_ms += f;
+		g_rp.worst_fence_ms = std::max(g_rp.worst_fence_ms, f);
+	}
 
 	// We don't need those after vkWaitForFences
 	current_blit_handles.fill(nullptr);
@@ -1038,6 +1070,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	smoothing_blend_handles = {};
 
 	gpu_timestamps timestamps;
+	const auto rp_query0 = std::chrono::steady_clock::now();
 	if (query_pool_filled)
 	{
 		auto [res, timestamps2] = query_pool.getResults<uint64_t>(
@@ -1054,6 +1087,12 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			});
 		}
 	}
+
+	g_rp.query_ms += rp_ms(std::chrono::steady_clock::now() - rp_query0);
+	// The client's OWN pass, on the device: what the defoveate/reprojection submission
+	// costs the GPU. Against the two decodes measured next to it this is the whole
+	// arithmetic of whether the GPU is saturated.
+	g_rp.app_gpu_ms += double(timestamps.gpu_time) * 1000.0;
 
 	session.begin_frame();
 
@@ -1244,6 +1283,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	    // overlay, even on headsets that would otherwise discard a repeated frame.
 	    state_ == state::reconnecting)
 	{
+		g_rp.gated_out++; // counted as "the gate LET IT THROUGH"; see the report line
 		XrExtent2Di extents[view_count];
 		{
 			int32_t max_width = 0;
@@ -1618,7 +1658,9 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		submit_info.pNext = &sem_info;
 
 		device.resetFences(*fence);
+		const auto rp_sub0 = std::chrono::steady_clock::now();
 		queue.lock()->submit(submit_info, *fence);
+		g_rp.submit_ms += rp_ms(std::chrono::steady_clock::now() - rp_sub0);
 #if WIVRN_FEATURE_RENDERDOC
 		renderdoc_end(*vk_instance);
 #endif
@@ -1780,6 +1822,24 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			else
 				next_gui_status = stream_tab::applications;
 		}
+	}
+
+	g_rp.blit_ms += rp_ms(std::chrono::steady_clock::now() - rp_t0);
+	g_rp.period_ms += double(real_display_period) / 1e6;
+	if (rp_t0 - g_rp.since > std::chrono::seconds(2))
+	{
+		const double n = double(g_rp.iters);
+		const double secs = rp_ms(rp_t0 - g_rp.since) / 1000.0;
+		spdlog::info("render: {} iterations in {:.1f} s ({:.1f}/s), {} submitted a layer, {} skipped by the repeat gate, {} with nothing to show; display period {:.1f} ms",
+		             g_rp.iters, secs, n / secs, g_rp.gated_out,
+		             g_rp.iters - g_rp.gated_out - g_rp.no_render, g_rp.no_render,
+		             g_rp.period_ms / n);
+		spdlog::info("render: this app's own GPU pass {:.1f} ms per iteration", g_rp.app_gpu_ms / n);
+		spdlog::info("render: per iteration fence {:.1f} (worst {:.1f}) | queries {:.1f} | submit {:.1f} | whole render() {:.1f} ms",
+		             g_rp.fence_ms / n, g_rp.worst_fence_ms, g_rp.query_ms / n,
+		             g_rp.submit_ms / n, g_rp.blit_ms / n);
+		g_rp = {};
+		g_rp.since = rp_t0;
 	}
 
 	query_pool_filled = true;

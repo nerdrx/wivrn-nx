@@ -962,11 +962,17 @@ void application::initialize_vulkan()
 	// Adreno 650's single graphics family reports queueCount 3, and taking only
 	// queue 0 is what put every NX Warp decode behind the compositor's own
 	// frame.  A family with one queue clamps back to the old behaviour.
+	// THREE where the family has them, because there are two decoders. Both eyes
+	// sharing queue 1 was measured on a Pico 4 with GPU timestamps: over 68 frames
+	// the two eyes' decodes never overlapped once, and each eye's copy started
+	// 12.6-16.4 ms after the other eye's ended -- one whole decode of dead time
+	// inside every frame's 26 ms wall. One queue each is what lets the driver
+	// overlap them if it can.
 	const uint32_t vk_queues_wanted =
-	        std::min<uint32_t>(2, queue_properties[vk_queue_family_index].queueCount);
+	        std::min<uint32_t>(3, queue_properties[vk_queue_family_index].queueCount);
 	// Equal priority: the decode is not less important than the frame it is
 	// decoded for, and a lower priority would only put it further behind.
-	float queuePriority[2] = {0.0f, 0.0f};
+	float queuePriority[3] = {0.0f, 0.0f, 0.0f};
 
 	vk::DeviceQueueCreateInfo queueCreateInfo{
 	        .queueFamilyIndex = vk_queue_family_index,
@@ -1020,10 +1026,17 @@ void application::initialize_vulkan()
 	{
 		*vk_decode_queue.lock() = vk_device.getQueue(vk_queue_family_index, 1);
 		vk_have_decode_queue = true;
-		spdlog::info("    queue family {} has {} queues; decoding on queue 1",
-		             vk_queue_family_index,
-		             queue_properties[vk_queue_family_index].queueCount);
 	}
+	if (vk_queues_wanted > 2)
+	{
+		*vk_decode_queue_2.lock() = vk_device.getQueue(vk_queue_family_index, 2);
+		vk_have_decode_queue_2 = true;
+	}
+	if (vk_have_decode_queue)
+		spdlog::info("    queue family {} has {} queues; decoding on queue 1{}",
+		             vk_queue_family_index,
+		             queue_properties[vk_queue_family_index].queueCount,
+		             vk_have_decode_queue_2 ? " and queue 2 (one per eye)" : " (both eyes share it)");
 	else
 		spdlog::info("    queue family {} has one queue; decode shares it with the renderer",
 		             vk_queue_family_index);

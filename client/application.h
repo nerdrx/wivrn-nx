@@ -117,6 +117,10 @@ private:
 	// Null when the family has only one queue; callers fall back to vk_queue.
 	thread_safe<vk::raii::Queue> vk_decode_queue = nullptr;
 	bool vk_have_decode_queue = false;
+	// A THIRD queue, so the two eyes' decoders do not sit behind each other. See
+	// get_decode_queue(slot) and the measurement quoted at vk_queues_wanted.
+	thread_safe<vk::raii::Queue> vk_decode_queue_2 = nullptr;
+	bool vk_have_decode_queue_2 = false;
 	vk::raii::CommandPool vk_cmdpool = nullptr;
 	vk::raii::PipelineCache pipeline_cache = nullptr;
 	vk::PhysicalDeviceProperties physical_device_properties;
@@ -360,6 +364,18 @@ public:
 	{
 		auto & app = instance();
 		return app.vk_have_decode_queue ? app.vk_decode_queue : app.vk_queue;
+	}
+
+	// One decode queue per caller where the family had three: `slot` is the stream
+	// index, so the two eyes get different queues and the driver is free to run them
+	// at the same time. Falls back a step at a time -- two queues put both eyes on
+	// queue 1, one queue puts everything back on the renderer's.
+	static thread_safe<vk::raii::Queue> & get_decode_queue(unsigned slot)
+	{
+		auto & app = instance();
+		if (slot % 2 == 1 and app.vk_have_decode_queue_2)
+			return app.vk_decode_queue_2;
+		return get_decode_queue();
 	}
 
 	static thread_safe<vk::raii::Queue> & get_queue()

@@ -122,6 +122,32 @@ struct nxwarp_codec_config
 		lite = 1,
 	};
 	entropy_t entropy = entropy_t::rans;
+	// How hard the GPU encoder looks for the cheapest way to say the frame:
+	// nxvc_vke_create_info::effort. 0 is the plain dead-zone quantiser, 1 adds
+	// the integer requantiser -- a level of +-1 whose squared error is worth
+	// less than the bits it saves is dropped.
+	//
+	// The default is 1 because it is measured free. On RADV at 2 x 1088x1088
+	// (578 tiles) it is -1.5 % BD-rate on rANS and -3.6 % on ENTROPY_LITE, at
+	// 9.12 -> 9.18 ms a frame, which is inside the run-to-run spread: the
+	// decision is 64 independent integer compares per block inside a pass
+	// that was already resident and already reading both arrays it needs.
+	// Lite gains twice as much because it spends a fixed field on every coded
+	// coefficient, so a dropped level saves a whole field.
+	//
+	// It changes which levels are coded and nothing about how they are
+	// decoded: the stream carries no tool bit for it, the headset's decoder
+	// cannot tell the levels apart, and nxvc pins each level byte-identical
+	// to `nxv-enc --int-rdoq N`. There is no level 2 -- nxvc refuses it, and
+	// vk/encoder/README.md has the measurements that say why.
+	//
+	// The reference backend honours it too (nxvc_config::int_rdoq) -- but only
+	// in its NON-directional path, which is the scope nxvc pins byte-identical
+	// against the GPU encoder (which has no directional intra to pin).  With
+	// `intra_dir` on, which is that backend's default, the level therefore
+	// reaches nothing, and video_encoder_nxwarp says so in the log rather than
+	// leaving it to be discovered as two runs with the same byte count.
+	uint32_t effort = 1;
 	// Encoder-side speed knobs; none of them changes how a stream decodes.
 	// Directional intra (tool 17): costs the CPU encoder most of its time at
 	// this resolution; off codes the DC-plane predictor only.

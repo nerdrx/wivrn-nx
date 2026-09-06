@@ -91,6 +91,15 @@ public:
 		cfg.entropy_lite =
 		        c.entropy == wivrn::nxwarp_codec_config::entropy_t::lite ? 1u : 0u;
 		cfg.rdo = 0;         // dead-zone quantiser instead of the RD trellis (~2.7x)
+		// The effort level, on the backend that has the trellis and is not
+		// allowed to use it: `int_rdoq` is exactly the part of RDOQ the GPU
+		// encoder can reproduce, so setting it here is what keeps the two
+		// backends from quietly disagreeing about what "effort": "1" means.
+		// nxvc pins `--int-rdoq 1` byte-identical between them.  It applies to
+		// the non-directional path only -- see nxwarp_codec_config::effort --
+		// so with `intra_dir` on it changes nothing here, and the encoder logs
+		// that combination instead of letting it look like a tuning result.
+		cfg.int_rdoq = c.effort >= 1 ? 1 : 0;
 		cfg.qp_search = 0;   // no per-tile QP offset search
 		cfg.intra_dir = c.intra_dir ? 1 : 0;
 		cfg.intra_dir_cand = 1;

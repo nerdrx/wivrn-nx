@@ -139,6 +139,12 @@ struct nxwarp_stream_stats
 	bool entropy_was_auto = true;
 	// The nxvc tool mask the headset advertised.
 	uint64_t negotiated_tools = 0;
+	// The encoder effort level in use: 0 the plain dead-zone quantiser, 1 the integer
+	// requantiser as well.  It is the one negotiated fact that CANNOT be read off the
+	// wire -- the level leaves no tool bit, by design, because it changes which levels
+	// are coded and nothing about how they decode -- so the encoder reporting it here is
+	// the only way anything downstream can say which one produced a stream.
+	uint32_t effort = 1;
 
 	// --- the encode size -----------------------------------------------------
 	// Per eye, whether or not the eyes are paired: the stereo frame on the wire is twice
@@ -249,6 +255,7 @@ inline void to_json(nlohmann::json & j, const nxwarp_stream_stats & s)
 	        {"not_reconstructed_costly", s.not_reconstructed_costly},
 	        {"dominant_reason", uint8_t(s.dominant_reason)},
 	        {"dominant_reason_count", s.dominant_reason_count},
+	        {"effort", s.effort},
 	        {"entropy", s.entropy},
 	        {"entropy_was_auto", s.entropy_was_auto},
 	        {"negotiated_tools", s.negotiated_tools},
@@ -303,6 +310,7 @@ inline void from_json(const nlohmann::json & j, nxwarp_stream_stats & s)
 	get("not_reconstructed", s.not_reconstructed);
 	get("not_reconstructed_costly", s.not_reconstructed_costly);
 	get("dominant_reason_count", s.dominant_reason_count);
+	get("effort", s.effort);
 	get("entropy", s.entropy);
 	get("entropy_was_auto", s.entropy_was_auto);
 	get("negotiated_tools", s.negotiated_tools);

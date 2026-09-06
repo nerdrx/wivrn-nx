@@ -100,6 +100,7 @@ nxwarp_stream_stats sample()
 	s.not_reconstructed_costly = 3;
 	s.dominant_reason = nxwarp_not_held_reason::worker_backlog;
 	s.dominant_reason_count = 3;
+	s.effort = 0; // not the default, so a field that is silently dropped shows up
 	s.entropy = "lite";
 	s.entropy_was_auto = true;
 	s.negotiated_tools = 0x777a1fffull;
@@ -134,6 +135,7 @@ void check_same(const nxwarp_stream_stats & a, const nxwarp_stream_stats & b, co
 	check(a.not_reconstructed_costly == b.not_reconstructed_costly, h + ": not_reconstructed_costly");
 	check(a.dominant_reason == b.dominant_reason, h + ": dominant_reason");
 	check(a.dominant_reason_count == b.dominant_reason_count, h + ": dominant_reason_count");
+	check(a.effort == b.effort, h + ": effort");
 	check(a.entropy == b.entropy, h + ": entropy");
 	check(a.entropy_was_auto == b.entropy_was_auto, h + ": entropy_was_auto");
 	check(a.negotiated_tools == b.negotiated_tools, h + ": negotiated_tools");
@@ -217,8 +219,13 @@ static void part_b()
 		auto older = nlohmann::json(sample());
 		older.erase("encode_scale");
 		older.erase("entropy");
+		older.erase("effort");
 		const auto s = older.get<nxwarp_stream_stats>();
 		check(near(s.encode_scale, 1.0), "a missing field keeps its default");
+		// A server too old to report the level is a server that does not have it, so
+		// the default has to read as 1 rather than as 0: 0 would put "dead-zone
+		// quantiser" on the card for an encoder that is running the level.
+		check(s.effort == 1, "a server with no effort field reads as the default level");
 		check(s.entropy.empty(), "a missing string keeps its default");
 		check(s.encoded_width == 896, "the fields that are present still arrive");
 		auto older2 = nlohmann::json(sample());

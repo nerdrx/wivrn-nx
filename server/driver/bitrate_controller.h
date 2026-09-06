@@ -509,6 +509,24 @@ private:
 		uint64_t index = uint64_t(-1);
 		XrTime first = 0; // earliest received_first_packet over all streams
 		XrTime last = 0;  // latest received_last_packet over all streams
+		// The same pair kept PER STREAM, and what the utilisation is actually
+		// measured from.
+		//
+		// The merged pair above is only a wire time when every stream's frame `index`
+		// names the same composited frame. On the shard codecs it does. On nxwarp it
+		// does not: that codec numbers its feedback from a per-stream WIRE id and the
+		// two eyes are paced independently, so their ids drift -- live, stream 0 sent
+		// 76 frames in the same two seconds stream 1 sent 67. `last - first` then
+		// measured the drift between two unrelated frames, p90 utilisation read 3.27
+		// and then 21.08 against a threshold of 1.00, and "acute congestion" halved
+		// the bitrate twice with ZERO lost datagrams.
+		//
+		// A frame's time on the wire is a property of one stream, so it is measured
+		// in one stream and the widest is taken. That is true for every codec and
+		// needs nothing on the wire.
+		static constexpr size_t max_streams = 4;
+		std::array<XrTime, max_streams> stream_first{};
+		std::array<XrTime, max_streams> stream_last{};
 		bool valid = false;
 		bool lost = false; // at least one stream never arrived completely
 		bool late = false; // decoded but dropped before being displayed

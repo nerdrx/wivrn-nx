@@ -1209,6 +1209,10 @@ int main(int argc, char ** argv)
 		uint32_t qp;
 		uint64_t bytes;
 		double target;
+		// The lowest QP the controller was allowed to pick for this frame. With
+		// the transport ceiling in play that is not always min-qp, and "under
+		// budget" is only a controller fault when it had somewhere lower to go.
+		uint32_t floor;
 	};
 	std::vector<rc_row> rc_trace;
 	// --- what the pace actually sent -------------------------------------------
@@ -1331,7 +1335,8 @@ int main(int argc, char ** argv)
 		(void)enc.encode(slot, f);
 		const auto after = enc.profile();
 		if (after.frames > before.frames)
-			rc_trace.push_back({before.qp, after.bytes - before.bytes, after.target_bytes});
+			rc_trace.push_back({before.qp, after.bytes - before.bytes,
+			                    after.target_bytes, before.qp_floor});
 		// Datagrams on the link is what "sent" means: an encode that produced bytes the
 		// tile grid could not carry is not a frame the client ever hears about, and it
 		// spends no wire frame id either.
@@ -1578,7 +1583,16 @@ int main(int argc, char ** argv)
 				// ceiling above that is simply more link than the picture needs.
 				check(mean <= 1.25 * want,
 				      "bytes per frame stay within 25% above the ceiling's budget");
-				check(mean >= 0.75 * want or tail_qp_lo == min_qp,
+				// The bottom of the band is the EFFECTIVE floor, not min-qp:
+				// the transport ceiling can hold the quantiser above what the
+				// operator asked for, and while it does, coming in under the
+				// bitrate budget is the controller doing as it was told rather
+				// than failing to converge. Still a real check -- a controller
+				// sitting above its floor while under budget still fails.
+				uint32_t tail_floor = 0;
+				for (size_t i = tail_from; i < rc_trace.size(); ++i)
+					tail_floor = std::max(tail_floor, rc_trace[i].floor);
+				check(mean >= 0.75 * want or tail_qp_lo <= tail_floor,
 				      "bytes per frame come in under the budget only at the bottom of the QP band");
 
 				// And it has to have STOPPED. Bytes on target with the

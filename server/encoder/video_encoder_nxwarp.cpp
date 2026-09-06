@@ -371,10 +371,12 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 			codec_cfg.entropy = client_has_lite
 			                            ? nxwarp_codec_config::entropy_t::lite
 			                            : nxwarp_codec_config::entropy_t::rans;
-			U_LOG_I("nxwarp: \"entropy\": \"auto\" -> %s (headset %s ENTROPY_LITE)",
+			U_LOG_I("nxwarp: \"entropy\": \"auto\" -> %s (%s)",
 			        client_has_lite ? "lite" : "rans",
-			        client_tools == 0 ? "reported no tool mask"
-			                          : (client_has_lite ? "advertises" : "does not advertise"));
+			        client_tools == 0
+			                ? "the headset reported no tool mask"
+			                : (client_has_lite ? "the headset advertises ENTROPY_LITE"
+			                                   : "the headset does not advertise ENTROPY_LITE"));
 			break;
 		case entropy_request::lite:
 			// Explicit, and refused rather than sent: emitting a header this

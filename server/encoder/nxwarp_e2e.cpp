@@ -954,11 +954,15 @@ int main(int argc, char ** argv)
 	// carry it. There is no headset in this process, so it is simulated: this is the
 	// only way to exercise the negotiation without two devices and a network.
 	//
-	// The default is every bit the encoder can emit, which is what a headset running
-	// this same nx-warp build reports and what keeps every existing run unchanged.
-	// --client-tools 0 is the old client that reports nothing; a number with bit 30
-	// clear is a headset whose decoder has no ENTROPY_LITE.
-	std::string client_tools = "all";
+	// The default is "none", and that is the truthful one: there is no headset in this
+	// process, so nothing reported a mask. It is also what keeps every existing run in
+	// this harness byte-for-byte what it was, because "entropy": "auto" reads an absent
+	// mask as "no information" and stays on rANS.
+	//
+	// "all" is a headset that can decode anything this encoder emits, which is what a
+	// headset running this same nx-warp build reports; a number with bit 30 clear is a
+	// headset whose decoder has no ENTROPY_LITE.
+	std::string client_tools = "none";
 	// "auto" (the server default), "rans" or "lite".
 	std::string entropy = "auto";
 

@@ -501,3 +501,23 @@ Does **not** work yet, and none of it is a bug to be filed:
   been connected in process — but no live server-to-headset session has been run. The first
   one may well find something this test cannot: real packet reordering, real jitter, a real
   display-time clock.
+
+## Live session with nobody wearing the headset
+
+The Pico keeps its display on and its compositor at 90 Hz with the proximity
+sensor uncovered, and the WiVRn client streams in `XR_SESSION_STATE_VISIBLE`,
+so a live nxwarp session needs no person in the headset:
+
+1. Start the server on the desktop (`wivrn-server -f <config.json>`); the
+   `active_runtime.json` symlink under `~/.config/openxr/1/` appears once a
+   client connects, so point OpenXR apps at the build's manifest directly.
+2. Connect the test client by intent (about 15 s after the app launches):
+   `adb shell am start -a android.intent.action.VIEW -d wivrn://<server-ip> org.meumeu.wivrn.nx.warp`
+3. Drive frames with `hello_xr`, keeping its stdin open (it exits on EOF):
+   `tail -f /dev/null | XR_RUNTIME_JSON=<build>/openxr_wivrn-dev.json hello_xr -g Vulkan2`
+4. Read `adb logcat -d | grep -E 'nxwarp\[[0-9]\]'` for the client's per-stream
+   decode lines and the server log for the encode/pacing/not-held lines.
+
+`pkill -x hello_xr` ends the session. Absolute numbers taken this way sit
+above a worn session's (SLAM tracking keeps the GPU at 490 MHz and warm), so
+compare pairs taken minutes apart, not against cold rows.

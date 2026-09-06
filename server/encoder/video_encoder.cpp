@@ -367,6 +367,7 @@ void video_encoder::on_feedback(const from_headset::feedback & feedback)
 {
 	assert(feedback.stream_index == stream_idx);
 	idr->on_feedback(feedback);
+	account_latency(feedback);
 
 	if (not fec_enabled or not fec_adaptive)
 		return;

@@ -292,3 +292,68 @@ Named here rather than left to be discovered.
   `wivrn-nxwarp-e2e` drives the real `video_encoder_nxwarp` and the real client decoder
   through the real packet types over a lossy in-process link (see `docs/NXWARP-E2E.md`).
   A live server-to-headset session has still not been run.
+
+## Where the latency is
+
+Motion-to-photon on the Pico 4 sat at 41-56 ms while `stream_scale` took the client's
+decode wall from 25.7 ms to 11.2 ms and the frame rate from 34 to 58. The decode got
+2.3x cheaper and MTP did not move, so the latency was somewhere else. This is where,
+measured rather than reasoned.
+
+Every number below is from one live capture: `logcat-scale080b.txt` and `scale080b.log`,
+896x896 per eye, ENTROPY_LITE, inter on.
+
+| stage | ms | what it is | who can move it |
+|---|---|---|---|
+| encode | **1.6** | `codec->encode()`, server GPU, max 3.4 | the encoder |
+| pacing, wait for the send slot | **~0** | 0 composited frames not sent, all 91 in the window went | the encoder |
+| datagrams out, and the wire | **<1** | 821 B/frame: a whole frame is about ONE datagram | the encoder |
+| client bounded worker queue | **~0** | `0 queued for the worker` over the window | the client |
+| decode, nxvc GPU | **7.3** | Pass A 0.8 + Pass B 6.5 | the codec |
+| decode, waiting for the client GPU | **14.4** | the `queue` term of fence-post, i.e. contention | the headset's GPU |
+| copy | **0.1** | | |
+| publish to photons | **33.3** | `VsyncDelay=3` at 90 Hz | the runtime |
+| **MTP, as PxrMetric measures it** | **46.7-53.2** | | |
+
+The identified stages sum to more than MTP because the runtime's three-vsync delay
+overlaps the client's own frame time rather than following it; the split between the
+last two rows is the part this table cannot separate from outside the runtime.
+
+**Everything the encoder controls is under 3 ms of it, about 5 %.** That is the finding.
+Transport is not a factor and cannot become one at this rate: at 821 bytes a frame the
+whole picture fits in a single datagram, so there is no striping, no reassembly wait and
+no per-frame wire span worth measuring. Pacing costs nothing here either -- it dropped no
+composited frame in the window.
+
+What is left is the headset, twice over, and both times for the same reason.
+`PxrMetric` reports `GPU=99%/490Mhz` in every run at every `stream_scale`, with `FrmGpu`
+between 15.7 and 29.3 ms against an 11.1 ms display period. A GPU that never leaves 99 %
+gives back a decode saving as *frame rate* -- 34 to 58 fps, exactly what was seen -- and
+not as latency, because the runtime keeps `VsyncDelay=3` for as long as it cannot land a
+frame inside one period. The 14.4 ms the decode spends waiting for the GPU is the same
+saturation seen from inside the decoder.
+
+So the lever is the client's GPU cost per frame, not the link and not the encoder. MTP
+falls when `FrmGpu` drops below the display period and the runtime can go to
+`VsyncDelay=1` or 2; nothing upstream of the headset can buy that.
+
+### The instrumentation this rests on
+
+`from_headset::feedback` carries ten timestamps and NX Warp filled four of them. The
+server filled none: `encode_begin`, `encode_end`, `send_begin` and `send_end` were zero
+for this codec, and `encode_begin` is the origin the dashboard normalises its latency plot
+against -- so the plot was not merely missing two segments, it was measured from zero. And
+`sent_to_decoder` was stamped at publish rather than at hand-off to the worker, which
+reported the decode as taking no time and charged its whole cost to the queue ahead of it.
+
+Both are fixed. The server carries its four in `to_headset::nxwarp_datagram::timing_info`,
+on the last datagram of a frame, in the same struct and by the same rule the shard path
+uses, so the client returns them in `from_headset::feedback` without knowing it is nxwarp
+and `wivrn_session` converts them with the clock offset exactly as it does for H.264. The
+per-stage means are published in `NxwarpStats` as `latency_*_ms`.
+
+Validated in the harness against a simulated client: with `--client-decode-ms 22` the
+decode stage reports 22.52 ms. The harness's own absolute numbers are not a latency
+budget -- it has no runtime compositor and presents in a tight loop, so its queue and
+present stages are its own scheduling -- but the stage that can be checked against a known
+input checks out.

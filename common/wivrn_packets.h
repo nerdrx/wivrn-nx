@@ -1746,6 +1746,18 @@ struct nxwarp_datagram
 	// field is never the only casualty of that loss.
 	std::optional<video_stream_data_shard::view_info_t> view_info;
 
+	// The server's own timestamps for this frame, in the HEADSET clock, on the
+	// LAST datagram of the frame and on no other -- the same rule
+	// video_stream_data_shard follows, and the same struct, so the client returns
+	// them in from_headset::feedback exactly as it does for H.264 and the
+	// dashboard's latency plot works for nxwarp without knowing it is nxwarp.
+	//
+	// Without it every server-side field of the feedback was zero for this codec,
+	// and `encode_begin` is the ORIGIN the dashboard normalises the whole plot
+	// against, so nxwarp's latency readout was not merely missing two segments --
+	// it was measured from zero.
+	std::optional<video_stream_data_shard::timing_info_t> timing_info;
+
 	std::vector<uint8_t> payload;
 };
 

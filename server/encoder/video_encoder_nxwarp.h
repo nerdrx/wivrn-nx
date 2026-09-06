@@ -414,6 +414,12 @@ class video_encoder_nxwarp : public video_encoder
 	//
 	// `base_qp` is where the loop starts (and, with "rc": "fixed", where it
 	// stays); `current_qp` is what the next frame will actually be coded at.
+	// The server's half of this frame's latency record, filled across encode() and
+	// carried to the headset on the frame's LAST datagram. The base class keeps its
+	// own `timing_info` for the shard path; this codec does not go through that
+	// path, so it keeps the same struct and fills it itself.
+	std::optional<to_headset::video_stream_data_shard::timing_info_t> frame_timing;
+
 	uint32_t base_qp;
 	uint32_t current_qp;
 	// "rc": "auto" honours the bitrate ceiling; "fixed" is the old behaviour,

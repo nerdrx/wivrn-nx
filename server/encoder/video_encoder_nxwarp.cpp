@@ -1445,6 +1445,14 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// undefined behaviour, not a race to lose. nxvc_vk_encoder is documented
 	// as leaving that serialisation to its caller, so this is where it
 	// happens. The CPU backend touches no queue and takes no lock.
+	// The server's half of the per-frame latency record, in the HEADSET clock,
+	// travelling on the last datagram in the same struct the shard path uses. Every
+	// one of these was zero for nxwarp before, which did not merely lose two
+	// segments of the dashboard's latency plot -- `encode_begin` is the origin it
+	// normalises against, so the whole plot was measured from zero. See
+	// to_headset::nxwarp_datagram::timing_info.
+	frame_timing = to_headset::video_stream_data_shard::timing_info_t{};
+	frame_timing->encode_begin = headset_clock().to_headset(os_monotonic_get_ns());
 	const auto t_enc0 = std::chrono::steady_clock::now();
 	std::span<const uint8_t> bitstream;
 	if (codec_uses_vk_queue)
@@ -1459,6 +1467,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		bitstream = codec->encode(y, extent.width, cb_plane.data(), cr_plane.data(), cw);
 	}
 	const auto t_enc1 = std::chrono::steady_clock::now();
+	frame_timing->encode_end = headset_clock().to_headset(os_monotonic_get_ns());
 	if (bitstream.empty())
 	{
 		U_LOG_W("nxwarp: stream %d frame %llu did not encode", int(stream_idx), (unsigned long long)frame_id);
@@ -1673,6 +1682,25 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				st.encoded_width = stats_width;
 				st.encoded_height = stats_height;
 				st.encode_scale = encode_scale_reported;
+
+				// The latency budget, from the feedback the headset returned over
+				// this window. Zero until a complete report arrives -- and it was
+				// zero for this codec however long you waited, until the server
+				// started filling timing_info for it.
+				if (latency.n)
+				{
+					const double k = 1.0 / double(latency.n);
+					st.latency_encode_ms = float(latency.encode * k);
+					st.latency_wait_send_ms = float(latency.wait_send * k);
+					st.latency_send_ms = float(latency.send * k);
+					st.latency_net_ms = float(latency.net * k);
+					st.latency_wire_ms = float(latency.wire * k);
+					st.latency_queue_ms = float(latency.queue * k);
+					st.latency_decode_ms = float(latency.decode * k);
+					st.latency_present_ms = float(latency.present * k);
+					st.latency_total_ms = float(latency.total * k);
+					st.latency_frames = latency.n;
+				}
 				publish_nxwarp_stats(st);
 			}
 
@@ -1684,6 +1712,8 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 			prof_qp_lo = 63;
 			prof_qp_hi = 0;
 			prof_paced_out = 0;
+			// The budget is a per-window mean like everything else on this line.
+			latency.reset();
 			prof_since = t_enc1;
 		}
 	}
@@ -1775,8 +1805,19 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		                              uint16_t(std::min<uint64_t>(65535, (uint64_t(os_monotonic_get_ns()) - encode_end_ns) / 1000)));
 	}
 
+	frame_timing->send_begin = headset_clock().to_headset(os_monotonic_get_ns());
+	// send_end is stamped BEFORE the last SendPacket rather than after it, because
+	// it has to travel inside that packet. It is the last instant the server can
+	// name and still have the number reach the headset; the packet's own write is
+	// the only thing outside it, and the pacing that matters happens before this
+	// loop, not inside it.
+	frame_timing->send_end = frame_timing->send_begin;
 	for (size_t i = 0; i < datagrams.size(); ++i)
 	{
+		const bool last = i + 1 == datagrams.size();
+		if (last)
+			frame_timing->send_end =
+			        headset_clock().to_headset(os_monotonic_get_ns());
 		SendPacket(to_headset::nxwarp_datagram{
 		                   .stream_item_idx = stream_idx,
 		                   .path_id = datagrams[i].path_id,
@@ -1786,9 +1827,11 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		                   // headset can reproject an NX Warp frame at all. The
 		                   // transport's own pose header is quantised and has no fov.
 		                   .view_info = i == 0 ? std::optional(view_info) : std::nullopt,
+		                   // Last datagram only, as the shard path does it.
+		                   .timing_info = last ? frame_timing : std::nullopt,
 		                   .payload = std::move(datagrams[i].bytes),
 		           },
-		           i + 1 == datagrams.size());
+		           last);
 	}
 
 	in[slot].have_view_info = false;

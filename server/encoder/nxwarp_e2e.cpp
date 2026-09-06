@@ -340,6 +340,49 @@ public:
 	// server's automatic bitrate reads. One per decoded frame and one per frame that
 	// closed with a hole, which is the whole set the client sends.
 	std::vector<from_headset::feedback> frame_reports;
+
+	// The per-stage latency budget, accumulated over every frame that reached the
+	// screen. One process and one clock here, so these are differences and need no
+	// offset; on a real link every one of them is in the HEADSET clock, because the
+	// server converts its four with clock_offset::to_headset() before they go on the
+	// wire and the session converts the headset's six back the same way.
+	//
+	// Every field this reads was zero for nxwarp until the commit that added it: the
+	// server filled no timing_info at all, and `sent_to_decoder` was stamped at publish
+	// rather than at hand-off, which put the whole decode into the queue segment and
+	// reported the decode itself as taking no time.
+	struct stage_acc
+	{
+		double encode = 0;     // encode_begin  -> encode_end
+		double wait_send = 0;  // encode_end    -> send_begin   (pacing + queueing)
+		double send = 0;       // send_begin    -> send_end     (datagrams out)
+		double net = 0;        // send_begin    -> rx_first     (first byte across)
+		double span = 0;       // rx_first      -> rx_last      (frame on the wire)
+		double queue = 0;      // rx_last       -> sent_to_dec  (bounded worker queue)
+		double decode = 0;     // sent_to_dec   -> rx_from_dec
+		double present = 0;    // rx_from_dec   -> blitted
+		double total = 0;      // encode_begin  -> blitted
+		size_t n = 0;
+	} stages;
+
+	void account(const from_headset::feedback & fb)
+	{
+		// Only a frame with both ends of every interval. A frame that was never
+		// displayed has no `blitted` and would report a negative present time.
+		if (not fb.encode_begin or not fb.blitted or not fb.sent_to_decoder)
+			return;
+		auto ms = [](XrTime a, XrTime b) { return double(b - a) * 1e-6; };
+		stages.encode += ms(fb.encode_begin, fb.encode_end);
+		stages.wait_send += ms(fb.encode_end, fb.send_begin);
+		stages.send += ms(fb.send_begin, fb.send_end);
+		stages.net += ms(fb.send_begin, fb.received_first_packet);
+		stages.span += ms(fb.received_first_packet, fb.received_last_packet);
+		stages.queue += ms(fb.received_last_packet, fb.sent_to_decoder);
+		stages.decode += ms(fb.sent_to_decoder, fb.received_from_decoder);
+		stages.present += ms(fb.received_from_decoder, fb.blitted);
+		stages.total += ms(fb.encode_begin, fb.blitted);
+		++stages.n;
+	}
 	// Every decoded picture, as yuv420p, and every .nxv unit the decoder was fed.
 	std::vector<std::vector<uint8_t>> pictures;
 	std::vector<std::vector<uint8_t>> units;
@@ -455,6 +498,7 @@ public:
 		pictures.push_back(std::move(pic));
 		frames.push_back({handle->view_info, handle->feedback.frame_index});
 		frame_reports.push_back(from_wire<from_headset::feedback>(to_wire(fb)));
+		account(frame_reports.back());
 		cv.notify_all();
 	}
 
@@ -2192,6 +2236,30 @@ int main(int argc, char ** argv)
 	// interval around codec->encode(). This is the number that decides whether
 	// a backend can hold a frame budget, so print it whether the run passed or
 	// failed.
+	// The per-stage latency budget. Printed before the encode summary because it is
+	// the wider statement: the encode line is one row of it.
+	if (host.stages.n)
+	{
+		const auto & g = host.stages;
+		const double n = double(g.n);
+		auto row = [&](const char * what, double sum) {
+			std::printf("  %-26s %7.2f ms  %5.1f%%\n", what, sum / n,
+			            g.total > 0 ? 100.0 * sum / g.total : 0.0);
+		};
+		std::printf("\nlatency budget, %zu frames from encode to blit (one process, "
+		            "one clock)\n",
+		            g.n);
+		row("encode", g.encode);
+		row("pacing + queue to send", g.wait_send);
+		row("datagrams out", g.send);
+		row("first byte across", g.net);
+		row("frame on the wire", g.span);
+		row("bounded worker queue", g.queue);
+		row("decode", g.decode);
+		row("decode to blit", g.present);
+		std::printf("  %-26s %7.2f ms\n", "total", g.total / n);
+	}
+
 	{
 		const auto p = enc.profile();
 		if (p.frames)

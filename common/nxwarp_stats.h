@@ -147,6 +147,43 @@ struct nxwarp_stream_stats
 	// above was derived at.
 	float encode_scale = 1;
 
+	// --- the latency budget, one stage per field, milliseconds ---------------
+	//
+	// Mean over the frames of this window that reached the screen, from
+	// from_headset::feedback. Every one of these was unavailable for NX Warp until the
+	// server started filling timing_info for it: the four server stamps were zero, and
+	// `sent_to_decoder` was stamped at publish rather than at hand-off, which reported
+	// the decode as taking no time and charged its whole cost to the queue ahead of it.
+	//
+	// The stages are contiguous and sum to `latency_total_ms`, so a reader can treat
+	// them as a stacked bar without normalising:
+	//
+	//   encode        encode_begin        -> encode_end
+	//   wait_send     encode_end          -> send_begin      (pacing, and the queue to it)
+	//   send          send_begin          -> send_end        (datagrams handed to the socket)
+	//   net           send_begin          -> rx_first        (first byte across the link)
+	//   wire          rx_first            -> rx_last         (the frame's span on the wire)
+	//   queue         rx_last             -> sent_to_decoder (the bounded worker queue)
+	//   decode        sent_to_decoder     -> rx_from_decoder
+	//   present       rx_from_decoder     -> blitted
+	//
+	// `net` overlaps `send` by construction -- both start at send_begin -- because the
+	// first byte can arrive before the last has left. It is reported rather than
+	// folded in so a reader can see the link's own delay.
+	//
+	// Zero when the headset has not returned a complete report yet.
+	float latency_encode_ms = 0;
+	float latency_wait_send_ms = 0;
+	float latency_send_ms = 0;
+	float latency_net_ms = 0;
+	float latency_wire_ms = 0;
+	float latency_queue_ms = 0;
+	float latency_decode_ms = 0;
+	float latency_present_ms = 0;
+	float latency_total_ms = 0;
+	// Frames the means above are over. Zero means no complete report arrived.
+	uint64_t latency_frames = 0;
+
 	// Tiles per eye, the NX Warp decoder's per-frame unit of work.
 	uint32_t tiles() const
 	{
@@ -195,6 +232,16 @@ inline void to_json(nlohmann::json & j, const nxwarp_stream_stats & s)
 	        {"encoded_width", s.encoded_width},
 	        {"encoded_height", s.encoded_height},
 	        {"encode_scale", r(s.encode_scale)},
+	        {"latency_encode_ms", r(s.latency_encode_ms)},
+	        {"latency_wait_send_ms", r(s.latency_wait_send_ms)},
+	        {"latency_send_ms", r(s.latency_send_ms)},
+	        {"latency_net_ms", r(s.latency_net_ms)},
+	        {"latency_wire_ms", r(s.latency_wire_ms)},
+	        {"latency_queue_ms", r(s.latency_queue_ms)},
+	        {"latency_decode_ms", r(s.latency_decode_ms)},
+	        {"latency_present_ms", r(s.latency_present_ms)},
+	        {"latency_total_ms", r(s.latency_total_ms)},
+	        {"latency_frames", s.latency_frames},
 	};
 }
 
@@ -238,6 +285,16 @@ inline void from_json(const nlohmann::json & j, nxwarp_stream_stats & s)
 	get("encoded_width", s.encoded_width);
 	get("encoded_height", s.encoded_height);
 	get("encode_scale", s.encode_scale);
+	get("latency_encode_ms", s.latency_encode_ms);
+	get("latency_wait_send_ms", s.latency_wait_send_ms);
+	get("latency_send_ms", s.latency_send_ms);
+	get("latency_net_ms", s.latency_net_ms);
+	get("latency_wire_ms", s.latency_wire_ms);
+	get("latency_queue_ms", s.latency_queue_ms);
+	get("latency_decode_ms", s.latency_decode_ms);
+	get("latency_present_ms", s.latency_present_ms);
+	get("latency_total_ms", s.latency_total_ms);
+	get("latency_frames", s.latency_frames);
 
 	uint8_t pace = uint8_t(nxwarp_pace_report::automatic);
 	get("pace_mode", pace);

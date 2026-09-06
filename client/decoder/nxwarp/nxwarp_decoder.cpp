@@ -519,6 +519,17 @@ void nxwarp_decoder::push_datagram(to_headset::nxwarp_datagram && dg)
 
 	// The pose rides the frame's first datagram and only that one; take it whichever
 	// datagram it turns up on, so that reordering on the wire does not lose it.
+	// The server's own timestamps, on the frame's LAST datagram. Copied straight
+	// into the feedback this frame will return, so the round trip is the one every
+	// other codec already uses (wivrn_session::operator()(from_headset::feedback))
+	// and the dashboard needs to know nothing about nxwarp.
+	if (dg.timing_info)
+	{
+		f->fb.encode_begin = dg.timing_info->encode_begin;
+		f->fb.encode_end = dg.timing_info->encode_end;
+		f->fb.send_begin = dg.timing_info->send_begin;
+		f->fb.send_end = dg.timing_info->send_end;
+	}
 	if (dg.view_info)
 	{
 		f->view_info = *dg.view_info;
@@ -1018,6 +1029,12 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 
 void nxwarp_decoder::decode_unit(decode_job & job)
 {
+	// The frame is handed to the decoder HERE -- off the bounded queue and onto the
+	// worker -- so this is what `sent_to_decoder` means. Stamping it at publish, as
+	// this did, made the reported decode interval zero and moved its whole cost into
+	// the queue segment ahead of it: the one number the dashboard had for nxwarp's
+	// decode was the one number it could not be.
+	job.fb.sent_to_decoder = host.now();
 	const auto t_iter0 = std::chrono::steady_clock::now();
 	size_t consumed = 0;
 	VkSemaphore dec_sem = VK_NULL_HANDLE;
@@ -1241,8 +1258,15 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		}
 	}
 
-	job.fb.sent_to_decoder = host.now();
-	job.fb.received_from_decoder = job.fb.sent_to_decoder;
+	// `sent_to_decoder` is NOT stamped here. It used to be, and here is after the
+	// decode, so the dashboard read nxwarp's decode as taking zero time and charged
+	// the whole of it to the queue segment before it. It is stamped at the top of
+	// decode_unit() instead, which is where the frame is actually handed over.
+	//
+	// `received_from_decoder` is the instant this frame's GPU work was known finished
+	// -- the fence-post below -- and it is stamped there rather than here.
+	// push_blit_handle() no longer overwrites a value the decoder already set, so what
+	// the dashboard shows as "decode" is the decode and not the walk to the ring.
 	auto handle = std::make_shared<nxwarp_blit_handle>(
 	        job.fb,
 	        job.view_info,
@@ -1302,6 +1326,15 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	if (not signal_on_queue and device.waitForFences(*fence, true, UINT64_MAX) != vk::Result::eSuccess)
 		spdlog::warn("nxwarp: waitForFences failed");
 	const auto t_fence_post = std::chrono::steady_clock::now();
+	// The decode is done: everything the codec was asked for has been signalled. This
+	// is what `received_from_decoder` means for every other codec in this client, so
+	// it is what it means here. See the note where sent_to_decoder is stamped.
+	//
+	// Stamped on the HANDLE and not on `job.fb`: the handle took its copy of the
+	// feedback before the submit, so writing the job's copy here would leave the one
+	// that travels at zero -- which reads downstream as a decode that finished before
+	// it started.
+	handle->feedback.received_from_decoder = host.now();
 	// The copy's own device time. Only readable on the path that just waited on the
 	// fence; where the render thread is given a semaphore instead, the copy may still
 	// be running and the queries are not ready.

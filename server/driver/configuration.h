@@ -122,6 +122,15 @@ struct configuration
 	// framerate to halve bandwidth, restoring it once the link recovers. Both switches must
 	// be on. It is the last automatic resort before a disconnect.
 	bool emergency_framerate = true;
+	// Server side cap on the encoded (foveated) per-eye size, as a linear fraction of the
+	// per-eye stream size the headset asked for. 1 leaves the headset in charge. It buys
+	// decode time on the headset — the NX Warp decoder's per-tile work scales with the
+	// pixel count, and the two eyes serialise on its GPU — at the cost of sharpness.
+	// Composed with the headset's own render_scale by taking the smaller of the two, so
+	// this is a ceiling and never sharpens a headset that asked for less. Applied where
+	// the foveated size is derived, in get_encoder_settings, so it takes effect on
+	// connection. Valid range is ]0, 1]; the aligned result is floored at one 64x64 tile.
+	float stream_scale = 1.0f;
 	std::optional<uint8_t> bit_depth;
 	std::optional<std::array<float, 3>> grip_surface;
 	std::vector<std::string> application;

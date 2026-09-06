@@ -1986,14 +1986,18 @@ void compositor::update_foveation_center_override(const from_headset::override_f
 void compositor::update_foveation_shape()
 {
 	float base;
-	float render_scale;
 	bool adaptive;
 	{
 		auto s = session.get_settings();
 		base = std::clamp(s->foveation_strength, 0.f, 1.f);
-		render_scale = std::clamp(s->render_scale, 0.f, 1.f);
 		adaptive = s->foveation_adaptive;
 	}
+	// The effective encode scale: the headset's render_scale already capped by the server's
+	// "stream_scale" (see get_encoder_settings). The guardrail bounds the peripheral factor
+	// against how much the encode was shrunk, so it has to read the scale the images were
+	// actually created at, which is fixed for the life of the session — not the headset's
+	// live setting, which cannot resize an encode session anyway.
+	const float render_scale = std::clamp(settings[0].encode_scale, 0.f, 1.f);
 
 	// Lever 2: steepen the curve as the automatic bitrate controller backs off its ceiling, so
 	// the periphery compresses under a Wi-Fi dip instead of the whole image losing quality.

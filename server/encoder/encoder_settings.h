@@ -76,6 +76,11 @@ struct encoder_settings
 	// information" and not "supports nothing": the NX Warp encoder then keeps to the
 	// tools every decoder has and negotiates nothing. See video_encoder_nxwarp.cpp.
 	uint64_t nxvc_tools = 0;
+	// The linear fraction of the headset's stream eye size this stream is actually encoded
+	// at: min(headset render_scale, server "stream_scale"). Same for every eye stream. The
+	// foveation guardrail needs the effective value, not the headset's half of it, or a
+	// server-side downscale would let the periphery collapse past what the guardrail allows.
+	float encode_scale = 1.f;
 };
 
 // Number of video streams: left, right, alpha, quad

@@ -327,6 +327,48 @@ full framerate immediately.
 ```
 Never automatically drop the framerate, even when the link is failing at the minimum bitrate.
 
+## `stream_scale`
+Default value: `1.0`
+
+Server-side ceiling on the size the eye images are **encoded** at, as a linear fraction of the
+per-eye stream size the headset asked for. A value in `]0, 1]`; `1.0` leaves the headset in charge.
+
+This is the sharpness/decode-cost dial. The NX Warp decoder's work scales with the pixel count of
+the encoded image, and the headset's GPU runs the two eyes one after the other, so the decoded
+frame rate is set by that pixel count. `0.8` linear is `0.64` of the pixels, `0.7` is about half.
+The headset keeps its full display resolution either way and upscales what it decoded (bilinear, or
+sharp with FSR), so the cost is peak sharpness, not field of view or geometry.
+
+Both dimensions are scaled and then **rounded up to a multiple of 64**, the tile grid the foveation
+shader and the NX Warp encoder work in (which also satisfies 4:2:0 chroma siting). For a headset
+asking 1088x1088 per eye: `0.8` gives 896x896 (14x14 = 196 tiles instead of 17x17 = 289), `0.7`
+gives 768x768 (12x12 = 144 tiles). The result is never smaller than one tile.
+
+The headset has a *reduced resolution* slider of its own (`render_scale`) that means the same thing.
+The two compose as the **smaller of the two**, not as a product: this setting is a cap, so a headset
+that already asked for less than it keeps what it asked for, and two moderate values never multiply
+into a blurry one. The effective scale is also what the foveation guardrail reads, so the periphery
+cannot collapse further just because the encode was shrunk here.
+
+Read when the headset connects, like the encoder settings it belongs to: changing it takes effect on
+the next connection, not on the running session. When it is below `1.0` the resulting size is logged
+at info level, for example:
+
+```
+nxwarp: stream 0 encodes 896x896 per eye (stream_scale 0.8, headset asked 1088x1088)
+```
+
+`stream-scale` is accepted as a spelling of the same key.
+
+### Example
+```json
+{
+	"stream_scale": 0.8
+}
+```
+Encode 896x896 per eye when the headset asks for 1088x1088, trading peak sharpness for about a
+third less decode work per frame.
+
 ## `encoder`
 The encoder to use, either a single string or object applied to all streams, or a list of string or objects with values for left, right and alpha.
 When a string it is used, it is equivalent to the `encoder` item of the object.

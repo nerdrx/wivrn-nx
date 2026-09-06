@@ -909,6 +909,25 @@ void Settings::set_nxwarpRcAuto(const bool & value)
 		nxwarpRcAutoChanged();
 }
 
+int Settings::nxwarpDecodeBudget() const
+{
+	return int(nxd::nxwarp_option_u32(m_jsonSettings, "decode-budget",
+	                                  nxd::nxwarp_default_decode_budget));
+}
+
+void Settings::set_nxwarpDecodeBudget(const int & value)
+{
+	const auto old = nxwarpDecodeBudget();
+	// 0 means "do not trade quality for the deadline at all"; above 100 the headset
+	// would be allowed to spend longer decoding than the period being defended, which
+	// is not a budget. Clamped so a saved configuration cannot express either mistake.
+	const uint32_t v = uint32_t(std::clamp(value, 0, 100));
+	nxd::set_nxwarp_option_u32(m_jsonSettings, "decode-budget", v,
+	                           nxd::nxwarp_default_decode_budget);
+	if (old != nxwarpDecodeBudget())
+		nxwarpDecodeBudgetChanged();
+}
+
 int Settings::nxwarpMinQp() const
 {
 	return int(nxd::nxwarp_option_u32(m_jsonSettings, "min-qp", nxd::nxwarp_default_min_qp));

@@ -429,6 +429,13 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	lens_mask_margin = std::min(64u, option_u32(settings.options, "lens-mask-margin", 1));
 	lens_mask_skip = option_bool(settings.options, "lens-mask-skip", true);
 
+	// The share of the defended frame period the headset's decode may take before
+	// the deadline controller starts spending quality. As a percentage, because it
+	// is a percentage in the dashboard and a fraction here; 0 turns the controller
+	// off entirely, which is the escape hatch for a headset whose reported decode
+	// cannot be trusted.
+	rc_decode_budget_frac =
+	        double(std::min(200u, option_u32(settings.options, "decode-budget", 80))) / 100.0;
 	rc_min_qp = std::min(63u, option_u32(settings.options, "min-qp", 20));
 	rc_max_qp = std::min(63u, option_u32(settings.options, "max-qp", 44));
 	if (rc_min_qp > rc_max_qp)
@@ -2352,6 +2359,11 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 					codec->identity_tiles(idt, idtot);
 					st.identity_tiles = idt;
 					st.identity_tiles_total = idtot;
+					st.rc_binding = rc_binding_name(rc_binding);
+					st.rc_decode_floor = rc_decode_floor;
+					st.rc_decode_budget_ms = rc_decode_budget_s() * 1000.0;
+					st.client_decode_us =
+					        client_decode_us.load(std::memory_order_relaxed);
 				}
 				/* The headset's own count would go here, from
 				 * nxvc's tiles_identity_seg once a client reports

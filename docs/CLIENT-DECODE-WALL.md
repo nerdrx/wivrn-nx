@@ -238,3 +238,75 @@ The A/B for (2) and (4), and the confirmation that (3)'s split points where this
 argues it will. The measurement recipe is the one that produced the numbers above: one
 server, one link, `nx-scratch/live-tools/connect.sh` to prove the stream scene is current,
 90 s of capture, and the aggregation in the report for that session.
+
+## Spending quality to keep the wall from becoming the frame rate
+
+Everything above is about making the decode cheaper. This section is about what the
+server does when it is still too expensive, which is the case the opening paragraph
+describes: a 22.8 ms wall means the pacer sends 38.5 fps, and that is the wall
+*becoming* the frame rate. Head motion made the frames bigger and the headset answered
+by showing fewer of them.
+
+The encoder now has a second rate controller for exactly this. The byte controller asks
+"does this fit the link"; the decode controller asks "can the headset decode it in
+time", and when they disagree the deadline wins — a frame that arrives on time at a
+worse quantiser is a picture, and a frame that arrives late is a dropped one.
+
+**It is a quantiser floor, not a target.** That is what lets it out-rank `min-qp`. The
+operator sets `min-qp` to say "do not spend quality below this"; the headset saying "I
+cannot decode this in time" is not a quality opinion, so the decode floor joins the
+transport-ceiling floor in `effective_qp_floor()`, above `min-qp`. It moves AIMD-style
+and asymmetrically: up hard when it is over budget (+2 when the overrun is more than
+half the budget again), down one step at a time and only with real headroom, so a
+decode that merely grazes the budget does not oscillate.
+
+**The budget is not a share of the live paced interval**, and this is the part worth
+reading twice. The pacer targets `1.1 x decode + 1 ms`, so decode is about 0.9 of the
+interval it produces *by construction*. Budgeting against that interval would find
+decode over budget at every quality, raise the quantiser, watch the interval shrink with
+it, and find it over budget again — a ratchet to `max-qp` that says nothing about the
+headset. The reference has to be a period the controller cannot move, so it is the
+slowest frame rate worth holding: half the stream's configured rate, 45 fps at 90 Hz.
+Above that the pacer is free and this controller is silent; below it, quality gives way
+instead.
+
+The dashboard exposes the budget as **Decode budget**, a percentage of that defended
+period (default 80%, so 17.8 ms at 90 Hz). 0 turns the controller off, for a headset
+whose reported decode cannot be trusted.
+
+### What it does, measured
+
+From the harness (`--decode-ms-per-kb` simulates a headset whose decode cost grows with
+the frame, which is what closes the loop), 320x240, budget 17.8 ms, `min-qp` 24,
+`max-qp` 44, `--present-hz 90`:
+
+| simulated load | quantiser floor | binding | frames/s on the wire | worst PSNR |
+|---|---|---|---|---|
+| none | +0 | bytes | 90.0 | 22.8 dB |
+| moderate (per-kb 3) | rose, then released | bytes | 45.7 | — |
+| heavy (per-kb 5) | +44 (at `max-qp`) | **decode** | **45.2** | 19.6 dB |
+
+The middle row is the controller working as designed: the floor rose, decode came back
+under budget (25.6 -> 17.5 ms), and the floor released itself. The bottom row is the
+whole point — quality spent all the way to `max-qp` and **the frame rate held**, 45.2
+against the 45.0 it defends. The mean PSNR falls from 36.3 to 27.9 dB. That is the trade
+being made on purpose: motion costs sharpness, not frames.
+
+### Reading it on a live session
+
+The two-second report line and the dashboard's **Rate limited by** row both name the
+binding controller, because "the picture is soft" and "the picture is soft *because the
+headset cannot decode it*" are different sentences and only the second one tells you
+what to change. If it says `decode` during head motion, that is the feature working. If
+it says `decode` while the scene is still, the budget is set too tight.
+
+### Two harness checks this changed
+
+Both were written for a one-controller world and are now conditioned rather than
+deleted. `the quantiser settles into a band of at most 2 QP` is the right invariant for
+a byte loop aiming at a fixed target and the wrong one when the decode floor is moving
+underneath it — there, a quantiser that sat still would be the bug, so the check becomes
+that it *rides* the floor. And the 20 dB resemblance floor does not apply to a run that
+is deliberately asking the controller to spend the picture; it drops to 15 dB, which
+catches corruption rather than softness, and the thing that must not move — the frame
+rate — is checked explicitly instead.

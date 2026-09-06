@@ -651,6 +651,8 @@ private:
 	// The decode wall this stream is aiming to stay under, in seconds.
 	double rc_decode_budget_s() const
 	{
+		if (not(rc_decode_budget_frac > 0))
+			return 0; // the operator turned the deadline controller off
 		return rc_decode_budget_frac / rc_decode_floor_fps();
 	}
 	// The floor this controller is currently imposing. 0 when it is not binding.

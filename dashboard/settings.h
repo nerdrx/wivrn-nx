@@ -170,6 +170,8 @@ public:
 	Q_PROPERTY(int nxwarpPaceFps READ nxwarpPaceFps WRITE set_nxwarpPaceFps NOTIFY nxwarpPaceFpsChanged)
 	Q_PROPERTY(bool nxwarpRcAuto READ nxwarpRcAuto WRITE set_nxwarpRcAuto NOTIFY nxwarpRcAutoChanged)
 	Q_PROPERTY(int nxwarpMinQp READ nxwarpMinQp WRITE set_nxwarpMinQp NOTIFY nxwarpMinQpChanged)
+	Q_PROPERTY(int nxwarpDecodeBudget READ nxwarpDecodeBudget WRITE set_nxwarpDecodeBudget NOTIFY
+	                   nxwarpDecodeBudgetChanged)
 	Q_PROPERTY(int nxwarpMaxQp READ nxwarpMaxQp WRITE set_nxwarpMaxQp NOTIFY nxwarpMaxQpChanged)
 	Q_PROPERTY(nxwarp_stereo nxwarpStereoFrame READ nxwarpStereoFrame WRITE set_nxwarpStereoFrame NOTIFY nxwarpStereoFrameChanged)
 	Q_PROPERTY(nxwarp_tile_map nxwarpTileMap READ nxwarpTileMap WRITE set_nxwarpTileMap NOTIFY nxwarpTileMapChanged)
@@ -222,6 +224,7 @@ public:
 	SETTER_GETTER_NOTIFY(int, nxwarpPaceFps)
 	SETTER_GETTER_NOTIFY(bool, nxwarpRcAuto)
 	SETTER_GETTER_NOTIFY(int, nxwarpMinQp)
+	SETTER_GETTER_NOTIFY(int, nxwarpDecodeBudget)
 	SETTER_GETTER_NOTIFY(int, nxwarpMaxQp)
 	SETTER_GETTER_NOTIFY(nxwarp_stereo, nxwarpStereoFrame)
 	SETTER_GETTER_NOTIFY(nxwarp_tile_map, nxwarpTileMap)

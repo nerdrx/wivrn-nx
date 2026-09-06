@@ -205,6 +205,15 @@ struct nxwarp_stream_stats
 	uint32_t snap_identity = 0;
 	uint64_t identity_tiles = 0;
 	uint64_t identity_tiles_total = 0;
+	// Which controller is currently deciding the quantiser -- "bytes", "decode" or
+	// "transport ceiling" -- with the decode deadline it is holding it against. The
+	// picture being soft and the picture being soft BECAUSE the headset cannot decode
+	// it in time look identical on a stats page that only shows the quantiser, and
+	// only one of them is something the operator can act on.
+	std::string rc_binding;
+	uint32_t rc_decode_floor = 0;
+	double rc_decode_budget_ms = 0;
+	uint16_t client_decode_us = 0;
 	bool identity_from_decoder = false;
 	// The piecewise-planar tile mode (nxvc tool bit 35): "off", "rd" or
 	// "prefer", as the session actually resolved it -- and, when that is not
@@ -383,6 +392,10 @@ inline void to_json(nlohmann::json & j, const nxwarp_stream_stats & s)
 	        {"snap_identity", s.snap_identity},
 	        {"identity_tiles", s.identity_tiles},
 	        {"identity_tiles_total", s.identity_tiles_total},
+	        {"rc_binding", s.rc_binding},
+	        {"rc_decode_floor", s.rc_decode_floor},
+	        {"rc_decode_budget_ms", s.rc_decode_budget_ms},
+	        {"client_decode_us", s.client_decode_us},
 	        {"identity_from_decoder", s.identity_from_decoder},
 	        {"planar", s.planar},
 	        {"planar_note", s.planar_note},
@@ -466,6 +479,10 @@ inline void from_json(const nlohmann::json & j, nxwarp_stream_stats & s)
 	get("snap_identity", s.snap_identity);
 	get("identity_tiles", s.identity_tiles);
 	get("identity_tiles_total", s.identity_tiles_total);
+	get("rc_binding", s.rc_binding);
+	get("rc_decode_floor", s.rc_decode_floor);
+	get("rc_decode_budget_ms", s.rc_decode_budget_ms);
+	get("client_decode_us", s.client_decode_us);
 	get("identity_from_decoder", s.identity_from_decoder);
 	get("planar", s.planar);
 	get("planar_note", s.planar_note);

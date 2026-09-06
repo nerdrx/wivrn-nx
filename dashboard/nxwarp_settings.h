@@ -75,6 +75,9 @@ inline constexpr std::string_view nxwarp_default_tile_map = "auto";
 inline constexpr uint32_t nxwarp_default_intra_period = 180;
 inline constexpr uint32_t nxwarp_default_min_qp = 20;
 inline constexpr uint32_t nxwarp_default_max_qp = 44;
+// Percent of the defended frame period the headset's decode may take before the
+// encoder starts trading quality to keep the frame rate. 0 turns that off.
+inline constexpr uint32_t nxwarp_default_decode_budget = 80;
 
 // Whether one entry of the "encoder" key is the NX Warp encoder. A bare string is an encoder name,
 // so "nxwarp" on its own counts; an object is NX Warp if either its encoder or its codec says so,

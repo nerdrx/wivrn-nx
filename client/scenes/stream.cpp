@@ -677,6 +677,23 @@ void scenes::stream::on_focused()
 
 void scenes::stream::on_unfocused()
 {
+	// Hand the clocks back.
+	//
+	// A boost asked for by the stream OUTLIVES the stream. Measured: after an A/B at
+	// BOOST the client exited and /sys/class/kgsl/kgsl-3d0/gpuclk still read 587 MHz
+	// rather than the 490 it idles at, so the next session -- or the next person
+	// measuring -- inherits a clock nobody asked for and every number after it is
+	// quietly wrong. The extension is happy to be asked again, so ask.
+	//
+	// SUSTAINED_LOW rather than the configured level: this is the scene giving up its
+	// claim, not setting a policy. Whatever takes over states its own -- the lobby asks
+	// for sustained_high the moment it is focused -- so the only window this covers is
+	// the one where nothing is streaming and nothing has spoken yet.
+	session.set_performance_level(XR_PERF_SETTINGS_DOMAIN_GPU_EXT,
+	                              XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT);
+	session.set_performance_level(XR_PERF_SETTINGS_DOMAIN_CPU_EXT,
+	                              XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT);
+
 	renderer->wait_idle(); // Must be before the scene data because the renderer uses its descriptor sets;
 	world.clear();
 	input.reset();

@@ -44,8 +44,12 @@ layout(push_constant) uniform pc
 	// x: dither strength, in units of one 8-bit step (1/255) of triangular-PDF noise;
 	//    0 disables it and the output is then byte identical to no debanding
 	vec4 deband;
-	// [atlas prototype] xy: the atlas picture size in samples, zw: its reciprocal.
+	// [atlas prototype] xy: one eye's picture size in samples, zw unused.
 	vec4 atlas_size;
+	// xy: the whole atlas image size in texels, zw: its reciprocal.
+	vec4 atlas_geom;
+	// x: luma rescale out of u16, y: chroma rescale, z: chroma midpoint offset.
+	vec4 atlas_range;
 };
 
 #ifdef VERT_SHADER
@@ -98,7 +102,11 @@ layout(constant_id = 3) const bool fsr_enable = false;
 // measures is the only thing that is in doubt: what per-tile indirection plus a warped
 // bilinear tap costs per fragment on this GPU, at panel resolution and at stream
 // resolution. The pixels it produces are meaningless.
-layout(constant_id = 4) const bool atlas_warp = false;
+// 0 off; 1 sampler over the decoder's R16_UNORM view, bilinear by the sampler;
+// 2 imageLoad of the same u16 storage memory with the bilinear done by hand;
+// 3 a UNORM8 RGBA copy, one tap and no conversion -- the lower bound the other two
+// are worth measuring against.
+layout(constant_id = 4) const int atlas_mode = 0;
 // Tiles per eye across and down. 17x17 is the model's figure.
 layout(constant_id = 5) const int atlas_tiles = 17;
 // Which eye's half of the table this pipeline reads. The pass is one draw per eye, as
@@ -116,20 +124,23 @@ layout(set = 0, binding = 1) uniform sampler2D motion_field;
 // mix below never runs and the output is byte identical to not having the feature.
 layout(set = 0, binding = 2) uniform sampler2D prev_rgb;
 
-// [atlas prototype] The atlas, laid out as ADR-0029 section 1 specifies a RefPicture:
-// the whole eye picture, planes in the CODED sample domain (Y/Co/Cg, before the inverse
-// colour transform), full tile extent, so the pass samples it directly with no repacking
-// and does the colour transform itself. 4:2:0 here, so Y is full resolution and the
-// interleaved Co/Cg plane is half.
-layout(set = 0, binding = 3) uniform sampler2D atlas_y;
-layout(set = 0, binding = 4) uniform sampler2D atlas_cocg;
+// [atlas prototype] The atlas, in the decoder's own storage layout: the ring layout,
+// both eyes side by side with eye e at column e * pw, planes in the coded YCoCg-R domain
+// with the chroma at 9-bit range inside u16. Nothing is converted for the display pass;
+// the pass rescales, upsamples the chroma and does the inverse transform itself. Binding
+// 3 is an R16_UNORM SAMPLED view of that memory and binding 4 a storage view of the very
+// same image, so modes 1 and 2 differ in how they read one allocation and in nothing
+// else. Binding 6 is the converted RGBA8 copy the other two are priced against.
+layout(set = 0, binding = 3) uniform sampler2D atlas_r16;
+layout(set = 0, binding = 4, r16) uniform readonly image2D atlas_store;
+layout(set = 0, binding = 6) uniform sampler2D atlas_rgba8;
 
 // The per-tile table, ADR-0029 section 1: 64 bytes per tile position per eye, 289 tiles
-// per eye at the v1 configuration, 37 kB for the pair -- a uniform buffer, as the ADR
-// says. Bytes 0..35 are the composed homography C mapping this frame's centred sample
-// coordinates to the tile's source frame; the client has already composed C with
-// H(pose_t <- pose_N) in float for late latching, which is per tile and not per fragment
-// and so is not in this shader.
+// per eye, 37 kB for the pair -- a uniform buffer, as the ADR says. Indexing is ROW-MAJOR
+// EYE-MINOR, so the eyes interleave within a row: for linear tile n,
+// eye = (n % cols) / cols_per_eye. Bytes 0..35 are the composed homography C mapping this
+// frame's centred sample coordinates to the tile's source frame; the late-latch
+// composition with H(pose_t <- pose_N) is per tile and is done in float on the host.
 //
 // Four vec4 per tile: rows 0, 1 and 2 of C in .xyz, then src_frame/gen/flags/res_level.
 layout(set = 0, binding = 5) uniform atlas_table_t
@@ -496,36 +507,99 @@ void main()
 	// opaque pixel pays a single centre sample whether or not it is sharpened. When FSR is
 	// active EASU replaces the colour but the tap still supplies colour.a (only read on the
 	// no-alpha-stream path below).
-	if (atlas_warp)
+	if (atlas_mode != 0)
 	{
-		// Which tile this fragment lands in. Every fragment of a tile reads the same
-		// three uniform vectors, which is the access pattern the constant cache is
-		// for and the reason the ADR puts the table in a uniform buffer.
+		// Which tile this fragment lands in. Row-major eye-minor over the pair, so a
+		// row of the table alternates eyes; every fragment of a tile reads the same
+		// three uniform vectors, which is what the constant cache is for.
 		vec2 t = clamp(inUV.xy, 0.0, 0.999999) * float(atlas_tiles);
 		ivec2 c = ivec2(t);
-		int idx = ((atlas_eye * atlas_tiles + c.y) * atlas_tiles + c.x) * 4;
+		int cols_per_eye = atlas_tiles;
+		int n = (c.y * (cols_per_eye * 2)) + atlas_eye * cols_per_eye + c.x;
+		int idx = n * 4;
 		vec3 r0 = tbl.e[idx].xyz;
 		vec3 r1 = tbl.e[idx + 1].xyz;
 		vec3 r2 = tbl.e[idx + 2].xyz;
 
-		// Centred sample coordinates of this fragment, through C, back to the tile's
-		// source frame. One homography, one perspective divide -- ADR-0029 section 5's
-		// "one step", which is the whole point of the model.
+		// This frame's centred sample coordinates, through C, back to the tile's
+		// source frame. One homography and one divide: ADR-0029 section 5's "one
+		// step", which is the whole point of the model.
 		vec2 centred = (inUV.xy - 0.5) * atlas_size.xy;
 		vec3 h = vec3(centred, 1.0);
 		vec3 q = vec3(dot(r0, h), dot(r1, h), dot(r2, h));
-		vec2 src = q.xy / q.z;
-		vec2 auv = clamp(src * atlas_size.zw + 0.5, 0.0, 1.0);
+		// Sample position inside THIS eye's picture, in samples.
+		vec2 src = clamp(q.xy / q.z + atlas_size.xy * 0.5, vec2(0.0), atlas_size.xy - 1.0);
 
-		// Two taps, bilinear by the sampler, then the inverse colour transform the
-		// coded sample domain leaves to whoever reads it.
-		float Y = texture(atlas_y, auv).r;
-		vec2 CoCg = texture(atlas_cocg, auv).rg * 2.0 - 1.0;
-		float tmp = Y - CoCg.y * 0.5;
-		float G = CoCg.y + tmp;
-		float B = tmp - CoCg.x * 0.5;
-		float R = B + CoCg.x;
-		outColor = vec4(R, G, B, 1.0);
+		vec3 rgb_out;
+		if (atlas_mode == 3)
+		{
+			// Lower bound: a converted RGBA8 copy. One tap, no rescale, no inverse
+			// transform, no chroma upsample. Whatever this costs is what the pass
+			// can never go below at this output size.
+			vec2 uvc = (src + vec2(float(atlas_eye) * atlas_size.x, 0.0)) * atlas_geom.zw;
+			rgb_out = texture(atlas_rgba8, uvc).rgb;
+		}
+		else
+		{
+			// The luma plane spans the pair: eye e starts at column e * pw. The two
+			// chroma planes sit under it at half resolution, Co on the left half of
+			// the band and Cg on the right.
+			float Y, Co, Cg;
+			vec2 luma_px = src + vec2(float(atlas_eye) * atlas_size.x, 0.0);
+			vec2 chroma_px = src * 0.5 + vec2(float(atlas_eye) * atlas_size.x * 0.5, atlas_size.y);
+			float cg_dx = atlas_size.x;
+
+			if (atlas_mode == 1)
+			{
+				// Sampler over the R16_UNORM view of the decoder's own memory.
+				// Three taps, bilinear by the hardware.
+				Y = texture(atlas_r16, (luma_px + 0.5) * atlas_geom.zw).r;
+				Co = texture(atlas_r16, (chroma_px + 0.5) * atlas_geom.zw).r;
+				Cg = texture(atlas_r16, (chroma_px + vec2(cg_dx, 0.0) + 0.5) * atlas_geom.zw).r;
+			}
+			else
+			{
+				// imageLoad of the u16 storage image, bilinear by hand: four loads
+				// a plane, twelve for the pixel, plus the weights.
+				vec2 lf = fract(luma_px);
+				ivec2 li = ivec2(floor(luma_px));
+				float y00 = imageLoad(atlas_store, li).r;
+				float y10 = imageLoad(atlas_store, li + ivec2(1, 0)).r;
+				float y01 = imageLoad(atlas_store, li + ivec2(0, 1)).r;
+				float y11 = imageLoad(atlas_store, li + ivec2(1, 1)).r;
+				Y = mix(mix(y00, y10, lf.x), mix(y01, y11, lf.x), lf.y);
+
+				vec2 cf = fract(chroma_px);
+				ivec2 ci = ivec2(floor(chroma_px));
+				float o00 = imageLoad(atlas_store, ci).r;
+				float o10 = imageLoad(atlas_store, ci + ivec2(1, 0)).r;
+				float o01 = imageLoad(atlas_store, ci + ivec2(0, 1)).r;
+				float o11 = imageLoad(atlas_store, ci + ivec2(1, 1)).r;
+				Co = mix(mix(o00, o10, cf.x), mix(o01, o11, cf.x), cf.y);
+
+				ivec2 gi = ci + ivec2(int(cg_dx), 0);
+				float g00 = imageLoad(atlas_store, gi).r;
+				float g10 = imageLoad(atlas_store, gi + ivec2(1, 0)).r;
+				float g01 = imageLoad(atlas_store, gi + ivec2(0, 1)).r;
+				float g11 = imageLoad(atlas_store, gi + ivec2(1, 1)).r;
+				Cg = mix(mix(g00, g10, cf.x), mix(g01, g11, cf.x), cf.y);
+			}
+
+			// Out of the raw u16 range and into the codec's: luma is 8-bit stored in
+			// 16, chroma is 9-bit signed around the midpoint (SYNTAX YCoCg-R).
+			Y = Y * atlas_range.x;
+			Co = Co * atlas_range.y - atlas_range.z;
+			Cg = Cg * atlas_range.y - atlas_range.z;
+
+			// YCoCg-R inverse.
+			float tmp = Y - Cg * 0.5;
+			float G = Cg + tmp;
+			float B = tmp - Co * 0.5;
+			float R = B + Co;
+			rgb_out = vec3(R, G, B);
+		}
+
+		outColor = vec4(rgb_out, 1.0);
 		if (do_srgb)
 			outColor = sRGB_to_linear_rgba(outColor);
 		return;

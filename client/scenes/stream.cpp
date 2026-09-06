@@ -1866,9 +1866,10 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		             g_rp.iters - g_rp.gated_out - g_rp.no_render, g_rp.no_render,
 		             g_rp.period_ms / n);
 		spdlog::info("render: this app's own GPU pass {:.1f} ms per iteration", g_rp.app_gpu_ms / n);
-		spdlog::info("render: defoveate {}x{} per eye x2 = {:.2f} Mpx/frame at scale {:.2f}; {} re-presented from the cache (reduce_gpu_load {})",
+		spdlog::info("render: defoveate {}x{} per eye x2 = {:.2f} Mpx/frame at scale {:.2f} atlas-mode {}; {} re-presented from the cache (reduce_gpu_load {})",
 		             g_rp.out_w, g_rp.out_h,
 		             2.0 * double(g_rp.out_w) * double(g_rp.out_h) / 1e6, defoveate_scale(),
+		             application::get_config().atlas_prototype,
 		             g_rp.cache_hits, g_rp.reduce_gpu_load ? "on" : "off");
 		spdlog::info("render: shader path sharpness {:.2f} fsr {} alpha {} motion {} blend {} glow {:.2f} vignette {:.2f} deband {:.2f}",
 		             g_rp.sharpness, g_rp.fsr, g_rp.use_alpha, g_rp.motion_on, g_rp.blend_on,

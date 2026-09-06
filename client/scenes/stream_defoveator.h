@@ -67,16 +67,29 @@ class stream_defoveator
 	bool fsr_baked = false;
 	// [atlas prototype] whether the per-tile warp is compiled into the current
 	// pipelines, same specialization scheme as the two above.
-	bool atlas_baked = false;
+	int atlas_baked = 0;
 	static constexpr uint32_t kAtlasTiles = 17;
 	// The v1 configuration of ADR-0029: 1088x1088 per eye, 64x64 tiles, 17x17 = 289
 	// tiles. The atlas is the whole eye picture in the coded sample domain.
 	static constexpr uint32_t kAtlasPicture = 1088;
+	// The ring layout over the pair: the luma band is both eyes side by side, and the
+	// two half-resolution chroma planes sit under it in one more band.
+	static constexpr uint32_t kAtlasW = kAtlasPicture * 2;
+	static constexpr uint32_t kAtlasH = kAtlasPicture + kAtlasPicture / 2;
 	// The synthetic atlas: Y at full extent, interleaved Co/Cg at half (4:2:0), one
 	// layer per eye, plus the 64-byte-per-tile table in a uniform buffer. None of it is
 	// allocated until the prototype is first asked for.
-	image_allocation atlas_y_image, atlas_cocg_image;
-	std::vector<vk::raii::ImageView> atlas_y_views, atlas_cocg_views;
+	// One R16_UNORM allocation in the decoder's ring layout (both eyes side by side,
+	// luma band then the two chroma planes at half resolution) with TWO views of the
+	// same memory -- sampled for mode 1, storage for mode 2 -- plus the converted
+	// RGBA8 copy mode 3 is priced against.
+	image_allocation atlas_r16_image, atlas_rgba8_image;
+	vk::raii::ImageView atlas_r16_sampled = nullptr;
+	vk::raii::ImageView atlas_r16_storage = nullptr;
+	vk::raii::ImageView atlas_rgba8_view = nullptr;
+	// Set when the device will not take R16_UNORM as a storage image, which makes
+	// mode 2 unmeasurable rather than slow; it is reported, not silently skipped.
+	bool atlas_storage_ok = false;
 	buffer_allocation atlas_table_buffer;
 	// Keeps the one-shot pixel upload alive until its copy has retired.
 	buffer_allocation atlas_staging_keepalive;
@@ -188,7 +201,7 @@ public:
 	        int destination,
 	        bool cas_full_kernel = false,
 	        bool fsr = false,
-	        bool atlas_prototype = false);
+	        int atlas_prototype = 0);
 
 	// `scale` < 1 renders the pass into fewer fragments and leaves the last upscale to
 	// the runtime's compositor, which resamples the layer during timewarp regardless.

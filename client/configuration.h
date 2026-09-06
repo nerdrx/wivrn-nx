@@ -336,7 +336,10 @@ public:
 	// from a 17x17 table and samples through it. Synthetic table, meaningless pixels;
 	// this exists to price the pass shape on real hardware before the model is built.
 	// Off, and no part of it is allocated until it is turned on.
-	bool atlas_prototype = false;
+	// 0 off; 1 sampler over the decoder's R16_UNORM view; 2 imageLoad of the same u16
+	// storage memory with the bilinear done by hand; 3 a converted UNORM8 RGBA copy,
+	// which is the lower bound the other two are worth measuring against.
+	int atlas_prototype = 0;
 
 	bool passthrough_enabled = false;
 	bool mic_unprocessed_audio = false;

@@ -50,7 +50,7 @@ public:
 	void with_queue(const std::function<void(vk::Queue)> & fn) override;
 	XrTime now() override;
 	void send_feedback(uint8_t stream_index, uint8_t path_id, std::vector<uint8_t> payload,
-	                   uint16_t decode_us) override;
+	                   uint16_t decode_us, uint16_t held_base, uint32_t held_mask) override;
 	void report_frame_lost(const wivrn::from_headset::feedback &) override;
 	void report_frame_not_held(uint8_t stream_index, uint16_t frame_id,
 	                           wivrn::from_headset::nxwarp_frame_not_held::reason why) override;

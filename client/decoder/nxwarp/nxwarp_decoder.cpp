@@ -644,6 +644,56 @@ void nxwarp_decoder::fire_elapsed_deadlines(uint64_t now)
 	}
 }
 
+// The worker has reconstructed `frame_id`: fold it into the window the network
+// thread puts on every feedback packet.
+//
+// Lock free because the two threads meet here every frame and the pair has to move
+// together -- a base from one update with a mask from another names frames that were
+// never built, and the encoder would reference one of them.  A compare-exchange loop
+// over the packed word is the whole of it; contention is one writer and one reader, so
+// it succeeds first time in practice.
+void nxwarp_decoder::note_frame_held(uint16_t frame_id)
+{
+	uint64_t cur = held_ack.load(std::memory_order_relaxed);
+	for (;;)
+	{
+		const uint16_t base = uint16_t(cur & kAckBaseMask);
+		const uint32_t mask = uint32_t(cur >> 16);
+		uint16_t nbase = base;
+		uint32_t nmask = mask;
+		if (mask == 0)
+		{
+			// Nothing yet: this frame becomes the window.
+			nbase = frame_id;
+			nmask = 1u;
+		}
+		else if (seq_lt(base, frame_id))
+		{
+			// Newer than anything recorded: shift the window forward. A shift of
+			// 32 or more is undefined in C++ and would also be meaningless -- the
+			// whole window is older than ref_sel can reach -- so it becomes an
+			// empty history with this frame in it.
+			const uint16_t d = uint16_t(frame_id - base);
+			nmask = (d >= 32 ? 0u : (mask << d)) | 1u;
+			nbase = frame_id;
+		}
+		else
+		{
+			// Older, which a frame decoded out of order can be. Only the window
+			// can hold it; anything past 32 back is beyond any reference.
+			const uint16_t d = uint16_t(base - frame_id);
+			if (d >= 32)
+				return;
+			nmask = mask | (1u << d);
+		}
+		const uint64_t next = uint64_t(nbase) | (uint64_t(nmask) << 16);
+		if (next == cur)
+			return;
+		if (held_ack.compare_exchange_weak(cur, next, std::memory_order_relaxed))
+			return;
+	}
+}
+
 void nxwarp_decoder::fire_bands_through(inflight_frame & f, uint8_t last_band)
 {
 	for (uint8_t b = 0; b <= last_band and b < f.band_fired.size(); ++b)
@@ -654,8 +704,12 @@ void nxwarp_decoder::fire_bands_through(inflight_frame & f, uint8_t last_band)
 		auto packet = receiver->band_deadline(f.frame_id, b, now_us(), 0, f.path_id);
 		if (packet.empty())
 			continue;
+		uint16_t ack_base = 0;
+		uint32_t ack_mask = 0;
+		read_held_ack(ack_base, ack_mask);
 		host.send_feedback(stream_index, f.path_id, std::move(packet),
-		                   decode_us_report.load(std::memory_order_relaxed));
+		                   decode_us_report.load(std::memory_order_relaxed),
+		                   ack_base, ack_mask);
 	}
 }
 
@@ -923,6 +977,19 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			refused = true;
 			return;
 		}
+		// The codec took the unit, so its reference ring slot is being filled by a
+		// submit every later decode is ordered behind -- and that is the whole of
+		// what the encoder needs to know before it may predict from this frame.
+		// Confirmed HERE, not after the readback and the fence below: those are
+		// about handing the picture to the compositor, and on a slow device they
+		// are most of the wall time. Confirming after them would put the encoder's
+		// answer a whole frame further behind, and the reference range it has to
+		// fit inside is three.
+		//
+		// A frame that is decoded and then WITHHELD is confirmed too. Withholding
+		// is about what the user is shown; the picture is in the ring either way,
+		// and refusing to confirm it would cost an intra frame for nothing.
+		note_frame_held(job.frame_id);
 		dec_sem = nxvc_vk_decoder_timeline(nxvc);
 		dec_val = nxvc_vk_decoder_timeline_value(nxvc);
 		if (use_bin_sem)

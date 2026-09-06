@@ -198,6 +198,16 @@ class video_encoder_nxwarp : public video_encoder
 	// frame. That is what `held_fallback_reset` carries.
 	std::mutex not_held_mutex;
 	std::vector<uint16_t> not_held_ids;
+	// And the POSITIVE half: the frames the headset says it reconstructed, as a newest
+	// id and a backward bitmask, merged from every feedback packet since the last
+	// encode. It is what lets the encoder reference a frame it KNOWS was built; the
+	// negative report cannot say that, because silence means "held" and a frame
+	// dropped a moment ago is also silent. Under the same mutex as the ids above: both
+	// are written by the network thread and drained by the encode thread, once a
+	// frame, and one lock for the pair is one lock fewer than two.
+	uint16_t ack_base = 0;
+	uint32_t ack_mask = 0;
+	bool ack_valid = false;
 	std::atomic<bool> held_fallback_reset{false};
 	// Set when a report has been handed to the codec and not yet answered by a frame
 	// the headset can trust. Only an all-INTRA frame answers it, and only then is the
@@ -218,9 +228,21 @@ class video_encoder_nxwarp : public video_encoder
 		uint16_t wire = 0;
 		uint32_t codec = 0;
 		bool used = false;
+		// How many frames this encoder had sent when this one went out, and when.
+		// The difference against "now" at the moment its confirmation is applied is
+		// the confirmation latency in the only unit that matters -- ENCODER FRAMES,
+		// because that is what ref_sel's three-frame reach is counted in -- and in
+		// milliseconds, which is what says whether the feedback cadence or the
+		// headset's decode is the term that dominates it.
+		uint64_t sent_index = 0;
+		std::chrono::steady_clock::time_point sent_at{};
+		bool confirmed = false;
 	};
 	static constexpr size_t kFrameMapDepth = 64;
 	std::array<wire_to_codec, kFrameMapDepth> frame_map{};
+	// Confirmation latency, accumulated over the session and reported once at the end.
+	uint64_t confirm_n = 0, confirm_frames_sum = 0, confirm_frames_max = 0;
+	double confirm_ms_sum = 0, confirm_ms_max = 0;
 	// The last one reported and why, for the two-second report. Written under no lock:
 	// they are for a log line, and a torn read of them costs a wrong number in a log.
 	std::atomic<uint16_t> last_not_held_id{0};
@@ -491,7 +513,8 @@ public:
 	std::optional<data> encode(uint8_t slot, uint64_t frame_id) override;
 
 	void on_nxwarp_feedback(uint8_t path_id, std::span<const uint8_t> payload,
-	                        uint16_t decode_us) override;
+	                        uint16_t decode_us, uint16_t held_base,
+	                        uint32_t held_mask) override;
 	void on_nxwarp_frame_not_held(uint16_t frame_id,
 	                              from_headset::nxwarp_frame_not_held::reason why) override;
 
@@ -529,6 +552,16 @@ public:
 		// Composited frames the pace declined to send, and the interval it is at.
 		uint64_t paced_out = 0;
 		double pace_fps = 0;
+		// How long the headset's CONFIRMATION of a frame takes to come back, over the
+		// frames that were confirmed at all. In encoder frames, which is the unit
+		// ref_sel's three-frame reach is counted in and therefore the one that decides
+		// how many frames have to be coded INTRA; and in milliseconds, which says
+		// whether the feedback cadence or the headset's own decode is what dominates
+		// it.
+		uint64_t confirms = 0;
+		double confirm_frames_mean = 0, confirm_ms_mean = 0;
+		uint64_t confirm_frames_max = 0;
+		double confirm_ms_max = 0;
 	};
 	encode_profile profile() const
 	{
@@ -541,7 +574,12 @@ public:
 		        not_held_total.load(std::memory_order_relaxed),
 		        not_held_already_answered.load(std::memory_order_relaxed),
 		        paced_out_total,
-		        pace_mode == pace_mode_t::off ? 0.0 : (pace_interval > 0 ? 1.0 / pace_interval : 0.0)};
+		        pace_mode == pace_mode_t::off ? 0.0 : (pace_interval > 0 ? 1.0 / pace_interval : 0.0),
+		        confirm_n,
+		        confirm_n ? double(confirm_frames_sum) / double(confirm_n) : 0.0,
+		        confirm_n ? confirm_ms_sum / double(confirm_n) : 0.0,
+		        confirm_frames_max,
+		        confirm_ms_max};
 	}
 };
 

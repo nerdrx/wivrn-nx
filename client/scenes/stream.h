@@ -476,7 +476,7 @@ public:
 	// Hands one already-encoded NX Warp feedback packet to the lossy socket. Called from
 	// the decoder's network-thread path once per band deadline.
 	void send_nxwarp_feedback(uint8_t stream_index, uint8_t path_id, std::vector<uint8_t> payload,
-	                          uint16_t decode_us);
+	                          uint16_t decode_us, uint16_t held_base, uint32_t held_mask);
 	// One frame this headset received and will not reconstruct. Control socket: losing
 	// it is the corruption it exists to prevent.
 	void send_nxwarp_frame_not_held(uint8_t stream_index, uint16_t frame_id,

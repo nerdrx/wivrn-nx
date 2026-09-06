@@ -108,6 +108,30 @@ class nxwarp_decoder : public decoder
 	// controller does its own smoothing, and feeding it a figure that only moves twice
 	// a minute would make that loop as slow as the report interval.
 	std::atomic<uint16_t> decode_us_report = 0;
+
+	// --- what this headset HAS reconstructed --------------------------------
+	//
+	// The positive half of the not-held report, and the half that makes a refusal
+	// impossible rather than merely rarer: the encoder can only reference a frame it
+	// KNOWS the client built, and the negative report cannot tell it that -- silence
+	// means "held", and a frame dropped a moment ago is also silent.
+	//
+	// `held_base` is the newest frame this decoder reconstructed and bit k of
+	// `held_mask` says `held_base - k` was reconstructed too; a zero mask means
+	// nothing has been. Both live in ONE atomic word because the network thread reads
+	// them together onto a feedback packet while the worker thread writes them, and a
+	// torn pair would name frames that were never built. Packed base in bits 0-15,
+	// mask in 16-47.
+	std::atomic<uint64_t> held_ack{0};
+	static constexpr uint64_t kAckBaseMask = 0xffffull;
+	// The worker calls this after a frame is reconstructed and its picture exists.
+	void note_frame_held(uint16_t frame_id);
+	void read_held_ack(uint16_t & base, uint32_t & mask) const
+	{
+		const uint64_t v = held_ack.load(std::memory_order_relaxed);
+		base = uint16_t(v & kAckBaseMask);
+		mask = uint32_t(v >> 16);
+	}
 	// Network-thread counters for the same report.
 	std::chrono::steady_clock::time_point net_since = std::chrono::steady_clock::now();
 	uint64_t net_holes = 0, stragglers_dropped = 0;

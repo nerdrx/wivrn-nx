@@ -417,8 +417,13 @@ public:
 	// is on the shard path and hears about loss through on_feedback and nack.
 	// `decode_us` is the headset's own decode cost per frame for this stream, or 0
 	// before it has decoded anything; see from_headset::nxwarp_feedback::decode_us.
+	// `held_base` / `held_mask` are the frames the headset has RECONSTRUCTED: the
+	// newest, and a backward bitmask from it. A zero mask means none yet. See
+	// from_headset::nxwarp_feedback::held_base for why the positive report has to
+	// exist alongside the negative one.
 	virtual void on_nxwarp_feedback(uint8_t path_id, std::span<const uint8_t> payload,
-	                                uint16_t decode_us) {}
+	                                uint16_t decode_us, uint16_t held_base,
+	                                uint32_t held_mask) {}
 	// One frame the headset received and did not reconstruct. See
 	// from_headset::nxwarp_frame_not_held: it is the correction the transport's own
 	// feedback structurally cannot carry, because that is sent before the decoder has

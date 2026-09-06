@@ -72,8 +72,15 @@ public:
 	// decoded anything; it rides the same packet because it goes out at the same
 	// cadence and is what the server's send pacing reads (see the field's comment on
 	// from_headset::nxwarp_feedback).
+	//
+	// `held_base` / `held_mask` are the frames this decoder HAS reconstructed -- the
+	// newest, and a backward bitmask from it. They ride here for the same reason
+	// `decode_us` does, and the cadence is load-bearing: the encoder can only
+	// reference a confirmed frame, ref_sel reaches three frames back, and a
+	// confirmation later than that costs intra frames. See
+	// from_headset::nxwarp_feedback::held_base.
 	virtual void send_feedback(uint8_t stream_index, uint8_t path_id, std::vector<uint8_t> payload,
-	                           uint16_t decode_us) = 0;
+	                           uint16_t decode_us, uint16_t held_base, uint32_t held_mask) = 0;
 
 	// One reassembled .nxv frame unit, exactly as it is about to be handed to the codec.
 	// The client ignores it; wivrn-nxwarp-e2e uses it to rebuild the byte stream the

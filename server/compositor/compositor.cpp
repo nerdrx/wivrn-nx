@@ -1854,7 +1854,8 @@ void compositor::on_nxwarp_feedback(const from_headset::nxwarp_feedback & fb)
 	if (fb.stream_item_idx >= snapshot.size() or not snapshot[fb.stream_item_idx])
 		return;
 
-	snapshot[fb.stream_item_idx]->on_nxwarp_feedback(fb.path_id, fb.payload, fb.decode_us);
+	snapshot[fb.stream_item_idx]->on_nxwarp_feedback(fb.path_id, fb.payload, fb.decode_us,
+	                                                 fb.held_base, fb.held_mask);
 }
 
 void compositor::on_nxwarp_frame_not_held(const from_headset::nxwarp_frame_not_held & fb)

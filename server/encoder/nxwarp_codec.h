@@ -106,6 +106,13 @@ struct nxwarp_codec_config
 	uint32_t preset = 1;
 	// Encoder worker threads: 0 = all cores (capped at 16), 1 = serial.
 	uint32_t threads = 0;
+	// Act on what the headset says it did and did not reconstruct: reference only
+	// frames it has confirmed, and strike out the ones it reports lost. Off restores
+	// the answer this encoder gave before either existed -- one all-intra frame per
+	// burst of not-held reports -- which is always correct and only expensive, and
+	// which is what makes the two measurable against each other in one binary.
+	// NXWARP_FRAME_HELD=0 in the environment clears it.
+	bool frame_held = true;
 };
 
 // One eye's view for one frame, OpenXR conventions: a unit quaternion and the

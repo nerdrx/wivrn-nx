@@ -48,6 +48,10 @@
 #include <vulkan/vulkan_raii.hpp>
 
 #include "wivrn_config.h"
+
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 #if WIVRN_FEATURE_RENDERDOC
 #include "vk/renderdoc.h"
 #endif
@@ -1035,6 +1039,12 @@ struct render_probe
 	uint64_t iters = 0, gated_out = 0, no_render = 0, cache_hits = 0;
 	double period_ms = 0, fence_ms = 0, query_ms = 0, submit_ms = 0, blit_ms = 0;
 	double app_gpu_ms = 0;
+	// Just-in-time display, per report window. pose_age is the client's own
+	// motion-to-photon estimate (see stream.h); wake_slack is how much of the interval
+	// the runtime handed over in the first place, which is the ceiling on what the
+	// schedule could ever give back.
+	double pose_age_ms = 0, pose_age_max_ms = 0, wake_slack_ms = 0;
+	uint64_t pose_age_n = 0;
 	int32_t out_w = 0, out_h = 0;
 	float sharpness = 0, glow = 0, vignette = 0, deband = 0;
 	bool fsr = false, use_alpha = false, motion_on = false, blend_on = false, reduce_gpu_load = false;
@@ -1095,9 +1105,104 @@ float scenes::stream::resolve_defoveate_scale(
 	return std::clamp(s, 0.4f, 1.0f);
 }
 
+// Whether just-in-time scheduling runs this frame.
+//
+// The setting is the configuration's, and the GUI toggle is the way a user changes it.
+// The system property is a measurement override and nothing else: an A/B pair has to be
+// taken inside ONE session against ONE server, because the two halves are only
+// comparable if the link, the encoder's bitrate ladder and the scene are the same, and
+// reconnecting between them changes all three. Reading it once a second is what lets
+//
+//     adb shell setprop debug.wivrn.jit 0   (and 1, and back to an empty string)
+//
+// switch the schedule mid-session without touching the headset. An empty or absent
+// property means "whatever the setting says", which is the case on every device that is
+// not being measured.
+bool scenes::stream::jit_enabled()
+{
+	bool enabled = application::get_config().jit_display;
+
+#ifdef __ANDROID__
+	static std::chrono::steady_clock::time_point next_poll{};
+	static int forced = -1;
+
+	const auto now = std::chrono::steady_clock::now();
+	if (now >= next_poll)
+	{
+		next_poll = now + std::chrono::seconds(1);
+		char value[PROP_VALUE_MAX] = {};
+		const int len = __system_property_get("debug.wivrn.jit", value);
+		if (len <= 0)
+			forced = -1;
+		else
+			forced = value[0] == '0' ? 0 : 1;
+	}
+
+	if (forced >= 0)
+		enabled = forced != 0;
+#endif
+
+	return enabled;
+}
+
 void scenes::stream::render(const XrFrameState & frame_state)
 {
+	// --- just-in-time display -------------------------------------------------
+	//
+	// xrWaitFrame has just returned, and on this device it describes a frame roughly
+	// three refresh periods before that frame reaches the panel. Everything below --
+	// the choice of which decoded image to show, the pose that comes with it, the
+	// pass, the submission -- has always happened at the near end of that interval.
+	// Sleep to the far end of it first, so that it happens there instead: an image
+	// that finishes decoding during the wait is then shown on THIS refresh rather than
+	// the next one, and the pose on the panel is a whole interval fresher.
+	//
+	// The sleep is bounded by the pass's own measured cost plus a margin, and the
+	// scheduler only ever adapts towards starting EARLIER (client/scenes/stream_jit.h),
+	// so the worst it can do is the free-running loop it replaces. Nothing below this
+	// point knows it happened; it is the same render() it always was, run later.
+	const bool jit_on = jit_enabled();
+	const XrTime jit_wake = instance.now();
+	const int64_t jit_wake_slack = frame_state.predictedDisplayTime - jit_wake;
+	const int64_t jit_budget = (jit_on and jit.frames_seen >= jit.warmup_frames) ? jit.budget_ns() : 0;
+	const int64_t jit_slept = jit.sleep_ns(jit_on, jit_wake, frame_state.predictedDisplayTime);
+	if (jit_slept > 0)
+		std::this_thread::sleep_for(std::chrono::nanoseconds(jit_slept));
+	jit_sleep = jit_slept;
+
+	// A refresh went by with nothing submitted. Past a few periods this is a gap in the
+	// session -- a pause, a reconnect, a swapchain rebuild -- rather than a refresh the
+	// schedule lost, and charging those to the scheduler would ratchet it shut for
+	// reasons that have nothing to do with it.
+	const XrDuration jit_period = frame_state.predictedDisplayPeriod;
+	const XrDuration jit_step = last_display_time ? frame_state.predictedDisplayTime - last_display_time : jit_period;
+	const bool jit_period_jump = jit_period > 0 and jit_step > jit_period * 3 / 2 and jit_step < jit_period * 4;
+
 	const auto rp_t0 = std::chrono::steady_clock::now();
+
+	// Accounted from a guard so that the early returns below are measured too: a
+	// refresh with nothing to show is still a refresh whose timing this chose.
+	struct jit_account
+	{
+		scenes::stream & self;
+		int64_t budget, slept;
+		XrTime display_time;
+		XrDuration period;
+		bool period_jump;
+		std::chrono::steady_clock::time_point t0;
+
+		~jit_account()
+		{
+			const int64_t cost = std::chrono::duration_cast<std::chrono::nanoseconds>(
+			                             std::chrono::steady_clock::now() - t0)
+			                             .count();
+			// Negative means the frame was handed over after the refresh it was
+			// meant for had already gone.
+			const int64_t lead = display_time - self.instance.now();
+			self.jit.account(cost, budget, slept, lead, period_jump, period);
+		}
+	} jit_guard{*this, jit_budget, jit_slept, frame_state.predictedDisplayTime, jit_period, jit_period_jump, rp_t0};
+
 	const auto rp_ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
 	// A gap far longer than any display period means the loop was not running at all
 	// rather than running slowly, so the window that was open across it measures nothing.
@@ -1109,9 +1214,16 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	{
 		g_rp = {};
 		g_rp.since = rp_t0;
+		// The schedule's counters describe the same window, so they are reset with
+		// it. Its LEARNT state -- what the pass costs, the margin, the sleep cap --
+		// is deliberately kept: the pass costs what it costs whether or not the loop
+		// was parked, and re-learning it would mean sleeping optimistically again on
+		// the first frames after every resume.
+		jit.reset_counters();
 	}
 	g_rp.last_call = rp_t0;
 	g_rp.iters++;
+	g_rp.wake_slack_ms += double(jit_wake_slack) / 1e6;
 
 	if (state_ == state::shutdown)
 		application::pop_scene();
@@ -1239,6 +1351,23 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	// Search for frame with desired display time on all decoders
 	// If no such frame exists, use the latest frame for each decoder
 	current_blit_handles = common_frame(frame_state.predictedDisplayTime);
+
+	// How stale the picture about to be drawn is: the refresh it is being drawn for,
+	// minus the display time the server stamped on the frame chosen for it. The pose in
+	// that frame is the pose the server rendered it from, so this is the age of the pose
+	// that will be on the panel -- the half of motion-to-photon the client can see, and
+	// the number just-in-time scheduling exists to move. Sampled here, immediately after
+	// the choice, because the choice is what the sleep above changes.
+	if (const auto & h = current_blit_handles[0]; h and h->view_info.display_time)
+	{
+		const XrDuration age = frame_state.predictedDisplayTime - h->view_info.display_time;
+		displayed_pose_age = age;
+		const double age_ms = double(age) / 1e6;
+		g_rp.pose_age_ms += age_ms;
+		g_rp.pose_age_max_ms = std::max(g_rp.pose_age_max_ms, age_ms);
+		++g_rp.pose_age_n;
+	}
+
 	std::array<XrPosef, view_count> pose;
 	std::array<XrFovf, view_count> fov;
 	std::array<wivrn::to_headset::foveation_parameter, view_count> foveation;
@@ -2030,6 +2159,28 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		spdlog::info("render: per iteration fence {:.1f} (worst {:.1f}) | queries {:.1f} | submit {:.1f} | whole render() {:.1f} ms",
 		             g_rp.fence_ms / n, g_rp.worst_fence_ms, g_rp.query_ms / n,
 		             g_rp.submit_ms / n, g_rp.blit_ms / n);
+		// --- just-in-time display --------------------------------------------
+		// The first line is the schedule: how much of the interval the runtime
+		// handed over, how much of it was slept, and what the sleep was cut short
+		// by. The second is what it bought and what it cost: the age of the pose
+		// on the panel, how much room was left between the submission and the
+		// refresh it was for, and every miss, by kind. A miss count that is not
+		// zero and not growing is a schedule that found its limit and stopped;
+		// one that keeps growing is a schedule that is still wrong.
+		spdlog::info("render: jit {} | wake slack {:.1f} ms | slept {:.1f} ms mean (max {:.1f}, {} of {} iterations) | budget {:.1f} = pass {:.1f} + margin {:.1f} | sleep cap {:.1f} ms",
+		             jit_enabled() ? "on" : "off",
+		             g_rp.wake_slack_ms / n,
+		             double(jit.sleep_total_ns) / 1e6 / n, double(jit.sleep_max_ns) / 1e6,
+		             jit.slept, g_rp.iters,
+		             double(jit.budget_ns()) / 1e6, double(jit.cost_ns()) / 1e6,
+		             double(jit.margin_ns) / 1e6, double(jit.sleep_cap_ns) / 1e6);
+		spdlog::info("render: displayed pose age {:.1f} ms mean (worst {:.1f}) over {} frames | submit lead {:.1f} ms mean (worst {:.1f}) | misses: {} overrun {} late {} skipped refresh",
+		             g_rp.pose_age_n ? g_rp.pose_age_ms / double(g_rp.pose_age_n) : 0.0,
+		             g_rp.pose_age_max_ms, g_rp.pose_age_n,
+		             jit.lead_n ? double(jit.lead_total_ns) / 1e6 / double(jit.lead_n) : 0.0,
+		             double(jit.lead_min_ns) / 1e6,
+		             jit.missed_overrun, jit.missed_late, jit.missed_skipped);
+		jit.reset_counters();
 		g_rp = {};
 		g_rp.since = rp_t0;
 	}

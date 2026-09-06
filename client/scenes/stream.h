@@ -29,6 +29,7 @@
 #include "scenes/input_profile.h"
 #include "secondary_path.h"
 #include "stream_defoveator.h"
+#include "stream_jit.h"
 #include "stream_quad_blitter.h"
 #include "utils/thread_safe.h"
 #include "wifi_lock.h"
@@ -153,6 +154,18 @@ private:
 	std::atomic<XrDuration> display_time_period = 0;
 	XrTime last_display_time = 0;
 	std::atomic<XrDuration> real_display_period = 0;
+
+	// Just-in-time display scheduling. Touched only from render(), which is one
+	// thread; the two atomics below are the parts the GUI thread reads.
+	wivrn::jit_scheduler jit;
+	// How stale the picture on the panel is, in nanoseconds: the predicted display
+	// time of the refresh this pass is drawing for, minus the display time the server
+	// stamped on the decoded frame the pass chose. This is the client's own
+	// motion-to-photon estimate for the part of the path it can see, and it is the
+	// number just-in-time scheduling exists to move.
+	std::atomic<XrDuration> displayed_pose_age = 0;
+	// Nanoseconds the last iteration slept before starting the pass.
+	std::atomic<XrDuration> jit_sleep = 0;
 	std::optional<std::thread> tracking_thread;
 
 	std::shared_mutex decoder_mutex;
@@ -516,6 +529,8 @@ public:
 	        std::optional<reconnect_info> reconnect_target = std::nullopt);
 
 	void render(const XrFrameState &) override;
+	// Whether just-in-time display scheduling runs; see the definition in stream.cpp.
+	static bool jit_enabled();
 	void on_focused() override;
 	void on_unfocused() override;
 	void on_xr_event(const xr::event &) override;

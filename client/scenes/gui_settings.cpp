@@ -725,6 +725,16 @@ void settings_streaming(const settings_context & ctx)
 	});
 
 	list.push_back({
+	        .id = "##jit_display",
+	        .label = _("Just-in-time display"),
+	        .description = _("Start drawing each frame as late as it can safely be started, instead of as early as possible. The headset describes a frame about three refreshes before it reaches the screen; waiting until the last moment means an image that arrives during that wait is shown straight away rather than one refresh later, so the picture follows your head more closely. The wait is measured from how long drawing actually takes and shortens itself the moment a refresh is at risk, so it never costs a dropped frame."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.jit_display; },
+	        .set_bool = [&config](bool v) { config.jit_display = v; config.save(); },
+	        .default_bool = default_config.jit_display,
+	});
+
+	list.push_back({
 	        .id = "##encoder_failover",
 	        .label = _("Encoder failover"),
 	        .description = _("If the graphics card's video encoder stops working in the middle of a session, let the computer carry on encoding that eye in software instead of leaving it frozen until you reconnect. Costs CPU on the computer while it lasts, and only works for H.264."),

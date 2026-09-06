@@ -235,8 +235,59 @@ nxwarp_decoder::nxwarp_decoder(vk::raii::Device & device,
 		}
 	}
 
+	build_image_pool();
+
+	// The band deadlines are fractions of one frame; take the rate from the stream
+	// description and fall back to 90 Hz when it says nothing usable.
+	if (description.frame_rate > 1.0f)
+		frame_period_us = uint32_t(1'000'000.0f / description.frame_rate);
+
+	worker = std::thread([this]() {
+		try
+		{
+			while (true)
+			{
+				auto job = jobs.pop();
+				jobs_pending--;
+				decode_unit(job);
+			}
+		}
+		catch (const utils::sync_queue_closed &)
+		{
+		}
+		catch (const std::exception & e)
+		{
+			spdlog::error("nxwarp decoder worker: {}", e.what());
+		}
+	});
+}
+
+// The pool of images the worker copies decoded pictures into, sized to `extent`.
+//
+// Split out of the constructor because a stereo stream cannot be sized from the stream
+// description: `video_stream_description::stream_size` reports ONE eye, which is all the
+// wire ever says, while a stereo nxvc picture is the pair side by side and twice that
+// wide. The width is only knowable from the .nxv stream header, and that arrives long
+// after the constructor has run, so on_stream_header calls this a second time.
+//
+// Rebuilding is safe exactly there and nowhere else: nothing can reach the worker before
+// a stream header has been parsed (push_datagram drops every datagram while `receiver` is
+// null), and a stream header is parsed once per stream, so the second call happens with an
+// idle worker, an empty job queue and no blit handle in the scene's hands. Anywhere else
+// it would free images the render thread is sampling.
+void nxwarp_decoder::build_image_pool()
+{
 	for (auto & item: image_pool)
 	{
+		// The view must go before the image it was made from: on a rebuild the
+		// assignment below frees the old image at once, and a live VkImageView on a
+		// destroyed VkImage is a use-after-free the validation layers will not see
+		// until the next frame samples it. On the constructor's call this is a no-op.
+		item.view_full = nullptr;
+		item.current_layout = vk::ImageLayout::eUndefined;
+		item.semaphore_val = 0;
+		item.free = true;
+
 		item.image = image_allocation(
 		        device,
 		        vk::ImageCreateInfo{
@@ -293,30 +344,6 @@ nxwarp_decoder::nxwarp_decoder(vk::raii::Device & device,
 	if (host_sync)
 		for (auto & item: image_pool)
 			item.semaphore = nullptr;
-
-	// The band deadlines are fractions of one frame; take the rate from the stream
-	// description and fall back to 90 Hz when it says nothing usable.
-	if (description.frame_rate > 1.0f)
-		frame_period_us = uint32_t(1'000'000.0f / description.frame_rate);
-
-	worker = std::thread([this]() {
-		try
-		{
-			while (true)
-			{
-				auto job = jobs.pop();
-				jobs_pending--;
-				decode_unit(job);
-			}
-		}
-		catch (const utils::sync_queue_closed &)
-		{
-		}
-		catch (const std::exception & e)
-		{
-			spdlog::error("nxwarp decoder worker: {}", e.what());
-		}
-	});
 }
 
 nxwarp_decoder::~nxwarp_decoder()
@@ -442,14 +469,47 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 	seen_any_frame = false;
 	any_retired = false;
 
+	// --- one stream, both eyes ------------------------------------------------
+	//
+	// A stereo stream is a stream whose every picture is the eye PAIR side by side, eye 0
+	// on the left, and nothing on the wire says so: the server sends stream item 0 and
+	// never sends stream item 1, and this field of the .nxv header -- which the client has
+	// always parsed -- is the whole of how the headset finds out. That is deliberate:
+	// making it a packet field would move protocol_version and break every mixed pair.
+	//
+	// The consequence is that the picture is twice as wide as anything the wire described.
+	// video_stream_description::stream_size reports ONE eye, because per-eye is all the
+	// stream description has ever meant, so the pool built in the constructor is half the
+	// width this stream needs and the copy in decode_unit -- which clamps to `extent` --
+	// would silently keep the left eye and throw the right one away. Widen the extent and
+	// rebuild the pool now, while the worker is provably idle (see build_image_pool).
+	if (si.eyes > 1)
+	{
+		// The scene places view 1 at x == video_stream_description::width, which is the
+		// per-eye width off the wire; nxvc's own per-eye width has to be the same number
+		// or the seam is in the wrong place and the right eye is rendered from a strip of
+		// the left one. Nothing enforces the agreement, so say so when it breaks: the
+		// symptom is a shifted, doubled right eye, which names nothing on its own.
+		if (si.width != extent.width)
+			spdlog::error("nxwarp[{}]: stereo stream says {} px per eye but the stream "
+			              "description says {} -- the right eye will be sampled from the "
+			              "wrong column",
+			              stream_index, si.width, extent.width);
+		extent.width = uint32_t(extent.width * si.eyes);
+		build_image_pool();
+	}
+	// Release, so that a scene thread which reads eye_count() as 2 also sees the widened
+	// pool this decoder will publish from.
+	hdr_eyes.store(si.eyes ? si.eyes : 1, std::memory_order_release);
+
 	// Published for the in-view statistics overlay; nothing else reads these.
 	hdr_width.store(si.width, std::memory_order_relaxed);
 	hdr_height.store(si.height, std::memory_order_relaxed);
 	hdr_tools.store(si.tools, std::memory_order_relaxed);
 
-	spdlog::info("nxwarp[{}]: {}x{} on {}, {} x {} tiles, {} bytes per tile",
-	             stream_index, si.width, si.height, nxvc_vk_decoder_device_name(nxvc),
-	             cfg.cols, cfg.rows, chunk);
+	spdlog::info("nxwarp[{}]: {}x{} per eye, {} {}, on {}, {} x {} tiles, {} bytes per tile",
+	             stream_index, si.width, si.height, si.eyes, si.eyes == 1 ? "eye" : "eyes",
+	             nxvc_vk_decoder_device_name(nxvc), cfg.cols, cfg.rows, chunk);
 	return true;
 }
 

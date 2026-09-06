@@ -1538,6 +1538,11 @@ void compositor::send_video_stream_description()
 	get_display_refresh_rate(&desc.refresh_rate);
 	static_assert(std::tuple_size_v<decltype(settings)> == std::tuple_size_v<decltype(desc.codec)>);
 	std::ranges::transform(settings, desc.codec.begin(), &encoder_settings::codec);
+	// Both eyes on stream 0, when the NX Warp encoder paired them. Stream 1 keeps
+	// its codec entry -- the view-to-stream mapping is unchanged -- but
+	// stream_size() then reports it as zero and the headset builds no decoder for
+	// a stream that will never receive a datagram.
+	desc.paired_eyes = uint8_t(settings[0].eyes ? settings[0].eyes : 1);
 	// Zero unless a quad layer stream exists, which is how the headset knows whether
 	// to create a decoder for it at all.
 	if (quad)

@@ -67,5 +67,15 @@ public:
 	virtual vk::Sampler sampler() = 0;
 
 	static const std::vector<wivrn::video_codec> & supported_codecs();
+
+	// The nxvc tool bits this headset's NX Warp decoder will accept, for
+	// from_headset::headset_info_packet::nxvc_tools. Zero when this build has no NX Warp
+	// decoder in it, which the server reads as "no information".
+	//
+	// It takes the physical device's properties rather than a decoder because the
+	// handshake happens before any decoder exists: the server has to know what to encode
+	// before it encodes anything, and the decoder is not built until the stream
+	// description arrives. See the definition for why that is not a shortcut.
+	static uint64_t nxvc_tools(const vk::PhysicalDeviceProperties & props);
 };
 } // namespace wivrn

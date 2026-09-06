@@ -333,6 +333,10 @@ std::array<encoder_settings, num_streams> get_encoder_settings(wivrn::vk_bundle 
 		dst.options = src.options;
 		dst.device = src.device;
 		dst.sharp_text = settings.sharp_text;
+		// The headset's nxvc decoder tool mask, for the NX Warp negotiation. It is a
+		// property of the headset and not of the stream, so every stream gets the same
+		// one; the encoder that does not code nxwarp ignores it.
+		dst.nxvc_tools = info.nxvc_tools;
 		dst.foveation_foveal_qp = settings.foveation_foveal_qp;
 		// Both switches, like the encoder failover. The encoders that have a refresh
 		// mechanism can only configure it when their encode session is created, which

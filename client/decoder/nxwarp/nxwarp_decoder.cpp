@@ -15,12 +15,45 @@
 
 #include <spdlog/spdlog.h>
 
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <algorithm>
+#include <string>
 
 // Shared by every NX Warp stream in the process (see the push site).
 static std::atomic<uint32_t> g_decode_stride{1};
+
+uint64_t wivrn::nxwarp_client_tools(const vk::PhysicalDeviceProperties & props)
+{
+	// The PER-DEVICE mask, which is what a handshake must send: nxvc's decoder clears
+	// XFORM_LARGE (bit 27) on an Adreno, because it decodes 16x16 and 32x32 streams
+	// wrong there and WEDGES on the 4:4:4 32x32 conformance vector -- a fence that never
+	// signals, no kgsl fault, no GPU reset. A headset that advertised a tool it hangs on
+	// would be inviting a conformant encoder to end the session.
+	//
+	// nxvc derives this in tools_supported_for(vendor_id, device_name)
+	// (nx-warp vk/decoder/nxvc_vkdec_parse.cpp), which is NOT in the installed headers,
+	// so the vendor test is repeated here. One rule in two places is a thing this
+	// project does not accept on trust, so it is not left on trust:
+	// nxwarp_decoder::on_stream_header() compares this against nxvc_vk_decoder_tools()
+	// as soon as a decoder exists and logs an error if they differ. The permanent fix is
+	// an nxvc entry point taking these two properties, and it belongs on that side.
+	//
+	// 0x5143 is Qualcomm. The name is checked too, case-insensitively, because a
+	// Qualcomm part behind a translation layer reports someone else's vendor id.
+	constexpr uint64_t nxvc_tool_xform_large = 1ull << 27;
+	bool adreno = props.vendorID == 0x5143u;
+	if (not adreno)
+	{
+		std::string name = props.deviceName;
+		for (char & c: name)
+			c = char(std::tolower((unsigned char)c));
+		adreno = name.find("adreno") != std::string::npos;
+	}
+	const uint64_t all = nxvc_vk_decoder_tools_supported();
+	return adreno ? (all & ~nxvc_tool_xform_large) : all;
+}
 
 #include <nxvc/transport/wire.h>
 
@@ -256,6 +289,22 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 		nxvc = nullptr;
 		nxvc_failed = true;
 		return false;
+	}
+
+	// The handshake's tool mask was computed BEFORE this decoder existed, from the
+	// physical device's properties alone (wivrn::decoder::nxvc_tools), because the server
+	// needs it before it encodes anything. That repeats nxvc's own vendor test in a
+	// second place, so this is where the two are compared: now there IS a decoder, and it
+	// knows the answer for certain. A difference means the copy in decoder.cpp has
+	// drifted from tools_supported_for(), and the server has been told the wrong thing.
+	{
+		const uint64_t advertised = nxwarp_client_tools(physical_device.getProperties());
+		const uint64_t actual = nxvc_vk_decoder_tools(nxvc);
+		if (advertised != actual)
+			spdlog::error("nxwarp[{}]: the tool mask sent at the handshake ({:#x}) is not "
+			              "the one this decoder accepts ({:#x}) -- wivrn::decoder::nxvc_tools "
+			              "has drifted from nxvc's tools_supported_for()",
+			              stream_index, advertised, actual);
 	}
 
 	nxvc_vkd_stream_info si{};

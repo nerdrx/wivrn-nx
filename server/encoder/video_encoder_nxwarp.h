@@ -398,7 +398,49 @@ class video_encoder_nxwarp : public video_encoder
 	// which is what says whether the controller settled or is hunting.
 	uint64_t prof_qp_sum = 0;
 	uint32_t prof_qp_lo = 63, prof_qp_hi = 0;
-	bool logged_oversize = false;
+	// --- the transport ceiling ----------------------------------------------
+	//
+	// The frame is cut into chunks of `chunk_bytes` and chunk i is placed at tile
+	// index i, so the grid IS the frame's byte ceiling: tiles_per_frame *
+	// chunk_bytes, about 337 kB at 17x17 tiles and a 1280-byte MTU. A frame over
+	// it cannot be sent at all -- nxwarp_send_frame returns nothing and the
+	// client sees a gap, which is worse than any picture.
+	//
+	// It is not a bitrate and it is not negotiable, so it is not left to the
+	// bitrate loop to discover: the target below is capped at 0.9 of it, and a
+	// frame that still lands over it moves the quantiser on its own.
+	//
+	// It is reachable in practice. ENTROPY_LITE at QP 22 on 1088x1088 detail
+	// codes a 355 kB frame where the same picture in rANS codes 272 kB, so the
+	// tool that buys the headset decode time is exactly the one that finds this
+	// edge first.
+	double transport_ceiling_bytes() const
+	{
+		return double(tiles_per_frame) * double(chunk_bytes);
+	}
+	// While non-zero, the quantiser floor the ceiling escape has imposed: the
+	// bitrate loop may not step below it. `rc_min_qp` is what the operator asked
+	// for and this is what the transport requires, and when they disagree the
+	// transport wins -- a frame that does not fit is not a quality decision.
+	uint32_t rc_ceiling_floor = 0;
+	// Consecutive frames comfortably under the ceiling. The floor is released
+	// after three, not one: releasing on the first good frame puts the quantiser
+	// straight back where the overflow happened and oscillates.
+	uint32_t rc_ceiling_fit_run = 0;
+	static constexpr uint32_t rc_ceiling_release_frames = 3;
+	// The frame is "comfortably" under at this fraction of the ceiling. The gap
+	// between this and 1.0 is the hysteresis band: inside it the floor is held
+	// but not raised.
+	static constexpr double rc_ceiling_release_frac = 0.8;
+	// And the fraction the byte target is capped at, so the bitrate loop aims
+	// below the ceiling rather than at it.
+	static constexpr double rc_ceiling_target_frac = 0.9;
+
+	// The oversize log line is rate-limited on wall time rather than fired once:
+	// with "rc": "fixed" nothing moves the quantiser, so the condition stands and
+	// a single line at the top of a session is not much use half an hour in.
+	std::chrono::steady_clock::time_point oversize_logged{};
+	static constexpr std::chrono::seconds oversize_repeat{2};
 	// The same measurements as prof_*, but never reset, for profile().
 	uint64_t prof_total_n = 0;
 	double prof_total_ms = 0, prof_total_max_ms = 0;

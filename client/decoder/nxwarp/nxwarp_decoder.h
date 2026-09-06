@@ -504,6 +504,17 @@ private:
 	bool warned_view_info = false;
 };
 
+// The nxvc tool bits a decoder on THIS device will accept, for the capability
+// handshake (from_headset::headset_info_packet::nxvc_tools).
+//
+// It takes the physical device's properties rather than a decoder because the
+// handshake happens before any decoder exists: the server has to know what it may
+// encode before it encodes anything, and a stream's decoder is not built until the
+// stream description arrives. nxwarp_decoder::on_stream_header() checks this against
+// the real nxvc_vk_decoder_tools() once there IS a decoder, which is what keeps the
+// early answer honest.
+uint64_t nxwarp_client_tools(const vk::PhysicalDeviceProperties & props);
+
 } // namespace wivrn
 
 #endif // WIVRN_USE_NXWARP

@@ -33,6 +33,8 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <span>
+#include <utility>
 
 namespace
 {
@@ -137,17 +139,88 @@ wivrn::nxwarp_codec_config::coded_vectors_t nxwarp_coded_vectors_from(const std:
 	                    v));
 }
 
-// "entropy": "rans" | "lite".  An unknown value is an error rather than a
-// fallback, for the same reason "coded-vectors" is.
-wivrn::nxwarp_codec_config::entropy_t nxwarp_entropy_from(const std::string & v)
+// "entropy": "auto" | "rans" | "lite".  An unknown value is an error rather than
+// a fallback, for the same reason "coded-vectors" is.
+//
+// "auto" is the default and is resolved against the headset's advertised tool
+// mask below, once, before the codec is built.  It is a request, not a setting:
+// what reaches nxwarp_codec_config is always rans or lite.
+enum class entropy_request
 {
-	using e = wivrn::nxwarp_codec_config::entropy_t;
+	automatic,
+	rans,
+	lite,
+};
+
+entropy_request nxwarp_entropy_from(const std::string & v)
+{
+	if (v == "auto")
+		return entropy_request::automatic;
 	if (v == "rans")
-		return e::rans;
+		return entropy_request::rans;
 	if (v == "lite")
-		return e::lite;
+		return entropy_request::lite;
 	throw std::runtime_error(
-	        std::format("nxwarp: \"entropy\": \"{}\" is not one of rans, lite", v));
+	        std::format("nxwarp: \"entropy\": \"{}\" is not one of auto, rans, lite", v));
+}
+
+// The nxvc tool bits, by name, for the one log line that shows what was
+// negotiated.  Only the bits this encoder can emit are listed; anything else
+// prints as its number, which is what an unexpected bit deserves.
+std::string nxwarp_tools_string(uint64_t m)
+{
+	static constexpr std::pair<int, const char *> names[] = {
+	        {0, "INTRA_DC_PLANE"}, {1, "TRANSFORM_SKIP"}, {2, "RES_LEVEL"},
+	        {3, "CHROMA444"}, {6, "CUSTOM_TABLES"}, {7, "NSUB_VAR"},
+	        {10, "INTER"}, {11, "WARP"}, {17, "INTRA_DIR"}, {20, "WM_ID"},
+	        {21, "CTX_V2"}, {22, "SIGN_HIDE"}, {25, "CTX_V3"}, {26, "TAB_V2"},
+	        {27, "XFORM_LARGE"}, {30, "ENTROPY_LITE"},
+	};
+	std::string out;
+	uint64_t left = m;
+	for (auto [bit, name]: names)
+		if (m & (1ull << bit))
+		{
+			if (not out.empty())
+				out += " ";
+			out += name;
+			left &= ~(1ull << bit);
+		}
+	for (int b = 0; b < 64; ++b)
+		if (left & (1ull << b))
+		{
+			if (not out.empty())
+				out += " ";
+			out += std::format("bit{}", b);
+		}
+	return out.empty() ? std::string("none") : out;
+}
+
+// Stream tool mask of a 64-byte nxvc stream header (docs/SYNTAX.md 2.1): the
+// u64 at offset 32, little endian.  Guarded by the magic at offset 0, so a
+// header layout change is a loud refusal here rather than a mask read out of
+// the middle of some other field.
+// ENTROPY_LITE, docs/TOOLBITS.md 2. Named here rather than included from nxvc:
+// this file is deliberately free of nxvc headers (see nxwarp_codec.h), and one
+// bit number with the tool's name beside it is clearer than a dependency.
+constexpr uint64_t kNxvcToolEntropyLite = 1ull << 30;
+
+constexpr uint32_t kNxvcMagic = 0x3156584Eu; // 'NXV1'
+constexpr size_t kNxvcToolsOffset = 32;
+
+std::optional<uint64_t> nxwarp_header_tools(std::span<const uint8_t> hdr)
+{
+	if (hdr.size() < kNxvcToolsOffset + 8)
+		return std::nullopt;
+	uint32_t magic = 0;
+	for (int i = 0; i < 4; ++i)
+		magic |= uint32_t(hdr[size_t(i)]) << (8 * i);
+	if (magic != kNxvcMagic)
+		return std::nullopt;
+	uint64_t tools = 0;
+	for (int i = 0; i < 8; ++i)
+		tools |= uint64_t(hdr[kNxvcToolsOffset + size_t(i)]) << (8 * i);
+	return tools;
 }
 
 std::string option_string(const std::map<std::string, std::string> & options,
@@ -260,8 +333,8 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	        .intra_period = option_u32(settings.options, "intra-period", 180),
 	        .coded_vectors = nxwarp_coded_vectors_from(
 	                option_string(settings.options, "coded-vectors", "default")),
-	        .entropy = nxwarp_entropy_from(
-	                option_string(settings.options, "entropy", "rans")),
+	        // Resolved just below, once the headset's mask is in hand.
+	        .entropy = nxwarp_codec_config::entropy_t::rans,
 	        .intra_dir = option_bool(settings.options, "intra-dir", true),
 	        .preset = option_u32(settings.options, "preset", 1),
 	        .threads = option_u32(settings.options, "threads", 0),
@@ -275,16 +348,54 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	// An unknown value is an error rather than a fallback: a typo that
 	// silently gives you the 200 ms CPU encoder looks exactly like the GPU
 	// encoder being slow.
-	// ENTROPY_LITE is a property of the CLIENT's decoder and this server has no
-	// way to ask: headset_info_packet carries `supported_codecs` and no nxvc
-	// tool mask, so a client without bit 30 refuses the stream header and shows
-	// nothing. Say so once, loudly, rather than let a wrong option look like a
-	// broken headset.
-	if (codec_cfg.entropy == nxwarp_codec_config::entropy_t::lite)
-		U_LOG_W("nxwarp: \"entropy\": \"lite\" sets stream tool bit 30. There is "
-		        "no tool-mask handshake, so this is only correct for a client "
-		        "whose decoder implements ENTROPY_LITE; one that does not will "
-		        "refuse the stream header.");
+	// ---- the entropy tool, negotiated against the headset's decoder.
+	//
+	// ENTROPY_LITE (bit 30) spends bytes to buy the headset's Pass A time, so
+	// only the decoder can say whether it is worth having -- and a decoder
+	// without it refuses the stream HEADER, which is a black screen and not a
+	// degraded picture. headset_info_packet::nxvc_tools is what makes that a
+	// decision the server can take rather than one the operator has to know.
+	//
+	// A zero mask is "the headset reported none" -- an old client, or a build
+	// with no NX Warp decoder -- and must be read as no information rather than
+	// as "supports nothing", or every stream would be refused.
+	const uint64_t client_tools = settings.nxvc_tools;
+	const bool client_has_lite = (client_tools & kNxvcToolEntropyLite) != 0;
+	const entropy_request entropy_req =
+	        nxwarp_entropy_from(option_string(settings.options, "entropy", "auto"));
+	switch (entropy_req)
+	{
+		case entropy_request::automatic:
+			// The default. Lite only when the headset said it can read it, which
+			// with no mask at all it did not.
+			codec_cfg.entropy = client_has_lite
+			                            ? nxwarp_codec_config::entropy_t::lite
+			                            : nxwarp_codec_config::entropy_t::rans;
+			U_LOG_I("nxwarp: \"entropy\": \"auto\" -> %s (%s)",
+			        client_has_lite ? "lite" : "rans",
+			        client_tools == 0
+			                ? "the headset reported no tool mask"
+			                : (client_has_lite ? "the headset advertises ENTROPY_LITE"
+			                                   : "the headset does not advertise ENTROPY_LITE"));
+			break;
+		case entropy_request::lite:
+			// Explicit, and refused rather than sent: emitting a header this
+			// headset will reject buys a black screen and a support ticket,
+			// where refusing here names the reason on the first line of the log.
+			if (not client_has_lite)
+				throw std::runtime_error(std::format(
+				        "nxwarp: \"entropy\": \"lite\" needs the headset to advertise "
+				        "ENTROPY_LITE (nxvc tool bit 30) and its mask is {:#x} ({}). "
+				        "Use \"auto\" to let the server pick, or \"rans\" to force it.",
+				        client_tools,
+				        client_tools == 0 ? "the headset reported no mask at all"
+				                          : "bit 30 is clear"));
+			codec_cfg.entropy = nxwarp_codec_config::entropy_t::lite;
+			break;
+		case entropy_request::rans:
+			codec_cfg.entropy = nxwarp_codec_config::entropy_t::rans;
+			break;
+	}
 
 	const std::string backend = option_string(settings.options, "backend", "ref");
 	if (backend == "ref")
@@ -314,6 +425,55 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 		        std::format("unknown NX Warp backend \"{}\"; expected \"ref\" or \"vk\"",
 		                    backend));
 	}
+	// ---- the negotiated tool mask, checked and logged once.
+	//
+	// A stream must never carry a tool the headset did not advertise. The rule is
+	// general and not about ENTROPY_LITE: XFORM_LARGE (27) is the one that has
+	// already bitten, because an Adreno decoder clears it and WEDGES on a stream
+	// that uses it -- this GPU encoder does not emit 27 today, which is why this
+	// is a check rather than a configuration, and why it must stay a check.
+	//
+	// Read from the header the codec actually produced, not from the request:
+	// the request is what was asked for and the header is what will be sent.
+	if (const auto emitted = nxwarp_header_tools(codec->stream_header()))
+	{
+		if (client_tools == 0)
+		{
+			// No mask to intersect with. Say what is going out anyway, so a
+			// session that later fails at the client has the answer in its log.
+			U_LOG_I("nxwarp: stream %d tools %#llx (%s); the headset reported no "
+			        "mask, so nothing was negotiated",
+			        int(stream_idx),
+			        (unsigned long long)*emitted,
+			        nxwarp_tools_string(*emitted).c_str());
+		}
+		else
+		{
+			const uint64_t unsupported = *emitted & ~client_tools;
+			if (unsupported)
+				throw std::runtime_error(std::format(
+				        "nxwarp: the stream would carry tools the headset cannot "
+				        "decode: {:#x} ({}). Encoder {:#x}, headset {:#x}.",
+				        unsupported,
+				        nxwarp_tools_string(unsupported),
+				        *emitted,
+				        client_tools));
+			U_LOG_I("nxwarp: stream %d tools %#llx (%s), headset %#llx -- negotiated",
+			        int(stream_idx),
+			        (unsigned long long)*emitted,
+			        nxwarp_tools_string(*emitted).c_str(),
+			        (unsigned long long)client_tools);
+		}
+	}
+	else
+	{
+		// The magic did not match, so the offset this reads is not the tool
+		// field any more. Refusing beats checking a number that is not the mask.
+		throw std::runtime_error(
+		        "nxwarp: the codec's stream header is not an NXV1 header; the tool "
+		        "mask cannot be checked against the headset's");
+	}
+
 	codec_reads_image = codec->accepts_image();
 	U_LOG_I("nxwarp: stream %d backend: %s%s",
 	        int(stream_idx),
@@ -473,11 +633,61 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 void wivrn::video_encoder_nxwarp::run_rate_control(size_t last_frame_bytes)
 {
 	if (not rc_auto)
-		return;
+		return; // "fixed": the drop site logs the ceiling; nothing moves the QP
+
+	// ---- the transport ceiling, first, and independent of the bitrate.
+	//
+	// A frame over it is not sent at all, so this outranks every other input the
+	// controller has: there is no bitrate low enough to make an undeliverable
+	// frame acceptable, and no reason to wait for the bitrate controller to have
+	// said anything before escaping. The step is +2 and repeats every frame until
+	// the frames fit, which converges in a handful of frames from any starting
+	// point in the band.
+	const double ceiling = transport_ceiling_bytes();
+	const double actual_bytes = double(last_frame_bytes);
+	if (ceiling > 0.0)
+	{
+		if (actual_bytes > ceiling)
+		{
+			rc_ceiling_fit_run = 0;
+			const uint32_t want =
+			        uint32_t(std::min<int>(int(current_qp) + 2, int(rc_max_qp)));
+			if (want != current_qp and codec->set_qp(want))
+			{
+				current_qp = want;
+				// The floor the bitrate loop below may not undo. Without it a
+				// frame under the BITRATE target immediately steps back down to
+				// rc_min_qp and the next frame overflows again.
+				rc_ceiling_floor = current_qp;
+			}
+			else if (current_qp >= rc_max_qp)
+			{
+				// Out of band: the coarsest quantiser this stream is allowed to
+				// use still does not fit the grid. Only the operator can fix
+				// that, so say which of the three levers to reach for.
+				rc_ceiling_floor = current_qp;
+			}
+			return;
+		}
+		if (actual_bytes < ceiling * rc_ceiling_release_frac)
+		{
+			if (rc_ceiling_floor and ++rc_ceiling_fit_run >= rc_ceiling_release_frames)
+			{
+				rc_ceiling_floor = 0;
+				rc_ceiling_fit_run = 0;
+			}
+		}
+		else
+		{
+			// Under the ceiling but inside the hysteresis band: hold the floor
+			// where it is rather than release it into the frame that overflowed.
+			rc_ceiling_fit_run = 0;
+		}
+	}
 
 	rc_bitrate = pending_bitrate.load();
 	if (not rc_bitrate)
-		return; // no ceiling has been decided yet; stay where we are
+		return; // no bitrate has been decided yet; stay where we are
 
 	// The live compositor rate when the session has set one, else the rate the
 	// stream was configured at. A zero here would make the budget infinite.
@@ -487,8 +697,14 @@ void wivrn::video_encoder_nxwarp::run_rate_control(size_t last_frame_bytes)
 	if (not(fps > 0))
 		return;
 
+	// The byte target is the smaller of what the link will carry and what the
+	// tile grid will carry. Capped at 0.9 of the ceiling rather than at it, so
+	// the loop aims below the edge and normal frame-to-frame variation does not
+	// cross it.
 	rc_target_bytes = double(rc_bitrate) / 8.0 / double(fps);
-	const double actual = double(last_frame_bytes);
+	if (ceiling > 0.0)
+		rc_target_bytes = std::min(rc_target_bytes, ceiling * rc_ceiling_target_frac);
+	const double actual = actual_bytes;
 
 	// Is the ceiling reachable at all? The controller has run out of band when the
 	// quantiser is already at max_qp and the frame is still over budget: there is no
@@ -534,7 +750,11 @@ void wivrn::video_encoder_nxwarp::run_rate_control(size_t last_frame_bytes)
 	if (not step)
 		return;
 
-	const uint32_t want = uint32_t(std::clamp(int(current_qp) + step, int(rc_min_qp), int(rc_max_qp)));
+	// The floor is the operator's min-qp, or the one the transport ceiling
+	// imposed if that is higher: an undeliverable frame is not a quality
+	// setting, so while the escape's floor stands it wins.
+	const int floor_qp = int(std::max(rc_min_qp, rc_ceiling_floor));
+	const uint32_t want = uint32_t(std::clamp(int(current_qp) + step, floor_qp, int(rc_max_qp)));
 	if (want == current_qp)
 		return;
 
@@ -1238,17 +1458,33 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	const size_t chunks = (bitstream.size() + kFrameLenBytes + chunk_bytes - 1) / chunk_bytes;
 	if (chunks > tiles_per_frame)
 	{
-		if (not logged_oversize)
+		const auto now_os = std::chrono::steady_clock::now();
+		if (oversize_logged == std::chrono::steady_clock::time_point{} or
+		    now_os - oversize_logged >= oversize_repeat)
 		{
-			logged_oversize = true;
-			U_LOG_W("nxwarp: stream %d frame is %zu bytes, more than the %u tile slots x %zu bytes the grid can carry; raise QP",
+			oversize_logged = now_os;
+			const double ceiling = transport_ceiling_bytes();
+			U_LOG_W("nxwarp: stream %d frame is %zu bytes, %zu over the %.0f byte ceiling "
+			        "(%u tile slots x %zu bytes); the frame is DROPPED. %s",
 			        int(stream_idx),
 			        bitstream.size(),
+			        bitstream.size() - size_t(ceiling),
+			        ceiling,
 			        unsigned(tiles_per_frame),
-			        chunk_bytes);
+			        chunk_bytes,
+			        rc_auto ? "The controller is raising QP to fit."
+			                : "\"rc\": \"fixed\" does not move the QP -- raise \"qp\", "
+			                  "lower the resolution, or raise \"mtu\".");
 		}
 		if (resync_this_frame)
 			client_holds_nothing = true;
+		// The controller has to SEE this frame, and this is the only path on
+		// which it is the one that matters: an oversized frame is exactly the
+		// input the ceiling escape exists to react to, and returning without
+		// running it left the quantiser where it was and the next frame the
+		// same size. The stream then sent nothing at all, for as long as the
+		// picture stayed busy.
+		run_rate_control(bitstream.size());
 		return {};
 	}
 

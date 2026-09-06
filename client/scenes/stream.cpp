@@ -33,6 +33,7 @@
 #include "application.h"
 #include "audio/audio.h"
 #include "boost/pfr/core.hpp"
+#include "decoder/decoder.h"
 #include "decoder/shard_accumulator.h"
 #include "inplace_vector.hpp"
 #include "is_finite.h"
@@ -432,6 +433,13 @@ void scenes::stream::send_initial_control_packets(wivrn_session & net, float gue
 		audio::get_audio_description(info);
 		if (not(config.check_feature(feature::microphone)))
 			info.microphone = {};
+
+		// The nxvc tool mask this headset's decoder will accept, for the NX Warp
+		// negotiation. Sent unconditionally: it costs eight bytes and it is what lets
+		// the server pick ENTROPY_LITE, which trades bytes for Pass A time and which
+		// only the decoder can judge. Zero from a build without an NX Warp decoder,
+		// which the server reads as "no information".
+		info.nxvc_tools = decoder::nxvc_tools(application::get_physical_device_properties());
 
 		if (config.codec)
 		{

@@ -40,9 +40,14 @@ layout(push_constant) uniform pc
 	// x: strength of the peripheral colour wash at the very edge, 0 disables it
 	// y: fraction of the half image, from each edge inward, the wash covers
 	vec4 glow;
-	// Debanding
+	// Debanding, and the low poly display filter. Two unrelated controls share one
+	// vec4 because the push constant block is already large and both are single
+	// scalars, the same way `post` carries the sharpen strength and the vignette.
 	// x: dither strength, in units of one 8-bit step (1/255) of triangular-PDF noise;
 	//    0 disables it and the output is then byte identical to no debanding
+	// y: low poly filter strength, the share of the region-filtered colour mixed over
+	//    the plain sample; 0 disables the filter
+	// z: low poly posterise levels per channel; below 2 disables posterising
 	vec4 deband;
 	// [atlas prototype] xy: one eye's picture size in samples, zw unused.
 	vec4 atlas_size;
@@ -88,6 +93,16 @@ layout(constant_id = 2) const bool cas_full_kernel = false;
 // with reduced resolution streaming). Baked like cas_full_kernel, so toggling it is a rare
 // pipeline rebuild rather than a per-pixel branch.
 layout(constant_id = 3) const bool fsr_enable = false;
+// "Low poly" display filter: an edge-preserving region filter over the decoded image.
+// Baked the same way as fsr_enable above, so with it false the whole kernel below compiles
+// out and an opaque pixel pays exactly the one base tap it always did. Toggling it is a
+// pipeline rebuild, which is what a settings change already is here.
+layout(constant_id = 7) const bool lowpoly_enable = false;
+// Which low poly kernel is compiled in. false (the default) is the 17-fetch kernel over a
+// 7x7 neighbourhood; true is the dense 37-fetch 5x5. Measured on the Pico 4 (Adreno 650)
+// with a standalone probe running this very shader, per frame pair at 2176x1088 total:
+// 17-fetch +2.12 ms, 37-fetch +5.16 ms over a 0.32 ms base. Baked like cas_full_kernel.
+layout(constant_id = 8) const bool lowpoly_full_kernel = false;
 
 // --- [atlas prototype] --------------------------------------------------------------
 //
@@ -477,6 +492,149 @@ float dither_noise(vec2 p)
 	return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
 }
 
+// "Low poly" display filter.
+//
+// At a low bitrate a transform codec fails by turning the picture into its own coding
+// grid: ringing along edges and 8x8/16x16 blocks of the wrong colour drifting frame to
+// frame. That failure is the one artefact the eye is least willing to forgive, because
+// nothing in the world looks like it. This filter replaces it with a failure the eye
+// already has a name for: flat or gently shaded regions meeting at sharp edges, the look
+// of a low polygon model. The information is no less lost -- fine texture goes with it --
+// but what is left reads as a stylisation rather than as a broken picture.
+//
+// Both kernels below are the same sectored variance-minimising (Kuwahara) filter: four
+// overlapping quadrants of the neighbourhood, each scored by the variance of its luma,
+// and the mean colour of the LOWEST variance quadrant is the output. On a flat region
+// every quadrant is flat and the result is the region's mean, so block noise and ringing
+// average away. Across an edge the quadrants that straddle it score high and lose to the
+// one lying wholly on one side, so the edge is not blurred across -- it is snapped to,
+// and a pixel one step over picks the quadrant on the other side. That is what makes the
+// regions flat AND the boundaries between them sharp.
+//
+// The taps are one texel of the DECODED image apart (rgb_rect.zw), not of the output: the
+// filter is defined at stream resolution and follows the codec's own scale, so it keeps
+// working when the display pass runs larger or smaller than the stream. It is applied to
+// the base sample, before anything downstream, and takes the place of CAS/FSR rather than
+// stacking with them.
+//
+// DO NOT rewrite either kernel to read its neighbourhood into a local array first. The
+// obvious transcription holds 25 vec3 live, which does not fit Adreno's register file:
+// measured on the Pico 4 it spills to scratch and costs 250 ms a frame pair instead of 2,
+// a 100x cliff with no warning. Both kernels below keep exactly one tap live at a time
+// and re-fetch the samples two quadrants share, because a texture cache hit is orders of
+// magnitude cheaper than a spill.
+
+// Default kernel: 7x7 support, seventeen fetches. Every tap sits on a TEXEL CORNER, at
+// +-0.5 and +-2.5 texels, so the linear sampler returns the mean of a 2x2 block for free
+// and each quadrant covers a 4x4 corner of the neighbourhood in four fetches. The
+// variance scored is that of the four block means rather than of sixteen samples, which
+// is if anything the better statistic here: it responds to edges and ignores exactly the
+// fine noise the filter exists to discard. Wider support than the dense 5x5 below and
+// 2.4x cheaper.
+//
+// This needs the decoded image bound with a LINEAR sampler, which every decoder this
+// client has does. With a nearest sampler it degrades to four point samples per quadrant
+// rather than breaking.
+vec3 low_poly_fast(vec2 uv)
+{
+	vec2 texel = 1.0 / vec2(rgb_rect.zw);
+
+	vec3 best_mean = vec3(0.0);
+	float best_var = 3.4e38;
+	for (int q = 0; q < 4; ++q)
+	{
+		// Which way this quadrant faces.
+		vec2 s = vec2(float((q & 1) * 2 - 1), float((q >> 1) * 2 - 1));
+		vec3 sum = vec3(0.0);
+		float ls = 0.0;
+		float lss = 0.0;
+		for (int j = 0; j < 2; ++j)
+		{
+			for (int i = 0; i < 2; ++i)
+			{
+				vec2 off = s * (vec2(0.5) + 2.0 * vec2(float(i), float(j)));
+				vec3 c = texture(rgb[0], uv + off * texel).rgb;
+				sum += c;
+				// Rec.601 luma, on the gamma encoded values the sampler
+				// returns, which is the perceptual space every other filter
+				// in this pass works in.
+				float l = dot(c, vec3(0.299, 0.587, 0.114));
+				ls += l;
+				lss += l * l;
+			}
+		}
+		float mean_l = ls * 0.25;
+		// Population variance. Never negative in exact arithmetic; max() only
+		// guards the float cancellation on a flat quadrant.
+		float var = max(lss * 0.25 - mean_l * mean_l, 0.0);
+		if (var < best_var)
+		{
+			best_var = var;
+			best_mean = sum * 0.25;
+		}
+	}
+	return best_mean;
+}
+
+// Full kernel: the dense 5x5, four overlapping 3x3 quadrants sharing the centre tap,
+// thirty-seven fetches. Finer regions and a boundary that follows small detail more
+// closely, at 2.4x the cost. Worth it only where the GPU has the headroom.
+vec3 low_poly_full(vec2 uv)
+{
+	vec2 texel = 1.0 / vec2(rgb_rect.zw);
+
+	vec3 best_mean = vec3(0.0);
+	float best_var = 3.4e38;
+	for (int q = 0; q < 4; ++q)
+	{
+		ivec2 o = ivec2((q & 1) * 2, (q >> 1) * 2) - ivec2(2, 2);
+		vec3 sum = vec3(0.0);
+		float ls = 0.0;
+		float lss = 0.0;
+		for (int j = 0; j < 3; ++j)
+		{
+			for (int i = 0; i < 3; ++i)
+			{
+				vec3 c = texture(rgb[0], uv + vec2(o + ivec2(i, j)) * texel).rgb;
+				sum += c;
+				float l = dot(c, vec3(0.299, 0.587, 0.114));
+				ls += l;
+				lss += l * l;
+			}
+		}
+		float mean_l = ls * (1.0 / 9.0);
+		float var = max(lss * (1.0 / 9.0) - mean_l * mean_l, 0.0);
+		if (var < best_var)
+		{
+			best_var = var;
+			best_mean = sum * (1.0 / 9.0);
+		}
+	}
+	return best_mean;
+}
+
+vec3 low_poly(vec2 uv, vec3 centre, float strength, float levels)
+{
+	vec3 region = lowpoly_full_kernel ? low_poly_full(uv)
+	                                  : low_poly_fast(uv);
+
+	// Strength blends the region colour over the plain sample, so the slider runs from
+	// the untouched image to the fully flattened one rather than switching between them.
+	vec3 result = mix(centre, region, strength);
+
+	// Optional posterise, after the region filter and never before it: quantizing first
+	// would put a step in the middle of a smooth region and the filter would then
+	// average across it. `levels` counts the reproducible values per channel including
+	// both endpoints, so the step is 1/(levels - 1).
+	if (levels >= 2.0)
+	{
+		float steps = levels - 1.0;
+		result = floor(clamp(result, 0.0, 1.0) * steps + 0.5) / steps;
+	}
+
+	return result;
+}
+
 void main()
 {
 	vec2 uv = inUV.xy;
@@ -606,7 +764,15 @@ void main()
 	}
 
 	vec4 colour = texture(rgb[0], uv);
-	if (fsr_enable)
+	if (lowpoly_enable && deband.y > 0.0)
+	{
+		// Low poly takes over the sampling path: it already delivers hard edges, and
+		// running a sharpener over its flat regions would only re-introduce the halo
+		// it exists to remove. The host keeps CAS and FSR off while it is on, so the
+		// three never stack.
+		colour.rgb = low_poly(uv, colour.rgb, deband.y, deband.z);
+	}
+	else if (fsr_enable)
 	{
 		// FSR takes over sampling and sharpening: EASU upscales, then RCAS sharpens with
 		// post.x carrying the FSR sharpness. The CAS path is never run while FSR is on, so

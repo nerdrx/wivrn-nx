@@ -314,6 +314,28 @@ public:
 	bool deband = true;
 	float deband_strength = 1.0;
 
+	// "Low poly" display filter, applied by the reprojection pass, client side, in
+	// stream. An edge-preserving region filter (a 5x5 sectored variance-minimising /
+	// Kuwahara kernel) run on the decoded image before it is sampled, so that when the
+	// bitrate is too low the picture degrades into flat regions with sharp edges rather
+	// than into drifting transform blocks and ringing. It is a display choice, not a
+	// codec one: nothing about the stream changes.
+	//
+	// Off by default -- it costs 25 texture reads per pixel and it throws away fine
+	// texture, which is the right trade only when the link cannot carry that texture
+	// anyway. Takes the place of CAS and FSR while it is on.
+	//
+	// low_poly_strength blends the filtered colour over the plain sample, 0 to 1.
+	// low_poly_levels posterises each channel to that many values, counting both
+	// endpoints; below 2 it is off.
+	// low_poly_full_kernel picks the dense 5x5 (37 fetches) over the default 7x7-support
+	// 17-fetch kernel. Measured on the Pico 4 (Adreno 650) per frame pair at 2176x1088
+	// total: +2.12 ms for the default, +5.16 ms for the full kernel.
+	bool low_poly = false;
+	float low_poly_strength = 0.85;
+	int low_poly_levels = 0;
+	bool low_poly_full_kernel = false;
+
 	// Skip re-running the in-stream defoveation pass on the refreshes where nothing it
 	// draws has changed, re-presenting the last result instead. Off by default. Meant
 	// for headsets that never discard a refresh (Pico), where the pass would otherwise

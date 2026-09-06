@@ -1146,6 +1146,8 @@ struct render_probe
 	uint64_t pose_age_n = 0;
 	int32_t out_w = 0, out_h = 0;
 	float sharpness = 0, glow = 0, vignette = 0, deband = 0;
+	float low_poly = 0, low_poly_levels = 0;
+	bool low_poly_full = false;
 	bool fsr = false, use_alpha = false, motion_on = false, blend_on = false, reduce_gpu_load = false;
 	double worst_fence_ms = 0;
 } g_rp;
@@ -1779,13 +1781,20 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		const auto & config = application::get_config();
 		const float v = comfort_vignette_fade * comfort_vignette_fade * (3 - 2 * comfort_vignette_fade); // Easing function
 
+		// The low poly region filter, when it is on, IS the sampling path: it replaces the
+		// plain sample and it already produces hard edges, so FSR and CAS are held off
+		// while it runs rather than stacking a sharpener on top of its flat regions. The
+		// settings UI disables their controls for the same reason.
+		const bool lowpoly_on = config.low_poly and config.low_poly_strength > 0;
 		// FSR takes over the sharpen when it is on: sharpness then feeds the RCAS lobe, and
 		// the CAS controls are ignored. Off, it is the CAS strength exactly as before.
-		const bool fsr_on = config.fsr;
+		const bool fsr_on = config.fsr and not lowpoly_on;
 		stream_defoveator::post_processing post{
-		        .sharpness = fsr_on
-		                             ? std::clamp<float>(config.fsr_sharpness, 0, 1)
-		                             : (config.cas_sharpening ? std::clamp<float>(config.cas_sharpness, 0, 1) : 0.f),
+		        .sharpness = lowpoly_on
+		                             ? 0.f
+		                             : (fsr_on
+		                                        ? std::clamp<float>(config.fsr_sharpness, 0, 1)
+		                                        : (config.cas_sharpening ? std::clamp<float>(config.cas_sharpness, 0, 1) : 0.f)),
 		        .vignette = v * constants::stream::vignette_strength,
 		        .vignette_inner = constants::stream::vignette_inner_radius,
 		        .vignette_outer = constants::stream::vignette_outer_radius,
@@ -1801,6 +1810,15 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		        // part of the cached image: a cache hit re-presents the same dithered
 		        // frame, with no temporal shimmer.
 		        .deband = config.deband ? std::clamp<float>(config.deband_strength, 0, 4) : 0.f,
+		        // Low poly. Zero here is what keeps the kernel out of the compiled
+		        // pipeline entirely, so the off path costs nothing at all.
+		        .low_poly = lowpoly_on ? std::clamp<float>(config.low_poly_strength, 0, 1) : 0.f,
+		        // Fewer than two levels is not a posterisation, so it is off rather than
+		        // a division by zero in the shader.
+		        .low_poly_levels = (lowpoly_on and config.low_poly_levels >= 2)
+		                                   ? float(std::clamp(config.low_poly_levels, 2, 32))
+		                                   : 0.f,
+		        .low_poly_full = lowpoly_on and config.low_poly_full_kernel,
 		};
 
 		// Whether this refresh can re-present the image already in the swapchain
@@ -1979,6 +1997,9 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			state.vignette = post.vignette;
 			state.glow = post.glow;
 			state.deband = post.deband;
+			state.low_poly = post.low_poly;
+			state.low_poly_levels = post.low_poly_levels;
+			state.low_poly_full = post.low_poly_full;
 			state.motion_on = motion.field != nullptr and motion.step > 0;
 			state.motion_step = motion.step;
 			state.motion_frame = motion.field ? motion.field->frame_idx : uint64_t(-1);
@@ -2008,6 +2029,9 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			g_rp.glow = post.glow;
 			g_rp.vignette = post.vignette;
 			g_rp.deband = post.deband;
+			g_rp.low_poly = post.low_poly;
+			g_rp.low_poly_levels = post.low_poly_levels;
+			g_rp.low_poly_full = post.low_poly_full;
 			g_rp.reduce_gpu_load = config.reduce_gpu_load;
 			if (not cache_hit)
 			{
@@ -2293,9 +2317,9 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		             2.0 * double(g_rp.out_w) * double(g_rp.out_h) / 1e6, defoveate_scale_,
 		             application::get_config().atlas_prototype,
 		             g_rp.cache_hits, g_rp.reduce_gpu_load ? "on" : "off");
-		spdlog::info("render: shader path sharpness {:.2f} fsr {} alpha {} motion {} blend {} glow {:.2f} vignette {:.2f} deband {:.2f}",
+		spdlog::info("render: shader path sharpness {:.2f} fsr {} alpha {} motion {} blend {} glow {:.2f} vignette {:.2f} deband {:.2f} lowpoly {:.2f} levels {:.0f} full-kernel {}",
 		             g_rp.sharpness, g_rp.fsr, g_rp.use_alpha, g_rp.motion_on, g_rp.blend_on,
-		             g_rp.glow, g_rp.vignette, g_rp.deband);
+		             g_rp.glow, g_rp.vignette, g_rp.deband, g_rp.low_poly, g_rp.low_poly_levels, g_rp.low_poly_full);
 		spdlog::info("render: per iteration fence {:.1f} (worst {:.1f}) | queries {:.1f} | submit {:.1f} | whole render() {:.1f} ms",
 		             g_rp.fence_ms / n, g_rp.worst_fence_ms, g_rp.query_ms / n,
 		             g_rp.submit_ms / n, g_rp.blit_ms / n);

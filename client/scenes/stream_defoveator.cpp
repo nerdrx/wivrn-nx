@@ -201,7 +201,9 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 	        VkBool32(fsr_baked),
 	        int32_t(atlas_baked),
 	        int32_t(kAtlasTiles),
-	        int32_t(view));
+	        int32_t(view),
+	        VkBool32(lowpoly_baked),
+	        VkBool32(lowpoly_full_baked));
 	auto fragment_shader = load_shader(device, "reprojection.frag");
 
 	vk::pipeline_builder pipeline_info{
@@ -699,16 +701,20 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 	if (destination < 0 || destination >= (int)output_images.size())
 		throw std::runtime_error("Invalid destination image index");
 
-	// The CAS kernel and the FSR path are specialization constants, so a change means
-	// rebuilding the pipelines. The caller has waited on the frame fence before recording,
+	// The CAS kernel, the FSR path and the low poly filter are specialization constants,
+	// so a change to any of them means rebuilding the pipelines. The caller has waited on the frame fence before recording,
 	// so nothing is still reading the old pipelines. They only ever flip from a settings
 	// toggle, a rare event.
-	if (cas_full_kernel != cas_full_baked or fsr != fsr_baked or atlas_prototype != atlas_baked)
+	const bool lowpoly = post.low_poly > 0;
+	if (cas_full_kernel != cas_full_baked or fsr != fsr_baked or atlas_prototype != atlas_baked or
+	    lowpoly != lowpoly_baked or post.low_poly_full != lowpoly_full_baked)
 	{
 		reset_pipelines();
 		cas_full_baked = cas_full_kernel;
 		fsr_baked = fsr;
 		atlas_baked = atlas_prototype;
+		lowpoly_baked = lowpoly;
+		lowpoly_full_baked = post.low_poly_full;
 	}
 
 	// [atlas prototype] the table has to exist before a descriptor can point at it, so
@@ -1005,7 +1011,8 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		        .post = {post.sharpness, post.vignette, post.vignette_inner, post.vignette_outer},
 		        .motion = {motion_step, motion_scale, blend_on ? blend.weight : 0.f, 0},
 		        .glow = {post.glow, post.glow_margin, 0, 0},
-		        .deband = {post.deband, 0, 0, 0},
+		        // x debanding, y/z the low poly filter -- see the shader's `deband`.
+		        .deband = {post.deband, post.low_poly, post.low_poly_levels, 0},
 		        .atlas_size = {float(kAtlasPicture), float(kAtlasPicture), 0, 0},
 		        .atlas_geom = {float(kAtlasW), float(kAtlasH),
 		                       1.f / float(kAtlasW), 1.f / float(kAtlasH)},

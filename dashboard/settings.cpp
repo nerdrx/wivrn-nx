@@ -924,6 +924,23 @@ void Settings::set_nxwarpCodedVectors(const nxwarp_coded_vectors & value)
 		nxwarpCodedVectorsChanged();
 }
 
+// "effort" is 0 or 1 on the server and a checkbox here: there is no level 2 --
+// nxvc refuses one, and the measurements that say why are in its
+// vk/encoder/README.md -- so a two-valued knob is the whole of it rather than a
+// simplification of a range.
+bool Settings::nxwarpEffort() const
+{
+	return nxd::nxwarp_option_u32(m_jsonSettings, "effort", nxd::nxwarp_default_effort) >= 1;
+}
+
+void Settings::set_nxwarpEffort(const bool & value)
+{
+	const auto old = nxwarpEffort();
+	nxd::set_nxwarp_option_u32(m_jsonSettings, "effort", value ? 1u : 0u, nxd::nxwarp_default_effort);
+	if (old != nxwarpEffort())
+		nxwarpEffortChanged();
+}
+
 bool Settings::nxwarpInter() const
 {
 	return nxd::nxwarp_option_bool(m_jsonSettings, "inter", nxd::nxwarp_default_inter);

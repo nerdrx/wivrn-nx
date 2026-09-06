@@ -210,6 +210,14 @@ public:
 			}
 		}
 
+		// How hard the encoder looks.  Encoder-side only and no tool bit: the
+		// stream is an ordinary stream at either level and the headset's
+		// decoder cannot tell which one produced it, which is why nothing on
+		// the client had to change for this.  The library refuses a level it
+		// does not have rather than clamping it, and nxwarp_codec_config
+		// carries the reason the default is 1.
+		ci.effort = c.effort;
+
 		// The entropy tool (stream bit 30).  Written out rather than cast for
 		// the same reason `coded_vectors` is, and passed unconditionally
 		// because -- unlike the inter fields -- it is legal on every

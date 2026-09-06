@@ -87,7 +87,7 @@
 //                    [--intra-period N] [--coded-vectors default|none|static]
 //                    [--reconnect-at N] [--start-frame-id F]
 //                    [--pace auto|off|FPS] [--client-decode-ms N] [--present-hz N]
-//                    [--feedback-delay N]
+//                    [--feedback-delay N] [--effort 0|1]
 //
 //   --eyes             1 (the default, and every run that predates this flag) or 2, which
 //                      is encoder_settings::eyes: ONE stream carrying BOTH eyes as a
@@ -1529,6 +1529,11 @@ int main(int argc, char ** argv)
 	std::string client_tools = "none";
 	// "auto" (the server default), "rans" or "lite".
 	std::string entropy = "auto";
+	// The encoder effort level, "0" or "1". The server's default is 1 and so is this
+	// one: the harness runs the configuration the server runs, or it is measuring
+	// something nobody ships. `--effort 0` is how a run reaches the pre-effort
+	// bitstream, which is what makes the two comparable in one binary.
+	std::string effort = "1";
 
 	for (int i = 1; i < argc; ++i)
 	{
@@ -1580,6 +1585,8 @@ int main(int argc, char ** argv)
 			client_tools = next();
 		else if (a == "--entropy")
 			entropy = next();
+		else if (a == "--effort")
+			effort = next();
 		else if (a == "--qp")
 			qp = uint32_t(std::stoul(next()));
 		else if (a == "--reconnect-at")
@@ -1724,6 +1731,7 @@ int main(int argc, char ** argv)
 	// .nxv files.
 	settings.options["stereo-compose"] = stereo_compose;
 	settings.options["entropy"] = entropy;
+	settings.options["effort"] = effort;
 	// The simulated headset mask. "all" is every bit set, which is a headset that can
 	// decode anything this encoder emits and is what keeps every existing run in this
 	// harness unchanged. It is spelled ~0 rather than read from nxvc because this file,

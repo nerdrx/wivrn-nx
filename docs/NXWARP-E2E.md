@@ -293,6 +293,35 @@ It drives the control law directly against two simulated eye decoders and separa
 two changes that had to be made — the frame numbering and the loss report — so each can
 be shown to matter on its own. Build and run it the way its header comment says.
 
+### Encoder effort
+
+`--effort 0|1` is the encoder's `"effort"` option, and the harness defaults to **1** as the
+server does: a harness that ran a configuration nobody ships would be measuring something
+else. Level 1 is the integer requantiser — a coefficient quantised to ±1 whose squared error
+is worth less than the bits it saves is dropped — and `--effort 0` is how a run reaches the
+pre-effort bitstream, which is what makes the two comparable in one binary.
+
+| run (320x240, `--backend vk --qp 32`, 12 frames) | B/frame | PSNR | decoder check |
+| --- | --- | --- | --- |
+| `--effort 0` | 5198 | 32.26 dB | byte-identical to `nxv-dec` on every published frame |
+| `--effort 1` | **4804** (−7.6 %) | 31.35 dB | byte-identical to `nxv-dec` on every published frame |
+| `--entropy lite --client-tools all --effort 0` | 6054 | 32.20 dB | byte-identical |
+| `--entropy lite --client-tools all --effort 1` | **5386** (−11.0 %) | 31.34 dB | byte-identical |
+
+Read the byte column, not the size of the `.nxv` the run writes: that file holds the units
+the GPU decoder actually consumed, and the bounded worker queue decides how many those are.
+
+**Both levels are the same bitstream.** The two streams above carry the identical tool mask
+(`0x0000000006600045` from `nxv-info`), because the level leaves no tool bit — it changes
+which levels are coded and nothing about how they decode. That is why nothing on the client
+had to change for this and why the headset's `nxvc_tools` handshake advertises nothing new.
+
+`"effort": "2"` is refused at startup rather than clamped, as nxvc refuses it: a wider motion
+search measures −0.05 % BD-rate for +12 % encoder time, and the reference's own trellis RDOQ
+cannot run on a GPU at all. On `--backend ref` the level reaches the non-directional path
+only — the scope nxvc pins byte-identical against the GPU encoder — so with `intra-dir` on,
+that backend's default, it changes nothing and the encoder logs a warning saying so.
+
 ### Send pacing, and a slow client
 
 A desktop GPU decodes a 320x240 NX Warp frame in about a millisecond, so nothing in this

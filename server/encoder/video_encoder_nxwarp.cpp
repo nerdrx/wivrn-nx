@@ -245,6 +245,23 @@ std::string option_string(const std::map<std::string, std::string> & options,
 	return it == options.end() ? std::string(fallback) : it->second;
 }
 
+// "effort": "0" | "1".  How hard the encoder looks for the cheapest way to say
+// the frame; see nxwarp_codec_config::effort for what each level is and what it
+// was measured to be worth.  Out of range is an error rather than a clamp, for
+// the reason "coded-vectors" is: nxvc itself refuses a level it does not have,
+// and a caller asking for a search that does not exist would otherwise be
+// handed the stream it was trying to beat with nothing to say so.
+uint32_t nxwarp_effort_from(const std::map<std::string, std::string> & options)
+{
+	const std::string v = option_string(options, "effort", "1");
+	if (v == "0")
+		return 0;
+	if (v == "1")
+		return 1;
+	throw std::runtime_error(
+	        std::format("nxwarp: \"effort\": \"{}\" is not one of 0, 1", v));
+}
+
 int16_t q15(float v)
 {
 	return int16_t(std::clamp(v, -1.f, 1.f) * 32767.f);
@@ -361,6 +378,7 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	                option_string(settings.options, "coded-vectors", "default")),
 	        // Resolved just below, once the headset's mask is in hand.
 	        .entropy = nxwarp_codec_config::entropy_t::rans,
+	        .effort = nxwarp_effort_from(settings.options),
 	        .intra_dir = option_bool(settings.options, "intra-dir", true),
 	        .preset = option_u32(settings.options, "preset", 1),
 	        .threads = option_u32(settings.options, "threads", 0),
@@ -433,6 +451,7 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 
 	// The same three facts the log states once, kept so every two-second report can carry
 	// them: a status page must not depend on having been open when the session started.
+	stats_effort = codec_cfg.effort;
 	stats_entropy_name = codec_cfg.entropy == nxwarp_codec_config::entropy_t::lite ? "lite" : "rans";
 	stats_entropy_was_auto = entropy_req == entropy_request::automatic;
 	stats_negotiated_tools = client_tools;
@@ -444,6 +463,19 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	const std::string backend = option_string(settings.options, "backend", "ref");
 	if (backend == "ref")
 	{
+		// The one configuration in which "effort" is asked for and cannot be
+		// given, said out loud rather than left to be discovered as two runs
+		// with the same byte count.  The reference encoder applies the integer
+		// requantiser in its non-directional path only -- the same scope nxvc
+		// pins byte-identical against the GPU encoder, which has no
+		// directional intra to pin -- so with "intra-dir" on, which is this
+		// backend's default, the level reaches nothing.
+		if (codec_cfg.effort >= 1 and codec_cfg.intra_dir)
+			U_LOG_W("nxwarp: \"effort\": \"1\" has no effect on the \"ref\" backend "
+			        "with \"intra-dir\": \"on\" -- the requantiser is implemented "
+			        "for the non-directional path, which is the one the GPU "
+			        "encoder codes.  Use \"backend\": \"vk\", or "
+			        "\"intra-dir\": \"off\"");
 		codec = nxwarp_codec::make_reference(codec_cfg);
 	}
 	else if (backend == "vk")
@@ -1756,6 +1788,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				}
 				st.dominant_reason_count = best;
 
+				st.effort = stats_effort;
 				st.entropy = stats_entropy_name;
 				st.entropy_was_auto = stats_entropy_was_auto;
 				st.negotiated_tools = stats_negotiated_tools;

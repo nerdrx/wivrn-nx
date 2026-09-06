@@ -182,6 +182,18 @@ Kirigami.ScrollablePage {
                         }
 
                         RowLayout {
+                            Kirigami.FormData.label: i18n("Encoder effort:")
+                            Controls.Label {
+                                text: modelData.effort >= 1
+                                      ? i18n("1 — integer requantiser")
+                                      : i18n("0 — dead-zone quantiser")
+                            }
+                            Kirigami.ContextualHelpButton {
+                                toolTipText: i18n("How hard the encoder looks for the cheapest way to say each frame. Level 1 drops a coefficient whose error is worth less than the bits it saves: measured 1.5%% fewer bytes on rANS and 3.6%% on Lite, for no measurable encode time. The level leaves no trace in the stream, so this line is the only place it can be read back.")
+                            }
+                        }
+
+                        RowLayout {
                             Kirigami.FormData.label: i18n("Entropy coder:")
                             Controls.Label {
                                 text: modelData.entropyWasAuto

@@ -282,6 +282,9 @@ class video_encoder_nxwarp : public video_encoder
 	// resolved it, and the tool mask the headset advertised. They are in every report because
 	// the status page shows them next to the numbers they explain, and a page that has to be
 	// open before the session starts to catch a one-shot log line is a log by another name.
+	// The effort level the codec was built with, for the stats card: it leaves
+	// no trace in the stream, so this is the only place it can be read back.
+	uint32_t stats_effort = 1;
 	std::string stats_entropy_name;
 	bool stats_entropy_was_auto = true;
 	uint64_t stats_negotiated_tools = 0;

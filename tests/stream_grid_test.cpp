@@ -197,6 +197,30 @@ int main(int argc, char ** argv)
 		check(emit(px, py, w, h, m, got.data(), got.size()) == 0, "everything masked draws nothing");
 	}
 
+	// Asymmetric runs, which is what a real foveation looks like: the centre band is
+	// not in the middle and the two axes differ. The uniform case above would not catch
+	// an off-by-one in the ratio walk, and this grid is the one the headset actually draws.
+	std::printf("asymmetric foveation reproduces the original strip exactly\n");
+	{
+		const std::vector<uint16_t> ax{48, 64, 96, 192, 160, 112, 80};
+		const std::vector<uint16_t> ay{32, 80, 144, 224, 128, 96, 64};
+		const auto ref = reference(ax, ay, 1088, 1088);
+		std::vector<vertex> got(max_vertices(ax.size(), ay.size()));
+		const size_t n = emit(ax, ay, 1088, 1088, {}, got.data(), got.size());
+		bool identical = n == ref.size();
+		for (size_t i = 0; identical and i < n; ++i)
+			identical = same(got[i], ref[i]);
+		check(identical, "asymmetric grid identical to the original loop");
+
+		// And at a non-square output, which is what defoveate_scale produces.
+		const auto ref2 = reference(ax, ay, 800, 1088);
+		const size_t n2 = emit(ax, ay, 800, 1088, {}, got.data(), got.size());
+		bool id2 = n2 == ref2.size();
+		for (size_t i = 0; id2 and i < n2; ++i)
+			id2 = same(got[i], ref2[i]);
+		check(id2, "non-square output identical to the original loop");
+	}
+
 	std::printf("the lens cell mask never eats the overscan ring\n");
 	{
 		using namespace wivrn::view_geometry;

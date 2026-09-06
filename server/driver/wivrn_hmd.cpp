@@ -278,7 +278,30 @@ xrt_result_t wivrn_hmd::get_view_poses(const xrt_vec3 * default_eye_relation,
 		// headset gets it back in view_info and hands it to its own compositor as the
 		// projection layer's FOV. So the extra ring is real pixels from end to end and
 		// nothing downstream has to know the setting exists.
-		out_fovs[eye] = apply_overscan(is_finite(view.fovs[eye]) ? view.fovs[eye] : hmd->distortion.fov[eye]);
+		const xrt_fov panel_fov = is_finite(view.fovs[eye]) ? view.fovs[eye] : hmd->distortion.fov[eye];
+		out_fovs[eye] = apply_overscan(panel_fov);
+
+		// --- geometry trace (once per eye). The panel's own field of view against the
+		// widened one the application is told to render. Everything downstream --
+		// the layer it submits, the wire, the headset's projection layer -- should
+		// carry the WIDENED pair; the panel figure is here only so the ratio is
+		// visible without arithmetic.
+		{
+			static std::array<bool, 2> logged{};
+			if (eye < 2 and not logged[eye])
+			{
+				logged[eye] = true;
+				const auto d = [](float a) { return double(a) * 180.0 / M_PI; };
+				U_LOG_I("geometry[eye %u]: panel fov L%.2f R%.2f U%.2f D%.2f -> rendered fov "
+				        "L%.2f R%.2f U%.2f D%.2f deg (overscan %.3f)",
+				        unsigned(eye),
+				        d(panel_fov.angle_left), d(panel_fov.angle_right),
+				        d(panel_fov.angle_up), d(panel_fov.angle_down),
+				        d(out_fovs[eye].angle_left), d(out_fovs[eye].angle_right),
+				        d(out_fovs[eye].angle_up), d(out_fovs[eye].angle_down),
+				        double(overscan));
+			}
+		}
 	}
 	return XRT_SUCCESS;
 }

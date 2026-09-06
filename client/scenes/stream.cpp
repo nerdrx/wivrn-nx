@@ -2382,6 +2382,39 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			                },
 			        };
 		}
+		// --- geometry trace (once per session).
+		//
+		// The two numbers that have to agree, printed side by side so no arithmetic is
+		// needed: the FOV the server says these pixels were rendered at, and the FOV
+		// this client puts on the projection layer it hands the compositor. If the
+		// layer's is narrower, the compositor stretches a wide picture into a narrow
+		// frustum -- the picture is squashed AND there is nothing beyond the edge for
+		// it to reproject into, which is the black border. Also the source rect and the
+		// defoveated extent, since a mismatch there squashes it the same way.
+		{
+			static bool logged = false;
+			if (not logged and current_blit_handles[0])
+			{
+				logged = true;
+				const auto d = [](float a) { return double(a) * 180.0 / M_PI; };
+				for (size_t v = 0; v < view_count; ++v)
+					spdlog::info("geometry[eye {}]: view_info fov L{:.2f} R{:.2f} U{:.2f} D{:.2f} | "
+					             "layer fov L{:.2f} R{:.2f} U{:.2f} D{:.2f} deg | "
+					             "layer rect {}x{} | defoveated {}x{} | scale {:.2f}",
+					             v,
+					             d(current_blit_handles[0]->view_info.fov[v].angleLeft),
+					             d(current_blit_handles[0]->view_info.fov[v].angleRight),
+					             d(current_blit_handles[0]->view_info.fov[v].angleUp),
+					             d(current_blit_handles[0]->view_info.fov[v].angleDown),
+					             d(layer_view[v].fov.angleLeft), d(layer_view[v].fov.angleRight),
+					             d(layer_view[v].fov.angleUp), d(layer_view[v].fov.angleDown),
+					             layer_view[v].subImage.imageRect.extent.width,
+					             layer_view[v].subImage.imageRect.extent.height,
+					             extents[v].width, extents[v].height,
+					             defoveate_scale_);
+			}
+		}
+
 		add_projection_layer(
 		        use_alpha ? XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT : 0,
 		        application::space(xr::spaces::world),

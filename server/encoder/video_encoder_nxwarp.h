@@ -616,6 +616,76 @@ private:
 	{
 		return double(tiles_per_frame) * double(chunk_bytes);
 	}
+	// --- decode-time rate control -------------------------------------------
+	//
+	// The byte controller answers "does this fit the link". This one answers "can
+	// the headset decode it in time", which on this hardware is the binding
+	// constraint far more often: measured on a Pico 4, a worn session at a pinned
+	// QP 22 produced 110-130 kB frames that took 35 ms to decode, and the pacer
+	// answered the only way it could -- by dropping the frame rate to 26 fps.
+	// Motion cost frame rate, which is the one thing it must never cost.
+	//
+	// So decode time gets its own AIMD, and it expresses itself as a QP FLOOR
+	// rather than a target, for the same reason the transport ceiling does: a
+	// frame the headset cannot decode in time is not a quality decision, so it
+	// outranks `min-qp`. The operator's min-qp remains the floor for the BYTE
+	// controller; this one may push above it.
+	//
+	// THE REFERENCE PERIOD, and why it is not the live paced interval. The pacer
+	// targets `1.1 * decode + 1 ms`, so decode is about 0.9 of the interval it
+	// produces BY CONSTRUCTION. Budgeting against that interval would therefore
+	// find decode over budget at every quality, raise QP, watch the interval
+	// shrink with it, and find it over budget again -- a ratchet to max_qp that
+	// says nothing about the headset. The reference has to be a period the
+	// controller does not move, so it is the slowest frame rate worth holding:
+	// half the stream's configured rate, 45 fps at 90 Hz. Above that the pacer is
+	// free and this controller is silent; below it, quality gives way instead.
+	double rc_decode_budget_frac = 0.8;
+	// Frames per second the pacer should not be pushed below. Zero means "half the
+	// configured rate", resolved once the stream's fps is known.
+	double rc_decode_budget_fps = 0;
+	double rc_decode_floor_fps() const
+	{
+		return rc_decode_budget_fps > 0 ? rc_decode_budget_fps : std::max(15.0, double(rc_fps) / 2.0);
+	}
+	// The decode wall this stream is aiming to stay under, in seconds.
+	double rc_decode_budget_s() const
+	{
+		if (not(rc_decode_budget_frac > 0))
+			return 0; // the operator turned the deadline controller off
+		return rc_decode_budget_frac / rc_decode_floor_fps();
+	}
+	// The floor this controller is currently imposing. 0 when it is not binding.
+	uint32_t rc_decode_floor = 0;
+
+	// Which controller last moved, or would move, the quantiser. Reported once a
+	// window: "the picture is soft" and "the picture is soft BECAUSE the headset
+	// cannot decode it" are different sentences and only one of them is actionable.
+	enum class rc_binding_t : uint8_t
+	{
+		none = 0,
+		bytes,
+		decode,
+		ceiling,
+	};
+	rc_binding_t rc_binding = rc_binding_t::none;
+	void run_decode_rate_control();
+	static constexpr const char * rc_binding_name(rc_binding_t b)
+	{
+		switch (b)
+		{
+			case rc_binding_t::bytes:
+				return "bytes";
+			case rc_binding_t::decode:
+				return "decode";
+			case rc_binding_t::ceiling:
+				return "transport ceiling";
+			case rc_binding_t::none:
+				return "nothing";
+		}
+		return "?";
+	}
+
 	// While non-zero, the quantiser floor the ceiling escape has imposed: the
 	// bitrate loop may not step below it. `rc_min_qp` is what the operator asked
 	// for and this is what the transport requires, and when they disagree the
@@ -643,7 +713,10 @@ private:
 	{
 		const uint32_t burnt =
 		        rc_burnt_qp > rc_burnt_margin ? rc_burnt_qp - rc_burnt_margin : 0;
-		return std::max({rc_min_qp, rc_ceiling_floor, burnt});
+		// rc_decode_floor is in here, which is what lets the decode controller push
+		// the quantiser ABOVE the operator's min-qp: min-qp is a quality request and
+		// a frame the headset cannot decode in time is not a quality question.
+		return std::max({rc_min_qp, rc_ceiling_floor, burnt, rc_decode_floor});
 	}
 	// And the fraction the byte target is capped at, so the bitrate loop aims
 	// below the ceiling rather than at it.
@@ -740,6 +813,12 @@ public:
 		// had somewhere lower to go, and with a ceiling in play min-qp is no
 		// longer the answer to that.
 		uint32_t qp_floor = 0;
+		// The decode-time controller's own contribution to that floor, and which
+		// constraint last decided the quantiser. Published so a harness run and a
+		// live session report the same thing.
+		uint32_t decode_qp_floor = 0;
+		double decode_budget_ms = 0;
+		uint8_t binding = 0;
 		double target_bytes = 0;
 		// Frames the headset reported it did not reconstruct, and how many of those
 		// named a frame older than one already coded intra and so cost nothing. The
@@ -835,6 +914,9 @@ public:
 		        prof_total_bytes,
 		        current_qp,
 		        effective_qp_floor(),
+		        rc_decode_floor,
+		        rc_decode_budget_s() * 1000.0,
+		        uint8_t(rc_binding),
 		        rc_target_bytes,
 		        not_held_total.load(std::memory_order_relaxed),
 		        not_held_already_answered.load(std::memory_order_relaxed),

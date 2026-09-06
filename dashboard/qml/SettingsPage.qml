@@ -495,6 +495,21 @@ Kirigami.ScrollablePage {
             }
 
             RowLayout {
+                Kirigami.FormData.label: i18n("Decode budget:")
+                visible: Settings.nxwarpSelected && nxwarp_rc_auto.checked
+                Controls.SpinBox {
+                    id: nxwarp_decode_budget
+                    from: 0
+                    to: 100
+                    textFromValue: function(value) { return value + " %" }
+                    valueFromText: function(text) { return parseInt(text) }
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("How much of the frame period the headset's own decode may take before the encoder starts trading quality to protect the frame rate. The headset reports what each frame cost it to decode; when that goes over this share, the quantiser rises -- above the minimum above, because a frame that cannot be decoded in time is not a quality decision. Head motion then costs sharpness instead of frames. 0 turns it off.")
+                }
+            }
+
+            RowLayout {
                 Kirigami.FormData.label: i18n("Coded motion vectors:")
                 visible: Settings.nxwarpSelected
                 Controls.ComboBox {
@@ -833,6 +848,7 @@ Kirigami.ScrollablePage {
             // Minimum first: each setter pushes the other bound out of the way rather than
             // letting an inverted range reach the server, which would refuse the session.
             Settings.nxwarpMinQp = nxwarp_min_qp.value;
+            Settings.nxwarpDecodeBudget = nxwarp_decode_budget.value;
             Settings.nxwarpMaxQp = nxwarp_max_qp.value;
             Settings.nxwarpStereoFrame = nxwarp_stereo.model[nxwarp_stereo.currentIndex].value;
             Settings.nxwarpTileMap = nxwarp_tile_map.model[nxwarp_tile_map.currentIndex].value;
@@ -866,6 +882,7 @@ Kirigami.ScrollablePage {
         nxwarp_pace_fps.value = Settings.nxwarpPaceFps;
         nxwarp_rc_auto.checked = Settings.nxwarpRcAuto;
         nxwarp_min_qp.value = Settings.nxwarpMinQp;
+        nxwarp_decode_budget.value = Settings.nxwarpDecodeBudget;
         nxwarp_max_qp.value = Settings.nxwarpMaxQp;
         nxwarp_stereo.currentIndex = nxwarp_stereo.model.findIndex(i => i.value === Settings.nxwarpStereoFrame);
         nxwarp_tile_map.currentIndex = nxwarp_tile_map.model.findIndex(i => i.value === Settings.nxwarpTileMap);

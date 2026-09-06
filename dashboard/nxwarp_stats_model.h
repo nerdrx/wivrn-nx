@@ -97,6 +97,7 @@ struct nxwarp_stream_stat
 	Q_PROPERTY(int effort READ effort CONSTANT)
 	Q_PROPERTY(int snapIdentity READ snapIdentity CONSTANT)
 	Q_PROPERTY(QString identityTiles READ identityTiles CONSTANT)
+	Q_PROPERTY(QString rateBinding READ rateBinding CONSTANT)
 	Q_PROPERTY(bool identityFromDecoder READ identityFromDecoder CONSTANT)
 	Q_PROPERTY(QString planar READ planar CONSTANT)
 	Q_PROPERTY(QString planarNote READ planarNote CONSTANT)
@@ -306,6 +307,23 @@ public:
 	}
 	// "N/M (share)" or an empty string when there is nothing to say -- an
 	// intra-only stream, or a codec with no such notion.
+	// Which constraint is deciding the quantiser, and -- when it is the headset's
+	// decode deadline -- the measurement and the budget it is being held against, so
+	// the line says why the picture is what it is and not merely what it is. Empty
+	// when the stream has not reported one, which is what an older client looks like.
+	QString rateBinding() const
+	{
+		if (s.rc_binding.empty() or s.rc_binding == "?")
+			return {};
+		const QString what = QString::fromStdString(s.rc_binding);
+		if (s.rc_binding != "decode" and s.rc_decode_floor == 0)
+			return what;
+		return QStringLiteral("%1 (decode %2 ms of %3 ms budget, quantiser floor %4)")
+		        .arg(what)
+		        .arg(double(s.client_decode_us) / 1000.0, 0, 'f', 1)
+		        .arg(s.rc_decode_budget_ms, 0, 'f', 1)
+		        .arg(s.rc_decode_floor);
+	}
 	QString identityTiles() const
 	{
 		if (s.identity_tiles_total == 0)

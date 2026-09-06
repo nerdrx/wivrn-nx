@@ -288,6 +288,17 @@ Kirigami.ScrollablePage {
                         }
 
                         RowLayout {
+                            Kirigami.FormData.label: i18n("Rate limited by:")
+                            visible: modelData.rateBinding.length > 0
+                            Controls.Label {
+                                text: modelData.rateBinding
+                            }
+                            Kirigami.ContextualHelpButton {
+                                toolTipText: i18n("Which constraint is choosing the quantiser right now. 'bytes' is the ordinary case: the link's bitrate. 'decode' means the headset cannot decode frames fast enough, so the encoder is spending quality to protect the frame rate -- the quantiser floor shown here is above the configured minimum on purpose, because a frame that arrives late is worse than a soft one. 'transport ceiling' means the frame would not fit the tile grid. If this says 'decode' during head motion, that is the feature working; if it says it while still, the decode budget is set too tight.")
+                            }
+                        }
+
+                        RowLayout {
                             Kirigami.FormData.label: i18n("Identity tiles:")
                             visible: modelData.identityTiles.length > 0
                             Controls.Label {

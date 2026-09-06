@@ -717,6 +717,14 @@ bound it: below `min-qp` the frames cost frame rate on the headset however much 
 is, and above `max-qp` the picture is not worth sending. The two-second encode report
 prints the applied QP next to the bytes it bought and the budget they were aimed at.
 
+A second controller runs alongside it on the headset's reported decode time. `min-qp`
+bounds the byte controller only: when the headset reports it cannot decode frames inside
+`decode-budget` percent of the frame period being defended, the decode controller raises
+the quantiser **above** `min-qp`, because a frame that arrives late is worse than a soft
+one. The report line and the dashboard's *Rate limited by* row name which of the two is
+binding. See [docs/CLIENT-DECODE-WALL.md](CLIENT-DECODE-WALL.md) for why the budget is a
+share of a fixed defended rate rather than of the live paced interval.
+
 `"rc": "fixed"` is the old behaviour — this encoder's `qp` for the whole session, whatever
 the link is doing — and the ceiling is then ignored, which the log says once.
 
@@ -759,7 +767,8 @@ composited frames were not sent.
 | --- | --- | --- |
 | `rc` | `auto` | `auto` honours the bitrate ceiling, `fixed` pins `qp` |
 | `qp` | `28` | the quantiser, 0..63; with `auto`, where the controller starts |
-| `min-qp` | `20` | the finest quantiser the controller may reach |
+| `min-qp` | `20` | the finest quantiser the BYTE controller may reach; the decode controller may go above it |
+| `decode-budget` | `80` | percent of the defended frame period the headset's decode may take before quality is traded to protect the frame rate; `0` disables it |
 | `max-qp` | `44` | the coarsest |
 
 ```json

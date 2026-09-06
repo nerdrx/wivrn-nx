@@ -207,6 +207,7 @@ static const QList<control> controls{
         // interesting value to round-trip is false -- the one that has to be WRITTEN, where
         // every other control here writes when it moves away from an off-by-default value.
         {"nxwarpEffort", false},
+        {"nxwarpSnapIdentity", QVariant::fromValue(int(Settings::SnapOneSample))},
 };
 
 static void part_b()
@@ -292,6 +293,7 @@ static void part_b()
 		d.setProperty("nxwarpEntropy", int(Settings::EntropyAuto));
 		d.setProperty("nxwarpInter", false);
 		d.setProperty("nxwarpEffort", true);
+		d.setProperty("nxwarpSnapIdentity", int(Settings::SnapOff));
 		const json out = d.configuration();
 		check(nxd::nxwarp_option(out, "entropy") == std::nullopt,
 		      "entropy set to Auto is erased, not written");
@@ -303,6 +305,17 @@ static void part_b()
 		// everyone who opened the settings page once.
 		check(nxd::nxwarp_option(out, "effort") == std::nullopt,
 		      "effort left on is erased, not written");
+		check(nxd::nxwarp_option(out, "snap-identity") == std::nullopt,
+		      "snap-identity left off is erased, not written");
+		// The four settings are 0/16/24/32, and the file carries the NUMBER:
+		// a dashboard that wrote its enum index would ask the server for 1/16
+		// of a sample, which is a threshold that can never fire.
+		d.setProperty("nxwarpSnapIdentity", int(Settings::SnapOneSample));
+		check(nxd::nxwarp_option(d.configuration(), "snap-identity") == std::string("16"),
+		      "snap-identity 1 sample is written as \"16\", not as an index");
+		d.setProperty("nxwarpSnapIdentity", int(Settings::SnapTwo));
+		check(nxd::nxwarp_option(d.configuration(), "snap-identity") == std::string("32"),
+		      "snap-identity 2 samples is written as \"32\"");
 		d.setProperty("nxwarpEffort", false);
 		check(nxd::nxwarp_option(d.configuration(), "effort") == std::string("0"),
 		      "effort turned off is written as \"0\"");
@@ -695,6 +708,7 @@ static void part_d(const char * qml_path)
 	        {"nxwarp_inter", true},
 	        {"nxwarp_intra_period", true},
 	        {"nxwarp_effort", true},
+	        {"nxwarp_snap", true},
 	};
 
 	for (const auto & [id, in_save]: ids)

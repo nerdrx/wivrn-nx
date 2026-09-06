@@ -98,6 +98,28 @@ cmake --build build/client -j4
 `ktx` must be on `PATH`. The client builds its own nx-warp through `ExternalProject`, from
 `../nx-warp`; `WIVRN_NXWARP_DIR` overrides that path.
 
+**In a git worktree this is not optional.** `../nx-warp` is relative to the
+checkout, so a worktree at `wivrn-nx-e2e-wt/<branch>/` looks for
+`wivrn-nx-e2e-wt/nx-warp`, which does not exist, and the build fails a long way
+in with
+
+```
+client/./decoder/nxwarp/nxwarp_reassemble.h:52:10: fatal error:
+    'nxvc/transport/common.h' file not found
+```
+
+which reads like a missing package and is a missing path. Pass the nx-warp
+source tree explicitly:
+
+```sh
+./gradlew assembleRelease -Psuffix=.warp ... \
+    -Pnxwarp_dir=/absolute/path/to/nx-warp
+```
+
+The server build takes the same thing as a CMake prefix
+(`-DCMAKE_PREFIX_PATH=...`), but the CLIENT compiles nxvc from source, so it
+wants the source tree rather than an install prefix.
+
 **`WIVRN_USE_NXWARP=ON` is required on the client too.** Without it the client builds and
 runs, but with no NX Warp decoder in it at all — it will simply never offer the codec.
 
@@ -574,6 +596,47 @@ search measures −0.05 % BD-rate for +12 % encoder time, and the reference's ow
 cannot run on a GPU at all. On `--backend ref` the level reaches the non-directional path
 only — the scope nxvc pins byte-identical against the GPU encoder — so with `intra-dir` on,
 that backend's default, it changes nothing and the encoder logs a warning saying so.
+
+### Snapping still tiles to a copy
+
+`--snap-identity N` is the encoder's `"snap-identity"` option, in 1/16 luma
+samples. When every tile corner has moved less than that, the frame is sent as
+if the head had not moved, and the headset decodes its skipped tiles as a
+straight copy instead of a filtered warp -- 8.25 of 13.7 ms of Pass B per pair
+on a Pico 4.
+
+**`--head-rate S` exists because of this.** The harness's simulated head turns
+at a fixed 0.017 rad a frame -- about 87 deg/s, a brisk turn -- and at that
+speed nothing can ever snap: a fixture that can only turn quickly can only
+prove that the tool does not fire. `--head-rate` scales that motion, default
+1.0, so every existing run is unchanged and a still head is one flag away.
+
+```sh
+wivrn-nxwarp-e2e --yuv rest.yuv --width 256 --height 192 --frames 200 --qp 26 \
+    --backend vk --inter on --intra-period 180 --present-hz 90 \
+    --head-rate 0.05 --snap-identity 16
+```
+
+| run | identity tiles | decoder check |
+| --- | --- | --- |
+| `--head-rate 0.05 --snap-identity 0` | 0 / 2148 (0.0 %) | byte-identical to `nxv-dec` over 198 frames |
+| `--head-rate 0.05 --snap-identity 16` | **2136 / 2136 (100.0 %)** | byte-identical over 194 frames |
+
+Both PASSED. At a still head every frame snaps; at the harness's default rate
+none do, which is the tool behaving.
+
+**The count comes from the ENCODER, and the line says so.** The headset will
+report its own once its nxvc carries `tiles_identity_seg`
+(`NXVC_VK_DECODER_PASSB_IDENTITY`); until then the number is what the decoder's
+fast path is *entitled* to copy, not a measurement of what it did. "The headset
+copied 2136 tiles" and "the headset can copy 2136 tiles" are different claims
+and the stats card makes the difference visible rather than rounding it away.
+
+Three refusals rather than a silent no-op, all at startup: on the reference
+backend (it has no such tool), without `"inter"` (there is no warp to snap),
+and above 32 -- the unit is SIXTEENTHS of a sample, and a caller who reads it
+as samples and asks for 16 samples gets told rather than getting a stream
+several decibels worse.
 
 ### Send pacing, and a slow client
 

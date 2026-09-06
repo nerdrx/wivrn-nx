@@ -112,6 +112,20 @@ public:
 	};
 	Q_ENUM(nxwarp_tile_map)
 
+	// "snap-identity": how far from the identity a warp may be and still be
+	// snapped to it, in 1/16 luma samples.  Four values rather than a slider:
+	// the measurement says everything below one sample is inert and everything
+	// above two is destructive, so the useful range is three settings and a
+	// way to turn it off.
+	enum nxwarp_snap
+	{
+		SnapOff,       // 0
+		SnapOneSample, // 16
+		SnapOneAndHalf,// 24
+		SnapTwo,       // 32
+	};
+	Q_ENUM(nxwarp_snap)
+
 	// "coded-vectors": whether motion vectors are coded into the stream.
 	enum nxwarp_coded_vectors
 	{
@@ -150,6 +164,7 @@ public:
 	Q_PROPERTY(nxwarp_tile_map nxwarpTileMap READ nxwarpTileMap WRITE set_nxwarpTileMap NOTIFY nxwarpTileMapChanged)
 	Q_PROPERTY(nxwarp_coded_vectors nxwarpCodedVectors READ nxwarpCodedVectors WRITE set_nxwarpCodedVectors NOTIFY nxwarpCodedVectorsChanged)
 	Q_PROPERTY(bool nxwarpEffort READ nxwarpEffort WRITE set_nxwarpEffort NOTIFY nxwarpEffortChanged)
+	Q_PROPERTY(nxwarp_snap nxwarpSnapIdentity READ nxwarpSnapIdentity WRITE set_nxwarpSnapIdentity NOTIFY nxwarpSnapIdentityChanged)
 	Q_PROPERTY(bool nxwarpInter READ nxwarpInter WRITE set_nxwarpInter NOTIFY nxwarpInterChanged)
 	// "Skip invisible tiles": the lens mask.
 	Q_PROPERTY(bool nxwarpLensMask READ nxwarpLensMask WRITE set_nxwarpLensMask NOTIFY nxwarpLensMaskChanged)
@@ -200,6 +215,7 @@ public:
 	SETTER_GETTER_NOTIFY(nxwarp_tile_map, nxwarpTileMap)
 	SETTER_GETTER_NOTIFY(nxwarp_coded_vectors, nxwarpCodedVectors)
 	SETTER_GETTER_NOTIFY(bool, nxwarpEffort)
+	SETTER_GETTER_NOTIFY(nxwarp_snap, nxwarpSnapIdentity)
 	SETTER_GETTER_NOTIFY(bool, nxwarpInter)
 	SETTER_GETTER_NOTIFY(bool, nxwarpLensMask)
 	SETTER_GETTER_NOTIFY(int, nxwarpIntraPeriod)

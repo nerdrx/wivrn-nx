@@ -95,6 +95,9 @@ struct nxwarp_stream_stat
 	Q_PROPERTY(double dominantReasonCount READ dominantReasonCount CONSTANT)
 
 	Q_PROPERTY(int effort READ effort CONSTANT)
+	Q_PROPERTY(int snapIdentity READ snapIdentity CONSTANT)
+	Q_PROPERTY(QString identityTiles READ identityTiles CONSTANT)
+	Q_PROPERTY(bool identityFromDecoder READ identityFromDecoder CONSTANT)
 	Q_PROPERTY(QString entropy READ entropy CONSTANT)
 	Q_PROPERTY(bool entropyWasAuto READ entropyWasAuto CONSTANT)
 	Q_PROPERTY(QString toolsText READ toolsText CONSTANT)
@@ -294,6 +297,27 @@ public:
 	int effort() const
 	{
 		return int(s.effort);
+	}
+	int snapIdentity() const
+	{
+		return int(s.snap_identity);
+	}
+	// "N/M (share)" or an empty string when there is nothing to say -- an
+	// intra-only stream, or a codec with no such notion.
+	QString identityTiles() const
+	{
+		if (s.identity_tiles_total == 0)
+			return {};
+		const double pc = 100.0 * double(s.identity_tiles) /
+		                  double(s.identity_tiles_total);
+		return QStringLiteral("%1/%2 (%3 %)")
+		        .arg(s.identity_tiles)
+		        .arg(s.identity_tiles_total)
+		        .arg(pc, 0, 'f', 1);
+	}
+	bool identityFromDecoder() const
+	{
+		return s.identity_from_decoder;
 	}
 	QString entropy() const
 	{

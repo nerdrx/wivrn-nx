@@ -285,6 +285,10 @@ class video_encoder_nxwarp : public video_encoder
 	// The effort level the codec was built with, for the stats card: it leaves
 	// no trace in the stream, so this is the only place it can be read back.
 	uint32_t stats_effort = 1;
+	/* The snap-to-identity threshold in force, and the identity-tile count the
+	 * encoder reports for it.  Neither can be read off the wire: an identity
+	 * warp_ext says nothing about how it was arrived at. */
+	uint32_t stats_snap_identity = 0;
 	std::string stats_entropy_name;
 	bool stats_entropy_was_auto = true;
 	uint64_t stats_negotiated_tools = 0;

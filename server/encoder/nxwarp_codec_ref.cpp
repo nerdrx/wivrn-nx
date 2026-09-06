@@ -100,6 +100,17 @@ public:
 		// so with `intra_dir` on it changes nothing here, and the encoder logs
 		// that combination instead of letting it look like a tuning result.
 		cfg.int_rdoq = c.effort >= 1 ? 1 : 0;
+		/* There is no snap-to-identity here and there cannot be: it is a
+		 * property of the GPU encoder's per-frame warp record, and this codec
+		 * derives its matrix with no such knob.  video_encoder_nxwarp refuses
+		 * the combination before a config reaches this constructor, so
+		 * reaching it with a threshold set is a wiring mistake in this server
+		 * rather than a configuration a user can write. */
+		if (c.snap_identity != 0)
+			throw std::runtime_error(
+			        "nxwarp: the reference backend has no snap-to-identity; "
+			        "the option should have been refused before the codec was "
+			        "built");
 		cfg.qp_search = 0;   // no per-tile QP offset search
 		cfg.intra_dir = c.intra_dir ? 1 : 0;
 		cfg.intra_dir_cand = 1;

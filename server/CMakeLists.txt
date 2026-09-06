@@ -242,7 +242,9 @@ if (WIVRN_BUILD_SERVER)
 			encoder/nxwarp_codec_ref.cpp
 			encoder/nxwarp_packetize.cpp
 			)
-		target_include_directories(wivrn-nxwarp-loopback PRIVATE .)
+		# common/ for nxwarp_stream_grid.h, which is header-only: this target does
+		# not link wivrn-common and does not need to.
+		target_include_directories(wivrn-nxwarp-loopback PRIVATE . ${CMAKE_SOURCE_DIR}/common)
 		target_compile_features(wivrn-nxwarp-loopback PRIVATE cxx_std_20)
 		target_link_libraries(wivrn-nxwarp-loopback PRIVATE nxvc::ref nxvc::transport)
 		# nxwarp_codec.h names Vulkan handles since the vk backend; the common

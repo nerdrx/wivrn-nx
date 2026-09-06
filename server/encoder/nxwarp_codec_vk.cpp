@@ -134,7 +134,10 @@ public:
 
 		ci.width = c.width;
 		ci.height = c.height;
-		ci.eyes = 1; // one WiVRn stream is one eye
+		// 1, or 2 for a side-by-side stereo frame. nxvc_vk_encoder_tile_grid()
+		// then reports `cols` over the pair, which is what the transport wants,
+		// so tile_grid() below needs no adjustment of its own.
+		ci.eyes = c.eyes ? c.eyes : 1;
 		ci.chroma = 0;
 		ci.bit_depth = 8;
 		ci.base_qp = c.base_qp;

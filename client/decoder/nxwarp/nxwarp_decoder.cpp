@@ -7,6 +7,7 @@
  * (at your option) any later version.
  */
 
+#include "nxwarp_stream_grid.h"
 #include "nxwarp_decoder.h"
 
 #include "wivrn_config.h"
@@ -404,9 +405,12 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 	// shows up as an authentication failure on every datagram rather than as anything
 	// diagnostic.
 	cfg.stream_id = stream_index;
-	cfg.cols = uint16_t(si.tiles_x);
-	cfg.rows = uint16_t(si.tile_count / si.tiles_x);
-	cfg.band_rows = uint16_t(std::min<uint32_t>(cfg.rows, 6));
+	// Over the eye PAIR. common/nxwarp_stream_grid.h has why this is not
+	// `tile_count / tiles_x`, and tests/nxwarp_stereo_grid_test.cpp pins it.
+	const auto grid = wivrn::nxwarp_tile_grid(si.tiles_x, si.tiles_y, si.eyes);
+	cfg.cols = grid.cols;
+	cfg.rows = grid.rows;
+	cfg.band_rows = wivrn::nxwarp_band_rows(grid.rows);
 	cfg.layers = 1;
 	cfg.mtu = 1280;
 	cfg.caps = nxt::kCapFec | nxt::kCapPoseHdr | nxt::kCapRleFeedback;

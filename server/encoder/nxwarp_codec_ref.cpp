@@ -16,6 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include "nxwarp_stream_grid.h"
 #include "nxwarp_codec.h"
 
 #include <nxvc/nxvc.h>
@@ -38,6 +39,9 @@ class nxwarp_codec_ref final : public wivrn::nxwarp_codec
 {
 	nxvc_encoder * enc = nullptr;
 	nxvc_tile_layout layout{};
+	// Eyes this stream codes: 1, or 2 for a side-by-side stereo frame. The tile
+	// grid the transport sees spans the pair, so tile_grid() needs it.
+	uint32_t eyes = 1;
 
 	// The reference encoder's quantiser is fixed at create(), but its
 	// encode_frame takes a per-tile qp_map that overrides it — so the way to
@@ -69,7 +73,8 @@ public:
 		cfg.color_space = NXVC_CS_YCBCR_709_LIMITED;
 		cfg.alpha = 0;
 		cfg.base_qp = c.base_qp;
-		cfg.eyes = 1; // one WiVRn stream is one eye; stereo pairing is a later item
+		cfg.eyes = c.eyes ? c.eyes : 1;
+		eyes = cfg.eyes;
 		cfg.inter = c.inter ? 1 : 0;
 		cfg.stereo = 0;
 		cfg.intra_period = c.intra_period;
@@ -134,8 +139,11 @@ public:
 
 	void tile_grid(uint32_t & cols, uint32_t & rows) const override
 	{
-		cols = layout.tiles_x;
-		rows = layout.tile_count / (layout.tiles_x ? layout.tiles_x : 1);
+		// Over the eye PAIR, matching nxvc_vk_encoder_tile_grid() and the
+		// transport's column count. common/nxwarp_stream_grid.h has why.
+		const auto grid = wivrn::nxwarp_tile_grid(layout.tiles_x, layout.tiles_y, eyes);
+		cols = grid.cols;
+		rows = grid.rows;
 	}
 
 	void set_view(const wivrn::nxwarp_codec_view & v) override
@@ -223,8 +231,8 @@ public:
 	{
 		return std::format("nxvc_ref CPU reference encoder, {} ({}x{} tiles)",
 		                   nxvc_version_string(),
-		                   layout.tiles_x,
-		                   layout.tiles_x ? layout.tile_count / layout.tiles_x : 0);
+		                   wivrn::nxwarp_tile_grid(layout.tiles_x, layout.tiles_y, eyes).cols,
+		                   wivrn::nxwarp_tile_grid(layout.tiles_x, layout.tiles_y, eyes).rows);
 	}
 };
 

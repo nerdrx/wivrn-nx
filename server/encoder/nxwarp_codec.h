@@ -46,8 +46,19 @@ namespace wivrn
 // headers on the include path.
 struct nxwarp_codec_config
 {
-	uint32_t width = 0;  // luma samples, per eye
+	uint32_t width = 0;  // luma samples, PER EYE
 	uint32_t height = 0;
+	// Eyes coded as ONE nxvc frame: 1, or 2 for a side-by-side stereo frame whose
+	// source image is `eyes * width` samples wide, eye 0 on the left ([SYN] 3.3 --
+	// a picture is one eye, and a stereo frame carries two pictures rather than one
+	// of double width). At 2 the tile grid the transport sees spans the pair:
+	// `cols = eyes * cols_per_eye`, `rows = ceil(height / 64)`.
+	//
+	// This is the eye PAIRING, not the STEREO tool: the cross-eye predictor (tool
+	// bit 12, mode 4) stays OFF and the stream carries that bit clear. The two are
+	// independent -- the syntax only requires STEREO => eyes == 2, never the
+	// converse -- so pairing the eyes costs nothing that the atlas work forbids.
+	uint32_t eyes = 1;
 	// The quantiser, 0..63, every tile of a frame is coded at, until
 	// nxwarp_codec::set_qp says otherwise. With "rc": "auto" this is only the
 	// starting point the controller in video_encoder_nxwarp moves from.

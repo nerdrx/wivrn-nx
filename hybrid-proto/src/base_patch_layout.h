@@ -6,6 +6,45 @@
 // prototype does not take a build dependency on the decoder's private headers.
 // If the two ever disagree, that header is right and this is the bug.
 //
+// ---------------------------------------------------------------------------
+// WHY THIS COPY STAYS, now that there is a published accessor.
+//
+// nxvc_vk_encoder_atlas_layout() reports the ring-slot shape, and the SERVER
+// path uses it: server/encoder/nxwarp_codec_vk.cpp asks the encoder and keeps
+// no arithmetic of its own. This file is deliberately not switched, for three
+// reasons, in order of how much they cost to overturn.
+//
+//   1. THE ACCESSOR NEEDS AN ENCODER. It is a method on a live
+//      nxvc_vk_encoder configured for an ATLAS stream. test_base_patch.c
+//      creates no encoder and no stream: it builds an atlas image itself, runs
+//      base_patch.comp over it, and compares against the model below. Asking
+//      the encoder would mean standing one up -- and then the thing under test
+//      would be supplying its own expected answer.
+//
+//   2. THIS FILE IS NOT ONLY A LAYOUT. nxbp_apply_cpu() is the CPU reference
+//      the GPU kernel is checked against, and it packs the 64-byte per-tile
+//      table as well. The accessor reports geometry and nothing else, so
+//      switching would replace a third of this header and leave the rest --
+//      which is the part that actually finds bugs.
+//
+//   3. THE BUILD IS THE POINT. hybrid-proto/build.sh compiles this with
+//      `gcc -I<vulkan headers> -lvulkan`, and the arm64 harnesses beside it
+//      with the NDK against nothing but the platform. There is no nxvc in that
+//      build, no CMake, and no CI; it is a harness you can run on a bare
+//      device. Taking the library as a dependency to learn six integers would
+//      cost that outright.
+//
+// WHAT THIS COSTS, stated plainly: this is now the only remaining copy of the
+// ring arithmetic, and nothing in a build checks it against the library. The
+// mitigation is that the copy was CONFIRMED against the accessor at the moment
+// the server side switched, on both shapes the e2e harness exercises --
+// 1088x1088 mono giving slot 1775616 u16, planes at 0/1183744/1479680, strides
+// 1088/544/544 and a 17x17 grid, and the 320x240 pair giving slot 230400,
+// planes at 0/153600/192000, strides 640/320/320 and 5x4 per eye. Both are
+// exactly what nxbp_layout_init() computes. If the library's layout ever moves,
+// this file does not find out; the rule at the top of this comment is then the
+// one that applies, and the server path is already safe because it asks.
+//
 //   * planes are concatenated; plane p has PER-EYE width planeW[p]
 //   * row stride is (planeW[p] * eyes + 1) & ~1, in u16 elements
 //   * eye e's sub-picture begins at column e * planeW[p]

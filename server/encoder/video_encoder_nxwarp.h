@@ -24,6 +24,7 @@
 #include "vk/allocation.h"
 
 #include <array>
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -387,7 +388,11 @@ class video_encoder_nxwarp : public video_encoder
 
 	// Move `current_qp` toward the byte budget implied by the bitrate share and
 	// the frame rate. Called once per encoded frame with that frame's size.
-	void run_rate_control(size_t last_frame_bytes);
+	// `frame_was_intra` is the encoder's own knowledge that the frame it just
+	// coded was an all-intra resync, which is what makes a fitting frame evidence
+	// rather than an accident. A content scene cut is not signalled and is caught
+	// by the size test instead.
+	void run_rate_control(size_t last_frame_bytes, bool frame_was_intra);
 
 	// Rolling encode timing, reported every two seconds (encode()).
 	std::chrono::steady_clock::time_point prof_since = std::chrono::steady_clock::now();
@@ -423,15 +428,30 @@ class video_encoder_nxwarp : public video_encoder
 	// for and this is what the transport requires, and when they disagree the
 	// transport wins -- a frame that does not fit is not a quality decision.
 	uint32_t rc_ceiling_floor = 0;
-	// Consecutive frames comfortably under the ceiling. The floor is released
-	// after three, not one: releasing on the first good frame puts the quantiser
-	// straight back where the overflow happened and oscillates.
-	uint32_t rc_ceiling_fit_run = 0;
-	static constexpr uint32_t rc_ceiling_release_frames = 3;
-	// The frame is "comfortably" under at this fraction of the ceiling. The gap
-	// between this and 1.0 is the hysteresis band: inside it the floor is held
-	// but not raised.
+	// The floor is released by ONE frame, but only by a frame whose fitting means
+	// something: an intra frame, or any frame over rc_ceiling_large_frac of the
+	// ceiling. Three consecutive SMALL frames was the first rule and it does not
+	// work -- on a 48-frame pan clip the small frames are inter frames, they say
+	// nothing about the next scene cut, and the floor was released straight into
+	// one. Measured: 37 of 48 frames sent, three spent re-climbing at every cut.
+	// An intra frame is the worst case by construction, so a intra frame that
+	// fits is the evidence the floor is no longer needed.
 	static constexpr double rc_ceiling_release_frac = 0.8;
+	static constexpr double rc_ceiling_large_frac = 0.5;
+	// The highest quantiser at which a frame has EVER overflowed this session.
+	// The band below it is known bad at this resolution and content, so the
+	// controller does not go back down into it: the floor never falls below
+	// rc_burnt_qp - 2, which puts a scene cut one +2 step from fitting instead of
+	// three. 0 until something overflows.
+	uint32_t rc_burnt_qp = 0;
+	static constexpr uint32_t rc_burnt_margin = 2;
+	// The three floors resolved into the one the controller actually honours.
+	uint32_t effective_qp_floor() const
+	{
+		const uint32_t burnt =
+		        rc_burnt_qp > rc_burnt_margin ? rc_burnt_qp - rc_burnt_margin : 0;
+		return std::max({rc_min_qp, rc_ceiling_floor, burnt});
+	}
 	// And the fraction the byte target is capped at, so the bitrate loop aims
 	// below the ceiling rather than at it.
 	static constexpr double rc_ceiling_target_frac = 0.9;
@@ -492,6 +512,12 @@ public:
 		// has been decided). Read before an encode() they describe that frame;
 		// read after it, the QP is the one the controller just moved to.
 		uint32_t qp = 0;
+		// The lowest quantiser the controller may currently choose: the
+		// operator's min-qp, or higher when the transport ceiling is holding it
+		// up. Reported because "under budget" is only a controller fault when it
+		// had somewhere lower to go, and with a ceiling in play min-qp is no
+		// longer the answer to that.
+		uint32_t qp_floor = 0;
 		double target_bytes = 0;
 		// Frames the headset reported it did not reconstruct, and how many of those
 		// named a frame older than one already coded intra and so cost nothing. The
@@ -509,6 +535,7 @@ public:
 		        prof_total_max_ms,
 		        prof_total_bytes,
 		        current_qp,
+		        effective_qp_floor(),
 		        rc_target_bytes,
 		        not_held_total.load(std::memory_order_relaxed),
 		        not_held_already_answered.load(std::memory_order_relaxed),

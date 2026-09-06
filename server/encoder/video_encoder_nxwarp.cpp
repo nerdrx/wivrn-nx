@@ -630,7 +630,8 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 // wants the frames the ceiling implies and cannot have them is a session whose
 // ceiling is wrong, and clamping says so in the two-second report rather than
 // silently obeying.
-void wivrn::video_encoder_nxwarp::run_rate_control(size_t last_frame_bytes)
+void wivrn::video_encoder_nxwarp::run_rate_control(size_t last_frame_bytes,
+                                                   bool frame_was_intra)
 {
 	if (not rc_auto)
 		return; // "fixed": the drop site logs the ceiling; nothing moves the QP
@@ -649,7 +650,10 @@ void wivrn::video_encoder_nxwarp::run_rate_control(size_t last_frame_bytes)
 	{
 		if (actual_bytes > ceiling)
 		{
-			rc_ceiling_fit_run = 0;
+			// This quantiser is now known bad at this resolution and content.
+			// Remembering the highest such value is what stops the controller
+			// walking back down into a band it has already been burnt in.
+			rc_burnt_qp = std::max(rc_burnt_qp, current_qp);
 			const uint32_t want =
 			        uint32_t(std::min<int>(int(current_qp) + 2, int(rc_max_qp)));
 			if (want != current_qp and codec->set_qp(want))
@@ -669,19 +673,18 @@ void wivrn::video_encoder_nxwarp::run_rate_control(size_t last_frame_bytes)
 			}
 			return;
 		}
-		if (actual_bytes < ceiling * rc_ceiling_release_frac)
+		// Releasing the floor takes a frame whose fitting is EVIDENCE. An intra
+		// frame is the worst case by construction; a frame over half the ceiling
+		// is a big one whatever the encoder called it, which is how an unsignalled
+		// scene cut qualifies. A small inter frame proves nothing about the next
+		// cut and no longer counts -- that rule released the floor straight into
+		// one and cost three frames every time.
+		if (rc_ceiling_floor)
 		{
-			if (rc_ceiling_floor and ++rc_ceiling_fit_run >= rc_ceiling_release_frames)
-			{
+			const bool large = frame_was_intra or
+			                   actual_bytes > ceiling * rc_ceiling_large_frac;
+			if (large and actual_bytes < ceiling * rc_ceiling_release_frac)
 				rc_ceiling_floor = 0;
-				rc_ceiling_fit_run = 0;
-			}
-		}
-		else
-		{
-			// Under the ceiling but inside the hysteresis band: hold the floor
-			// where it is rather than release it into the frame that overflowed.
-			rc_ceiling_fit_run = 0;
 		}
 	}
 
@@ -750,10 +753,12 @@ void wivrn::video_encoder_nxwarp::run_rate_control(size_t last_frame_bytes)
 	if (not step)
 		return;
 
-	// The floor is the operator's min-qp, or the one the transport ceiling
-	// imposed if that is higher: an undeliverable frame is not a quality
-	// setting, so while the escape's floor stands it wins.
-	const int floor_qp = int(std::max(rc_min_qp, rc_ceiling_floor));
+	// The floor is the highest of three: what the operator asked for, what the
+	// ceiling escape is holding, and two steps below the worst quantiser that has
+	// ever overflowed. The last one outlives the escape on purpose -- the escape
+	// is released by evidence that the CURRENT picture fits, and the burnt band is
+	// a fact about the resolution that the next scene cut will re-discover.
+	const int floor_qp = int(effective_qp_floor());
 	const uint32_t want = uint32_t(std::clamp(int(current_qp) + step, floor_qp, int(rc_max_qp)));
 	if (want == current_qp)
 		return;
@@ -1484,7 +1489,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		// running it left the quantiser where it was and the next frame the
 		// same size. The stream then sent nothing at all, for as long as the
 		// picture stayed busy.
-		run_rate_control(bitstream.size());
+		run_rate_control(bitstream.size(), resync_this_frame);
 		return {};
 	}
 
@@ -1553,7 +1558,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// The quantiser for the NEXT frame, from the size of this one. Last, because
 	// everything above describes the frame that was just sent and the controller
 	// is about to invalidate `current_qp` for it.
-	run_rate_control(bitstream.size());
+	run_rate_control(bitstream.size(), resync_this_frame);
 	// And the transport's own budget, from the same number the quantiser follows.
 	follow_path_budget();
 

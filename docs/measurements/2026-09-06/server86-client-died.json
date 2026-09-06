@@ -1,0 +1,213 @@
+{
+ "name": "server86-client-died",
+ "note": "Kept deliberately. A record set that holds only sessions that worked cannot be used to tell whether a change broke anything.",
+ "verdict": "NEGATIVE RECORD: the client connected, exactly one encode report went out, and the network thread saw a socket shutdown.",
+ "generated": "2026-09-06T20:52:39",
+ "tool": "tools/capture-record.py",
+ "window": {
+  "client_from": null,
+  "client_to": null,
+  "server_report_from": 0,
+  "server_report_to": null,
+  "note": "Server logs carry no timestamps, so the wall-clock window applies to the client capture only; the server side is selected by report index."
+ },
+ "provenance": {
+  "server": {
+   "path": "/run/media/nerdrx/Lex/claude/nx-scratch/live/server86.log",
+   "bytes": 7458,
+   "mtime": "2026-09-06T20:10:44",
+   "sha256": "1e660fb2c4dcdff09e9dfc57130e67ba801d387470929f59180d4aecae7f5be2"
+  },
+  "client": null
+ },
+ "server": {
+  "session": {
+   "build": {
+    "v": "nx-1.4.1-4-g537bab91"
+   },
+   "gpu": {
+    "gpu": "AMD Radeon RX 7900 XTX (RADV NAVI31)"
+   },
+   "geometry": {
+    "w": "2176",
+    "h": "1088",
+    "tiles": "578"
+   },
+   "entropy": {
+    "req": "auto",
+    "got": "lite"
+   },
+   "tools": {
+    "enc": "0x42200c05",
+    "names": "INTRA_DC_PLANE RES_LEVEL INTER WARP CTX_V2 CTX_V3 ENTROPY_LITE",
+    "client": "0x1777a1fff"
+   },
+   "backend": {
+    "backend": "nxvc_vk_encoder GPU compute encoder, nxvc_vk_encoder (E0/E3/E4/E5, intra only) (34x17 tiles, intra only, one QP per frame)"
+   },
+   "bitrate_cfg": {
+    "algo": "AIMD (v1)",
+    "ceil": "50.0",
+    "floor": "10.0"
+   },
+   "fec": {
+    "fec": "one parity shard per 8 video shards"
+   },
+   "rc": {
+    "bps": "43360433",
+    "bpf": "60223",
+    "hz": "90",
+    "lo": "22",
+    "hi": "40"
+   },
+   "tile_map_mode": "auto",
+   "not_reconstructed_last_reason": "dropped by the worker backlog",
+   "encoder_configuration": [
+    "* nxwarp (nxwarp 8-bit)",
+    "size: 1088x1088",
+    "bitrate: 48.7Mbit/s",
+    "* nxwarp (nxwarp 8-bit)",
+    "size: 1088x544",
+    "bitrate: 1.2Mbit/s"
+   ],
+   "encode_reports_in_log": 1,
+   "report_lines_not_parsed": 0
+  },
+  "metrics": {
+   "bytes_per_frame": {
+    "n": 1,
+    "mean": 32055.0,
+    "min": 32055,
+    "max": 32055,
+    "unit": "B"
+   },
+   "client_decode_ms": {
+    "n": 1,
+    "mean": 58.8,
+    "min": 58.8,
+    "max": 58.8,
+    "unit": "ms"
+   },
+   "controller_mbit": {
+    "n": 1,
+    "mean": 43.4,
+    "min": 43.4,
+    "max": 43.4,
+    "unit": "Mbit/s"
+   },
+   "encode_ms": {
+    "n": 1,
+    "mean": 3.6,
+    "min": 3.6,
+    "max": 3.6,
+    "unit": "ms"
+   },
+   "encode_ms_max": {
+    "n": 1,
+    "mean": 6.4,
+    "min": 6.4,
+    "max": 6.4,
+    "unit": "ms"
+   },
+   "frames_not_sent": {
+    "n": 1,
+    "mean": 6.0,
+    "min": 6,
+    "max": 6,
+    "unit": "frames"
+   },
+   "frames_per_report": {
+    "n": 1,
+    "mean": 83.0,
+    "min": 83,
+    "max": 83,
+    "unit": "frames"
+   },
+   "not_reconstructed": {
+    "n": 1,
+    "mean": 76.0,
+    "min": 76,
+    "max": 76,
+    "unit": "frames"
+   },
+   "not_reconstructed_cost_intra": {
+    "n": 1,
+    "mean": 42.0,
+    "min": 42,
+    "max": 42,
+    "unit": "frames"
+   },
+   "not_reconstructed_free": {
+    "n": 1,
+    "mean": 34.0,
+    "min": 34,
+    "max": 34,
+    "unit": "frames"
+   },
+   "paced_fps": {
+    "n": 1,
+    "mean": 33.0,
+    "min": 33.0,
+    "max": 33.0,
+    "unit": "fps"
+   },
+   "qp_hi": {
+    "n": 1,
+    "mean": 28.0,
+    "min": 28,
+    "max": 28
+   },
+   "qp_lo": {
+    "n": 1,
+    "mean": 22.0,
+    "min": 22,
+    "max": 22
+   },
+   "qp_mean": {
+    "n": 1,
+    "mean": 22.2,
+    "min": 22.2,
+    "max": 22.2
+   },
+   "rate_error_pct": {
+    "n": 1,
+    "mean": -76.0,
+    "min": -76,
+    "max": -76,
+    "unit": "%"
+   },
+   "report_seconds": {
+    "n": 1,
+    "mean": 2.0,
+    "min": 2.0,
+    "max": 2.0,
+    "unit": "s"
+   },
+   "target_bytes_per_frame": {
+    "n": 1,
+    "mean": 132283.0,
+    "min": 132283,
+    "max": 132283,
+    "unit": "B"
+   },
+   "tilemap_chunk_frames": {
+    "n": 1,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "unit": "frames"
+   },
+   "tilemap_span_frames": {
+    "n": 1,
+    "mean": 82.0,
+    "min": 82,
+    "max": 82,
+    "unit": "frames"
+   }
+  }
+ },
+ "client": {
+  "session": {},
+  "metrics": {}
+ }
+}

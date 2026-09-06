@@ -1,0 +1,232 @@
+{
+ "name": "server76-long-session",
+ "note": "Kept because it is the only capture long enough to show the quantiser controller and the not-reconstructed storm over a long horizon. The 90-second operating point belongs to cap76-operating-point, not to this.",
+ "verdict": "The long one: 3406 encode reports over roughly two hours of a single connection.",
+ "generated": "2026-09-06T20:52:38",
+ "tool": "tools/capture-record.py",
+ "window": {
+  "client_from": null,
+  "client_to": null,
+  "server_report_from": 0,
+  "server_report_to": null,
+  "note": "Server logs carry no timestamps, so the wall-clock window applies to the client capture only; the server side is selected by report index."
+ },
+ "provenance": {
+  "server": {
+   "path": "/run/media/nerdrx/Lex/claude/nx-scratch/live/server76.log",
+   "bytes": 1869889,
+   "mtime": "2026-09-06T15:01:37",
+   "sha256": "a516398e661c509c2c9f8b2fad8e73d4fedbb0878a69a47210d128bfb8264505"
+  },
+  "client": null
+ },
+ "server": {
+  "session": {
+   "build": {
+    "v": "nx-1.4.1-4-g537bab91"
+   },
+   "gpu": {
+    "gpu": "AMD Radeon RX 7900 XTX (RADV NAVI31)"
+   },
+   "geometry": {
+    "w": "2176",
+    "h": "1088",
+    "tiles": "578"
+   },
+   "entropy": {
+    "req": "auto",
+    "got": "lite"
+   },
+   "tools": {
+    "enc": "0x42200c05",
+    "names": "INTRA_DC_PLANE RES_LEVEL INTER WARP CTX_V2 CTX_V3 ENTROPY_LITE",
+    "client": "0x1777a1fff"
+   },
+   "backend": {
+    "backend": "nxvc_vk_encoder GPU compute encoder, nxvc_vk_encoder (E0/E3/E4/E5, intra only) (34x17 tiles, intra only, one QP per frame)"
+   },
+   "bitrate_cfg": {
+    "algo": "AIMD (v1)",
+    "ceil": "50.0",
+    "floor": "10.0"
+   },
+   "fec": {
+    "fec": "one parity shard per 8 video shards"
+   },
+   "rc": {
+    "bps": "43360433",
+    "bpf": "60223",
+    "hz": "90",
+    "lo": "22",
+    "hi": "40"
+   },
+   "tile_map_mode": "auto",
+   "not_reconstructed_last_reason": "dropped by the worker backlog",
+   "encoder_configuration": [
+    "* nxwarp (nxwarp 8-bit)",
+    "size: 1088x1088",
+    "bitrate: 48.7Mbit/s",
+    "* nxwarp (nxwarp 8-bit)",
+    "size: 1088x544",
+    "bitrate: 1.2Mbit/s"
+   ],
+   "encode_reports_in_log": 3406,
+   "report_lines_not_parsed": 0
+  },
+  "metrics": {
+   "bytes_per_frame": {
+    "n": 3406,
+    "mean": 30118.4463,
+    "min": 17141,
+    "max": 33709,
+    "stdev": 6819.5068,
+    "unit": "B"
+   },
+   "client_decode_ms": {
+    "n": 3406,
+    "mean": 20.0786,
+    "min": 16.3,
+    "max": 57.9,
+    "stdev": 1.9338,
+    "unit": "ms"
+   },
+   "controller_mbit": {
+    "n": 3406,
+    "mean": 43.4,
+    "min": 43.4,
+    "max": 43.4,
+    "stdev": 0.0,
+    "unit": "Mbit/s"
+   },
+   "encode_ms": {
+    "n": 3406,
+    "mean": 3.4388,
+    "min": 3.2,
+    "max": 4.6,
+    "stdev": 0.1078,
+    "unit": "ms"
+   },
+   "encode_ms_max": {
+    "n": 3406,
+    "mean": 5.1312,
+    "min": 4.2,
+    "max": 12.6,
+    "stdev": 0.6577,
+    "unit": "ms"
+   },
+   "frames_not_sent": {
+    "n": 3406,
+    "mean": 91.0437,
+    "min": 2,
+    "max": 118,
+    "stdev": 2.0429,
+    "unit": "frames"
+   },
+   "frames_per_report": {
+    "n": 3406,
+    "mean": 90.0816,
+    "min": 62,
+    "max": 91,
+    "stdev": 1.3843,
+    "unit": "frames"
+   },
+   "not_reconstructed": {
+    "n": 729,
+    "mean": 3.3951,
+    "min": 1,
+    "max": 80,
+    "stdev": 3.0046,
+    "unit": "frames"
+   },
+   "not_reconstructed_cost_intra": {
+    "n": 729,
+    "mean": 2.0247,
+    "min": 0,
+    "max": 43,
+    "stdev": 2.3144,
+    "unit": "frames"
+   },
+   "not_reconstructed_free": {
+    "n": 729,
+    "mean": 1.3704,
+    "min": 0,
+    "max": 37,
+    "stdev": 2.1851,
+    "unit": "frames"
+   },
+   "paced_fps": {
+    "n": 3406,
+    "mean": 43.5587,
+    "min": 37.0,
+    "max": 49.9,
+    "stdev": 3.0556,
+    "unit": "fps"
+   },
+   "qp_hi": {
+    "n": 3406,
+    "mean": 22.0018,
+    "min": 22,
+    "max": 28,
+    "stdev": 0.1028
+   },
+   "qp_lo": {
+    "n": 3406,
+    "mean": 22.0,
+    "min": 22,
+    "max": 22,
+    "stdev": 0.0
+   },
+   "qp_mean": {
+    "n": 3406,
+    "mean": 22.0001,
+    "min": 22.0,
+    "max": 22.2,
+    "stdev": 0.0034
+   },
+   "rate_error_pct": {
+    "n": 3406,
+    "mean": -75.4551,
+    "min": -88,
+    "max": -69,
+    "stdev": 6.6304,
+    "unit": "%"
+   },
+   "report_seconds": {
+    "n": 3406,
+    "mean": 2.0,
+    "min": 2.0,
+    "max": 2.0,
+    "stdev": 0.0,
+    "unit": "s"
+   },
+   "target_bytes_per_frame": {
+    "n": 3406,
+    "mean": 125087.8018,
+    "min": 108134,
+    "max": 146257,
+    "stdev": 9409.2668,
+    "unit": "B"
+   },
+   "tilemap_chunk_frames": {
+    "n": 3406,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "frames"
+   },
+   "tilemap_span_frames": {
+    "n": 3406,
+    "mean": 90.0813,
+    "min": 62,
+    "max": 91,
+    "stdev": 1.3853,
+    "unit": "frames"
+   }
+  }
+ },
+ "client": {
+  "session": {},
+  "metrics": {}
+ }
+}

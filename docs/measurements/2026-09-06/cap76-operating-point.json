@@ -1,0 +1,805 @@
+{
+ "name": "cap76-operating-point",
+ "note": "90 seconds of a live Pico 4 session on the nx-warp-e2e head of the day. This is the capture every operating-point number in docs/CLIENT-DECODE-WALL.md and docs/CLIENT-REPROJECTION.md was read out of by eye.",
+ "verdict": "The shipped operating point: 16.69 ms of Adreno per stereo frame, 92 ms of pose age, and a GPU already at 92 %.",
+ "generated": "2026-09-06T20:52:38",
+ "tool": "tools/capture-record.py",
+ "window": {
+  "client_from": "13:08:03",
+  "client_to": "13:09:34",
+  "server_report_from": 0,
+  "server_report_to": null,
+  "note": "Server logs carry no timestamps, so the wall-clock window applies to the client capture only; the server side is selected by report index."
+ },
+ "provenance": {
+  "server": {
+   "path": "/run/media/nerdrx/Lex/claude/nx-scratch/live/cap76-server.log",
+   "bytes": 31615,
+   "mtime": "2026-09-06T13:09:35",
+   "sha256": "a9946427d1307b3c585263f4234dc6adfc58dbc887b527f830714fcd09f5c374"
+  },
+  "client": {
+   "path": "/run/media/nerdrx/Lex/claude/nx-scratch/live/cap76.log",
+   "bytes": 167670,
+   "mtime": "2026-09-06T13:09:35",
+   "sha256": "b64d24c778c248250f151bf106c36eb41a72ca59a86bd1384f0f869782123832"
+  }
+ },
+ "server": {
+  "session": {
+   "tile_map_mode": "auto",
+   "not_reconstructed_last_reason": "dropped by the worker backlog",
+   "encode_reports_in_log": 45,
+   "report_lines_not_parsed": 0
+  },
+  "metrics": {
+   "bytes_per_frame": {
+    "n": 45,
+    "mean": 17148.2667,
+    "min": 17147,
+    "max": 17150,
+    "stdev": 1.1362,
+    "unit": "B"
+   },
+   "client_decode_ms": {
+    "n": 45,
+    "mean": 22.8111,
+    "min": 19.8,
+    "max": 23.7,
+    "stdev": 0.9672,
+    "unit": "ms"
+   },
+   "controller_mbit": {
+    "n": 45,
+    "mean": 43.4,
+    "min": 43.4,
+    "max": 43.4,
+    "stdev": 0.0,
+    "unit": "Mbit/s"
+   },
+   "encode_ms": {
+    "n": 45,
+    "mean": 3.5489,
+    "min": 3.3,
+    "max": 4.6,
+    "stdev": 0.1914,
+    "unit": "ms"
+   },
+   "encode_ms_max": {
+    "n": 45,
+    "mean": 5.6933,
+    "min": 4.5,
+    "max": 12.6,
+    "stdev": 1.3758,
+    "unit": "ms"
+   },
+   "frames_not_sent": {
+    "n": 45,
+    "mean": 94.0667,
+    "min": 90,
+    "max": 102,
+    "stdev": 2.9419,
+    "unit": "frames"
+   },
+   "frames_per_report": {
+    "n": 45,
+    "mean": 86.8889,
+    "min": 80,
+    "max": 90,
+    "stdev": 2.9094,
+    "unit": "frames"
+   },
+   "not_reconstructed": {
+    "n": 37,
+    "mean": 2.8108,
+    "min": 1,
+    "max": 4,
+    "stdev": 1.1015,
+    "unit": "frames"
+   },
+   "not_reconstructed_cost_intra": {
+    "n": 37,
+    "mean": 2.8108,
+    "min": 1,
+    "max": 4,
+    "stdev": 1.1015,
+    "unit": "frames"
+   },
+   "not_reconstructed_free": {
+    "n": 37,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "frames"
+   },
+   "paced_fps": {
+    "n": 45,
+    "mean": 38.4644,
+    "min": 37.2,
+    "max": 42.1,
+    "stdev": 0.9966,
+    "unit": "fps"
+   },
+   "qp_hi": {
+    "n": 45,
+    "mean": 22.0,
+    "min": 22,
+    "max": 22,
+    "stdev": 0.0
+   },
+   "qp_lo": {
+    "n": 45,
+    "mean": 22.0,
+    "min": 22,
+    "max": 22,
+    "stdev": 0.0
+   },
+   "qp_mean": {
+    "n": 45,
+    "mean": 22.0,
+    "min": 22.0,
+    "max": 22.0,
+    "stdev": 0.0
+   },
+   "rate_error_pct": {
+    "n": 45,
+    "mean": -87.8889,
+    "min": -88,
+    "max": -87,
+    "stdev": 0.3178,
+    "unit": "%"
+   },
+   "report_seconds": {
+    "n": 45,
+    "mean": 2.0,
+    "min": 2.0,
+    "max": 2.0,
+    "stdev": 0.0,
+    "unit": "s"
+   },
+   "target_bytes_per_frame": {
+    "n": 45,
+    "mean": 140951.2,
+    "min": 129004,
+    "max": 145884,
+    "stdev": 3485.6583,
+    "unit": "B"
+   },
+   "tilemap_chunk_frames": {
+    "n": 45,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "frames"
+   },
+   "tilemap_span_frames": {
+    "n": 45,
+    "mean": 86.8889,
+    "min": 80,
+    "max": 90,
+    "stdev": 2.9094,
+    "unit": "frames"
+   }
+  }
+ },
+ "client": {
+  "session": {
+   "defoveate_per_eye": "1088x1088",
+   "atlas_mode": 0,
+   "timestamped_lines": 782,
+   "lines_in_window": 782,
+   "stat_lines_not_parsed": 0,
+   "wifi": null
+  },
+  "metrics": {
+   "bytes_per_frame": {
+    "n": 46,
+    "mean": 17148.087,
+    "min": 17144,
+    "max": 17152,
+    "stdev": 1.9757,
+    "unit": "B"
+   },
+   "cache_represented": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "frames"
+   },
+   "defoveate_mpx": {
+    "n": 46,
+    "mean": 2.37,
+    "min": 2.37,
+    "max": 2.37,
+    "stdev": 0.0,
+    "unit": "Mpx"
+   },
+   "defoveate_scale": {
+    "n": 46,
+    "mean": 0.5,
+    "min": 0.5,
+    "max": 0.5,
+    "stdev": 0.0
+   },
+   "display_pass_ms": {
+    "n": 46,
+    "mean": 6.3717,
+    "min": 6.3,
+    "max": 6.5,
+    "stdev": 0.0544,
+    "unit": "ms"
+   },
+   "display_period_ms": {
+    "n": 46,
+    "mean": 22.9326,
+    "min": 21.4,
+    "max": 23.5,
+    "stdev": 0.5956,
+    "unit": "ms"
+   },
+   "frames_per_report": {
+    "n": 46,
+    "mean": 84.6739,
+    "min": 80,
+    "max": 86,
+    "stdev": 1.5924,
+    "unit": "frames"
+   },
+   "gpu_ms_per_stereo_frame": {
+    "n": 46,
+    "mean": 16.6935,
+    "min": 16.5,
+    "max": 17.0,
+    "stdev": 0.12,
+    "unit": "ms"
+   },
+   "holes": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "frames"
+   },
+   "iter_fence_ms": {
+    "n": 46,
+    "mean": 5.0565,
+    "min": 2.0,
+    "max": 7.9,
+    "stdev": 1.1678,
+    "unit": "ms"
+   },
+   "iter_fence_worst_ms": {
+    "n": 46,
+    "mean": 20.9674,
+    "min": 9.7,
+    "max": 23.8,
+    "stdev": 3.7457,
+    "unit": "ms"
+   },
+   "iter_queries_ms": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "iter_render_ms": {
+    "n": 46,
+    "mean": 5.4652,
+    "min": 2.4,
+    "max": 8.3,
+    "stdev": 1.1685,
+    "unit": "ms"
+   },
+   "iter_submit_ms": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "loop_gated_out": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "iterations"
+   },
+   "loop_iterations": {
+    "n": 46,
+    "mean": 87.8261,
+    "min": 85,
+    "max": 94,
+    "stdev": 2.3505,
+    "unit": "iterations"
+   },
+   "loop_nothing_to_show": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "iterations"
+   },
+   "loop_rate": {
+    "n": 46,
+    "mean": 43.6435,
+    "min": 42.3,
+    "max": 47.0,
+    "stdev": 1.1779,
+    "unit": "/s"
+   },
+   "loop_submitted_layer": {
+    "n": 46,
+    "mean": 87.8261,
+    "min": 85,
+    "max": 94,
+    "stdev": 2.3505,
+    "unit": "iterations"
+   },
+   "misses_late": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "frames"
+   },
+   "misses_overrun": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "frames"
+   },
+   "misses_skipped_refresh": {
+    "n": 46,
+    "mean": 0.3478,
+    "min": 0,
+    "max": 1,
+    "stdev": 0.4815,
+    "unit": "frames"
+   },
+   "net_datagrams_per_report": {
+    "n": 46,
+    "mean": 10094.5217,
+    "min": 9280,
+    "max": 10556,
+    "stdev": 334.8534,
+    "unit": "datagrams"
+   },
+   "net_decoded_total": {
+    "n": 46,
+    "last": 5554,
+    "first": 1744,
+    "delta": 3810,
+    "unit": "frames"
+   },
+   "net_frames_closed": {
+    "n": 46,
+    "mean": 87.0217,
+    "min": 80,
+    "max": 91,
+    "stdev": 2.8867,
+    "unit": "frames"
+   },
+   "net_frames_late": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "frames"
+   },
+   "net_frames_with_hole": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "frames"
+   },
+   "net_ms_per_datagram": {
+    "n": 46,
+    "mean": 0.009,
+    "min": 0.009,
+    "max": 0.009,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "net_ms_per_second": {
+    "n": 46,
+    "mean": 44.5893,
+    "min": 40.69,
+    "max": 46.49,
+    "stdev": 1.5113,
+    "unit": "ms/s"
+   },
+   "net_out_of_order": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "datagrams"
+   },
+   "net_queued_for_worker": {
+    "n": 46,
+    "mean": 0.0217,
+    "min": 0,
+    "max": 1,
+    "stdev": 0.1474,
+    "unit": "frames"
+   },
+   "net_stragglers_dropped": {
+    "n": 46,
+    "last": 5890,
+    "first": 1977,
+    "delta": 3913,
+    "unit": "datagrams"
+   },
+   "passA_ms": {
+    "n": 46,
+    "mean": 2.9717,
+    "min": 2.9,
+    "max": 3.1,
+    "stdev": 0.0502,
+    "unit": "ms"
+   },
+   "passB_coded_ms": {
+    "n": 46,
+    "mean": 5.4087,
+    "min": 5.3,
+    "max": 5.5,
+    "stdev": 0.0463,
+    "unit": "ms"
+   },
+   "passB_dir_ms": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "passB_ms": {
+    "n": 46,
+    "mean": 13.7152,
+    "min": 13.6,
+    "max": 14.0,
+    "stdev": 0.101,
+    "unit": "ms"
+   },
+   "passB_other_ms": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "passB_skip_ms": {
+    "n": 46,
+    "mean": 8.2457,
+    "min": 8.0,
+    "max": 8.5,
+    "stdev": 0.0982,
+    "unit": "ms"
+   },
+   "passB_tiles_coded": {
+    "n": 46,
+    "mean": 289.0,
+    "min": 289,
+    "max": 289,
+    "stdev": 0.0,
+    "unit": "tiles"
+   },
+   "passB_tiles_dir": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "tiles"
+   },
+   "passB_tiles_skip": {
+    "n": 46,
+    "mean": 289.0,
+    "min": 289,
+    "max": 289,
+    "stdev": 0.0,
+    "unit": "tiles"
+   },
+   "passB_total_ms": {
+    "n": 46,
+    "mean": 13.7152,
+    "min": 13.6,
+    "max": 14.0,
+    "stdev": 0.101,
+    "unit": "ms"
+   },
+   "passB_warp_ms": {
+    "n": 46,
+    "mean": 0.1,
+    "min": 0.1,
+    "max": 0.1,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "pose_age_mean_ms": {
+    "n": 46,
+    "mean": 91.9022,
+    "min": 82.4,
+    "max": 96.8,
+    "stdev": 3.1825,
+    "unit": "ms"
+   },
+   "pose_age_worst_ms": {
+    "n": 46,
+    "mean": 131.8022,
+    "min": 108.7,
+    "max": 154.7,
+    "stdev": 8.4737,
+    "unit": "ms"
+   },
+   "pose_frames": {
+    "n": 46,
+    "mean": 87.8261,
+    "min": 85,
+    "max": 94,
+    "stdev": 2.3505,
+    "unit": "frames"
+   },
+   "reassembly_buffer_kB": {
+    "n": 46,
+    "mean": 17.0,
+    "min": 17,
+    "max": 17,
+    "stdev": 0.0,
+    "unit": "kB"
+   },
+   "reassembly_held_kB": {
+    "n": 46,
+    "mean": 17.0,
+    "min": 17,
+    "max": 17,
+    "stdev": 0.0,
+    "unit": "kB"
+   },
+   "reassembly_ms_per_frame": {
+    "n": 46,
+    "mean": 0.0202,
+    "min": 0.02,
+    "max": 0.03,
+    "stdev": 0.0015,
+    "unit": "ms"
+   },
+   "reassembly_ratio": {
+    "n": 46,
+    "mean": 1.0,
+    "min": 1.0,
+    "max": 1.0,
+    "stdev": 0.0,
+    "unit": "x"
+   },
+   "refused": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "frames"
+   },
+   "report_seconds": {
+    "n": 46,
+    "mean": 2.0,
+    "min": 2.0,
+    "max": 2.0,
+    "stdev": 0.0,
+    "unit": "s"
+   },
+   "rx_datagrams": {
+    "n": 46,
+    "last": 660272,
+    "first": 206364,
+    "delta": 453908,
+    "unit": "datagrams"
+   },
+   "rx_late": {
+    "n": 46,
+    "last": 271,
+    "first": 271,
+    "delta": 0,
+    "unit": "datagrams"
+   },
+   "rx_placed": {
+    "n": 46,
+    "last": 1699917,
+    "first": 569062,
+    "delta": 1130855,
+    "unit": "datagrams"
+   },
+   "sel_arrival_ms": {
+    "n": 46,
+    "mean": 23.1674,
+    "min": 21.9,
+    "max": 27.0,
+    "stdev": 1.3839,
+    "unit": "ms"
+   },
+   "sel_decoded": {
+    "n": 46,
+    "last": 5554,
+    "first": 1744,
+    "delta": 3810,
+    "unit": "frames"
+   },
+   "sel_dropped_late": {
+    "n": 46,
+    "last": 239,
+    "first": 135,
+    "delta": 104,
+    "unit": "frames"
+   },
+   "sel_withheld": {
+    "n": 46,
+    "last": 151,
+    "first": 47,
+    "delta": 104,
+    "unit": "frames"
+   },
+   "stage_arrival_ms": {
+    "n": 46,
+    "mean": 23.1913,
+    "min": 21.9,
+    "max": 28.2,
+    "stdev": 1.3513,
+    "unit": "ms"
+   },
+   "stage_fence_post_ms": {
+    "n": 46,
+    "mean": 22.0804,
+    "min": 21.0,
+    "max": 22.7,
+    "stdev": 0.3661,
+    "unit": "ms"
+   },
+   "stage_fence_pre_ms": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "stage_gap_ms": {
+    "n": 46,
+    "mean": 0.9935,
+    "min": 0.3,
+    "max": 3.2,
+    "stdev": 0.7485,
+    "unit": "ms"
+   },
+   "stage_get_free_ms": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "stage_publish_ms": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "stage_qsubmit_ms": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "stage_record_ms": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "stage_stride": {
+    "n": 46,
+    "mean": 1.0,
+    "min": 1,
+    "max": 1,
+    "stdev": 0.0
+   },
+   "stage_submit_codec_ms": {
+    "n": 46,
+    "mean": 0.6022,
+    "min": 0.6,
+    "max": 0.7,
+    "stdev": 0.0147,
+    "unit": "ms"
+   },
+   "stage_submit_ms": {
+    "n": 46,
+    "mean": 0.6022,
+    "min": 0.6,
+    "max": 0.7,
+    "stdev": 0.0147,
+    "unit": "ms"
+   },
+   "stage_submit_qlock_ms": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "stage_wait_prev_ms": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "stage_withheld": {
+    "n": 46,
+    "mean": 2.3261,
+    "min": 0,
+    "max": 4,
+    "stdev": 1.3833,
+    "unit": "frames"
+   },
+   "submit_lead_mean_ms": {
+    "n": 46,
+    "mean": 46.6739,
+    "min": 44.0,
+    "max": 48.3,
+    "stdev": 0.895,
+    "unit": "ms"
+   },
+   "submit_lead_worst_ms": {
+    "n": 46,
+    "mean": 28.0239,
+    "min": 19.1,
+    "max": 36.8,
+    "stdev": 4.2689,
+    "unit": "ms"
+   },
+   "wait_prev_ms": {
+    "n": 46,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "wall_ms": {
+    "n": 46,
+    "mean": 22.7804,
+    "min": 21.7,
+    "max": 23.4,
+    "stdev": 0.3661,
+    "unit": "ms"
+   }
+  }
+ }
+}

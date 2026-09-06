@@ -94,6 +94,21 @@ constexpr bool nxwarp_pass_segments_supported()
 #endif
 }
 
+// Decoupled display: publish every frame COMPLETE, so the render thread waits on
+// nothing.
+//
+// A pool item with no semaphore is one whose copy the decode thread waits for on its
+// own fence; the frame then reaches the scene finished and the reprojection pass adds
+// no wait to its submit. That is the whole of the decoupling, and it is a path this
+// client already had -- it is what the Pico's Adreno driver forces, since it advertises
+// timeline semaphores and then refuses to create one.
+//
+// A plain global rather than a configuration lookup, because this header is compiled
+// into the NX Warp e2e harness as well as into the headset client, and the harness has
+// no configuration layer at all. Defaults ON so the harness exercises the same path the
+// headset does; the client overwrites it from the setting when a stream starts.
+inline std::atomic<bool> g_nxwarp_decoupled_display{true};
+
 
 // The decode stride, which is a process-wide value living in the decoder's translation unit (both
 // eyes share one). Declared here so the in-view statistics overlay can read it without reaching

@@ -33,6 +33,7 @@
 #include "application.h"
 #include "audio/audio.h"
 #include "boost/pfr/core.hpp"
+#include "decoder/nxwarp/nxwarp_decoder.h"
 #include "decoder/decoder.h"
 #include "decoder/shard_accumulator.h"
 #include "inplace_vector.hpp"
@@ -788,6 +789,23 @@ void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_p
 			if (stream == 0 and is_view(stream))
 				dejitter.sample(handle->feedback.received_from_decoder, handle->view_info.display_time);
 
+			// Publish the newest COMPLETE frame for the render thread, which reads
+			// it without taking this lock. Stream 0 only: it is the one every
+			// refresh paces on, and under decoupled display a handle reaching this
+			// point has already had its decode waited for -- there is nothing left
+			// for the display pass to wait on, which is what makes "complete"
+			// literal rather than optimistic.
+			//
+			// Inside the lock, which is what makes the single-producer requirement
+			// hold: two decode threads can be here at once, and the ring does not
+			// serialise publishers itself.
+			if (stream == 0 and is_view(stream))
+				complete_ring.publish(latest_complete{
+				        .frame_id = handle->feedback.frame_index,
+				        .display_time = handle->view_info.display_time,
+				        .completed_at = handle->feedback.received_from_decoder,
+				});
+
 			// One decoded frame on this stream, for the frame rate readout. Monotonic
 			// and never reset: the render thread differences it over a rolling window.
 			// Counted for every stream, base included: it is a decode that happened.
@@ -1456,6 +1474,21 @@ void scenes::stream::render(const XrFrameState & frame_state)
 
 	command_buffer.resetQueryPool(*query_pool, 0, size_gpu_timestamps);
 	command_buffer.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, *query_pool, 0);
+
+	// What is actually ready, read without taking a lock the decoders hold.
+	//
+	// Under decoupled display this is the frame the refresh will draw: a handle only
+	// reaches the ring once its decode has finished, so "the newest complete frame" and
+	// "the newest frame" are the same statement, and the pass below waits on nothing.
+	// Sampled before the choice so the number is what the render thread SAW, not what
+	// arrived while it was choosing.
+	latest_complete ready{};
+	const bool have_ready = complete_ring.load_latest(ready);
+	if (have_ready)
+	{
+		latest_complete_frame_id = ready.frame_id;
+		latest_complete_display_time = ready.display_time;
+	}
 
 	// Search for frame with desired display time on all decoders
 	// If no such frame exists, use the latest frame for each decoder
@@ -2410,6 +2443,15 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 		             int(description.role_of(uint8_t(stream_index))),
 		             width,
 		             height);
+
+#if WIVRN_USE_NXWARP
+		// Tell the NX Warp decoder which hand-over to use before it builds its image
+		// pool, since that is where the choice is made. A global rather than a
+		// constructor argument because the decoder header is also compiled into the
+		// e2e harness, which has no configuration layer to ask.
+		wivrn::g_nxwarp_decoupled_display.store(application::get_config().decoupled_display,
+		                                        std::memory_order_relaxed);
+#endif
 
 		item = accumulator_images{
 		        .decoder = std::make_unique<shard_accumulator>(device, physical_device, instance, queue_family_index, description, shared_from_this(), stream_index),

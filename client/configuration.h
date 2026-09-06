@@ -218,6 +218,31 @@ public:
 	// case is the behaviour it replaces.
 	bool jit_display = true;
 
+	// Let the display loop run at the refresh rate instead of at the decode rate.
+	//
+	// The reprojection pass used to be submitted with a wait on the decoder's
+	// semaphore, so it sat behind the whole decode on the queue; render() then blocked
+	// on the previous submission's fence for as long as that took. Measured on a clean
+	// live pair: a 16.7 ms decode per eye pair put a 20-23 ms stall in front of a
+	// display pass that costs one or two, the loop turned at 43/s against an 11.1 ms
+	// refresh, and the pose reaching the panel was 94 ms old.
+	//
+	// With this on, a frame is handed over only once its decode has actually FINISHED,
+	// and the display pass carries no wait at all: every refresh warps and presents the
+	// newest complete frame with the freshest pose, whether or not a decode is running.
+	// The decode keeps its own thread, its own command buffer and its own fence, which
+	// it alone waits on.
+	//
+	// It costs the one frame of CPU-side pipelining that the semaphore bought. On
+	// Adreno that is not a loss at all -- every queue is the same hardware ring, so
+	// there was no overlap to give up -- and even where it is real, a compositor that
+	// gets a frame every refresh is worth more than a decode that starts a millisecond
+	// earlier.
+	//
+	// The path itself is not new code: it is what this client already does on a driver
+	// whose image pool hands out no semaphore, which is why it can be the default.
+	bool decoupled_display = true;
+
 	// Last automatic resort below the bitrate floor: when the server's automatic bitrate is
 	// already pinned at its minimum and the link is still losing frames, let it halve the
 	// stream framerate to instantly halve bandwidth, restoring the full rate once the link

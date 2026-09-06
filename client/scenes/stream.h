@@ -31,6 +31,7 @@
 #include "stream_defoveator.h"
 #include "stream_jit.h"
 #include "stream_quad_blitter.h"
+#include "utils/frame_ring.h"
 #include "utils/thread_safe.h"
 #include "wifi_lock.h"
 #include "wivrn_client.h"
@@ -185,6 +186,38 @@ private:
 
 	// The one place a decoded base layer frame arrives. See stream.cpp.
 	void handle_base_frame(uint8_t stream_index, const std::shared_ptr<wivrn::shard_accumulator::blit_handle> & handle);
+
+	// The newest frame whose decode has FINISHED, as a few plain numbers, published by
+	// the decode threads and read by the render thread without a lock.
+	//
+	// The render thread needs to know what is ready before it decides how long to sleep
+	// -- that is the just-in-time schedule's whole input -- and it needs to know it
+	// without waiting on anything the decoders hold. frames_mutex is a short critical
+	// section, but "short" is a property of today's code and the render loop should not
+	// depend on it; this carries no lock and no fence at all.
+	//
+	// Deliberately NOT the frames themselves. A sequence lock copies a slot
+	// speculatively and discards it if it was being written, which is only safe for
+	// plain data: a shared_ptr copied mid-write would touch a reference count before
+	// the check could say the copy was bad. The handles keep travelling under
+	// frames_mutex; see latest_complete_ring's own note.
+	struct latest_complete
+	{
+		uint64_t frame_id = 0;
+		// The display time the server stamped on it, which is what the pose age and
+		// the just-in-time schedule are both measured against.
+		XrTime display_time = 0;
+		// When this client finished decoding it, on the same clock as the render
+		// loop's own timestamps.
+		XrTime completed_at = 0;
+	};
+	wivrn::latest_complete_ring<latest_complete, 4> complete_ring;
+	// The last thing the ring gave the render thread. Render-thread only, so no
+	// synchronisation of their own: they exist so the statistics and the just-in-time
+	// schedule can talk about the frame that was actually ready, rather than about the
+	// one the choice below happened to settle on.
+	uint64_t latest_complete_frame_id = 0;
+	XrTime latest_complete_display_time = 0;
 
 	// for frames inside accumulator images
 	std::mutex frames_mutex;

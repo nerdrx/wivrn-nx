@@ -361,11 +361,34 @@ void nxwarp_decoder::build_image_pool()
 		                },
 		        });
 
-		// The Pico 4's Adreno 650 driver advertises timeline semaphores and refuses to
-		// create one (vkCreateSemaphore returns VK_INCOMPLETE); nxvc's own decoder falls
-		// back to a fence for the same reason. Without one, the copy below is waited for
-		// on the host and the frame is published with no semaphore, which the render
-		// thread already treats as "nothing to wait for".
+		// DECOUPLED DISPLAY takes this path on purpose.
+		//
+		// A pool item with no semaphore is one whose copy is waited for on the decoder
+		// thread's own fence, and whose frame is therefore published COMPLETE -- the
+		// render thread is handed something finished and adds no wait to its submit.
+		// That is precisely what decoupling the display loop from the decode means, and
+		// it is why the option is implemented by choosing this existing path rather
+		// than by writing a second one: it is the path the Pico already runs, so it is
+		// the better tested of the two.
+		//
+		// What the semaphore bought was one frame of CPU-side pipelining, and what it
+		// cost was the reprojection pass queueing behind the whole decode -- a 16.7 ms
+		// decode putting a 20-23 ms stall in front of a pass that costs one or two, a
+		// loop turning at 43/s against an 11.1 ms refresh, and a 94 ms old pose on the
+		// panel. On Adreno the trade is free: every queue is the same hardware ring, so
+		// there was no overlap to give up in the first place.
+		//
+		// The other reason to take it: the Pico 4's Adreno 650 driver advertises
+		// timeline semaphores and refuses to create one (vkCreateSemaphore returns
+		// VK_INCOMPLETE), and nxvc's own decoder falls back to a fence for the same
+		// reason -- so this path has to work regardless.
+		if (g_nxwarp_decoupled_display.load(std::memory_order_relaxed) and not host_sync)
+		{
+			host_sync = true;
+			spdlog::info("nxwarp[{}]: decoupled display -- frames are published complete "
+			             "and the reprojection pass waits on nothing",
+			             stream_index);
+		}
 		if (not host_sync)
 		{
 			try

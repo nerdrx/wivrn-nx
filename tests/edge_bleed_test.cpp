@@ -247,9 +247,6 @@ struct vert_pc
 	float motion[4];
 	float glow[4];
 	float deband[4];
-	float atlas_size[4];
-	float atlas_geom[4];
-	float atlas_range[4];
 };
 // 176 bytes, and the size is itself under test.
 //
@@ -260,7 +257,7 @@ struct vert_pc
 // assert is the tripwire: the five edge bleed scalars live in the lanes the block already
 // had spare (glow.z, glow.w, motion.w, deband.w), and a future parameter goes in a free
 // lane or into a uniform buffer, never on the end.
-static_assert(sizeof(vert_pc) == 176);
+static_assert(sizeof(vert_pc) == 128);
 
 // The atlas table the fragment shader declares: vec4 e[4 * 289 * 2]. Nothing reads it here
 // (atlas_mode is 0, so the whole path compiles out) but the descriptor still has to point at
@@ -1102,9 +1099,6 @@ int main(int argc, char ** argv)
 		pc.scale[0] = pc.scale[1] = pc.scale[2] = pc.scale[3] = 1.0f;
 		pc.motion[0] = cfg.warp ? kMotionStep : 0.0f;
 		pc.motion[1] = kMotionScale;
-		pc.atlas_size[0] = pc.atlas_size[1] = float(kSrc);
-		pc.atlas_geom[0] = pc.atlas_geom[1] = 8.0f;
-		pc.atlas_geom[2] = pc.atlas_geom[3] = 1.0f / 8.0f;
 		// The edge bleed, packed into the free lanes the way the client packs it:
 		// glow.z is the ring width, glow.w is the mode plus the fade distance, and
 		// motion.w / deband.w are this eye's horizontal limits in the colour image.

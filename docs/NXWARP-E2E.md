@@ -1117,6 +1117,46 @@ those differ by degrees), that `visible_rect()` agrees with a hand re-derivation
 angles, that an asymmetric field of view keeps asymmetric margins in pixels, and that the wire
 values of the extension enum are 0/1/2 and are not free to change.
 
+### 128 bytes, and the second change
+
+The first fix took the block from 208 back to 176 and it STILL failed on the Pico, with the
+same `vkCreateGraphicsPipelines: ErrorUnknown`. The client now logs the limit, and it says
+what the mistake was:
+
+```
+maxPushConstantsSize: 128 bytes
+```
+
+176 was never legal. It had been over the limit for as long as the atlas prototype's three
+vectors had been in the block, and the Adreno driver had simply been tolerating it -- which
+is why `32316591` streamed perfectly at 176 bytes and why "it worked before, so 176 is
+fine" was a false inference. Reasoning from "the last good build did X" only works when X
+is actually legal; here it was merely unpunished.
+
+Compiled and compared, which is what settles it:
+
+| build | push block | vertex-stage `Location` decorations |
+| --- | --- | --- |
+| `32316591`, last known good on the device | 176 B | 4 |
+| `87619894`, edge bleed | 208 B | 5 |
+| this fix | **128 B** | **4** |
+
+So the edge bleed changed exactly two things about the pipeline's interface, and both are
+now undone. The push block is under the limit for the first time, and the extra
+inter-stage varying is gone.
+
+**The 48 bytes that came out** are the atlas prototype's `atlas_size`, `atlas_geom` and
+`atlas_range`. Every one of them is a compile-time constant -- `kAtlasPicture` 1088,
+`kAtlasW` 2176, `kAtlasH` 1632, and two fixed u16 rescales -- so they were per-frame
+push constants carrying values that never varied. They are now `const` in the shader, with
+a `static_assert` beside the host constants pinning the pair, since the shader cannot
+include the header.
+
+**The varying** was `layout(location = 2) out vec2 outBleed`. It is now the `zw` of
+`outPosition`, widened from `vec2` to `vec4`: the same data across the same two locations
+the pass has always used. Adding a location is not free on this driver, and it was the
+half of the fault that a push-constant count alone would not have found.
+
 ### The push constant ceiling, and how it was found
 
 The first live session with the edge bleed on a Pico 4 died like this:

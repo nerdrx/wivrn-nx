@@ -80,12 +80,6 @@ layout(push_constant) uniform pc
 	//    image, so the vertical limits are the plain half-texel inset the rest of this
 	//    shader already computes from `rgb_rect`.
 	vec4 deband;
-	// [atlas prototype] xy: one eye's picture size in samples, zw unused.
-	vec4 atlas_size;
-	// xy: the whole atlas image size in texels, zw: its reciprocal.
-	vec4 atlas_geom;
-	// x: luma rescale out of u16, y: chroma rescale, z: chroma midpoint offset.
-	vec4 atlas_range;
 };
 
 #ifdef VERT_SHADER
@@ -94,10 +88,15 @@ layout (location = 0) in vec2 vPosition;
 layout (location = 1) in uvec2 vUV;
 
 layout(location = 0) out vec4 outUV;
-layout(location = 1) out vec2 outPosition;
-// How far into the edge bleed ring this fragment is, per axis: 0 everywhere the picture
-// is real, rising to 1 at the outer border. Zero everywhere when the ring is off.
-layout(location = 2) out vec2 outBleed;
+// xy: the grid position, -1 to 1, which is what the vignette and the ambient glow are
+// placed against. zw: how far into the edge bleed ring this fragment is, per axis -- 0
+// everywhere the picture is real, rising to 1 at the outer border, and zero everywhere
+// when the ring is off.
+//
+// One vec4 rather than a vec2 and a new location. Adding a third inter-stage location was
+// the other half of what stopped this pipeline being creatable on a Pico 4's Adreno 650;
+// widening a varying that already exists costs nothing and adds no location.
+layout(location = 1) out vec4 outPosition;
 
 void main()
 {
@@ -123,8 +122,7 @@ void main()
 	gl_Position = vec4(p, 0.0, 1.0);
 	// The picture's own coordinate, NOT the shrunk one: the vignette and the ambient
 	// glow are placed against the image, and shrinking the image must not move them.
-	outPosition = vPosition;
-	outBleed = in_ring;
+	outPosition = vec4(vPosition, in_ring);
 	vec2 uv = vUV;
 	outUV.xy = (uv + rgb_rect.xy) / rgb_rect.zw;
 	outUV.zw = (uv + a_rect.xy) / a_rect.zw;
@@ -214,14 +212,35 @@ layout(set = 0, binding = 6) uniform sampler2D atlas_rgba8;
 // composition with H(pose_t <- pose_N) is per tile and is done in float on the host.
 //
 // Four vec4 per tile: rows 0, 1 and 2 of C in .xyz, then src_frame/gen/flags/res_level.
+// [atlas prototype] The atlas geometry, which used to ride the push constant block.
+//
+// It never needed to: every one of these is a COMPILE TIME constant on the host --
+// stream_defoveator.h's kAtlasPicture (1088), kAtlasW (2176) and kAtlasH (1632), and the
+// two u16 rescales -- so it was 48 bytes of per-frame constant on a block that turned out
+// to be 48 bytes over what a Pico 4's Adreno 650 will create a pipeline with
+// (maxPushConstantsSize is 128 there). Constants cost nothing and cannot overflow
+// anything.
+//
+// Keep in step with stream_defoveator.h; the host static_asserts the pair.
+const vec2 atlas_picture = vec2(1088.0, 1088.0);      // one eye's picture, in samples
+const vec2 atlas_image = vec2(2176.0, 1632.0);        // the whole atlas image, in texels
+const vec2 atlas_image_rcp = vec2(1.0 / 2176.0, 1.0 / 1632.0);
+// Out of the raw u16 range and into the codec's: luma is 8-bit stored in 16, chroma is
+// 9-bit signed about the midpoint (SYNTAX YCoCg-R).
+const float atlas_luma_scale = 65535.0 / 257.0;
+const float atlas_chroma_scale = 65535.0 / 128.0;
+const float atlas_chroma_bias = 255.0;
+
 layout(set = 0, binding = 5) uniform atlas_table_t
 {
 	vec4 e[4 * 289 * 2];
 } tbl;
 
 layout(location = 0) in vec4 inUV;
-layout(location = 1) in vec2 inPosition;
-layout(location = 2) in vec2 inBleed;
+// xy the grid position, zw the edge bleed ring depth. See the vertex shader.
+layout(location = 1) in vec4 inPositionBleed;
+#define inPosition (inPositionBleed.xy)
+#define inBleed (inPositionBleed.zw)
 
 layout(location = 0) out vec4 outColor;
 
@@ -841,11 +860,11 @@ void main()
 		// This frame's centred sample coordinates, through C, back to the tile's
 		// source frame. One homography and one divide: ADR-0029 section 5's "one
 		// step", which is the whole point of the model.
-		vec2 centred = (inUV.xy - 0.5) * atlas_size.xy;
+		vec2 centred = (inUV.xy - 0.5) * atlas_picture.xy;
 		vec3 h = vec3(centred, 1.0);
 		vec3 q = vec3(dot(r0, h), dot(r1, h), dot(r2, h));
 		// Sample position inside THIS eye's picture, in samples.
-		vec2 src = clamp(q.xy / q.z + atlas_size.xy * 0.5, vec2(0.0), atlas_size.xy - 1.0);
+		vec2 src = clamp(q.xy / q.z + atlas_picture.xy * 0.5, vec2(0.0), atlas_picture.xy - 1.0);
 
 		vec3 rgb_out;
 		if (atlas_mode == 3)
@@ -853,7 +872,7 @@ void main()
 			// Lower bound: a converted RGBA8 copy. One tap, no rescale, no inverse
 			// transform, no chroma upsample. Whatever this costs is what the pass
 			// can never go below at this output size.
-			vec2 uvc = (src + vec2(float(atlas_eye) * atlas_size.x, 0.0)) * atlas_geom.zw;
+			vec2 uvc = (src + vec2(float(atlas_eye) * atlas_picture.x, 0.0)) * atlas_image_rcp;
 			rgb_out = texture(atlas_rgba8, uvc).rgb;
 		}
 		else
@@ -862,17 +881,17 @@ void main()
 			// chroma planes sit under it at half resolution, Co on the left half of
 			// the band and Cg on the right.
 			float Y, Co, Cg;
-			vec2 luma_px = src + vec2(float(atlas_eye) * atlas_size.x, 0.0);
-			vec2 chroma_px = src * 0.5 + vec2(float(atlas_eye) * atlas_size.x * 0.5, atlas_size.y);
-			float cg_dx = atlas_size.x;
+			vec2 luma_px = src + vec2(float(atlas_eye) * atlas_picture.x, 0.0);
+			vec2 chroma_px = src * 0.5 + vec2(float(atlas_eye) * atlas_picture.x * 0.5, atlas_picture.y);
+			float cg_dx = atlas_picture.x;
 
 			if (atlas_mode == 1)
 			{
 				// Sampler over the R16_UNORM view of the decoder's own memory.
 				// Three taps, bilinear by the hardware.
-				Y = texture(atlas_r16, (luma_px + 0.5) * atlas_geom.zw).r;
-				Co = texture(atlas_r16, (chroma_px + 0.5) * atlas_geom.zw).r;
-				Cg = texture(atlas_r16, (chroma_px + vec2(cg_dx, 0.0) + 0.5) * atlas_geom.zw).r;
+				Y = texture(atlas_r16, (luma_px + 0.5) * atlas_image_rcp).r;
+				Co = texture(atlas_r16, (chroma_px + 0.5) * atlas_image_rcp).r;
+				Cg = texture(atlas_r16, (chroma_px + vec2(cg_dx, 0.0) + 0.5) * atlas_image_rcp).r;
 			}
 			else
 			{
@@ -904,9 +923,9 @@ void main()
 
 			// Out of the raw u16 range and into the codec's: luma is 8-bit stored in
 			// 16, chroma is 9-bit signed around the midpoint (SYNTAX YCoCg-R).
-			Y = Y * atlas_range.x;
-			Co = Co * atlas_range.y - atlas_range.z;
-			Cg = Cg * atlas_range.y - atlas_range.z;
+			Y = Y * atlas_luma_scale;
+			Co = Co * atlas_chroma_scale - atlas_chroma_bias;
+			Cg = Cg * atlas_chroma_scale - atlas_chroma_bias;
 
 			// YCoCg-R inverse.
 			float tmp = Y - Cg * 0.5;

@@ -33,6 +33,15 @@
 
 namespace xr
 {
+// configuration::perf_level_cpu / _gpu (0 auto, 1 high, 2 boost) plus the
+// context, resolved to the level to ask the runtime for.
+XrPerfSettingsLevelEXT resolve_performance_level(uint32_t setting, bool high_power,
+                                                 bool lobby_high);
+const char * to_string(XrPerfSettingsLevelEXT);
+const char * to_string(XrPerfSettingsDomainEXT);
+const char * to_string(XrPerfSettingsSubDomainEXT);
+const char * to_string(XrPerfSettingsNotificationLevelEXT);
+
 class instance;
 class system;
 
@@ -98,6 +107,22 @@ public:
 		return passthrough;
 	}
 
+	// Asks the runtime for a level, logs what happened and remembers it.  See
+	// the note in session.cpp: "applied" means asked-and-not-refused, which is
+	// all the extension promises; XrEventDataPerfSettingsEXT is the only thing
+	// that reports what the runtime actually did afterwards.
 	void set_performance_level(XrPerfSettingsDomainEXT, XrPerfSettingsLevelEXT);
+
+	// Index 0 CPU, 1 GPU.  `applied_valid` is false where nothing has been
+	// asked for, or where the ask was refused.
+	std::array<XrPerfSettingsLevelEXT, 2> applied_level{
+	        XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT,
+	        XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT};
+	std::array<bool, 2> applied_valid{false, false};
+
+	bool has_performance_settings() const
+	{
+		return xrPerfSettingsSetPerformanceLevelEXT != nullptr;
+	}
 };
 } // namespace xr

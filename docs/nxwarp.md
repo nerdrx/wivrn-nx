@@ -217,6 +217,59 @@ connected.
 The manual "Video codec" combo deliberately does not list NX Warp: it has its own switch,
 and having it in both would make one of them a lie.
 
+### 3.1 Performance levels (`XR_EXT_performance_settings`)
+
+**Settings → Advanced → "CPU performance level" / "GPU performance level"**, backed by
+`configuration::perf_level_cpu` / `_gpu`, three values each: **Auto**, **High**, **Boost**.
+The rows appear only when the runtime offers `XR_EXT_performance_settings`.
+
+**Auto is not "do nothing", and that matters.** This client has always asked the runtime
+for a level: `high_power_mode` picks `sustained_high` or `sustained_low` when the stream
+scene is entered, and the lobby has always asked for `sustained_high` regardless. `Auto`
+IS that policy, unchanged, so the default changes nothing. `High` and `Boost` PIN the
+domain — `high_power_mode` stops speaking for it — and are applied at the same point, on
+scene entry, which is why they take effect on entering or leaving the stream rather than
+mid-frame.
+
+`xr::resolve_performance_level()` is the single place the setting becomes a level, so the
+lobby and the stream cannot disagree about what any of the three values mean.
+
+**What the runtime says back.** `xrPerfSettingsSetPerformanceLevelEXT` returning success
+does **not** mean the level was honoured; the only feedback the extension has is
+`XrEventDataPerfSettingsEXT`, which the runtime sends when a sub-domain
+(compositing / rendering / thermal) changes level. `application::poll_events()` logs each
+one in full — domain, sub-domain, from-level, to-level, and whether it is improving or
+degrading — and keeps the last one for the HUD. The in-stream overlay's last line reads
+
+```
+perf asked CPU sustained_high · GPU sustained_high · runtime GPU/thermal sustained_high → sustained_low
+```
+
+The two halves are separate on purpose: the left is what we asked for, the right is what
+the runtime did about it. A HUD that showed only the ask would be quietly wrong the moment
+the headset got warm.
+
+**The warning, which is the reason the default stays Auto.** Forcing clocks on this
+headset has gone badly before: `VK_EXT_global_priority` at HIGH was a **10x regression**,
+because the decoder won the scheduling fight and the compositor lost it. This extension is
+the sanctioned way to ask — the runtime arbitrates instead of the driver — but "sanctioned"
+is not "free", and nothing here has been measured on a device. The default stays `Auto`
+until the kgsl clock is measured under load and a device A/B says a pinned level helps.
+
+**Vendor extensions.** Instance creation logs one summary line naming whether
+`XR_EXT_performance_settings` is available and listing any other extension the runtime
+offers whose name mentions power, performance or a CPU/GPU level:
+
+```
+Performance APIs: XR_EXT_performance_settings = available, vendor power/performance extensions = none
+```
+
+Nothing calls a vendor extension. The OpenXR SDK this client builds against (1.1.58)
+defines no Pico or BD performance extension — the `XR_BD_*` set it does define is
+controllers, tracking, spatial sensing and anchors — and hand-declaring an entry point
+from a name seen in a log is how a client starts crashing on the next runtime update. If
+that line ever names one, that is the moment to go and read its specification.
+
 ---
 
 ## 4. What is built

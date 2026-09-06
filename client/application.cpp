@@ -2081,6 +2081,20 @@ void application::poll_events()
 					spdlog::info("    XR_PASSTHROUGH_STATE_CHANGED_RESTORED_ERROR_BIT_FB");
 			}
 			break;
+			case XR_TYPE_EVENT_DATA_PERF_SETTINGS_EXT: {
+				// The runtime telling us what it actually did with the levels
+				// we asked for -- thermal throttling, a boost expiring, the
+				// compositor being starved.  It is the only feedback the
+				// extension has, so it is logged in full and shown on the HUD.
+				const auto & p = e.perf_settings;
+				spdlog::info("Performance settings: {} / {} {} -> {} ({})",
+				             xr::to_string(p.domain), xr::to_string(p.subDomain),
+				             xr::to_string(p.fromLevel), xr::to_string(p.toLevel),
+				             p.toLevel > p.fromLevel ? "improving" : "degrading");
+				last_perf_event = p;
+				have_perf_event = true;
+			}
+			break;
 			default:
 				spdlog::info("Received event type {}", xr::to_string(e.header.type));
 				break;

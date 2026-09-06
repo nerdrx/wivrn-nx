@@ -1427,6 +1427,37 @@ void settings_system(const settings_context & ctx)
 		        .set_bool = [&config](bool v) { config.high_power_mode = v; config.save(); },
 		        .default_bool = default_config.high_power_mode,
 		});
+
+		// Per-domain performance level.  "Auto" is the setting above doing what
+		// it has always done; the other two PIN the domain and take it out of
+		// that policy.  Applied on the next scene change (entering or leaving
+		// the stream), which is where the levels are asked for.
+		static const auto perf_options = [] {
+			return std::vector<std::string>{
+			        _("Auto"), _("High"), _("Boost")};
+		};
+		const std::string perf_desc =
+		        _("Ask the runtime for a CPU or GPU performance level. 'Auto' follows High power mode, which is what this client has always done. 'High' pins sustained_high; 'Boost' asks for the transient level, which the runtime may bound, ignore or take back — the in-stream overlay shows what it actually did.\n\nLeave this on Auto unless you are measuring. Forcing clocks on this headset has gone badly before: raising the Vulkan queue priority made decoding TEN TIMES slower because the compositor lost the scheduling fight. This is the sanctioned way to ask, which is not the same as it being free.");
+		list.push_back({
+		        .id = "##perf_cpu",
+		        .label = _("CPU performance level"),
+		        .description = perf_desc,
+		        .ui = ui_kind::segmented,
+		        .get_int = [&config] { return int(config.perf_level_cpu); },
+		        .set_int = [&config](int v) { config.perf_level_cpu = uint32_t(v); config.save(); },
+		        .options = perf_options,
+		        .default_int = int(default_config.perf_level_cpu),
+		});
+		list.push_back({
+		        .id = "##perf_gpu",
+		        .label = _("GPU performance level"),
+		        .description = perf_desc,
+		        .ui = ui_kind::segmented,
+		        .get_int = [&config] { return int(config.perf_level_gpu); },
+		        .set_int = [&config](int v) { config.perf_level_gpu = uint32_t(v); config.save(); },
+		        .options = perf_options,
+		        .default_int = int(default_config.perf_level_gpu),
+		});
 	}
 
 	bool disable_instream_gui = false;

@@ -439,8 +439,27 @@ public:
 		fn(*vk.queue.queue);
 	}
 
+	// --deterministic: a clock that counts presented frames instead of nanoseconds.
+	//
+	// Every timestamp that leaves this host ends up back in the encoder -- publish()
+	// stamps `blitted` and `displayed` with it, and those ride the feedback packet the
+	// controller and the client shadow are driven by. Read off steady_clock they are a
+	// measurement of the machine's mood, and two runs of the same binary on the same
+	// input disagree about them. Counted in frames they are a function of the input
+	// alone, which is the whole point of the mode.
+	//
+	// Still nanoseconds, and still monotonic: 90 Hz is a nominal cadence, not a claim
+	// about how long anything took. Nothing downstream measures a duration it then
+	// reports as truth in this mode -- the latency budget the harness prints at the end
+	// is measured on steady_clock directly, and says so.
+	bool deterministic = false;
+	std::atomic<uint64_t> det_tick{0};
+	static constexpr int64_t det_period_ns = 1'000'000'000 / 90;
+
 	XrTime now() override
 	{
+		if (deterministic)
+			return XrTime(int64_t(det_tick.load(std::memory_order_relaxed)) * det_period_ns);
 		return XrTime(std::chrono::duration_cast<std::chrono::nanoseconds>(
 		                      std::chrono::steady_clock::now().time_since_epoch())
 		                      .count());
@@ -541,6 +560,37 @@ public:
 		return cv.wait_for(lock, timeout, [&] { return frames.size() >= n; });
 	}
 };
+
+// --deterministic: block until the decoder has finished with every frame it has closed.
+//
+// This is the one that matters. The .nxv the harness writes is built from the frames the
+// decoder CONSUMED, and the decoder's worker keeps a backlog of one: a frame that arrives
+// while the previous one is still on the GPU is dropped as late. Whether that happens is a
+// race between the network thread and the worker, so a twelve-frame run on this machine
+// consumed nine, nine and eight frames on three consecutive tries and wrote three different
+// files -- which is what made --nxv-out useless as a byte-identity vehicle.
+//
+// Waiting for quiescence after each frame empties the queue before the next one is pushed,
+// so the backlog drop cannot fire and every closed frame is decoded, in order. The condition
+// is stated in the decoder's own published counters -- every closed frame accounted for one
+// way or another -- rather than as "decoded == closed", because a hole or a codec refusal is
+// a legitimate end for a frame and the lossy legs of the regression set produce both.
+bool wait_quiescent(wivrn::nxwarp_decoder & d, std::chrono::milliseconds timeout)
+{
+	const auto deadline = std::chrono::steady_clock::now() + timeout;
+	for (;;)
+	{
+		const auto st = d.stats();
+		const uint64_t settled = st.frames_decoded + st.frames_dropped_late +
+		                         st.frames_dropped_holes + st.frames_dropped_codec +
+		                         st.frames_withheld;
+		if (settled >= st.frames_closed)
+			return true;
+		if (std::chrono::steady_clock::now() >= deadline)
+			return false;
+		std::this_thread::sleep_for(std::chrono::microseconds(200));
+	}
+}
 
 // ===========================================================================
 // The lossy link.
@@ -1456,6 +1506,10 @@ int main(int argc, char ** argv)
 	// 90 Hz. With --present-hz 90 the frames arrive when a compositor would make them,
 	// and "how many of them did the pace send" is the number the headset would see.
 	double present_hz = 0;
+	// --deterministic: two runs of this binary on this input write the same .nxv, byte
+	// for byte. See the block below main's argument parsing for what it costs and what
+	// it refuses.
+	bool deterministic = false;
 	// Hold each not-held report back this many presented frames before handing it to
 	// the encoder. Zero is the harness's own behaviour -- the report is delivered in
 	// the same loop iteration that produced it, which no network does. On a live link
@@ -1624,6 +1678,8 @@ int main(int argc, char ** argv)
 			present_hz = std::stod(next());
 		else if (a == "--feedback-delay")
 			feedback_delay = uint32_t(std::stoul(next()));
+		else if (a == "--deterministic")
+			deterministic = true;
 		else
 		{
 			std::fprintf(stderr, "unknown argument %s\n", a.c_str());
@@ -1635,6 +1691,52 @@ int main(int argc, char ** argv)
 	{
 		std::fprintf(stderr, "--yuv is required\n");
 		return 2;
+	}
+
+	// --- --deterministic: what it refuses, and why -------------------------------
+	//
+	// The mode's promise is that two runs write the same .nxv. Every option below puts
+	// a wall clock back into the bytes, so each is refused rather than quietly ignored
+	// -- a flag that is read and then does nothing is worse than one that is rejected,
+	// because the run still produces a file and the file still looks like an answer.
+	//
+	//   --aimd            WiVRn's bitrate controller reacts to delivery timing.
+	//   --rc other than fixed   the rate controller's window is a wall-clock window.
+	//   --pace other than off   send admission is a steady_clock deadline in the
+	//                     encoder, which this harness cannot reach without changing
+	//                     the shipping encoder; it is refused rather than faked.
+	//   --client-decode-ms      a real sleep on the worker thread, whose whole purpose
+	//                     is to make the timing-dependent paths fire.
+	//   --present-hz      a compositor cadence measured against steady_clock.
+	//
+	// --loss, --reorder and --drop-datagram stay legal: they are driven by the seeded
+	// mt19937 in lossy_link and are already a function of --seed alone.
+	if (deterministic)
+	{
+		const char * why = nullptr;
+		if (aimd_ceiling)
+			why = "--aimd";
+		else if (rc != "fixed")
+			why = "--rc other than fixed";
+		else if (pace != "off")
+			why = "--pace other than off";
+		else if (client_decode_ms > 0)
+			why = "--client-decode-ms";
+		else if (present_hz > 0)
+			why = "--present-hz";
+		if (why)
+		{
+			std::fprintf(stderr,
+			             "--deterministic cannot be combined with %s: it makes the "
+			             "encode depend on wall-clock time\n",
+			             why);
+			return 2;
+		}
+		// The stride is derived from measured decode time against measured arrival
+		// period. Pinned before a decoder exists, so no frame is ever judged by it.
+		wivrn::nxwarp_pin_decode_stride(true);
+		std::printf("deterministic: frame-counter clock, decode stride pinned to 1, "
+		            "the decoder drained after every frame\n");
 	}
 
 	// --- what --eyes 2 requires, checked before anything is built ----------------
@@ -1790,6 +1892,10 @@ int main(int argc, char ** argv)
 		                                          vk.queue.family_index, desc, 0, host, nullptr);
 		if (client_decode_ms > 0)
 			d->set_simulated_decode_ms(client_decode_ms);
+		// See set_unbounded_queue(): the worker's one-frame backlog is the largest
+		// single source of run-to-run variance in the file this harness writes.
+		if (deterministic)
+			d->set_unbounded_queue(true);
 		return d;
 	};
 	auto dec = make_decoder();
@@ -1918,10 +2024,18 @@ int main(int argc, char ** argv)
 		            (unsigned long long)((first_frame / 65536 + 1) * 65536),
 		            first_frame % 65536 + frames > 65536 ? "is" : "is NOT");
 
+	host.deterministic = deterministic;
+
 	const auto run_start = std::chrono::steady_clock::now();
 	for (uint32_t i = 0; i < frames; ++i)
 	{
 		const uint64_t f = first_frame + i;
+
+		// The frame-counter clock, advanced once per presented frame. Before anything
+		// this iteration timestamps, so a frame's own feedback carries the frame's own
+		// tick and not the previous one's.
+		if (deterministic)
+			host.det_tick.store(i + 1, std::memory_order_relaxed);
 
 		// The compositor's cadence, when one was asked for. Against the run's own
 		// start rather than the previous frame, so a slow frame does not push the
@@ -2106,6 +2220,21 @@ int main(int argc, char ** argv)
 		// The other return half: the per-frame delivery reports into WiVRn's own
 		// automatic bitrate, whose answer goes back to the encoder as a new ceiling.
 		pump_aimd(i);
+
+		// --deterministic: let the decoder finish this frame before the next one is
+		// encoded. This is what removes the race the mode exists to remove -- see
+		// wait_quiescent(). It is deliberately the LAST thing in the iteration, after
+		// the feedback and not-held drains above, so that what those drains saw is
+		// still "whatever had arrived by now" on an ordinary run and becomes "exactly
+		// what frames up to i-1 produced" here.
+		if (deterministic and not wait_quiescent(*dec, std::chrono::seconds(10)))
+		{
+			std::fprintf(stderr,
+			             "deterministic: the decoder did not settle within 10 s at "
+			             "frame %u; the run would not be reproducible\n",
+			             i);
+			return 1;
+		}
 	}
 
 	// The encode loop is over, so nothing more will arrive to push the tail through:

@@ -454,6 +454,68 @@ but a link with real jitter would exercise it properly and this does not.
 
 ---
 
+### `--deterministic`: two runs, one file
+
+`--nxv-out` is not reproducible by default, and the reason is not the encoder. The file is
+built from the frame units the decoder **consumed**, and the decoder's worker keeps a backlog
+one frame deep: a frame that arrives while the previous one is still on the GPU is dropped as
+late. Whether that happens is a race between the network thread and the worker. Three
+consecutive twelve-frame runs on one machine consumed nine, nine and eight frames and wrote
+31242, 36381 and 46749 bytes — the same encoder, the same input, three different files. So
+the flag exists because comparing two `.nxv` files was measuring the machine, not the code.
+
+```sh
+wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 12 \
+    --backend vk --qp 32 --deterministic --nxv-out a.nxv
+wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 12 \
+    --backend vk --qp 32 --deterministic --nxv-out b.nxv
+md5sum a.nxv b.nxv        # identical
+```
+
+Three things change, and all three are wall clocks:
+
+* **The decoder is drained after every frame.** The queue is empty before the next frame is
+  pushed, so the backlog drop cannot fire and every unit that closes is decoded, in order.
+  The wait is stated in the decoder's own counters — every closed frame decoded, dropped for
+  a hole, refused by the codec or withheld — so a lossy leg, where a frame legitimately never
+  decodes, settles rather than hanging.
+* **The worker's backlog is unbounded** (`set_unbounded_queue`), which is what the drain needs
+  to be sufficient rather than merely likely: several units can close inside one `send_stream`
+  call when datagrams were held back, and the second would otherwise evict the first before
+  the drain ever ran.
+* **The clock counts frames.** `e2e_host::now()` returns the presented-frame index at a
+  nominal 90 Hz instead of `steady_clock`. Every timestamp this host produces ends up back in
+  the encoder — `publish()` stamps `blitted` and `displayed`, and those ride the feedback the
+  controller and the client shadow are driven by.
+* **The decode stride is pinned to 1** (`nxwarp_pin_decode_stride`). It is otherwise derived
+  from measured decode time against measured arrival period, and a stride above 1 throws
+  frames away.
+
+What it refuses, rather than quietly ignoring — a flag that is read and does nothing is worse
+than one that is rejected, because the run still writes a file and the file still looks like
+an answer:
+
+| refused | why |
+|---|---|
+| `--aimd` | the bitrate controller reacts to delivery timing |
+| `--rc` other than `fixed` | the rate controller's window is a wall-clock window |
+| `--pace` other than `off` | send admission is a `steady_clock` deadline inside the encoder |
+| `--client-decode-ms` | a real sleep on the worker, whose purpose is to make timing paths fire |
+| `--present-hz` | a compositor cadence measured against `steady_clock` |
+
+`--loss`, `--reorder`, `--drop-datagram` and `--seed` stay legal: the link's `mt19937` is
+seeded, so the drop pattern is already a function of `--seed` alone. Verified byte-identical
+across two runs each at 320x240 and 1088x1088, on the reference and GPU backends, with inter,
+with the stereo pair, with the pair *and* inter, under 5 % loss, under reordering, under
+`--drop-datagram`, under `--tile-stream`, and across the 16-bit frame-id wrap.
+
+**The trade is real.** A `--deterministic` run does not exercise the backlog drop, the stride
+adaptation, the pacing or the automatic bitrate at all. It is for byte identity — "did this
+change alter the bitstream" — and nothing else. Ordinary runs are where those paths are
+tested, and they still are.
+
+---
+
 ### Under the Vulkan validation layers
 
 The harness links the shipping client decoder and the real encoder against one device, which

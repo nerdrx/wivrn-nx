@@ -74,12 +74,18 @@ static uint16_t publish_decode_us(uint8_t stream_index, uint16_t own)
 	return worst;
 }
 
+// See nxwarp_pin_decode_stride(). Read on the decode path, written once by the harness before
+// any frame arrives, so relaxed is right on both sides.
+static std::atomic<bool> g_stride_pinned{false};
+
 static std::atomic<uint64_t> g_last_copy_end_ts{0};
 static std::atomic<uint32_t> g_last_copy_stream{0xffffffffu};
 
 // One step down, at most once per `period`, from whichever thread gets there first.
 static void decay_decode_stride(std::chrono::milliseconds period)
 {
+	if (g_stride_pinned.load(std::memory_order_relaxed))
+		return;
 	uint32_t cur = g_decode_stride.load(std::memory_order_relaxed);
 	if (cur <= 1)
 		return;
@@ -100,6 +106,13 @@ static void decay_decode_stride(std::chrono::milliseconds period)
 uint32_t wivrn::nxwarp_decode_stride()
 {
 	return g_decode_stride.load(std::memory_order_relaxed);
+}
+
+void wivrn::nxwarp_pin_decode_stride(bool on)
+{
+	g_stride_pinned.store(on, std::memory_order_relaxed);
+	if (on)
+		g_decode_stride.store(1, std::memory_order_relaxed);
 }
 
 uint64_t wivrn::nxwarp_client_tools(const vk::PhysicalDeviceProperties & props)
@@ -1104,7 +1117,7 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 		host.report_frame_not_held(stream_index, job.frame_id, from_headset::nxwarp_frame_not_held::reason::stride);
 		return;
 	}
-	if (jobs_pending.load() >= kMaxQueuedFrames)
+	if (jobs_pending.load() >= max_queued_frames)
 	{
 		// The queued frames are about to be discarded, and each of them is a frame
 		// the encoder currently believes this headset holds. Their ids are only
@@ -1601,7 +1614,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			             prof.wait_ms / n, prof.wall_ms / n, prof.pass_a_ms / n, prof.pass_b_ms / n, prof.gpu_ms / n,
 			             frames_dropped_holes.load(), frames_dropped_codec.load());
 			spdlog::info("nxwarp[{}]: {} frames dropped late (queue kept to {})",
-			             stream_index, frames_dropped_late.load(), kMaxQueuedFrames);
+			             stream_index, frames_dropped_late.load(), max_queued_frames);
 			spdlog::info("nxwarp[{}] stage: gap {:.1f} | wait-prev {:.1f} | submit {:.1f} | get_free {:.1f} | fence-pre {:.1f} | record {:.1f} | qsubmit {:.1f} | fence-post {:.1f} | publish {:.1f} ms; withheld {}, stride {}, arrival {:.1f} ms",
 			             stream_index, prof.gap_ms / n, prof.wait_ms / n, prof.sub_ms / n,
 			             prof.free_ms / n, prof.fpre_ms / n, prof.rec_ms / n, prof.qsub_ms / n,
@@ -1661,7 +1674,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			//    the decode cost and the stride is 1 by construction.
 			//
 			// The decay is not here at all; see decay_decode_stride().
-			if (prof.n >= 4)
+			if (prof.n >= 4 and not g_stride_pinned.load(std::memory_order_relaxed))
 			{
 				const double arrival = double(arrival_period_ms.load(std::memory_order_relaxed));
 				const double period_ms = arrival > 0.1 ? arrival : double(frame_period_us) / 1000.0;

@@ -329,7 +329,12 @@ public:
 	// Left at 1.0 so nothing changes without being asked for: below 1.0 the compositor
 	// enlarges, which is a picture decision and belongs to whoever is wearing the
 	// headset.
-	float defoveate_scale = 1.0f;
+	// 0 (the default) means AUTO: the pass renders at the stream's own per-eye size,
+	// so a 1088x1088 stream is drawn at 1088x1088 and this pass performs no
+	// enlargement at all -- the runtime's compositor does the one it was always going
+	// to do when it timewarps the layer. An explicit 0.4 to 1.0 overrides that with a
+	// fixed share of the defoveated size.
+	float defoveate_scale = 0.0f;
 
 	// [atlas prototype] Replace the display pass's plain sample with the atlas
 	// reference model's shape: every fragment finds its tile, reads that tile's warp

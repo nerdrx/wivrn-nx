@@ -194,6 +194,8 @@ if (WIVRN_BUILD_SERVER)
 			PRIVATE encoder/video_encoder_nxwarp.cpp
 				encoder/nxwarp_codec_ref.cpp
 				encoder/nxwarp_packetize.cpp
+				# The monado-process end of the two-second statistics hop.
+				encoder/nxwarp_stats_publish.cpp
 			)
 		target_link_libraries(wivrn-server PRIVATE nxvc::ref nxvc::transport)
 

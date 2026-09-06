@@ -46,6 +46,11 @@
 		<property name="SteamCommand"          type="s" access="read"/>
 		<property name="JsonConfiguration"     type="s" access="readwrite"/>
 		<property name="Bitrate"               type="u" access="read"/>
+		<!-- The NX Warp encoder's two-second report, one JSON object per active stream, as
+		     a JSON array. Empty while nothing is streaming NX Warp. JSON rather than a
+		     struct signature because it carries two dozen fields that grow with the codec;
+		     see common/nxwarp_stats.h for the schema and why. -->
+		<property name="NxwarpStats"           type="s" access="read"/>
 
 		<!-- Data from the headset info packet -->
 		<!-- The per-eye size the headset asks the server to encode, before the server's own

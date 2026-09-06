@@ -23,8 +23,8 @@
 #include "video_encoder.h"
 #include "vk/allocation.h"
 
-#include <array>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -250,6 +250,32 @@ class video_encoder_nxwarp : public video_encoder
 	std::atomic<uint8_t> last_not_held_why{0};
 	std::atomic<uint64_t> not_held_total{0};
 	uint64_t not_held_reported = 0;
+	// Per reason, so the status page can name the one that accounts for most of them rather
+	// than only the last. Same indices as from_headset::nxwarp_frame_not_held::reason and as
+	// the why_name[] table in the two-second report. Written on the network thread.
+	std::array<std::atomic<uint64_t>, 4> not_held_by_reason{};
+	std::array<uint64_t, 4> not_held_by_reason_reported{};
+	// The published report's own watermarks. Separate from not_held_reported and
+	// not_held_answered_reported, which the log line owns: the log only prints when the
+	// count moved, the report goes out every window, and sharing the watermarks would make
+	// each consume the other's delta.
+	uint64_t not_held_reported_stats = 0;
+	uint64_t not_held_answered_stats = 0;
+	// settings.encode_scale and the size it produced, kept for the report.
+	float encode_scale_reported = 1;
+	uint16_t stats_width = 0;
+	uint16_t stats_height = 0;
+
+	// --- what the two-second report publishes, beyond what it logs -----------
+	//
+	// Fixed for the life of the encoder, resolved at construction: the entropy coder that
+	// negotiation actually settled on, whether the configuration asked for it or "auto"
+	// resolved it, and the tool mask the headset advertised. They are in every report because
+	// the status page shows them next to the numbers they explain, and a page that has to be
+	// open before the session starts to catch a one-shot log line is a log by another name.
+	std::string stats_entropy_name;
+	bool stats_entropy_was_auto = true;
+	uint64_t stats_negotiated_tools = 0;
 
 	// --- which not-held reports are already answered -------------------------
 	//
@@ -532,9 +558,7 @@ public:
 
 	std::optional<data> encode(uint8_t slot, uint64_t frame_id) override;
 
-	void on_nxwarp_feedback(uint8_t path_id, std::span<const uint8_t> payload,
-	                        uint16_t decode_us, uint16_t held_base,
-	                        uint32_t held_mask) override;
+	void on_nxwarp_feedback(uint8_t path_id, std::span<const uint8_t> payload, uint16_t decode_us, uint16_t held_base, uint32_t held_mask) override;
 	void on_nxwarp_frame_not_held(uint16_t frame_id,
 	                              from_headset::nxwarp_frame_not_held::reason why) override;
 

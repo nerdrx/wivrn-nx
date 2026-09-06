@@ -374,6 +374,18 @@ void wivrn_server::on_server_properties_changed(const QString & interface_name, 
 		encryptionEnabledChanged(m_isEncryptionEnabled = changed_properties["EncryptionEnabled"].toBool());
 	}
 
+	if (changed_properties.contains("NxwarpStats"))
+	{
+		// A JSON array of per-stream reports; see common/nxwarp_stats.h. Parsed rather than
+		// unmarshalled because the payload grows with the codec and a struct signature
+		// would have to be respelled in three places every time it did.
+		m_nxwarpStats.clear();
+		for (const auto & one: wivrn::nxwarp_stats_from_json(
+		             changed_properties["NxwarpStats"].toString().toStdString()))
+			m_nxwarpStats.push_back(nxwarp_stream_stat{one});
+		nxwarpStatsChanged();
+	}
+
 	if (changed_properties.contains("StreamEyeSize"))
 	{
 		const auto arg = qvariant_cast<QDBusArgument>(changed_properties["StreamEyeSize"]);

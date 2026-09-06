@@ -1733,6 +1733,39 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			             stream_index, prof.n, ms(t_end - prof.since) / 1000.0, prof.bytes / n,
 			             prof.wait_ms / n, prof.wall_ms / n, prof.pass_a_ms / n, prof.pass_b_ms / n, prof.gpu_ms / n,
 			             frames_dropped_holes.load(), frames_dropped_codec.load());
+
+			// --- how full is the GPU, and whose queue is this?
+			//
+			// The decode wall on a Pico 4 is 22.8 ms against 16.7 ms of decode
+			// kernel, and the 5 ms difference is reported below as `queue`: the
+			// host's fence wait minus the two GPU durations inside it. That number
+			// is unreadable on its own -- it is large when the GPU is busy and small
+			// when it is idle, and nothing in the log said which.
+			//
+			// This says which. `gpu_ms` summed over the window against the window's
+			// own length is the share of one GPU this stream's decoding occupies.
+			// Measured on that device it is 643 ms/s, and the client's own
+			// reprojection pass adds 278 ms/s (6.4 ms x 43.6/s, from the render:
+			// line), so the two together are at 92% of one Adreno ring. At that duty
+			// a submission waits for whatever is already running, which is what
+			// `queue` is measuring and why it is milliseconds rather than
+			// microseconds. See docs/CLIENT-DECODE-WALL.md.
+			//
+			// Deliberately NOT reporting which queue this is. The decoder passes
+			// `stream_index` to host.with_queue() as a slot REQUEST, and
+			// application::get_decode_queue() may hand back queue 2, queue 1, or --
+			// on a device that gave out only one -- the render thread's own queue and
+			// mutex. Which of those happened is host state the decoder cannot see, so
+			// printing the slot here would print the question dressed as the answer.
+			// That line belongs on the host side; see docs/CLIENT-DECODE-WALL.md.
+			{
+				const double secs = ms(t_end - prof.since) / 1000.0;
+				spdlog::info("nxwarp[{}] gpu duty {:.0f} ms/s ({:.0f}% of one GPU) for decode alone; "
+				             "the display pass is extra",
+				             stream_index,
+				             secs > 0 ? prof.gpu_ms / secs : 0.0,
+				             secs > 0 ? prof.gpu_ms / secs / 10.0 : 0.0);
+			}
 #ifdef NXVC_VK_DECODER_PASSB_SEGMENTS
 			// What "passB" above is actually made of. It is an ENVELOPE -- Pass A's
 			// end to Pass B's end -- so it contains the predictor dispatch and all

@@ -415,6 +415,31 @@ configuration::configuration()
 		if (auto it = json.find("lh-stick-deadzone"); it != json.end())
 			lh_stick_deadzone = *it;
 
+		// "stream_scale": 0 < float <= 1
+		//
+		// Underscore, not the dash the neighbouring keys use: the name matches the
+		// headset's own render_scale setting it composes with. "stream-scale" is
+		// accepted too so neither spelling is a silent no-op.
+		try
+		{
+			auto it = json.find("stream_scale");
+			if (it == json.end())
+				it = json.find("stream-scale");
+			if (it != json.end())
+			{
+				if (not it->is_number())
+					throw std::runtime_error("expected a number");
+				const double v = it->get<double>();
+				if (not(v > 0) or v > 1)
+					throw std::runtime_error("expected a value in ]0, 1]");
+				stream_scale = float(v);
+			}
+		}
+		catch (const std::exception & e)
+		{
+			U_LOG_W("Ignoring invalid \"stream_scale\" configuration: %s", e.what());
+		}
+
 		if (auto it = json.find("bit-depth"); it != json.end())
 			bit_depth = *it;
 

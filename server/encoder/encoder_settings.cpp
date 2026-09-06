@@ -18,6 +18,8 @@
  */
 #include "encoder_settings.h"
 
+#include "stream_scale.h"
+
 #include "driver/configuration.h"
 #include "driver/wivrn_session.h"
 #include "util/u_logging.h"
@@ -357,9 +359,30 @@ std::array<encoder_settings, num_streams> get_encoder_settings(wivrn::vk_bundle 
 	// full defoveated/display resolution and reconstructs the difference when it samples the
 	// decoded image (bilinear on its own, sharp with FSR). Clamped so a stray value can
 	// never ask for a degenerate encode size. Only read here, so it applies on connection.
-	const float render_scale = std::clamp(settings.render_scale, 0.5f, 1.0f);
-	auto width = align(uint16_t(info.stream_eye_width * render_scale), 64);
-	auto height = align(uint16_t(info.stream_eye_height * render_scale), 64);
+	//
+	// The server has a ceiling of its own on the same quantity, "stream_scale": the NX Warp
+	// decoder's per-tile cost scales with the pixel count and the headset serialises the two
+	// eyes on its GPU, so trading a little sharpness for a smaller encode is what buys the
+	// decoded frame rate back. Both are linear fractions of the same stream eye size, so they
+	// compose as the smaller of the two, not as a product: the server value is a cap and a
+	// headset that already asked for less keeps what it asked for. Both are read here only,
+	// so both apply on connection.
+	// stream_encode_size() is the whole derivation, kept pure and dependency free in
+	// stream_scale.h so it can be unit tested without a Vulkan device or a session.
+	const auto encode = stream_encode_size(info.stream_eye_width,
+	                                       info.stream_eye_height,
+	                                       settings.render_scale,
+	                                       config.stream_scale);
+	const float render_scale = encode.scale;
+	auto width = encode.width;
+	auto height = encode.height;
+	if (config.stream_scale < 1.0f)
+		U_LOG_I("nxwarp: stream 0 encodes %ux%u per eye (stream_scale %.3g, headset asked %ux%u)",
+		        unsigned(width),
+		        unsigned(height),
+		        double(config.stream_scale),
+		        unsigned(info.stream_eye_width),
+		        unsigned(info.stream_eye_height));
 	// Ensure we don't try to encode too large images (only for left/right, ignore alpha)
 	for (size_t i = 0; i < 2; ++i)
 		check_video_size(res[i].encoder_name, res[i].codec, width, height);
@@ -368,6 +391,7 @@ std::array<encoder_settings, num_streams> get_encoder_settings(wivrn::vk_bundle 
 	{
 		dst.width = width;
 		dst.height = height;
+		dst.encode_scale = render_scale;
 		dst.src_layer = i;
 		if (i == 2) // alpha channel
 			dst.height /= 2;

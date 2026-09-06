@@ -121,6 +121,7 @@ if (WIVRN_BUILD_SERVER)
 			driver/bitrate_controller.cpp
 			driver/clock_offset.cpp
 			driver/configuration.cpp
+			hostname.cpp
 			driver/hand_joints_list.cpp
 			driver/pose_list.cpp
 			driver/tracking_control.cpp
@@ -209,6 +210,27 @@ if (WIVRN_BUILD_SERVER)
 		else()
 			message(STATUS "\tNX Warp Vulkan encoder: OFF (nxvc has no vk_encoder)")
 		endif()
+
+		# The encoded per-eye size derivation on its own: the server's "stream_scale"
+		# against the headset's render_scale, and the tile-grid alignment both the
+		# foveation shader and the NX Warp encoder depend on. The e2e harness builds
+		# its encoder_settings by hand and never reaches get_encoder_settings, so this
+		# is what covers that decision. Header only, links nothing.
+		# It also drives the server configuration parser through a real config file, so it
+		# links configuration.cpp and the monado logging it uses.
+		add_executable(wivrn-stream-scale-test
+			encoder/stream_scale_test.cpp
+			driver/configuration.cpp
+			)
+		target_include_directories(wivrn-stream-scale-test PRIVATE .)
+		target_compile_features(wivrn-stream-scale-test PRIVATE cxx_std_23)
+		target_link_libraries(wivrn-stream-scale-test PRIVATE
+			wivrn-common
+			wivrn-common-server
+			aux_os
+			aux_util
+			xrt-interfaces
+			)
 
 		# The server path without a headset, a GPU or a socket: synthetic frames
 		# through the codec, the packetizer, the transport and back into the

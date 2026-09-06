@@ -967,6 +967,28 @@ void Settings::set_nxwarpEffort(const bool & value)
 		nxwarpEffortChanged();
 }
 
+Settings::nxwarp_planar Settings::nxwarpPlanar() const
+{
+	const auto v = nxd::nxwarp_option(m_jsonSettings, "planar")
+	                       .value_or(std::string(nxd::nxwarp_default_planar));
+	if (v == "off")
+		return PlanarOff;
+	if (v == "prefer")
+		return PlanarPrefer;
+	return PlanarRd;
+}
+
+void Settings::set_nxwarpPlanar(const nxwarp_planar & value)
+{
+	const auto old = nxwarpPlanar();
+	const char * v = value == PlanarOff ? "off"
+	                                    : (value == PlanarPrefer ? "prefer" : "rd");
+	nxd::set_nxwarp_option_or_default(m_jsonSettings, "planar", v,
+	                                  nxd::nxwarp_default_planar);
+	if (old != nxwarpPlanar())
+		nxwarpPlanarChanged();
+}
+
 bool Settings::nxwarpInter() const
 {
 	return nxd::nxwarp_option_bool(m_jsonSettings, "inter", nxd::nxwarp_default_inter);

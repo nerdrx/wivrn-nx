@@ -302,6 +302,32 @@ Kirigami.ScrollablePage {
             }
 
             RowLayout {
+                Kirigami.FormData.label: i18n("Low-poly tiles:")
+                visible: Settings.nxwarpSelected
+                Controls.ComboBox {
+                    id: nxwarp_planar
+                    model: [
+                        {
+                            label: i18nc("piecewise-planar tile mode", "Off"),
+                            value: Settings.PlanarOff
+                        },
+                        {
+                            label: i18n("Where it is free"),
+                            value: Settings.PlanarRd
+                        },
+                        {
+                            label: i18n("Prefer the look"),
+                            value: Settings.PlanarPrefer
+                        }
+                    ]
+                    textRole: "label"
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("Code a tile as a few flat, shaded regions with sharp edges instead of as transform blocks. It changes how the picture FAILS when bits run short: flat facets and edges, like a low-polygon model, instead of blocky mush. \"Where it is free\" takes it only where it costs nothing, which is measured as no change worth seeing; \"Prefer the look\" takes it wherever it is cheaper and trades 2-4 dB for the look. Needs the reference encoder and a headset that supports it — the Headset statistics page says which one you have.")
+                }
+            }
+
+            RowLayout {
                 Kirigami.FormData.label: i18n("Send pacing:")
                 visible: Settings.nxwarpSelected
                 Controls.ComboBox {
@@ -699,6 +725,7 @@ Kirigami.ScrollablePage {
             Settings.nxwarpTileMap = nxwarp_tile_map.model[nxwarp_tile_map.currentIndex].value;
             Settings.nxwarpCodedVectors = nxwarp_coded_vectors.model[nxwarp_coded_vectors.currentIndex].value;
             Settings.nxwarpEffort = nxwarp_effort.checked;
+            Settings.nxwarpPlanar = nxwarp_planar.model[nxwarp_planar.currentIndex].value;
             Settings.nxwarpInter = nxwarp_inter.checked;
             Settings.nxwarpIntraPeriod = nxwarp_intra_period.value;
         }
@@ -727,6 +754,7 @@ Kirigami.ScrollablePage {
         nxwarp_tile_map.currentIndex = nxwarp_tile_map.model.findIndex(i => i.value === Settings.nxwarpTileMap);
         nxwarp_coded_vectors.currentIndex = nxwarp_coded_vectors.model.findIndex(i => i.value === Settings.nxwarpCodedVectors);
         nxwarp_effort.checked = Settings.nxwarpEffort;
+        nxwarp_planar.currentIndex = nxwarp_planar.model.findIndex(i => i.value === Settings.nxwarpPlanar);
         nxwarp_inter.checked = Settings.nxwarpInter;
         nxwarp_intra_period.value = Settings.nxwarpIntraPeriod;
         desktop_mirror.checked = Settings.mirror;

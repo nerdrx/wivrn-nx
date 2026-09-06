@@ -95,6 +95,8 @@ struct nxwarp_stream_stat
 	Q_PROPERTY(double dominantReasonCount READ dominantReasonCount CONSTANT)
 
 	Q_PROPERTY(int effort READ effort CONSTANT)
+	Q_PROPERTY(QString planar READ planar CONSTANT)
+	Q_PROPERTY(QString planarNote READ planarNote CONSTANT)
 	Q_PROPERTY(QString entropy READ entropy CONSTANT)
 	Q_PROPERTY(bool entropyWasAuto READ entropyWasAuto CONSTANT)
 	Q_PROPERTY(QString toolsText READ toolsText CONSTANT)
@@ -286,6 +288,16 @@ public:
 	int effort() const
 	{
 		return int(s.effort);
+	}
+	QString planar() const
+	{
+		return QString::fromStdString(s.planar);
+	}
+	// Empty when the configured level is the level in use; otherwise the
+	// reason it is not, which is the half of this field that matters.
+	QString planarNote() const
+	{
+		return QString::fromStdString(s.planar_note);
 	}
 	QString entropy() const
 	{

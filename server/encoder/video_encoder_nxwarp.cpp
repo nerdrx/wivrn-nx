@@ -167,6 +167,44 @@ entropy_request nxwarp_entropy_from(const std::string & v)
 	        std::format("nxwarp: \"entropy\": \"{}\" is not one of auto, rans, lite", v));
 }
 
+// "planar": "off" | "rd" | "prefer".  An unknown value is an error rather than
+// a fallback, for the same reason "entropy" is: a typo that silently gives a
+// different picture is worse than a refusal.
+//
+// Unlike "entropy" there is no "auto", and that is deliberate.  The default is
+// `rd`, which is already the conservative level -- it takes the mode only where
+// it is no worse -- so an "auto" would have nothing left to decide.  What the
+// resolution below decides is not WHICH level but whether the level is
+// available at all, and that is a property of the backend and of the headset,
+// not a preference.
+wivrn::nxwarp_codec_config::planar_t nxwarp_planar_from(const std::string & v)
+{
+	using pl = wivrn::nxwarp_codec_config::planar_t;
+	if (v == "off")
+		return pl::off;
+	if (v == "rd")
+		return pl::rd;
+	if (v == "prefer")
+		return pl::prefer;
+	throw std::runtime_error(std::format(
+	        "nxwarp: \"planar\": \"{}\" is not one of off, rd, prefer", v));
+}
+
+const char * nxwarp_planar_name(wivrn::nxwarp_codec_config::planar_t p)
+{
+	using pl = wivrn::nxwarp_codec_config::planar_t;
+	switch (p)
+	{
+		case pl::off:
+			return "off";
+		case pl::rd:
+			return "rd";
+		case pl::prefer:
+			return "prefer";
+	}
+	return "off";
+}
+
 // The nxvc tool bits, by name, for the one log line that shows what was
 // negotiated.  Only the bits this encoder can emit are listed; anything else
 // prints as its number, which is what an unexpected bit deserves.
@@ -218,6 +256,8 @@ std::string nxwarp_tools_string(uint64_t m)
 // this file is deliberately free of nxvc headers (see nxwarp_codec.h), and one
 // bit number with the tool's name beside it is clearer than a dependency.
 constexpr uint64_t kNxvcToolEntropyLite = 1ull << 30;
+// PLANAR, nxvc SYNTAX.md 13.13.  Named here for the same reason bit 30 is.
+constexpr uint64_t kNxvcToolPlanar = 1ull << 35;
 
 constexpr uint32_t kNxvcMagic = 0x3156584Eu; // 'NXV1'
 constexpr size_t kNxvcToolsOffset = 32;
@@ -475,6 +515,69 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 		case entropy_request::rans:
 			codec_cfg.entropy = nxwarp_codec_config::entropy_t::rans;
 			break;
+	}
+
+	// ---- the piecewise-planar tile mode, resolved against the backend and the
+	// headset (nxvc SYNTAX.md 13.13, tool bit 35).
+	//
+	// Two things can stop it and NEITHER may be silent, which is the whole
+	// point of the option: the Vulkan backend has no mode 5 at all, and a
+	// headset that does not advertise bit 35 refuses the stream HEADER, which
+	// is a black screen rather than a degraded picture.
+	//
+	// The rule is the one "entropy" already uses, and for the same reason: a
+	// DEFAULT that cannot be honoured degrades quietly-with-a-log, because a
+	// default must never stop a session an operator did not ask for; an
+	// EXPLICIT request that cannot be honoured is refused, because the operator
+	// asked for something and deserves to be told it is not happening.
+	{
+		using pl = nxwarp_codec_config::planar_t;
+		const pl want = nxwarp_planar_from(
+		        option_string(settings.options, "planar", "rd"));
+		const bool explicit_ask = settings.options.count("planar") != 0;
+		const bool client_has_planar = (client_tools & kNxvcToolPlanar) != 0;
+		pl eff = want;
+		std::string note;
+		if (want != pl::off)
+		{
+			if (nxwarp_backend_is_vk(settings))
+			{
+				if (explicit_ask)
+					throw std::runtime_error(std::format(
+					        "nxwarp: \"planar\": \"{}\" needs \"backend\": "
+					        "\"ref\" -- the Vulkan encoder does not implement "
+					        "the piecewise-planar tile mode (nxvc mode 5). Use "
+					        "\"planar\": \"off\", or the reference backend.",
+					        nxwarp_planar_name(want)));
+				eff = pl::off;
+				note = "the GPU backend has no planar mode";
+			}
+			else if (not client_has_planar)
+			{
+				if (explicit_ask)
+					throw std::runtime_error(std::format(
+					        "nxwarp: \"planar\": \"{}\" needs the headset to "
+					        "advertise PLANAR (nxvc tool bit 35) and its mask is "
+					        "{:#x} ({}). A headset without it refuses the stream "
+					        "header outright, which is a black screen. Use "
+					        "\"planar\": \"off\".",
+					        nxwarp_planar_name(want), client_tools,
+					        client_tools == 0
+					                ? "the headset reported no mask at all"
+					                : "bit 35 is clear"));
+				eff = pl::off;
+				note = "the client does not support planar tiles";
+			}
+		}
+		codec_cfg.planar = eff;
+		stats_planar_name = nxwarp_planar_name(eff);
+		stats_planar_note = note;
+		if (not note.empty())
+			U_LOG_I("nxwarp: \"planar\": \"%s\" -> \"off\" (%s)",
+			        nxwarp_planar_name(want), note.c_str());
+		else if (eff != pl::off)
+			U_LOG_I("nxwarp: \"planar\": \"%s\" (nxvc tool bit 35)",
+			        nxwarp_planar_name(eff));
 	}
 
 	// The same three facts the log states once, kept so every two-second report can carry
@@ -1866,6 +1969,8 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				st.dominant_reason_count = best;
 
 				st.effort = stats_effort;
+				st.planar = stats_planar_name;
+				st.planar_note = stats_planar_note;
 				st.entropy = stats_entropy_name;
 				st.entropy_was_auto = stats_entropy_was_auto;
 				st.negotiated_tools = stats_negotiated_tools;

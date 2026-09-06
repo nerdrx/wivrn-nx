@@ -100,6 +100,12 @@ public:
 		// so with `intra_dir` on it changes nothing here, and the encoder logs
 		// that combination instead of letting it look like a tuning result.
 		cfg.int_rdoq = c.effort >= 1 ? 1 : 0;
+		// The piecewise-planar tile mode (nxvc tool bit 35).  This backend is
+		// the one that HAS it: the Vulkan encoder does not implement mode 5,
+		// and video_encoder_nxwarp has already resolved the option to `off`
+		// there, so by the time a config reaches here the level is one this
+		// codec can deliver.
+		cfg.planar = (uint32_t)c.planar;
 		cfg.qp_search = 0;   // no per-tile QP offset search
 		cfg.intra_dir = c.intra_dir ? 1 : 0;
 		cfg.intra_dir_cand = 1;

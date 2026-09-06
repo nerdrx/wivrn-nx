@@ -285,6 +285,13 @@ class video_encoder_nxwarp : public video_encoder
 	// The effort level the codec was built with, for the stats card: it leaves
 	// no trace in the stream, so this is the only place it can be read back.
 	uint32_t stats_effort = 1;
+	// The planar level actually in use, and -- when it is not the level that
+	// was asked for -- the reason.  It leaves no trace in the stream that the
+	// server could read back, and the reason is a fact about the SESSION (this
+	// backend, this headset), so reporting it here is the only way anything
+	// downstream can say what happened.
+	std::string stats_planar_name = "off";
+	std::string stats_planar_note;
 	std::string stats_entropy_name;
 	bool stats_entropy_was_auto = true;
 	uint64_t stats_negotiated_tools = 0;

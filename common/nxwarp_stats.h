@@ -186,6 +186,18 @@ struct nxwarp_stream_stats
 	// are coded and nothing about how they decode -- so the encoder reporting it here is
 	// the only way anything downstream can say which one produced a stream.
 	uint32_t effort = 1;
+	// The piecewise-planar tile mode (nxvc tool bit 35): "off", "rd" or
+	// "prefer", as the session actually resolved it -- and, when that is not
+	// what the configuration asked for, why not.  An empty note means the
+	// configured level is the level in use.
+	//
+	// Like `effort` this cannot be read off the wire, and unlike `effort` it
+	// can be silently unavailable for two different reasons (the Vulkan
+	// backend has no mode 5; the headset does not advertise bit 35).  Carrying
+	// the reason is what turns "it did nothing" into "it did nothing BECAUSE",
+	// which is the difference between a status page and a shrug.
+	std::string planar = "off";
+	std::string planar_note;
 
 	// --- the encode size -----------------------------------------------------
 	// Per eye, whether or not the eyes are paired: the stereo frame on the wire is twice
@@ -320,6 +332,8 @@ inline void to_json(nlohmann::json & j, const nxwarp_stream_stats & s)
 	        {"dominant_reason", uint8_t(s.dominant_reason)},
 	        {"dominant_reason_count", s.dominant_reason_count},
 	        {"effort", s.effort},
+	        {"planar", s.planar},
+	        {"planar_note", s.planar_note},
 	        {"entropy", s.entropy},
 	        {"entropy_was_auto", s.entropy_was_auto},
 	        {"negotiated_tools", s.negotiated_tools},
@@ -390,6 +404,8 @@ inline void from_json(const nlohmann::json & j, nxwarp_stream_stats & s)
 	get("not_reconstructed_costly", s.not_reconstructed_costly);
 	get("dominant_reason_count", s.dominant_reason_count);
 	get("effort", s.effort);
+	get("planar", s.planar);
+	get("planar_note", s.planar_note);
 	get("entropy", s.entropy);
 	get("entropy_was_auto", s.entropy_was_auto);
 	get("negotiated_tools", s.negotiated_tools);

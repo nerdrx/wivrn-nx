@@ -148,6 +148,39 @@ struct nxwarp_codec_config
 	// reaches nothing, and video_encoder_nxwarp says so in the log rather than
 	// leaving it to be discovered as two runs with the same byte count.
 	uint32_t effort = 1;
+	// The piecewise-planar tile mode: nxvc tool bit 35, `mode == 5`, nxvc's
+	// SYNTAX.md 13.13 and docs/LOWPOLY-MODE.md.  A tile whose content is a few
+	// smoothly shaded regions meeting at sharp boundaries is coded as those
+	// regions instead of as transform coefficients.
+	//
+	// It exists for the KIND of failure it has, not for its PSNR.  A transform
+	// codec starved of bits turns the picture into its own coding grid, and in
+	// a headset that pattern reshuffles every frame; a planar tile loses detail
+	// and keeps structure, which degrades toward the look of a low-polygon
+	// model.  Measured on nxvc's own fixtures the transform is 5 to 12 dB ahead
+	// on luma at equal bytes, so this is a taste and never an optimisation --
+	// which is exactly why `prefer` is a separate level and not the default.
+	//
+	//   off    the mode is not offered.
+	//   rd     offered per tile, and taken only where it is BOTH cheaper and no
+	//          worse than the intra tile it would replace.  Measured neutral --
+	//          within 0.015 dB and 2.4 % of the mode being off -- and the
+	//          default.
+	//   prefer taken wherever it is cheaper, distortion notwithstanding: the
+	//          low-polygon look as a setting, at 2 to 4 dB.
+	//
+	// TWO THINGS CAN STOP IT, and neither may be silent.  The Vulkan backend
+	// does not implement mode 5 at all, and a headset that does not advertise
+	// tool bit 35 would refuse the stream header outright -- a black screen,
+	// not a degraded picture.  video_encoder_nxwarp resolves both before the
+	// codec is built and reports what it did in `nxwarp_stream_stats`.
+	enum class planar_t
+	{
+		off = 0,
+		rd = 1,
+		prefer = 2,
+	};
+	planar_t planar = planar_t::rd;
 	// Encoder-side speed knobs; none of them changes how a stream decodes.
 	// Directional intra (tool 17): costs the CPU encoder most of its time at
 	// this resolution; off codes the DC-plane predictor only.

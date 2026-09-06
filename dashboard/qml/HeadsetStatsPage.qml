@@ -270,6 +270,25 @@ Kirigami.ScrollablePage {
                         }
 
                         RowLayout {
+                            Kirigami.FormData.label: i18n("Low-poly tiles:")
+                            Controls.Label {
+                                // The note is the point of this line: the level
+                                // can be unavailable for two different reasons
+                                // and neither shows up anywhere else.
+                                text: modelData.planarNote.length > 0
+                                      ? i18n("off — %1", modelData.planarNote)
+                                      : (modelData.planar === "off"
+                                         ? i18n("off")
+                                         : (modelData.planar === "prefer"
+                                            ? i18n("on, preferring the look")
+                                            : i18n("on where it is free")))
+                            }
+                            Kirigami.ContextualHelpButton {
+                                toolTipText: i18n("Whether tiles may be coded as flat shaded regions with sharp edges instead of as transform blocks. It needs the reference encoder and a headset that advertises the tool; when either is missing this line says which, because the setting is then doing nothing and nothing else would tell you.")
+                            }
+                        }
+
+                        RowLayout {
                             Kirigami.FormData.label: i18n("Entropy coder:")
                             Controls.Label {
                                 text: modelData.entropyWasAuto

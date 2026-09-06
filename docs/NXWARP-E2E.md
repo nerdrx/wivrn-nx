@@ -490,6 +490,68 @@ cannot run on a GPU at all. On `--backend ref` the level reaches the non-directi
 only — the scope nxvc pins byte-identical against the GPU encoder — so with `intra-dir` on,
 that backend's default, it changes nothing and the encoder logs a warning saying so.
 
+### Low-poly tiles, and the decoder that is not there
+
+`"planar"` codes a tile as two to four flat shaded regions with sharp
+boundaries instead of as transform blocks (nxvc tool bit 35, SYNTAX.md 13.13).
+`off`, `rd` (the default: taken only where it is cheaper AND no worse) and
+`prefer` (taken wherever it is cheaper — the low-polygon look, at 2 to 4 dB).
+
+**The e2e harness cannot prove this one, and finding out why is the useful
+part.** `wivrn-nxwarp-e2e --backend ref --client-tools all --planar prefer`
+runs, encodes, and then its client refuses the stream header:
+
+```
+nxwarp[0]: stream header refused: unsupported version or tool
+```
+
+That is the harness being right. Its client is the *shipping* decoder —
+`nxvc_vk_decoder`, the GPU one — and that decoder has no mode 5, so
+`nxvc_vk_decoder_tools_supported()` is `0x17f7a1fff` with bit 35 clear.
+`--client-tools all` simulates a headset that advertises everything; the
+harness's own decoder then demonstrates what advertising something you cannot
+decode buys you. **A real headset never advertises bit 35**, so on a real
+session the server degrades to `off` and the dashboard says
+*"off — the client does not support planar tiles"*.
+
+The path that does work end to end is `wivrn-nxwarp-loopback`, which decodes
+with `nxvc_decoder`, the reference decoder, which implements the mode:
+
+```sh
+wivrn-nxwarp-loopback --w 256 --h 192 --frames 8 --qp 44 --planar off|rd|prefer
+```
+
+| `--planar` | B/frame | worst luma PSNR | planar tiles | stream tools |
+| --- | --- | --- | --- | --- |
+| `off` | 1195 | 29.10 dB | 0 / 98 | `0x016a0045` |
+| `rd` | 1192 (−0.3 %) | 29.10 dB | 1 / 98 | `0x8016a0045` |
+| `prefer` | **526 (−56 %)** | 23.91 dB | 96 / 98 | `0x8016a0045` |
+
+All three reassemble byte-identically and decode 8 of 8 frames. `rd` is
+neutral, as it is designed to be; `prefer` is the look, and on this synthetic
+panel content it is also a large byte saving, which says more about the content
+than about the mode. Note the tool bit in the last column: it appears only when
+the mode is enabled, because it is negotiated.
+
+The two refusals are worth running once, since they are the whole point of the
+option not being a silent no-op:
+
+```sh
+# explicit level on the GPU backend
+wivrn-nxwarp-e2e ... --backend vk --planar prefer
+#   nxwarp: "planar": "prefer" needs "backend": "ref" -- the Vulkan encoder
+#   does not implement the piecewise-planar tile mode (nxvc mode 5).
+
+# explicit level, headset without the tool bit
+wivrn-nxwarp-e2e ... --backend ref --client-tools none --planar prefer
+#   nxwarp: "planar": "prefer" needs the headset to advertise PLANAR (nxvc
+#   tool bit 35) and its mask is 0x0 ... which is a black screen.
+```
+
+The DEFAULT never refuses: with the same headset it degrades to `off`, logs the
+reason and the run passes, because a default must not stop a session nobody
+asked to change.
+
 ### Send pacing, and a slow client
 
 A desktop GPU decodes a 320x240 NX Warp frame in about a millisecond, so nothing in this

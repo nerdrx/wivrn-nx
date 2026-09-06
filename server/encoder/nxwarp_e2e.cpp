@@ -87,7 +87,7 @@
 //                    [--intra-period N] [--coded-vectors default|none|static]
 //                    [--reconnect-at N] [--start-frame-id F]
 //                    [--pace auto|off|FPS] [--client-decode-ms N] [--present-hz N]
-//                    [--feedback-delay N] [--effort 0|1]
+//                    [--feedback-delay N] [--effort 0|1] [--planar off|rd|prefer]
 //
 //   --eyes             1 (the default, and every run that predates this flag) or 2, which
 //                      is encoder_settings::eyes: ONE stream carrying BOTH eyes as a
@@ -1597,6 +1597,16 @@ int main(int argc, char ** argv)
 	// something nobody ships. `--effort 0` is how a run reaches the pre-effort
 	// bitstream, which is what makes the two comparable in one binary.
 	std::string effort = "1";
+	// The piecewise-planar tile mode: "off", "rd" (the server's default) or
+	// "prefer".  It needs --backend ref: the Vulkan encoder has no mode 5, and
+	// the server refuses the combination rather than dropping it, which this
+	// harness is a good place to prove.
+	// Unset unless asked: leaving the key ABSENT is what makes the server's own
+	// default apply, and the server refuses an EXPLICIT level the simulated
+	// headset cannot decode.  Writing it unconditionally would turn every
+	// existing run in this harness -- all of which simulate a headset with no
+	// tool mask -- into a startup error.
+	std::string planar;
 
 	for (int i = 1; i < argc; ++i)
 	{
@@ -1650,6 +1660,8 @@ int main(int argc, char ** argv)
 			entropy = next();
 		else if (a == "--effort")
 			effort = next();
+		else if (a == "--planar")
+			planar = next();
 		else if (a == "--qp")
 			qp = uint32_t(std::stoul(next()));
 		else if (a == "--reconnect-at")
@@ -1845,6 +1857,8 @@ int main(int argc, char ** argv)
 	settings.options["stereo-compose"] = stereo_compose;
 	settings.options["entropy"] = entropy;
 	settings.options["effort"] = effort;
+	if (not planar.empty())
+		settings.options["planar"] = planar;
 	// The simulated headset mask. "all" is every bit set, which is a headset that can
 	// decode anything this encoder emits and is what keeps every existing run in this
 	// harness unchanged. It is spelled ~0 rather than read from nxvc because this file,
@@ -1856,10 +1870,16 @@ int main(int argc, char ** argv)
 		settings.nxvc_tools = 0;
 	else
 		settings.nxvc_tools = std::stoull(client_tools, nullptr, 0);
+	// Named rather than built inside the call: a std::string temporary's
+	// c_str() does live to the end of the full expression, but a reader should
+	// not have to know that to trust the line.
+	const std::string planar_note =
+	        planar.empty() ? std::string() : ", planar request \"" + planar + "\"";
 	std::fprintf(stderr,
-	             "[e2e] simulated headset nxvc_tools = 0x%llx (entropy request \"%s\")\n",
+	             "[e2e] simulated headset nxvc_tools = 0x%llx (entropy request \"%s\"%s)\n",
 	             (unsigned long long)settings.nxvc_tools,
-	             entropy.c_str());
+	             entropy.c_str(),
+	             planar_note.c_str());
 	// Rate control off by default. The byte-identity check below compares this
 	// run's bitstream against nxv-dec's decode of it, which a moving quantiser
 	// does not disturb -- but the frame sizes and the loss pattern would stop

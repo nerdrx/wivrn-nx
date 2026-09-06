@@ -426,6 +426,7 @@ Per-stream `options` (all optional):
 | `intra-period` | `180` | rolling intra refresh period in frames; `1` forces every tile every frame |
 | `intra-dir` | `on` | directional intra prediction (tool 17). It is most of the CPU encoder's time at headset resolutions; `off` codes the DC-plane predictor only, for more bits and a much faster encode |
 | `effort` | `1` | how hard the encoder looks for the cheapest way to say each frame. `1` adds the **integer requantiser**: a coefficient quantised to ±1 whose squared error is worth less than the bits it saves is dropped. Measured on RADV at 2 × 1088×1088, it is **−1.5 % BD-rate on rANS and −3.6 % on Lite for no measurable encode time** (9.12 → 9.18 ms a frame, inside the run-to-run spread). `0` is the plain dead-zone quantiser, which is what the encoder did before this option existed. It changes which levels are coded and nothing about how they decode — the stream carries no tool bit for it and no decoder can tell the levels apart — and both backends honour it. There is no level 2: nxvc refuses one, because a wider motion search measures −0.05 % for +12 % encode time and its own trellis RDOQ cannot run on a GPU. Out of range is an error, not a fallback |
+| `planar` | `rd` | the **piecewise-planar tile mode** (nxvc tool bit 35): a tile may be coded as two to four flat, shaded regions meeting at sharp boundaries instead of as transform blocks. It changes how the picture FAILS when bits run short — flat facets and edges, like a low-polygon model, instead of blocky mush — and it is a taste, not an optimisation: at equal bytes the transform is 5 to 12 dB ahead on luma. `off`; `rd` takes it only where it is both cheaper and no worse (measured neutral, within 0.015 dB); `prefer` takes it wherever it is cheaper, which is the look, at 2 to 4 dB. **It needs `"backend": "ref"` and a headset that advertises the tool** — see below. An unrecognised value is an error, not a fallback |
 | `preset` | `1` | nxvc effort preset: `0` medium, `1` fast, `2` slow. Encoder-side only |
 | `threads` | `0` | encoder worker threads for the tile pool: `0` uses every core (capped at 16), `1` is the serial path. Byte-identical either way |
 | `pace` | `auto` | send pacing: `auto` follows the rate the headset reports it can decode at, `off` sends every composited frame, a number is a fixed frame rate. See below |
@@ -459,6 +460,27 @@ too, on the stream's geometry line, told from what arrived rather than from anyt
 the wire: under fixed chunks a frame carries one transport tile per MTU-sized piece of its
 bitstream and under spans it carries every tile it coded, which on a paired 1088x1088 is 45
 against 578.
+
+**`planar` is off in practice today, and the dashboard says so rather than
+pretending.** Two things can stop it and the server resolves both before the
+codec is built:
+
+* the **Vulkan encoder does not implement the mode** (nxvc mode 5 exists in the
+  reference codec only). `"planar"` set explicitly together with
+  `"backend": "vk"` is refused at startup with a message naming both; the
+  default degrades to `off` and is logged.
+* **no shipping headset advertises tool bit 35.** The client sends
+  `nxvc_vk_decoder_tools_supported()`, whose mask is `0x17f7a1fff` — bit 35
+  clear, because the headset decodes with the GPU decoder and that has no
+  mode 5 either. A decoder without the bit refuses the stream *header*, which
+  is a black screen and not a degraded picture, so an explicit request is
+  refused and the default degrades to `off`.
+
+So on a real session today the Headset statistics page reads *"off — the client
+does not support planar tiles"*, and that is the truthful answer rather than a
+setting quietly doing nothing. The path that works end to end is
+`wivrn-nxwarp-loopback --planar`, which decodes with the reference decoder;
+see `docs/NXWARP-E2E.md`.
 
 **`"backend": "vk"` is intra-only, and that is not free.** It implements the DC-plane
 intra half of the v1 bitstream and nothing else: no inter prediction (`"inter": "on"`
@@ -569,7 +591,8 @@ The dashboard renders it on the **Headset statistics** page, one card per stream
 the rate they are paced to, the headset's own decode time, frames the pacer held back, encode
 time, frame size against the controller's target, the quantiser and its band, the bitrate the
 controller allows, what the headset failed to reconstruct and the reason that accounts for most of
-it, the encoded size and tile count, the effort level and the negotiated entropy coder. Each line has a one-sentence
+it, the encoded size and tile count, the effort level, whether low-poly tiles are in use (and, when
+they are not, which of the two reasons applies), and the negotiated entropy coder. Each line has a one-sentence
 note on what it means. Nothing there requires reading the log.
 
 ### In the dashboard
@@ -579,7 +602,8 @@ dashboard's settings page reveals an **NX Warp encoder** section carrying the se
 are worth changing: [`stream_scale`](#stream_scale) (with the per-eye size and tile count it will
 produce, from the size the last connected headset asked for), `entropy`, `pace` with its fixed
 frame rate, `rc` with its `min-qp`/`max-qp` band, `coded-vectors`, `effort` (as **Extra encoder
-effort**, on by default), and `inter` with `intra-period`. Each carries a one-line note on what it trades away.
+effort**, on by default), `planar` (as **Low-poly tiles**), and `inter` with
+`intra-period`. Each carries a one-line note on what it trades away.
 
 The remaining options — `backend`, `qp`, `intra-dir`, `preset`, `threads`, `band-rows`, `mtu` —
 are bring-up and debugging controls rather than things to tune, and stay in the file. The

@@ -200,6 +200,7 @@ static const QList<control> controls{
         // interesting value to round-trip is false -- the one that has to be WRITTEN, where
         // every other control here writes when it moves away from an off-by-default value.
         {"nxwarpEffort", false},
+        {"nxwarpPlanar", QVariant::fromValue(int(Settings::PlanarPrefer))},
 };
 
 static void part_b()
@@ -279,6 +280,7 @@ static void part_b()
 		d.setProperty("nxwarpEntropy", int(Settings::EntropyAuto));
 		d.setProperty("nxwarpInter", false);
 		d.setProperty("nxwarpEffort", true);
+		d.setProperty("nxwarpPlanar", int(Settings::PlanarRd));
 		const json out = d.configuration();
 		check(nxd::nxwarp_option(out, "entropy") == std::nullopt,
 		      "entropy set to Auto is erased, not written");
@@ -290,6 +292,13 @@ static void part_b()
 		// everyone who opened the settings page once.
 		check(nxd::nxwarp_option(out, "effort") == std::nullopt,
 		      "effort left on is erased, not written");
+		// "rd" is the server's default, so the middle value is the one that
+		// erases the key -- the same convention, on a three-valued control.
+		check(nxd::nxwarp_option(out, "planar") == std::nullopt,
+		      "planar left at rd is erased, not written");
+		d.setProperty("nxwarpPlanar", int(Settings::PlanarOff));
+		check(nxd::nxwarp_option(d.configuration(), "planar") == std::string("off"),
+		      "planar turned off is written as \"off\"");
 		d.setProperty("nxwarpEffort", false);
 		check(nxd::nxwarp_option(d.configuration(), "effort") == std::string("0"),
 		      "effort turned off is written as \"0\"");
@@ -621,6 +630,7 @@ static void part_d(const char * qml_path)
 	        {"nxwarp_inter", true},
 	        {"nxwarp_intra_period", true},
 	        {"nxwarp_effort", true},
+	        {"nxwarp_planar", true},
 	};
 
 	for (const auto & [id, in_save]: ids)

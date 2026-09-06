@@ -59,6 +59,10 @@ inline constexpr std::string_view nxwarp_default_coded_vectors = "default";
 inline constexpr bool nxwarp_default_inter = false;
 // "effort": 1 is the default the server applies, so an unchecked box is what gets written out.
 inline constexpr uint32_t nxwarp_default_effort = 1;
+// "planar": the piecewise-planar tile mode.  The server's default is "rd", so
+// that is what an untouched configuration means and what gets erased rather
+// than written.
+inline constexpr std::string_view nxwarp_default_planar = "rd";
 inline constexpr std::string_view nxwarp_default_stereo_frame = "auto";
 inline constexpr std::string_view nxwarp_default_tile_map = "auto";
 inline constexpr uint32_t nxwarp_default_intra_period = 180;

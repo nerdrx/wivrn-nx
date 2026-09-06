@@ -1635,11 +1635,17 @@ int main(int argc, char ** argv)
 	std::string client_tools = "none";
 	// "auto" (the server default), "rans" or "lite".
 	std::string entropy = "auto";
-	// The encoder effort level, "0" or "1". The server's default is 1 and so is this
-	// one: the harness runs the configuration the server runs, or it is measuring
-	// something nobody ships. `--effort 0` is how a run reaches the pre-effort
-	// bitstream, which is what makes the two comparable in one binary.
-	std::string effort = "1";
+	// The encoder effort level, "0" or "1".  EMPTY UNLESS ASKED FOR, so a plain
+	// run leaves the option out of the map entirely and gets whatever the
+	// server defaults to -- which is the point.  It used to be hard-defaulted
+	// to "1" here to match the server, and that made the harness incapable of
+	// noticing when the two disagreed: it was passing the answer in.  Now the
+	// level the run actually used is read back off the constructed encoder
+	// (`resolved_effort()`) and printed, so `--effort` with no value proves the
+	// default rather than asserting it.  Not out of the published stats: those
+	// are built inside the two-second reporting window and a twelve-frame run
+	// publishes none, so a reader would get the struct's initialiser.
+	std::string effort;
 	// The snap-to-identity threshold, 1/16 luma samples.  Absent unless asked
 	// for, so every existing run keeps the server's default of 0.
 	std::string snap_identity;
@@ -1925,7 +1931,8 @@ int main(int argc, char ** argv)
 	// .nxv files.
 	settings.options["stereo-compose"] = stereo_compose;
 	settings.options["entropy"] = entropy;
-	settings.options["effort"] = effort;
+	if (not effort.empty())
+		settings.options["effort"] = effort;
 	if (not snap_identity.empty())
 		settings.options["snap-identity"] = snap_identity;
 	if (not planar.empty())
@@ -3539,6 +3546,18 @@ int main(int argc, char ** argv)
 			            p.total_ms / double(p.frames), p.max_ms,
 			            (unsigned long long)p.frames,
 			            (unsigned long long)(p.bytes / p.frames));
+		/* The effort level THE RUN ACTUALLY USED, read back out of the
+		 * published stats rather than echoed from the command line: with no
+		 * --effort the option is never put in the map, so this line is the
+		 * server's own default arriving from the other side of the encoder.
+		 * The level leaves no tool bit, so the stats are the only place it
+		 * can be read at all. */
+		const uint32_t used = enc.resolved_effort();
+		std::printf("effort: %u (%s), %s\n",
+		            used,
+		            used >= 1 ? "integer requantiser" : "dead-zone quantiser",
+		            effort.empty() ? "the server's default, not asked for"
+		                           : "asked for on the command line");
 		/* The identity count, from the published stats the encoder filled --
 		 * the same number the dashboard card shows, so a harness run and a
 		 * live session cannot disagree about it. */

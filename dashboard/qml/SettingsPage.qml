@@ -377,7 +377,7 @@ Kirigami.ScrollablePage {
                     text: i18n("Extra encoder effort")
                 }
                 Kirigami.ContextualHelpButton {
-                    toolTipText: i18n("Let the encoder work a little harder for a smaller stream: it drops a coefficient whose error is worth less than the bits it saves. Measured 1.5%% fewer bytes with rANS and 3.6%% with Lite, for no measurable encode time, and the picture is unchanged in every other way. On unless you are chasing a difference to the byte.")
+                    toolTipText: i18n("Let the encoder drop a coefficient whose error is worth less than the bits it saves. It costs no measurable encode time, but it only pays on synthetic test footage: on rendered scenes it measured 0.1%% to 3.2%% MORE bytes for the same quality, because the detail it drops is also what the next frame is predicted from. Off by default for that reason. The setting that will replace it is a trellis search, which measured better on every clip and is not written yet.")
                 }
             }
 

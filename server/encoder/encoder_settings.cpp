@@ -27,6 +27,8 @@
 #include "video_encoder.h"
 #include "wivrn_packets.h"
 
+#include <format>
+#include <ranges>
 #include <algorithm>
 #include <magic_enum.hpp>
 #include <string>
@@ -365,6 +367,13 @@ std::array<encoder_settings, num_streams> get_encoder_settings(wivrn::vk_bundle 
 	configuration config;
 
 	std::array<wivrn::encoder_settings, num_streams> res{};
+	// What each slot IS, before anything decides whether it is enabled. This is the
+	// assignment that was missing: encoder_settings::role used to default to `view`
+	// and nothing here ever set it, so the alpha plane went on the wire labelled as
+	// an eye and the client waited for a picture it would never be sent.
+	for (auto [i, dst]: std::ranges::enumerate_view(res))
+		dst.role = default_stream_role(size_t(i));
+
 	const auto & info = session.get_info();
 	const auto settings = *session.get_settings();
 
@@ -689,6 +698,14 @@ std::array<encoder_settings, num_streams> get_encoder_settings(wivrn::vk_bundle 
 		i.bit_depth = bit_depth.value_or(10);
 
 	split_bitrate(res, settings.bitrate_bps);
+
+	// Last gate before these become the wire description. A wrong role does not fail
+	// here, on the server, where it would be obvious: it fails on the headset, as a
+	// stream scene that never starts, which reads as a broken client or a bad link.
+	// So say it here, loudly, with the stream that is wrong.
+	if (const auto bad = check_stream_roles(res); not bad.empty())
+		U_LOG_E("stream roles are inconsistent: %s -- the headset will route this stream wrongly", bad.c_str());
+
 	return res;
 }
 } // namespace wivrn

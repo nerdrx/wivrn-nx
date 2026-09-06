@@ -228,6 +228,14 @@ enum class stream_role : uint8_t
 	alpha = 1, // the passthrough alpha plane
 	quad = 2,  // a promoted quad layer
 	base = 3,  // an atlas patch source; never presented on its own
+
+	// Server-side sentinel, never serialised. encoder_settings::role starts here so
+	// that a stream nobody assigned a role to is a loud error at description-build
+	// time instead of a silent `view` -- which is what shipped an alpha plane to the
+	// client labelled as an eye and hung the stream scene before it ever started.
+	// The compositor only ever copies roles out of ENABLED streams, and
+	// check_stream_roles() refuses this value, so it cannot reach the wire.
+	unset = 255,
 };
 
 enum class stream_tab : uint8_t

@@ -37,12 +37,22 @@
 
 #define RENDER_FOVEATION_BUFFER_DIMENSIONS (4096 + 1)
 
+// The lens mask, as the shader reads it: one bit per 64x64 tile, per eye. 128 words covers
+// 4096 tiles, which is a 4096x4096 encode -- larger than RENDER_FOVEATION_BUFFER_DIMENSIONS
+// allows the image to be at all, so it cannot be overrun by a bigger headset.
+#define FOVEATION_MASK_WORDS 128
+
 namespace
 {
 struct ubo_data
 {
 	uint32_t x[XRT_MAX_VIEWS * RENDER_FOVEATION_BUFFER_DIMENSIONS];
 	uint32_t y[XRT_MAX_VIEWS * RENDER_FOVEATION_BUFFER_DIMENSIONS];
+	// Must match the tail of the Config buffer in shaders/foveation.comp.
+	uint32_t mask[XRT_MAX_VIEWS * FOVEATION_MASK_WORDS];
+	uint32_t mask_cols;
+	uint32_t mask_on;
+	uint32_t mask_pad[2];
 };
 
 vk::raii::Sampler make_sampler(wivrn::vk_bundle & vk)
@@ -505,6 +515,53 @@ void foveation::compute_params()
 		else
 			params[i].y = {uint16_t(extent_h)};
 	}
+
+	compute_lens_mask();
+}
+
+// The tiles no lens can show, per eye, from the FOV and the foveation runs this object has
+// just recomputed. Called from compute_params() with the mutex held, so it is recomputed
+// exactly when the curve is -- which is exactly when it can have moved.
+void foveation::compute_lens_mask()
+{
+	lens_mask_tiles = {};
+	if (not lens_mask_enabled)
+		return;
+
+	for (size_t i = 0; i < 2; ++i)
+	{
+		const auto & fov = last.fovs[i];
+		lens_mask_tiles[i] = view_geometry::lens_tile_mask(
+		        {fov.angle_left, fov.angle_right, fov.angle_up, fov.angle_down},
+		        params[i].x,
+		        params[i].y,
+		        foveated_size.width,
+		        foveated_size.height,
+		        {.margin_tiles = lens_mask_margin, .overscan_margin = lens_mask_overscan});
+	}
+}
+
+void foveation::set_lens_mask(bool enabled, uint32_t margin_tiles, float overscan)
+{
+	std::lock_guard lock(mutex);
+	lens_mask_enabled = enabled;
+	lens_mask_margin = margin_tiles;
+	lens_mask_overscan = overscan;
+	// Force the next update_ubo to recompute: the mask is not part of the `last`
+	// comparison, so nothing else would notice this changed.
+	last = {};
+}
+
+std::array<uint32_t, 2> foveation::lens_mask_counts()
+{
+	std::lock_guard lock(mutex);
+	return {lens_mask_tiles[0].masked, lens_mask_tiles[1].masked};
+}
+
+uint32_t foveation::lens_mask_total()
+{
+	std::lock_guard lock(mutex);
+	return lens_mask_tiles[0].total();
 }
 
 foveation::foveation(wivrn::vk_bundle & bundle, vk::Extent3D foveated_size) :
@@ -703,6 +760,26 @@ void foveation::update_ubo(
 		         extent,
 		         foveated_size.height);
 	}
+	// The lens mask, packed one bit per tile per eye. mask_cols is the same for both
+	// eyes -- they are the same encode size -- and 0 tiles masked is written as mask_on
+	// = 0 so the shader's own branch is the one that costs nothing.
+	std::memset(ubo.mask, 0, sizeof(ubo.mask));
+	ubo.mask_cols = lens_mask_tiles[0].cols;
+	ubo.mask_on = 0;
+	ubo.mask_pad[0] = ubo.mask_pad[1] = 0;
+	for (size_t view = 0; view < 2; ++view)
+	{
+		const auto & m = lens_mask_tiles[view];
+		if (m.masked == 0)
+			continue;
+		ubo.mask_on = 1;
+		for (uint32_t t = 0; t < m.total() and t < FOVEATION_MASK_WORDS * 32; ++t)
+		{
+			if (m.tiles[t])
+				ubo.mask[view * FOVEATION_MASK_WORDS + t / 32] |= 1u << (t % 32);
+		}
+	}
+
 	vmaCopyMemoryToAllocation(vk_allocator::instance(), &ubo, gpu_buffer, 0, sizeof(ubo));
 	std::memcpy(gpu_buffer.data<ubo_data>(), &ubo, sizeof(ubo));
 }

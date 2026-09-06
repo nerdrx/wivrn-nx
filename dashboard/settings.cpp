@@ -152,6 +152,7 @@ void Settings::emitAllChanged()
 	nxwarpTileMapChanged();
 	nxwarpCodedVectorsChanged();
 	nxwarpInterChanged();
+	nxwarpLensMaskChanged();
 	nxwarpIntraPeriodChanged();
 }
 
@@ -1092,6 +1093,19 @@ void Settings::set_nxwarpInter(const bool & value)
 	nxd::set_nxwarp_option_bool(m_jsonSettings, "inter", value, nxd::nxwarp_default_inter);
 	if (old != nxwarpInter())
 		nxwarpInterChanged();
+}
+
+bool Settings::nxwarpLensMask() const
+{
+	return nxd::nxwarp_option_bool(m_jsonSettings, "lens-mask", nxd::nxwarp_default_lens_mask);
+}
+
+void Settings::set_nxwarpLensMask(const bool & value)
+{
+	const auto old = nxwarpLensMask();
+	nxd::set_nxwarp_option_bool(m_jsonSettings, "lens-mask", value, nxd::nxwarp_default_lens_mask);
+	if (old != nxwarpLensMask())
+		nxwarpLensMaskChanged();
 }
 
 int Settings::nxwarpIntraPeriod() const

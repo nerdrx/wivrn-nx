@@ -319,6 +319,25 @@ nxwarp_decoder::nxwarp_decoder(vk::raii::Device & device,
 // null), and a stream header is parsed once per stream, so the second call happens with an
 // idle worker, an empty job queue and no blit handle in the scene's hands. Anywhere else
 // it would free images the render thread is sampling.
+// THE LENS MASK, FROM THIS END. The server does not code the tiles the optics cannot show
+// (server/encoder/video_encoder_nxwarp.cpp, "lens-mask"), and the question that raises here is
+// whether the reprojection can then sample a pixel nothing ever wrote. It cannot, and the
+// reason is a property of nxvc rather than of anything this file does:
+//
+//   * every tile of every frame is RECONSTRUCTED, whatever its mode. WARP_SKIP does not mean
+//     "leave the destination alone", it means "reconstruct this tile from the pose warp of the
+//     reference" -- a dispatch that writes every pixel of the tile;
+//   * a masked tile is a constant grey in the picture the server encoded, so what the warp
+//     propagates is that grey, frame after frame;
+//   * the first frame of a stream has no reference at all and is coded INTRA throughout, the
+//     masked tiles included, so the grey is written before anything can predict from it.
+//
+// So the images below are fully written from their first decode and the reprojection reads
+// defined pixels everywhere, in the mask and out of it. There is nothing to fill and nothing
+// to skip, and adding a clear here would only hide a future regression rather than prevent
+// one. What WOULD break the invariant is a decode that writes a subset of the tiles -- which
+// is what a per-tile decode entry point would be -- and that is the change that would have to
+// bring a clear with it.
 void nxwarp_decoder::build_image_pool()
 {
 	for (auto & item: image_pool)

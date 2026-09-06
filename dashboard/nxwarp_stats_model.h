@@ -110,6 +110,14 @@ struct nxwarp_stream_stat
 	Q_PROPERTY(int encodedWidth READ encodedWidth CONSTANT)
 	Q_PROPERTY(int encodedHeight READ encodedHeight CONSTANT)
 	Q_PROPERTY(int tiles READ tiles CONSTANT)
+	// The lens mask: tiles per eye the optics cannot show. `lensMaskEnforced` is the
+	// honest half -- false means the mask is known and the pixels are flattened, but this
+	// backend has no way to be told to skip them.
+	Q_PROPERTY(bool lensMaskOn READ lensMaskOn CONSTANT)
+	Q_PROPERTY(bool lensMaskEnforced READ lensMaskEnforced CONSTANT)
+	Q_PROPERTY(int lensMaskMasked READ lensMaskMasked CONSTANT)
+	Q_PROPERTY(int lensMaskTiles READ lensMaskTiles CONSTANT)
+	Q_PROPERTY(int lensMaskMargin READ lensMaskMargin CONSTANT)
 	Q_PROPERTY(double encodeScale READ encodeScale CONSTANT)
 	// How this window's frames were laid on the transport's tile grid. Counts and not a
 	// mode, because the choice is per frame: "auto" can produce all spans, all chunks or
@@ -324,6 +332,26 @@ public:
 	int tiles() const
 	{
 		return int(s.tiles());
+	}
+	bool lensMaskOn() const
+	{
+		return s.lens_mask_on;
+	}
+	bool lensMaskEnforced() const
+	{
+		return s.lens_mask_enforced;
+	}
+	int lensMaskMasked() const
+	{
+		return int(s.lens_mask_masked);
+	}
+	int lensMaskTiles() const
+	{
+		return int(s.lens_mask_tiles ? s.lens_mask_tiles : s.tiles());
+	}
+	int lensMaskMargin() const
+	{
+		return int(s.lens_mask_margin);
 	}
 	int spanFrames() const
 	{

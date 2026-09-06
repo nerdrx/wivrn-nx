@@ -200,6 +200,34 @@ struct nxwarp_stream_stats
 	// above was derived at.
 	float encode_scale = 1;
 
+	// --- the lens mask -------------------------------------------------------
+	//
+	// Tiles PER EYE whose whole area falls outside what the headset's optics can show, and
+	// which are therefore not worth coding (client/utils/view_geometry.h, and the
+	// "lens-mask" option). `lens_mask_tiles` is the denominator, which equals tiles()
+	// whenever the codec's grid and the encode size agree -- it is carried separately
+	// rather than derived so that a disagreement shows up as two numbers that differ
+	// instead of as a share quietly computed against the wrong one.
+	//
+	// `lens_mask_enforced` is the honest half: TRUE when the codec was actually told
+	// (nxvc's skip map, which the reference encoder has), FALSE when the mask is known
+	// and reported but the backend has no per-tile mode override, in which case the
+	// saving is only what the mode search makes of the flat grey the compositor paints
+	// there. Zero masked tiles with the option on is a real answer, not a missing one: a
+	// strongly foveated encode has no fully-invisible tile left.
+	// Tiles the frames of this window actually put bytes in, and how many they had, both
+	// over the CODED FRAME (the eye pair when paired). A tile in WARP_SKIP is not coded.
+	// This is the number the lens mask moves, and the pair (coded, total) is carried
+	// rather than a ratio so that a window with no frames is visibly empty.
+	float tiles_coded_per_frame = 0;
+	float tiles_per_frame = 0;
+
+	uint32_t lens_mask_masked = 0;
+	uint32_t lens_mask_tiles = 0;
+	uint8_t lens_mask_margin = 0;
+	bool lens_mask_on = false;
+	bool lens_mask_enforced = false;
+
 	// --- how this window's frames were laid on the transport's tile grid -----
 	//
 	// Reported rather than derived from the configuration, because the choice is made per
@@ -323,6 +351,13 @@ inline void to_json(nlohmann::json & j, const nxwarp_stream_stats & s)
 	        {"entropy", s.entropy},
 	        {"entropy_was_auto", s.entropy_was_auto},
 	        {"negotiated_tools", s.negotiated_tools},
+	        {"tiles_coded_per_frame", s.tiles_coded_per_frame},
+	        {"tiles_per_frame", s.tiles_per_frame},
+	        {"lens_mask_masked", s.lens_mask_masked},
+	        {"lens_mask_tiles", s.lens_mask_tiles},
+	        {"lens_mask_margin", s.lens_mask_margin},
+	        {"lens_mask_on", s.lens_mask_on},
+	        {"lens_mask_enforced", s.lens_mask_enforced},
 	        {"encoded_width", s.encoded_width},
 	        {"encoded_height", s.encoded_height},
 	        {"paired_eyes", s.paired_eyes},
@@ -393,6 +428,13 @@ inline void from_json(const nlohmann::json & j, nxwarp_stream_stats & s)
 	get("entropy", s.entropy);
 	get("entropy_was_auto", s.entropy_was_auto);
 	get("negotiated_tools", s.negotiated_tools);
+	get("tiles_coded_per_frame", s.tiles_coded_per_frame);
+	get("tiles_per_frame", s.tiles_per_frame);
+	get("lens_mask_masked", s.lens_mask_masked);
+	get("lens_mask_tiles", s.lens_mask_tiles);
+	get("lens_mask_margin", s.lens_mask_margin);
+	get("lens_mask_on", s.lens_mask_on);
+	get("lens_mask_enforced", s.lens_mask_enforced);
 	get("encoded_width", s.encoded_width);
 	get("encoded_height", s.encoded_height);
 	get("paired_eyes", s.paired_eyes);

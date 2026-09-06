@@ -32,19 +32,67 @@
 //   * The lens mask. Tiles that fall entirely outside the visible lens region are skipped.
 //     The overscan margin is NOT outside the visible region for that purpose -- it exists
 //     precisely to be pulled into view by a late reprojection, so masking it away would
-//     undo the feature it was added for. Anything that asks "is this part of the image
-//     ever seen" must ask through `is_maskable()` below, which answers no for the margin.
+//     undo the feature it was added for. `visible_region()` below is therefore GROWN by the
+//     same margin, and the consequence is that the mask does not change at all when
+//     overscan is turned on; `is_maskable()` remains the rectangular question the
+//     reprojection pass asks, and is a different one -- see "one tangent-space model" below
+//     for why the two are not the same test and must not be ANDed.
 //
-// Header only, no Vulkan, no Qt, no OpenXR: the server (server/driver/wivrn_hmd.cpp) and
-// the client (client/scenes/stream_defoveator.cpp) both include it, and
-// tests/view_geometry_test.cpp checks the round trips. Angles are the signed half angles
-// both XrFovf and xrt_fov use -- left and down negative, right and up positive -- passed
-// as bare floats so neither type has to be visible here.
+// Header only, no Vulkan, no Qt, no OpenXR: the server (server/driver/wivrn_hmd.cpp, the
+// compositor's foveation pass, the NX Warp encoder) and the client
+// (client/scenes/stream_defoveator.cpp) all include it, and tests/view_geometry_test.cpp,
+// tests/edge_bleed_test.cpp and tests/lens_mask_test.cpp check it. Angles are the signed
+// half angles both XrFovf and xrt_fov use -- left and down negative, right and up positive
+// -- passed as bare floats so neither type has to be visible here.
+//
+// ONE TANGENT-SPACE MODEL, TWO SHAPES OVER IT.
+//
+// Everything below works on tan(angle) and not on the angle, because that is the space the
+// rendered image is linear in: a projection layer maps its pixel grid affinely onto
+// tan(angle), so a fraction of the plane is a fraction of the pixels whatever the FOV is.
+// The two shapes are
+//
+//   * the RECTANGLE, which is the picture: `visible_rect()` says where the display FOV
+//     lands inside an overscanned image, and `is_maskable()` asks whether a region is
+//     disjoint from it. This is what the reprojection pass needs, and it is the panel's
+//     BOUNDING BOX;
+//   * the ELLIPSE, which is the optics: `visible_region()` is what a lens can actually
+//     show, because the barrel is round and the corners of the rendered rectangle are
+//     never presented to an eye. This is what the lens mask needs.
+//
+// The ellipse is strictly inside the rectangle, so the lens mask masks MORE than the
+// rectangular test alone would: the four corners of the panel's own bounding box are inside
+// `visible_rect()` and outside the lens. That is not a disagreement between the two, it is
+// the extra thing the round shape knows, and the two are NOT ANDed -- requiring
+// `is_maskable()` as well would mask nothing at all whenever overscan is off, because with
+// no margin the panel rectangle is the whole image.
+//
+// What holds instead, and what tests/lens_mask_test.cpp asserts, is stronger than an
+// intersection would be: THE LENS MASK IS EXACTLY INVARIANT UNDER OVERSCAN. Widening the
+// FOV scales the tangent rectangle and the protected ellipse by the same (1 + f), and the
+// encoded size does not change, so every tile lands in the same place relative to the
+// region and the mask is identical tile for tile at overscan 0 and at 0.05. Turning edge
+// bleed on therefore cannot mask one extra pixel of the ring it just paid for, which is the
+// guarantee `is_maskable()`'s comment is asking for, met by construction rather than by a
+// veto.
+//
+// The overscan margin is the single number both halves grow by. `overscan_angle()` widens
+// an edge by scaling its tangent, and `visible_region()` grows its radii by the same
+// factor, so
+//
+//     visible_region(display_fov, f) == visible_region(widen(display_fov, f), 0)
+//
+// exactly. tests/lens_mask_test.cpp asserts that identity rather than leaving it as a
+// claim, and it is what lets the NX Warp encoder -- which receives the ALREADY WIDENED FOV
+// in view_info, because the overscan is applied at wivrn_hmd::get_view_poses() long before
+// anything is encoded -- pass a margin of 0 and still get the overscan-protected region.
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <span>
 #include <string_view>
+#include <vector>
 
 namespace wivrn::view_geometry
 {
@@ -257,6 +305,292 @@ inline edge_extension parse_edge_extension(std::string_view s)
 	if (s == "clamp")
 		return edge_extension::clamp;
 	return edge_extension::fade;
+}
+
+// --- the lens: what the optics can show -------------------------------------------------
+//
+// `visible_rect()` above is the panel's bounding box. A lens shows a ROUND region inside
+// it, and the corners of the rendered rectangle fall outside the barrel and never reach an
+// eye. That is the difference the lens mask lives on, and it is why this is an ellipse and
+// not a fifth rectangle.
+
+// Per-eye field of view, in radians, in the same sign convention as everything above.
+// Deliberately not XrFovf or xrt_fov: this header is included by translation units that
+// have neither.
+struct fov_angles
+{
+	float left = 0;
+	float right = 0;
+	float up = 0;
+	float down = 0;
+};
+
+// An axis-aligned rectangle in TANGENT space. Distinct from `rect`, which is normalised
+// image coordinates: the two are related by an affine map and confusing them is the bug
+// this type exists to prevent.
+struct tan_rect
+{
+	double x0 = 0, x1 = 0, y0 = 0, y1 = 0;
+};
+
+// An axis-aligned ellipse in tangent space.
+struct ellipse
+{
+	double cx = 0, cy = 0, rx = 0, ry = 0;
+};
+
+// The tangent-space bounding box of a field of view.
+inline tan_rect fov_bounds(const fov_angles & fov)
+{
+	return {
+	        std::tan(double(fov.left)),
+	        std::tan(double(fov.right)),
+	        std::tan(double(fov.down)),
+	        std::tan(double(fov.up)),
+	};
+}
+
+// A whole FOV widened by `fraction`, edge by edge, through overscan_angle(). This is the
+// server's own widening (wivrn_hmd::get_view_poses) expressed on the struct, so that the
+// identity in the header comment can be written down and tested rather than asserted.
+inline fov_angles widen(const fov_angles & fov, float fraction)
+{
+	return {
+	        overscan_angle(fov.left, fraction),
+	        overscan_angle(fov.right, fraction),
+	        overscan_angle(fov.up, fraction),
+	        overscan_angle(fov.down, fraction),
+	};
+}
+
+// The region of a rendered eye image the optics can present, grown by `overscan_margin`.
+//
+// Centred on the lens axis -- tangent-space origin, which is where the view pose points --
+// with a half-extent on each axis taken from the LARGER of that axis's two half-angles.
+//
+// TAKING THE MAX RATHER THAN THE HALF-EXTENT IS THE CONSERVATIVE CHOICE, and it is where an
+// asymmetric FOV earns its keep. A headset's FOV is asymmetric because the panel is offset
+// against the lens; the round region is still centred on the axis. Sizing the ellipse from
+// the larger half on each axis means it reaches at least as far as the picture does on the
+// wide side and covers the narrow side entirely, so only the far corners of the wide side
+// can be masked -- which is where a lens genuinely runs out. Inscribing an ellipse in the
+// rectangle instead would recentre the region on the picture rather than on the lens, and
+// would then give an answer that does not depend on the FOV at all, which is how you can
+// tell it is the wrong model.
+//
+// It errs toward showing too much: a real lens shows less than this near the ellipse's own
+// edge. `margin_tiles` below is the second, cruder guard on top of that.
+//
+// `overscan_margin` is the SAME fraction `default_overscan` names and `overscan_angle()`
+// applies, sanitised the same way. Pass it when you hold the DISPLAY fov; pass 0 when you
+// hold a FOV that has already been widened, which is what arrives in view_info.
+inline ellipse visible_region(const fov_angles & fov, float overscan_margin = 0.f)
+{
+	const tan_rect r = fov_bounds(fov);
+	const double grow = 1.0 + double(clamp_overscan(overscan_margin));
+	return {
+	        0.0,
+	        0.0,
+	        std::max(std::abs(r.x0), std::abs(r.x1)) * grow,
+	        std::max(std::abs(r.y0), std::abs(r.y1)) * grow,
+	};
+}
+
+// Does any part of `r` fall inside `e`?
+//
+// Exact, not a corner test: scaling by (rx, ry) takes the ellipse to the unit circle and
+// leaves the axis-aligned rectangle axis-aligned, so the question becomes "is the closest
+// point of a rectangle to the origin within 1", which is a clamp and a dot product. A
+// four-corner test would answer NO for a rectangle straddling the region -- a tile the eye
+// can see -- which is the one wrong answer this must never give.
+inline bool region_covers(const ellipse & e, const tan_rect & r)
+{
+	if (not(e.rx > 0) or not(e.ry > 0))
+		return true; // a degenerate region masks nothing
+
+	const double nx0 = (std::min(r.x0, r.x1) - e.cx) / e.rx;
+	const double nx1 = (std::max(r.x0, r.x1) - e.cx) / e.rx;
+	const double ny0 = (std::min(r.y0, r.y1) - e.cy) / e.ry;
+	const double ny1 = (std::max(r.y0, r.y1) - e.cy) / e.ry;
+
+	const double qx = std::clamp(0.0, nx0, nx1);
+	const double qy = std::clamp(0.0, ny0, ny1);
+	return qx * qx + qy * qy <= 1.0;
+}
+
+// --- the foveation remap ---------------------------------------------------------------
+//
+// to_headset::foveation_parameter is a run-length list over the DESTINATION (encoded) axis:
+// entry i covers `runs[i]` destination pixels, each of which consumes `|n_ratio - i| + 1`
+// source pixels, where n_ratio = (runs.size() - 1) / 2. That is exactly how the
+// compositor's fill_ubo walks it and how the headset's defoveator undoes it, so it is
+// repeated here rather than reinterpreted.
+//
+// Returns dim + 1 boundaries: bounds[i] is the first source pixel of destination pixel i,
+// and bounds[dim] is the source size. An empty or short run list is the identity, and a run
+// list that runs out before `dim` (which is what the compositor writes when the encode is
+// at least as large as the source) clamps, the same way fill_ubo pads its tail.
+inline std::vector<uint32_t> foveation_bounds(std::span<const uint16_t> runs, uint32_t dim)
+{
+	std::vector<uint32_t> bounds;
+	bounds.reserve(size_t(dim) + 1);
+	bounds.push_back(0);
+
+	if (not runs.empty())
+	{
+		const int n_ratio = (int(runs.size()) - 1) / 2;
+		uint32_t src = 0;
+		for (size_t i = 0; i < runs.size() and bounds.size() <= dim; ++i)
+		{
+			const uint32_t n_source = uint32_t(std::abs(n_ratio - int(i)) + 1);
+			for (uint16_t j = 0; j < runs[i] and bounds.size() <= dim; ++j)
+			{
+				src += n_source;
+				bounds.push_back(src);
+			}
+		}
+	}
+
+	// Identity tail: either there were no runs at all, or they described fewer
+	// destination pixels than the image has.
+	while (bounds.size() <= dim)
+		bounds.push_back(bounds.back() + 1);
+
+	return bounds;
+}
+
+// --- the tile mask -----------------------------------------------------------------------
+
+struct tile_mask_options
+{
+	// The codec's tile side, in encoded pixels. nxvc is 64x64 and so is the foveation
+	// pass's own alignment (server/encoder/stream_scale.h).
+	uint32_t tile = 64;
+
+	// How many tiles of slack to leave around the visible region, in tiles. A tile is
+	// masked only when it AND every tile within this Chebyshev distance of it are outside
+	// the region, so at the default 1 the whole ring of tiles touching the boundary is
+	// left coded. It is the guard against everything this geometry does not model: lens
+	// tolerances, an eye that is not on the optical axis, the runtime handing out a FOV
+	// slightly larger than the optics, and the resampling the defoveator does at a tile
+	// edge.
+	uint32_t margin_tiles = 1;
+
+	// The overscan the FOV has NOT already been widened by. 0 -- the default -- is right
+	// for a caller holding a FOV that arrived through view_info, because the server widens
+	// at wivrn_hmd::get_view_poses() and everything downstream sees the widened one. A
+	// caller holding the DISPLAY fov passes the configured `edge_bleed.overscan` here.
+	float overscan_margin = 0.f;
+
+};
+
+struct tile_mask
+{
+	uint32_t cols = 0;
+	uint32_t rows = 0;
+	// 1 = the whole tile is outside the visible region, with the margin applied.
+	std::vector<uint8_t> tiles;
+	uint32_t masked = 0;
+
+	uint32_t total() const
+	{
+		return cols * rows;
+	}
+
+	bool at(uint32_t x, uint32_t y) const
+	{
+		return x < cols and y < rows and tiles[size_t(y) * cols + x];
+	}
+
+	bool empty() const
+	{
+		return masked == 0;
+	}
+};
+
+// The tiles of ONE EYE's encoded image that the lens can never show.
+//
+// `width`/`height` are the encoded per-eye size in pixels; `fov_x`/`fov_y` are that eye's
+// foveation runs as they go on the wire. A caller with no foveation passes empty spans.
+inline tile_mask lens_tile_mask(const fov_angles & fov,
+                                std::span<const uint16_t> fov_x,
+                                std::span<const uint16_t> fov_y,
+                                uint32_t width,
+                                uint32_t height,
+                                const tile_mask_options & opt = {})
+{
+	tile_mask out;
+	const uint32_t tile = opt.tile ? opt.tile : 64;
+	if (width == 0 or height == 0)
+		return out;
+
+	out.cols = (width + tile - 1) / tile;
+	out.rows = (height + tile - 1) / tile;
+	out.tiles.assign(size_t(out.cols) * out.rows, 0);
+
+	const auto bx = foveation_bounds(fov_x, width);
+	const auto by = foveation_bounds(fov_y, height);
+	const double src_w = double(bx[width]);
+	const double src_h = double(by[height]);
+	if (not(src_w > 0) or not(src_h > 0))
+		return out;
+
+	const tan_rect r = fov_bounds(fov);
+	const ellipse e = visible_region(fov, opt.overscan_margin);
+
+	// The raw test, before the margin ring: is this tile's source footprint entirely
+	// outside the visible region?
+	std::vector<uint8_t> outside(out.tiles.size(), 0);
+	for (uint32_t ty = 0; ty < out.rows; ++ty)
+	{
+		const uint32_t y0 = ty * tile;
+		const uint32_t y1 = std::min(y0 + tile, height);
+		for (uint32_t tx = 0; tx < out.cols; ++tx)
+		{
+			const uint32_t x0 = tx * tile;
+			const uint32_t x1 = std::min(x0 + tile, width);
+
+			// Destination pixels -> source pixels -> normalised -> tangent.
+			const double u0 = bx[x0] / src_w, u1 = bx[x1] / src_w;
+			const double v0 = by[y0] / src_h, v1 = by[y1] / src_h;
+			const tan_rect t{
+			        r.x0 + u0 * (r.x1 - r.x0),
+			        r.x0 + u1 * (r.x1 - r.x0),
+			        r.y0 + v0 * (r.y1 - r.y0),
+			        r.y0 + v1 * (r.y1 - r.y0),
+			};
+			outside[size_t(ty) * out.cols + tx] = region_covers(e, t) ? 0 : 1;
+		}
+	}
+
+	// Erode by the margin. A tile survives only if every tile within `margin_tiles` of it
+	// is also outside; a neighbour off the grid is outside by definition, so the image's
+	// own edge does not un-mask the corners.
+	const int m = int(opt.margin_tiles);
+	for (uint32_t ty = 0; ty < out.rows; ++ty)
+	{
+		for (uint32_t tx = 0; tx < out.cols; ++tx)
+		{
+			bool all = true;
+			for (int dy = -m; dy <= m and all; ++dy)
+			{
+				for (int dx = -m; dx <= m and all; ++dx)
+				{
+					const int nx = int(tx) + dx, ny = int(ty) + dy;
+					if (nx < 0 or ny < 0 or nx >= int(out.cols) or ny >= int(out.rows))
+						continue;
+					all = outside[size_t(ny) * out.cols + nx];
+				}
+			}
+			if (all)
+			{
+				out.tiles[size_t(ty) * out.cols + tx] = 1;
+				++out.masked;
+			}
+		}
+	}
+
+	return out;
 }
 
 } // namespace wivrn::view_geometry

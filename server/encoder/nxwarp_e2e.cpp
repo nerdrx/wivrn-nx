@@ -252,6 +252,17 @@ bool same(const view_info_t & a, const view_info_t & b)
 
 // A pose that is different every frame, so that a decoder republishing a stale one, or
 // publishing a default, cannot pass by accident.
+// --static-view: hold the view configuration still.
+//
+// The harness varies the FOV and the foveation runs with the frame number on purpose -- it
+// is how a stale or default-constructed view_info on the wire becomes visible. That makes it
+// the wrong clip for measuring anything that DEPENDS on the view configuration: the lens
+// mask is recomputed whenever the foveation runs move, and runs that move every frame make
+// the mask move every frame, so tiles cross in and out of it and each crossing costs a coded
+// tile. A live session's runs move when the gaze does and not otherwise. This pins them so
+// the A/B measures the mask rather than the harness's own churn.
+bool static_view = false;
+
 view_info_t make_view_info(uint64_t frame)
 {
 	const float t = float(frame) * 0.017f;
@@ -263,10 +274,13 @@ view_info_t make_view_info(uint64_t frame)
 		const float s = t + float(eye) * 0.5f;
 		vi.pose[eye].orientation = {std::sin(s) * 0.1f, std::cos(s) * 0.1f, 0.0f, std::sqrt(1.0f - 0.02f)};
 		vi.pose[eye].position = {0.032f * (eye ? 1.f : -1.f), 1.6f + 0.01f * std::sin(s), 0.05f * std::cos(s)};
-		vi.fov[eye] = {-0.9f - 0.001f * t, 0.9f, 0.9f, -0.9f};
+		// Only the VIEW CONFIGURATION is pinned by --static-view: the pose and the
+		// display time still move, so every check that identifies a frame by its
+		// view_info still can.
+		vi.fov[eye] = {-0.9f - (static_view ? 0.f : 0.001f * t), 0.9f, 0.9f, -0.9f};
 		// The foveation runs: source pixels per output pixel, middle entry 1:1. Made
 		// to vary with the frame so a stale or default one is visible.
-		vi.foveation[eye].x = {uint16_t(1 + frame % 3), 4, 5, 3, 1};
+		vi.foveation[eye].x = {uint16_t(1 + (static_view ? 0 : frame % 3)), 4, 5, 3, 1};
 		vi.foveation[eye].y = {1, 4, uint16_t(5 + eye), 3, 1};
 	}
 	return vi;
@@ -1466,6 +1480,11 @@ int main(int argc, char ** argv)
 	// all-intra stream its assertions were written against.
 	std::string inter = "false";
 	uint32_t intra_period = 180;
+	// The lens mask: "on" (the server's default) or "off", and the ring of tiles around
+	// the visible region left coded anyway.
+	std::string lens_mask = "on";
+	uint32_t lens_mask_margin = 1;
+	std::string lens_mask_skip = "true";
 	// "default" (STATIC when inter is on), "none", or "static".
 	std::string coded_vectors = "default";
 	std::string stereo_compose = "layers";
@@ -1640,6 +1659,20 @@ int main(int argc, char ** argv)
 		}
 		else if (a == "--intra-period")
 			intra_period = uint32_t(std::stoul(next()));
+		else if (a == "--lens-mask")
+		{
+			const std::string v = next();
+			lens_mask = (v == "on" or v == "true" or v == "1") ? "on" : "off";
+		}
+		else if (a == "--lens-mask-margin")
+			lens_mask_margin = uint32_t(std::stoul(next()));
+		else if (a == "--static-view")
+			static_view = true;
+		else if (a == "--lens-mask-skip")
+		{
+			const std::string v = next();
+			lens_mask_skip = (v == "on" or v == "true" or v == "1") ? "true" : "false";
+		}
 		else if (a == "--stereo-compose")
 			stereo_compose = next();
 		else if (a == "--coded-vectors")
@@ -1836,6 +1869,11 @@ int main(int argc, char ** argv)
 	settings.options["backend"] = backend;
 	settings.options["inter"] = inter;
 	settings.options["intra-period"] = std::to_string(intra_period);
+	// The lens mask. On by default here as it is in the server, so the harness runs the
+	// shipping configuration; --lens-mask off is the other half of the A/B.
+	settings.options["lens-mask"] = lens_mask;
+	settings.options["lens-mask-margin"] = std::to_string(lens_mask_margin);
+	settings.options["lens-mask-skip"] = lens_mask_skip;
 	settings.options["coded-vectors"] = coded_vectors;
 	// "layers" (the default) reads the eye pair straight out of two array layers;
 	// "blit" copies them into one side-by-side picture first. nxvc pins that the
@@ -2280,6 +2318,28 @@ int main(int argc, char ** argv)
 	std::printf("reassembly produced %zu complete frame units of %llu sent (%u presented)\n",
 	            host.units.size(), (unsigned long long)sent_frames, frames);
 	std::printf("decoder published %zu frames\n", host.frames.size());
+
+	// --- the lens mask -----------------------------------------------------------
+	//
+	// What it masked, whether the codec was actually told, and what the frames of this
+	// run coded. The A/B is the same clip at the same quantiser with --lens-mask off,
+	// and the numbers to compare are "coded tiles per frame" and the size of the .nxv.
+	{
+		const auto lm = enc.lens_mask_report();
+		std::printf("\nlens mask: %s%s -- %u of %u tiles per eye masked, margin %u tile%s\n",
+		            lm.on ? "on" : "off",
+		            lm.on ? (lm.enforced ? " (never coded: nxvc skip map)"
+		                                 : " (flattened only: this backend has no skip-map "
+		                                   "input)")
+		                  : "",
+		            lm.masked, lm.tiles_per_eye, lm.margin, lm.margin == 1 ? "" : "s");
+		if (lm.frames)
+			std::printf("coded tiles: %.1f of %.1f per frame (%.1f%%) over %llu frames\n",
+			            double(lm.coded_tiles) / double(lm.frames),
+			            double(lm.total_tiles) / double(lm.frames),
+			            100.0 * double(lm.coded_tiles) / double(lm.total_tiles ? lm.total_tiles : 1),
+			            (unsigned long long)lm.frames);
+	}
 
 	// --- the pace ---------------------------------------------------------------
 	{

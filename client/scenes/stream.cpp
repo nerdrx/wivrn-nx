@@ -1025,6 +1025,13 @@ namespace
 struct render_probe
 {
 	std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
+	// When render() was last entered. The loop is only driven while the OpenXR session
+	// is running: off the face, or with the session otherwise not running,
+	// application::loop() sleeps 250 ms instead of calling render() at all, and it can
+	// stay there for minutes while the network and decoder threads keep going and keep
+	// logging. Without this the first report after a resume would divide a handful of
+	// iterations by that whole parked span and announce a render loop running at 0.1/s.
+	std::chrono::steady_clock::time_point last_call{};
 	uint64_t iters = 0, gated_out = 0, no_render = 0, cache_hits = 0;
 	double period_ms = 0, fence_ms = 0, query_ms = 0, submit_ms = 0, blit_ms = 0;
 	double app_gpu_ms = 0;
@@ -1092,6 +1099,18 @@ void scenes::stream::render(const XrFrameState & frame_state)
 {
 	const auto rp_t0 = std::chrono::steady_clock::now();
 	const auto rp_ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
+	// A gap far longer than any display period means the loop was not running at all
+	// rather than running slowly, so the window that was open across it measures nothing.
+	// Start a new one. 500 ms is chosen to be past any plausible frame -- a 30 Hz panel
+	// with a bad hitch is still an order of magnitude under it -- and well under the
+	// 250 ms sleep repeated a few times that a parked loop actually produces.
+	if (g_rp.last_call != std::chrono::steady_clock::time_point{} and
+	    rp_t0 - g_rp.last_call > std::chrono::milliseconds(500))
+	{
+		g_rp = {};
+		g_rp.since = rp_t0;
+	}
+	g_rp.last_call = rp_t0;
 	g_rp.iters++;
 
 	if (state_ == state::shutdown)
@@ -1101,6 +1120,13 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	display_time_period = frame_state.predictedDisplayPeriod;
 	real_display_period = last_display_time ? frame_state.predictedDisplayTime - last_display_time : frame_state.predictedDisplayPeriod;
 	last_display_time = frame_state.predictedDisplayTime;
+
+	// The frame rate readout's own pair, monotonic and never reset: the sampler in
+	// accumulate_fps differences them like every other counter it shows. Counted here, at
+	// the top, so the early return below and the repeat gate further down are both inside
+	// the figure -- an iteration that showed nothing is still an iteration.
+	++render_iterations;
+	render_period_ns += uint64_t(std::max<XrDuration>(real_display_period, 0));
 
 	// The playout delay's switch and the refresh period it is bounded in terms of. Done here,
 	// before common_frame is reached below, so that a toggle takes effect on the refresh the

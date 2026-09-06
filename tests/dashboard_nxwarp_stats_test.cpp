@@ -120,6 +120,8 @@ nxwarp_stream_stats sample()
 	s.identity_tiles = 2136;
 	s.identity_tiles_total = 2148;
 	s.identity_from_decoder = false;
+	s.planar = "prefer";
+	s.planar_note = "the client does not support planar tiles";
 	s.entropy = "lite";
 	s.entropy_was_auto = true;
 	s.negotiated_tools = 0x777a1fffull;
@@ -171,6 +173,8 @@ void check_same(const nxwarp_stream_stats & a, const nxwarp_stream_stats & b, co
 	      h + ": identity_tiles_total");
 	check(a.identity_from_decoder == b.identity_from_decoder,
 	      h + ": identity_from_decoder");
+	check(a.planar == b.planar, h + ": planar");
+	check(a.planar_note == b.planar_note, h + ": planar_note");
 	check(a.entropy == b.entropy, h + ": entropy");
 	check(a.entropy_was_auto == b.entropy_was_auto, h + ": entropy_was_auto");
 	check(a.negotiated_tools == b.negotiated_tools, h + ": negotiated_tools");
@@ -259,6 +263,8 @@ static void part_b()
 		older.erase("identity_tiles");
 		older.erase("identity_tiles_total");
 		older.erase("identity_from_decoder");
+		older.erase("planar");
+		older.erase("planar_note");
 		const auto s = older.get<nxwarp_stream_stats>();
 		check(near(s.encode_scale, 1.0), "a missing field keeps its default");
 		// A server too old to report the level is a server that does not have it, so
@@ -272,6 +278,11 @@ static void part_b()
 		check(s.identity_tiles_total == 0, "and reports no identity tiles");
 		check(not s.identity_from_decoder,
 		      "and does not claim the headset counted them");
+		// A server too old to report the mode is a server that does not have
+		// it, so "off" is the honest default -- and the empty note is what
+		// stops the card claiming a reason nobody gave.
+		check(s.planar == "off", "a server with no planar field reads as off");
+		check(s.planar_note.empty(), "and carries no invented reason");
 		check(s.entropy.empty(), "a missing string keeps its default");
 		check(s.encoded_width == 896, "the fields that are present still arrive");
 		auto older2 = nlohmann::json(sample());

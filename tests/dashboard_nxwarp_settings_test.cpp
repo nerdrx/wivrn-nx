@@ -208,6 +208,7 @@ static const QList<control> controls{
         // every other control here writes when it moves away from an off-by-default value.
         {"nxwarpEffort", false},
         {"nxwarpSnapIdentity", QVariant::fromValue(int(Settings::SnapOneSample))},
+        {"nxwarpPlanar", QVariant::fromValue(int(Settings::PlanarPrefer))},
 };
 
 static void part_b()
@@ -294,6 +295,7 @@ static void part_b()
 		d.setProperty("nxwarpInter", false);
 		d.setProperty("nxwarpEffort", true);
 		d.setProperty("nxwarpSnapIdentity", int(Settings::SnapOff));
+		d.setProperty("nxwarpPlanar", int(Settings::PlanarRd));
 		const json out = d.configuration();
 		check(nxd::nxwarp_option(out, "entropy") == std::nullopt,
 		      "entropy set to Auto is erased, not written");
@@ -316,6 +318,13 @@ static void part_b()
 		d.setProperty("nxwarpSnapIdentity", int(Settings::SnapTwo));
 		check(nxd::nxwarp_option(d.configuration(), "snap-identity") == std::string("32"),
 		      "snap-identity 2 samples is written as \"32\"");
+		// "rd" is the server's default, so the middle value is the one that
+		// erases the key -- the same convention, on a three-valued control.
+		check(nxd::nxwarp_option(out, "planar") == std::nullopt,
+		      "planar left at rd is erased, not written");
+		d.setProperty("nxwarpPlanar", int(Settings::PlanarOff));
+		check(nxd::nxwarp_option(d.configuration(), "planar") == std::string("off"),
+		      "planar turned off is written as \"off\"");
 		d.setProperty("nxwarpEffort", false);
 		check(nxd::nxwarp_option(d.configuration(), "effort") == std::string("0"),
 		      "effort turned off is written as \"0\"");
@@ -709,6 +718,7 @@ static void part_d(const char * qml_path)
 	        {"nxwarp_intra_period", true},
 	        {"nxwarp_effort", true},
 	        {"nxwarp_snap", true},
+	        {"nxwarp_planar", true},
 	};
 
 	for (const auto & [id, in_save]: ids)

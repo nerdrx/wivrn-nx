@@ -98,6 +98,8 @@ struct nxwarp_stream_stat
 	Q_PROPERTY(int snapIdentity READ snapIdentity CONSTANT)
 	Q_PROPERTY(QString identityTiles READ identityTiles CONSTANT)
 	Q_PROPERTY(bool identityFromDecoder READ identityFromDecoder CONSTANT)
+	Q_PROPERTY(QString planar READ planar CONSTANT)
+	Q_PROPERTY(QString planarNote READ planarNote CONSTANT)
 	Q_PROPERTY(QString entropy READ entropy CONSTANT)
 	Q_PROPERTY(bool entropyWasAuto READ entropyWasAuto CONSTANT)
 	Q_PROPERTY(QString toolsText READ toolsText CONSTANT)
@@ -318,6 +320,15 @@ public:
 	bool identityFromDecoder() const
 	{
 		return s.identity_from_decoder;
+	QString planar() const
+	{
+		return QString::fromStdString(s.planar);
+	}
+	// Empty when the configured level is the level in use; otherwise the
+	// reason it is not, which is the half of this field that matters.
+	QString planarNote() const
+	{
+		return QString::fromStdString(s.planar_note);
 	}
 	QString entropy() const
 	{

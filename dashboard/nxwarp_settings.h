@@ -65,6 +65,10 @@ inline constexpr uint32_t nxwarp_default_effort = 1;
 // "snap-identity": 1/16 luma samples, 0 = off, which is the server's default
 // and stays it until the saving is measured on the headset.
 inline constexpr uint32_t nxwarp_default_snap_identity = 0;
+// "planar": the piecewise-planar tile mode.  The server's default is "rd", so
+// that is what an untouched configuration means and what gets erased rather
+// than written.
+inline constexpr std::string_view nxwarp_default_planar = "rd";
 inline constexpr std::string_view nxwarp_default_stereo_frame = "auto";
 inline constexpr std::string_view nxwarp_default_tile_map = "auto";
 inline constexpr uint32_t nxwarp_default_intra_period = 180;

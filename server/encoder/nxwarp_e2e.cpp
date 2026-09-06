@@ -89,6 +89,7 @@
 //                    [--pace auto|off|FPS] [--client-decode-ms N] [--present-hz N]
 //                    [--feedback-delay N] [--effort 0|1] [--snap-identity N]
 //                    [--head-rate S]
+//                    [--feedback-delay N] [--effort 0|1] [--planar off|rd|prefer]
 //
 //   --eyes             1 (the default, and every run that predates this flag) or 2, which
 //                      is encoder_settings::eyes: ONE stream carrying BOTH eyes as a
@@ -1643,6 +1644,16 @@ int main(int argc, char ** argv)
 	// The snap-to-identity threshold, 1/16 luma samples.  Absent unless asked
 	// for, so every existing run keeps the server's default of 0.
 	std::string snap_identity;
+	// The piecewise-planar tile mode: "off", "rd" (the server's default) or
+	// "prefer".  It needs --backend ref: the Vulkan encoder has no mode 5, and
+	// the server refuses the combination rather than dropping it, which this
+	// harness is a good place to prove.
+	// Unset unless asked: leaving the key ABSENT is what makes the server's own
+	// default apply, and the server refuses an EXPLICIT level the simulated
+	// headset cannot decode.  Writing it unconditionally would turn every
+	// existing run in this harness -- all of which simulate a headset with no
+	// tool mask -- into a startup error.
+	std::string planar;
 
 	for (int i = 1; i < argc; ++i)
 	{
@@ -1714,6 +1725,8 @@ int main(int argc, char ** argv)
 			snap_identity = next();
 		else if (a == "--head-rate")
 			g_head_rate = std::stof(next());
+		else if (a == "--planar")
+			planar = next();
 		else if (a == "--qp")
 			qp = uint32_t(std::stoul(next()));
 		else if (a == "--reconnect-at")
@@ -1916,6 +1929,8 @@ int main(int argc, char ** argv)
 	settings.options["effort"] = effort;
 	if (not snap_identity.empty())
 		settings.options["snap-identity"] = snap_identity;
+	if (not planar.empty())
+		settings.options["planar"] = planar;
 	// The simulated headset mask. "all" is every bit set, which is a headset that can
 	// decode anything this encoder emits and is what keeps every existing run in this
 	// harness unchanged. It is spelled ~0 rather than read from nxvc because this file,
@@ -1930,11 +1945,17 @@ int main(int argc, char ** argv)
 	const std::string snap_note =
 	        snap_identity.empty() ? std::string()
 	                              : ", snap-identity \"" + snap_identity + "\"";
+	// Named rather than built inside the call: a std::string temporary's
+	// c_str() does live to the end of the full expression, but a reader should
+	// not have to know that to trust the line.
+	const std::string planar_note =
+	        planar.empty() ? std::string() : ", planar request \"" + planar + "\"";
 	std::fprintf(stderr,
 	             "[e2e] simulated headset nxvc_tools = 0x%llx (entropy request \"%s\"%s)\n",
 	             (unsigned long long)settings.nxvc_tools,
 	             entropy.c_str(),
 	             snap_note.c_str());
+	             planar_note.c_str());
 	// Rate control off by default. The byte-identity check below compares this
 	// run's bitstream against nxv-dec's decode of it, which a moving quantiser
 	// does not disturb -- but the frame sizes and the loss pattern would stop

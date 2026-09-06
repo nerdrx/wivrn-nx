@@ -289,6 +289,13 @@ class video_encoder_nxwarp : public video_encoder
 	 * encoder reports for it.  Neither can be read off the wire: an identity
 	 * warp_ext says nothing about how it was arrived at. */
 	uint32_t stats_snap_identity = 0;
+	// The planar level actually in use, and -- when it is not the level that
+	// was asked for -- the reason.  It leaves no trace in the stream that the
+	// server could read back, and the reason is a fact about the SESSION (this
+	// backend, this headset), so reporting it here is the only way anything
+	// downstream can say what happened.
+	std::string stats_planar_name = "off";
+	std::string stats_planar_note;
 	std::string stats_entropy_name;
 	bool stats_entropy_was_auto = true;
 	uint64_t stats_negotiated_tools = 0;

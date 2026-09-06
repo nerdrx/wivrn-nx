@@ -125,6 +125,17 @@ public:
 		SnapTwo,       // 32
 	};
 	Q_ENUM(nxwarp_snap)
+	// "planar": the piecewise-planar tile mode (nxvc tool bit 35).  Three
+	// values and no "auto": `rd` is already the conservative level, and what
+	// the server resolves is not which level but whether the level is
+	// available at all -- which the Headset statistics page reports.
+	enum nxwarp_planar
+	{
+		PlanarOff,
+		PlanarRd,
+		PlanarPrefer,
+	};
+	Q_ENUM(nxwarp_planar)
 
 	// "coded-vectors": whether motion vectors are coded into the stream.
 	enum nxwarp_coded_vectors
@@ -165,6 +176,7 @@ public:
 	Q_PROPERTY(nxwarp_coded_vectors nxwarpCodedVectors READ nxwarpCodedVectors WRITE set_nxwarpCodedVectors NOTIFY nxwarpCodedVectorsChanged)
 	Q_PROPERTY(bool nxwarpEffort READ nxwarpEffort WRITE set_nxwarpEffort NOTIFY nxwarpEffortChanged)
 	Q_PROPERTY(nxwarp_snap nxwarpSnapIdentity READ nxwarpSnapIdentity WRITE set_nxwarpSnapIdentity NOTIFY nxwarpSnapIdentityChanged)
+	Q_PROPERTY(nxwarp_planar nxwarpPlanar READ nxwarpPlanar WRITE set_nxwarpPlanar NOTIFY nxwarpPlanarChanged)
 	Q_PROPERTY(bool nxwarpInter READ nxwarpInter WRITE set_nxwarpInter NOTIFY nxwarpInterChanged)
 	// "Skip invisible tiles": the lens mask.
 	Q_PROPERTY(bool nxwarpLensMask READ nxwarpLensMask WRITE set_nxwarpLensMask NOTIFY nxwarpLensMaskChanged)
@@ -216,6 +228,7 @@ public:
 	SETTER_GETTER_NOTIFY(nxwarp_coded_vectors, nxwarpCodedVectors)
 	SETTER_GETTER_NOTIFY(bool, nxwarpEffort)
 	SETTER_GETTER_NOTIFY(nxwarp_snap, nxwarpSnapIdentity)
+	SETTER_GETTER_NOTIFY(nxwarp_planar, nxwarpPlanar)
 	SETTER_GETTER_NOTIFY(bool, nxwarpInter)
 	SETTER_GETTER_NOTIFY(bool, nxwarpLensMask)
 	SETTER_GETTER_NOTIFY(int, nxwarpIntraPeriod)

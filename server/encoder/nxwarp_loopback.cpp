@@ -129,7 +129,7 @@ void usage()
 	std::fprintf(stderr,
 	             "usage: wivrn-nxwarp-loopback [--w N] [--h N] [--frames N] [--qp N]\n"
 	             "       [--loss F] [--burst N] [--seed N] [--mtu N] [--band-rows N]\n"
-	             "       [--inter] [--out FILE.nxv]\n");
+	             "       [--inter] [--planar off|rd|prefer] [--out FILE.nxv]\n");
 }
 
 } // namespace
@@ -141,6 +141,11 @@ int main(int argc, char ** argv)
 	double loss = 0.0;
 	unsigned seed = 1;
 	bool inter = false;
+	// The piecewise-planar tile mode.  This tool is the only path in this
+	// repository that can exercise it end to end today: it decodes with
+	// nxvc_decoder, the REFERENCE decoder, which implements mode 5 -- where the
+	// e2e harness decodes with the client's Vulkan decoder, which does not.
+	std::string planar = "off";
 	std::string out_path;
 
 	for (int i = 1; i < argc; ++i)
@@ -168,6 +173,8 @@ int main(int argc, char ** argv)
 			loss = std::atof(v);
 		else if (take("--out"))
 			out_path = v;
+		else if (take("--planar"))
+			planar = v;
 		else if (a == "--inter")
 			inter = true;
 		else
@@ -190,6 +197,22 @@ int main(int argc, char ** argv)
 	        .inter = inter,
 	        .intra_period = 180,
 	};
+	{
+		using pl = wivrn::nxwarp_codec_config::planar_t;
+		if (planar == "off")
+			codec_cfg.planar = pl::off;
+		else if (planar == "rd")
+			codec_cfg.planar = pl::rd;
+		else if (planar == "prefer")
+			codec_cfg.planar = pl::prefer;
+		else
+		{
+			std::fprintf(stderr,
+			             "--planar: expected off, rd or prefer, got \"%s\"\n",
+			             planar.c_str());
+			return 2;
+		}
+	}
 	std::unique_ptr<wivrn::nxwarp_codec> codec;
 	try
 	{

@@ -522,7 +522,17 @@ private:
 		// count), the frame size, and the interval frames are arriving at.
 		float nxwarp_gpu_ms = 0;
 		float nxwarp_pass_a_ms = 0;
+		// The ENVELOPE. It contains Pass W and all three reconstruction segments, so
+		// the parts below are what it is made of and not extra work beside it.
 		float nxwarp_pass_b_ms = 0;
+		float nxwarp_pass_w_ms = 0;
+		float nxwarp_pass_b_skip_ms = 0;
+		float nxwarp_pass_b_coded_ms = 0;
+		float nxwarp_pass_b_dir_ms = 0;
+		float nxwarp_tiles_skip = 0;
+		float nxwarp_tiles_coded = 0;
+		float nxwarp_tiles_dir = 0;
+		bool nxwarp_pass_segments = false;
 		float nxwarp_bytes = 0;
 		float nxwarp_arrival_ms = 0;
 		// Fixed for the stream: how many arriving frames one decode takes, the size
@@ -592,8 +602,12 @@ private:
 	// Built once per sample window by accumulate_fps and cached here, NOT formatted per
 	// frame: both call sites draw them every frame, and the numbers in them only move when
 	// the decoder's two-second profile window turns over.
-	static constexpr size_t fps_line_count = 5;
+	static constexpr size_t fps_line_count = 6;
 	std::array<std::string, fps_line_count> fps_line_cache{};
+	// The decoder window sequence last reported to the server, per stream. Zero is the
+	// value a decoder that has published nothing reports, so nothing is sent until a
+	// real window exists.
+	std::array<uint64_t, decoder_count> nxwarp_profile_seq{};
 	void rebuild_fps_lines();
 	const std::array<std::string, fps_line_count> & fps_lines() const
 	{
@@ -671,6 +685,10 @@ public:
 	// the decoder's network-thread path once per band deadline.
 	void send_nxwarp_feedback(uint8_t stream_index, uint8_t path_id, std::vector<uint8_t> payload,
 	                          uint16_t decode_us, uint16_t held_base, uint32_t held_mask);
+	// Where one eye's GPU decode time went, about twice a second. Reported for the
+	// dashboard only -- nothing on the server acts on it -- so a lost one costs a stale
+	// card and is not resent.
+	void send_nxwarp_decode_profile(wivrn::from_headset::nxwarp_decode_profile p);
 	// One frame this headset received and will not reconstruct. Control socket: losing
 	// it is the corruption it exists to prevent.
 	void send_nxwarp_frame_not_held(uint8_t stream_index, uint16_t frame_id,

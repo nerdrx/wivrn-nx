@@ -457,6 +457,7 @@ public:
 	// One NX Warp feedback packet, to the encoder of the stream it names. Only
 	// video_encoder_nxwarp does anything with it.
 	void on_nxwarp_feedback(const from_headset::nxwarp_feedback &);
+	void on_nxwarp_decode_profile(const from_headset::nxwarp_decode_profile &);
 	void on_nxwarp_frame_not_held(const from_headset::nxwarp_frame_not_held &);
 
 	// Video shards sent again on request over every stream, monotonic

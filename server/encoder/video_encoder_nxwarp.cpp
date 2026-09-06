@@ -1814,6 +1814,24 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				st.paced_fps = pace_interval > 0 ? float(1.0 / pace_interval) : 0.f;
 				st.client_decode_ms =
 				        float(client_decode_us.load(std::memory_order_relaxed)) / 1000.f;
+				// The headset's own breakdown of that decode, as of its last
+				// report. Copied under the lock the network thread writes it
+				// under: the eleven fields have to be one window's worth, and a
+				// card showing this window's skip time against the previous
+				// window's envelope would be worse than showing nothing.
+				{
+					std::lock_guard lock(client_profile_mutex);
+					st.client_pass_segments_known = client_profile.segments_known;
+					st.client_pass_a_ms = client_profile.pass_a_ms;
+					st.client_pass_b_ms = client_profile.pass_b_ms;
+					st.client_pass_w_ms = client_profile.pass_w_ms;
+					st.client_pass_b_skip_ms = client_profile.pass_b_skip_ms;
+					st.client_pass_b_coded_ms = client_profile.pass_b_coded_ms;
+					st.client_pass_b_dir_ms = client_profile.pass_b_dir_ms;
+					st.client_tiles_skip = client_profile.tiles_skip;
+					st.client_tiles_coded = client_profile.tiles_coded;
+					st.client_tiles_dir = client_profile.tiles_dir;
+				}
 				st.frames_not_sent = prof_paced_out;
 
 				// Not-held, over the same window as everything else: the deltas
@@ -2088,6 +2106,16 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// watchdog knows this encoder sends synchronously (async_send == false in the
 	// base constructor), so an empty return is success here, not a stall.
 	return {};
+}
+
+// The headset's decode breakdown, arriving on the network thread about twice a second.
+// Stored whole and read whole: nothing here decides anything, so there is no work to do
+// beyond keeping the eleven numbers consistent with each other.
+void wivrn::video_encoder_nxwarp::on_nxwarp_decode_profile(
+        const from_headset::nxwarp_decode_profile & p)
+{
+	std::lock_guard lock(client_profile_mutex);
+	client_profile = p;
 }
 
 void wivrn::video_encoder_nxwarp::on_nxwarp_frame_not_held(

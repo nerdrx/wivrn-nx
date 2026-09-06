@@ -95,6 +95,21 @@ nxwarp_stream_stats sample()
 	s.pace_mode = nxwarp_pace_report::automatic;
 	s.paced_fps = 33.3f;
 	s.client_decode_ms = 32.8f;
+	// The headset's decode breakdown. Deliberately NOT a set that sums exactly: the
+	// segments are separate timestamp pairs from the envelope, so 30.7 against
+	// 3.1 + 19.4 + 4.2 + 1.6 = 28.3 leaves 2.4 ms of pipeline drain that belongs to no
+	// segment -- which is the case the "other" term exists for, and the one a sample
+	// that added up cleanly would never exercise.
+	s.client_pass_segments_known = true;
+	s.client_pass_a_ms = 7.6f;
+	s.client_pass_b_ms = 30.7f;
+	s.client_pass_w_ms = 3.1f;
+	s.client_pass_b_skip_ms = 19.4f;
+	s.client_pass_b_coded_ms = 4.2f;
+	s.client_pass_b_dir_ms = 1.6f;
+	s.client_tiles_skip = 241;
+	s.client_tiles_coded = 39;
+	s.client_tiles_dir = 9;
 	s.frames_not_sent = 113;
 	s.not_reconstructed = 3;
 	s.not_reconstructed_costly = 3;
@@ -118,6 +133,16 @@ void check_same(const nxwarp_stream_stats & a, const nxwarp_stream_stats & b, co
 	check(near(a.window_seconds, b.window_seconds), h + ": window_seconds");
 	check(a.frames_encoded == b.frames_encoded, h + ": frames_encoded");
 	check(near(a.encode_ms_mean, b.encode_ms_mean), h + ": encode_ms_mean");
+	check(a.client_pass_segments_known == b.client_pass_segments_known, h + ": client_pass_segments_known");
+	check(near(a.client_pass_a_ms, b.client_pass_a_ms), h + ": client_pass_a_ms");
+	check(near(a.client_pass_b_ms, b.client_pass_b_ms), h + ": client_pass_b_ms");
+	check(near(a.client_pass_w_ms, b.client_pass_w_ms), h + ": client_pass_w_ms");
+	check(near(a.client_pass_b_skip_ms, b.client_pass_b_skip_ms), h + ": client_pass_b_skip_ms");
+	check(near(a.client_pass_b_coded_ms, b.client_pass_b_coded_ms), h + ": client_pass_b_coded_ms");
+	check(near(a.client_pass_b_dir_ms, b.client_pass_b_dir_ms), h + ": client_pass_b_dir_ms");
+	check(near(a.client_tiles_skip, b.client_tiles_skip), h + ": client_tiles_skip");
+	check(near(a.client_tiles_coded, b.client_tiles_coded), h + ": client_tiles_coded");
+	check(near(a.client_tiles_dir, b.client_tiles_dir), h + ": client_tiles_dir");
 	check(near(a.encode_ms_max, b.encode_ms_max), h + ": encode_ms_max");
 	check(near(a.bytes_per_frame, b.bytes_per_frame), h + ": bytes_per_frame");
 	check(near(a.target_bytes_per_frame, b.target_bytes_per_frame), h + ": target_bytes_per_frame");
@@ -291,6 +316,24 @@ static void part_c()
 	check(near(read("fpsSent").toDouble(), 67.0 / 2.03, 1e-3), "fpsSent is frames over the window");
 	check(read("paceModeText").toString() == "auto", "paceModeText");
 	check(read("clientDecodeKnown").toBool(), "clientDecodeKnown is true when a time was reported");
+
+	// The pass B breakdown, and the property that makes it honest: the five parts must
+	// account for the envelope exactly. "other" is defined as the remainder, so this is
+	// really a check that the gadget computes the remainder rather than inventing it.
+	check(read("passSegmentsKnown").toBool(), "passSegmentsKnown with a measured envelope");
+	check(near(read("passBMs").toDouble(), 30.7), "passBMs is the envelope");
+	check(near(read("passBOtherMs").toDouble(), 30.7 - 3.1 - 19.4 - 4.2 - 1.6, 1e-3),
+	      "passBOtherMs is the drain the segment timers do not cover");
+	{
+		const double parts = read("passWMs").toDouble() + read("passBSkipMs").toDouble() +
+		                     read("passBCodedMs").toDouble() + read("passBDirMs").toDouble() +
+		                     read("passBOtherMs").toDouble();
+		check(near(parts, read("passBMs").toDouble(), 1e-3),
+		      "the five parts sum to the pass B envelope");
+	}
+	check(near(read("skipSharePct").toDouble(), 100.0 * 19.4 / 30.7, 1e-3),
+	      "skipSharePct is the skipped-tile warp's share of pass B");
+	check(near(read("tilesSkip").toDouble(), 241), "tilesSkip");
 	check(read("tiles").toInt() == 196, "tiles is 14x14 for 896x896");
 	check(read("hasTarget").toBool(), "hasTarget with automatic rate control");
 	check(near(read("bytesOffTargetPercent").toDouble(), 100.0 * (6649.0 - 6097.0) / 6097.0),
@@ -512,6 +555,86 @@ static void part_e()
 	check(read("codedFrameWidth").toInt() == 1088, "so the coded frame is one eye wide");
 }
 
+// ------------------------------------------------------------------------------------------
+// The two cases the sample above cannot show at once: a headset that reported no
+// breakdown, and one whose segments overrun the envelope.
+static void part_f()
+{
+	std::printf("\nPart F: the pass B breakdown's edges\n");
+
+	// An older headset, or a device that cannot timestamp the segments. It must read as
+	// "not measured" rather than as a decode that cost nothing: the card is hidden on
+	// this flag, and a row of noughts would look like a measurement.
+	{
+		nxwarp_stream_stats s = sample();
+		s.client_pass_segments_known = false;
+		s.client_pass_b_ms = 0;
+		s.client_pass_w_ms = 0;
+		s.client_pass_b_skip_ms = 0;
+		s.client_pass_b_coded_ms = 0;
+		s.client_pass_b_dir_ms = 0;
+		const nxwarp_stream_stat g{s};
+		const QMetaObject * mo = &nxwarp_stream_stat::staticMetaObject;
+		auto read = [&](const char * n) {
+			return mo->property(mo->indexOfProperty(n)).readOnGadget(&g);
+		};
+		check(not read("passSegmentsKnown").toBool(),
+		      "an unreported breakdown reads as not measured");
+		check(near(read("passBOtherMs").toDouble(), 0.0),
+		      "and its remainder is zero rather than negative");
+		check(near(read("skipSharePct").toDouble(), 0.0),
+		      "and its skip share does not divide by zero");
+	}
+
+	// A headset whose nxvc has the timers but whose envelope is zero -- the segments
+	// are stamped, the envelope is not. Reported as not measured for the same reason:
+	// a breakdown without a total is not a breakdown.
+	{
+		nxwarp_stream_stats s = sample();
+		s.client_pass_segments_known = true;
+		s.client_pass_b_ms = 0;
+		const nxwarp_stream_stat g{s};
+		const QMetaObject * mo = &nxwarp_stream_stat::staticMetaObject;
+		auto read = [&](const char * n) {
+			return mo->property(mo->indexOfProperty(n)).readOnGadget(&g);
+		};
+		check(not read("passSegmentsKnown").toBool(),
+		      "segments without an envelope read as not measured");
+	}
+
+	// The segments totalling more than the envelope. They are separate timestamp pairs,
+	// so on a very cheap frame this is measurement noise and not a fault -- but the
+	// remainder must clamp at zero rather than print a negative "other".
+	{
+		nxwarp_stream_stats s = sample();
+		s.client_pass_b_ms = 1.0f;
+		s.client_pass_w_ms = 0.4f;
+		s.client_pass_b_skip_ms = 0.5f;
+		s.client_pass_b_coded_ms = 0.2f;
+		s.client_pass_b_dir_ms = 0.1f; // 1.2 > 1.0
+		check(near(s.client_pass_b_other_ms(), 0.0),
+		      "an overrun remainder clamps at zero, not below it");
+		const nxwarp_stream_stat g{s};
+		const QMetaObject * mo = &nxwarp_stream_stat::staticMetaObject;
+		check(near(mo->property(mo->indexOfProperty("passBOtherMs")).readOnGadget(&g).toDouble(), 0.0),
+		      "and the gadget shows the same");
+	}
+
+	// The remainder is DERIVED on the way in, not carried. A payload whose parts and
+	// remainder disagree must be recomputed rather than believed -- otherwise a stale
+	// or hostile producer could publish an equation that does not balance.
+	{
+		nxwarp_stream_stats in = sample();
+		nlohmann::json j = in;
+		check(j.contains("client_pass_b_other_ms"),
+		      "the remainder is published for consumers that want it");
+		j["client_pass_b_other_ms"] = 999.0;
+		const auto out = j.get<nxwarp_stream_stats>();
+		check(near(out.client_pass_b_other_ms(), in.client_pass_b_other_ms()),
+		      "but a bogus remainder in the payload is recomputed, not trusted");
+	}
+}
+
 int main(int argc, char ** argv)
 {
 	const char * qml = argc > 1 ? argv[1] : "dashboard/qml/HeadsetStatsPage.qml";
@@ -520,6 +643,7 @@ int main(int argc, char ** argv)
 	part_c();
 	part_d(qml);
 	part_e();
+	part_f();
 
 	std::printf("\n%d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;

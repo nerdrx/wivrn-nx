@@ -1068,6 +1068,14 @@ void wivrn_session::operator()(from_headset::nxwarp_feedback && fb)
 	compositor.on_nxwarp_feedback(fb);
 }
 
+void wivrn_session::operator()(from_headset::nxwarp_decode_profile && p)
+{
+	// Straight through, like the two above. Unlike them it changes nothing the encoder
+	// does: it is carried so the dashboard can show the headset's own decode breakdown
+	// beside the encoder's numbers, which is the only place the two can be compared.
+	compositor.on_nxwarp_decode_profile(p);
+}
+
 void wivrn_session::operator()(from_headset::nxwarp_frame_not_held && fb)
 {
 	// Straight through to the encoder, like the transport feedback above and for the

@@ -119,6 +119,47 @@ struct nxwarp_stream_stats
 	float paced_fps = 0;
 	// As the headset measures it. Zero means it has not reported one yet.
 	float client_decode_ms = 0;
+
+	// --- where the headset's GPU decode goes ---------------------------------
+	//
+	// From from_headset::nxwarp_decode_profile, republished about twice a second by
+	// the headset's own decoder. `client_decode_ms` above is the wall cost of a
+	// decode; these say what it is spent on, which is the difference between "the
+	// headset is slow" and "the headset is spending it all warping skipped tiles".
+	//
+	// `client_pass_b_ms` is an ENVELOPE, not a sum: nxvc measures it from the end of
+	// Pass A to the end of Pass B, so it contains the predictor dispatch
+	// (`client_pass_w_ms`) and all three reconstruction segments. What is left after
+	// subtracting them is the pipeline drain between dispatches -- real time that
+	// belongs to no segment. It is displayed as "other" rather than folded in, so the
+	// parts visibly account for the whole.
+	//
+	// All zero, with `client_pass_segments_known` false, when the headset's nxvc has
+	// no segment timers or its device cannot timestamp them -- which a reader must be
+	// able to tell from a decode that genuinely cost nothing.
+	bool client_pass_segments_known = false;
+	float client_pass_a_ms = 0;
+	float client_pass_b_ms = 0;
+	float client_pass_w_ms = 0;
+	float client_pass_b_skip_ms = 0;
+	float client_pass_b_coded_ms = 0;
+	float client_pass_b_dir_ms = 0;
+	// Mean tiles per frame in each Pass B segment, eye pass 0. A segment at zero
+	// milliseconds with no tiles was empty; with tiles, it was not measurable.
+	float client_tiles_skip = 0;
+	float client_tiles_coded = 0;
+	float client_tiles_dir = 0;
+
+	// The part of the Pass B envelope that no segment timer covers: the drain between
+	// dispatches. Never negative -- the envelope and the segments are separate
+	// timestamp pairs, so on a very cheap frame the parts can total a hair over.
+	float client_pass_b_other_ms() const
+	{
+		const float parts = client_pass_w_ms + client_pass_b_skip_ms +
+		                    client_pass_b_coded_ms + client_pass_b_dir_ms;
+		const float other = client_pass_b_ms - parts;
+		return other > 0 ? other : 0.f;
+	}
 	// Composited frames the pacer did not send in this window. Not a fault: it is the
 	// difference between what the compositor made and what the headset could take.
 	uint64_t frames_not_sent = 0;
@@ -260,6 +301,19 @@ inline void to_json(nlohmann::json & j, const nxwarp_stream_stats & s)
 	        {"pace_mode", uint8_t(s.pace_mode)},
 	        {"paced_fps", r(s.paced_fps)},
 	        {"client_decode_ms", r(s.client_decode_ms)},
+	        {"client_pass_segments_known", s.client_pass_segments_known},
+	        {"client_pass_a_ms", r(s.client_pass_a_ms)},
+	        {"client_pass_b_ms", r(s.client_pass_b_ms)},
+	        {"client_pass_w_ms", r(s.client_pass_w_ms)},
+	        {"client_pass_b_skip_ms", r(s.client_pass_b_skip_ms)},
+	        {"client_pass_b_coded_ms", r(s.client_pass_b_coded_ms)},
+	        {"client_pass_b_dir_ms", r(s.client_pass_b_dir_ms)},
+	        // Derived, and published anyway: every consumer needs it and none of them
+	        // should have to know that the segments do not sum to the envelope.
+	        {"client_pass_b_other_ms", r(s.client_pass_b_other_ms())},
+	        {"client_tiles_skip", r(s.client_tiles_skip)},
+	        {"client_tiles_coded", r(s.client_tiles_coded)},
+	        {"client_tiles_dir", r(s.client_tiles_dir)},
 	        {"frames_not_sent", s.frames_not_sent},
 	        {"not_reconstructed", s.not_reconstructed},
 	        {"not_reconstructed_costly", s.not_reconstructed_costly},
@@ -318,6 +372,19 @@ inline void from_json(const nlohmann::json & j, nxwarp_stream_stats & s)
 	get("controller_bitrate_bps", s.controller_bitrate_bps);
 	get("paced_fps", s.paced_fps);
 	get("client_decode_ms", s.client_decode_ms);
+	get("client_pass_segments_known", s.client_pass_segments_known);
+	get("client_pass_a_ms", s.client_pass_a_ms);
+	get("client_pass_b_ms", s.client_pass_b_ms);
+	get("client_pass_w_ms", s.client_pass_w_ms);
+	get("client_pass_b_skip_ms", s.client_pass_b_skip_ms);
+	get("client_pass_b_coded_ms", s.client_pass_b_coded_ms);
+	get("client_pass_b_dir_ms", s.client_pass_b_dir_ms);
+	get("client_tiles_skip", s.client_tiles_skip);
+	get("client_tiles_coded", s.client_tiles_coded);
+	get("client_tiles_dir", s.client_tiles_dir);
+	// client_pass_b_other_ms is deliberately NOT read back: it is derived from the
+	// fields above, and a payload whose parts and remainder disagreed would otherwise
+	// be reproduced here rather than recomputed.
 	get("frames_not_sent", s.frames_not_sent);
 	get("not_reconstructed", s.not_reconstructed);
 	get("not_reconstructed_costly", s.not_reconstructed_costly);

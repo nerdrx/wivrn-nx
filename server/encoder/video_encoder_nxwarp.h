@@ -604,6 +604,12 @@ public:
 	std::optional<data> encode(uint8_t slot, uint64_t frame_id) override;
 
 	void on_nxwarp_feedback(uint8_t path_id, std::span<const uint8_t> payload, uint16_t decode_us, uint16_t held_base, uint32_t held_mask) override;
+	void on_nxwarp_decode_profile(const from_headset::nxwarp_decode_profile &) override;
+	// The headset's last decode breakdown, written by the network thread and read by
+	// the two-second report. A plain mutex rather than atomics because the eleven
+	// fields only mean anything together.
+	std::mutex client_profile_mutex;
+	from_headset::nxwarp_decode_profile client_profile{};
 	void on_nxwarp_frame_not_held(uint16_t frame_id,
 	                              from_headset::nxwarp_frame_not_held::reason why) override;
 

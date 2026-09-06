@@ -1156,6 +1156,54 @@ struct nxwarp_feedback
 	uint32_t held_mask = 0;
 };
 
+// Where one eye's GPU decode time went, over the decoder's own two-second window.
+//
+// A SEPARATE packet, and the cadence is the whole reason. nxwarp_feedback carries
+// decode_us and the held mask because those want to arrive several times a frame --
+// the pace controller and the reference selector both read them that often, and the
+// packet's own comment explains why a packet of its own would be wasteful for two
+// bytes. This is the opposite case: it is a profile window, republished about every
+// two seconds, and putting it on the feedback packet would send the same unchanged
+// numbers several hundred times per window to no purpose.
+//
+// It exists so the dashboard can show what the in-headset HUD shows. Nothing on the
+// server READS it to make a decision -- it is reported, not acted on -- which is why
+// losing one costs a stale card and nothing else, and why it goes out on the control
+// socket without any retry of its own.
+//
+// `pass_b_ms` is an ENVELOPE: nxvc measures it from the end of Pass A to the end of
+// Pass B, so it contains the predictor dispatch (`pass_w_ms`) and all three
+// reconstruction segments. The parts therefore do NOT sum to it, and the remainder is
+// not slack -- the segments are timestamps taken around dispatches and the pipeline
+// drain between them belongs to none of them. Both ends report that remainder as
+// "other" rather than distributing it.
+//
+// Milliseconds as floats because that is what nxvc reports and what is displayed; the
+// packet is sent twice a second, so there is nothing to gain by packing it smaller.
+struct nxwarp_decode_profile
+{
+	// Same stream numbering as video_stream_data_shard: 0 and 1 are the eyes.
+	uint8_t stream_item_idx = 0;
+	// True when this build's nxvc breaks Pass B up at all. False means every segment
+	// below is zero because it was never measured, which a reader must be able to tell
+	// from a decode that genuinely cost nothing.
+	bool segments_known = false;
+
+	float pass_a_ms = 0;
+	float pass_b_ms = 0; // the envelope, which contains everything below
+	float pass_w_ms = 0;
+	float pass_b_skip_ms = 0;  // WARP_SKIP tiles: the normative integer pose warp
+	float pass_b_coded_ms = 0; // every other non-INTRA tile
+	float pass_b_dir_ms = 0;   // INTRA tiles, directional-intra wavefront
+
+	// Mean tiles per frame in each segment, eye pass 0 -- what makes a zero segment
+	// legible: no tiles means empty, tiles with no time means the device cannot
+	// timestamp it.
+	float tiles_skip = 0;
+	float tiles_coded = 0;
+	float tiles_dir = 0;
+};
+
 // A frame the headset will NOT reconstruct, named by the stream's own 16-bit frame id.
 //
 // It is a CORRECTION, and that is the whole reason it has to exist separately from
@@ -1230,6 +1278,7 @@ using packets = std::variant<
         transport_status_subscribe,
         nxwarp_feedback,
         nxwarp_frame_not_held,
+        nxwarp_decode_profile,
         override_foveation_center,
         get_application_list,
         start_app,

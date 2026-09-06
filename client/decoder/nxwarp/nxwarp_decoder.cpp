@@ -1635,6 +1635,20 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		prof.wall_ms += ms(t_end - t_decode0);
 		prof.pass_a_ms += st.pass_a_ms;
 		prof.pass_b_ms += st.pass_b_ms;
+#ifdef NXVC_VK_DECODER_PASSB_SEGMENTS
+		// Pass W and the three Pass B segments, all of which pass_b_ms already
+		// contains. Accumulated separately rather than subtracted out of it: the
+		// segments are timestamps around dispatches and the drain between them
+		// belongs to none of them, so the envelope stays the envelope and the
+		// leftover is reported as its own thing.
+		prof.pass_w_ms += st.pass_w_ms;
+		prof.pass_b_skip_ms += st.pass_b_skip_ms;
+		prof.pass_b_coded_ms += st.pass_b_coded_ms;
+		prof.pass_b_dir_ms += st.pass_b_dir_ms;
+		prof.tiles_skip += st.tiles_skip_seg;
+		prof.tiles_coded += st.tiles_coded_seg;
+		prof.tiles_dir += st.tiles_dir_seg;
+#endif
 		prof.gpu_ms += st.gpu_ms;
 		prof.bytes += job.unit.size();
 		prof.gap_ms += have_last_iter ? ms(t_iter0 - last_iter_end) : 0.0;
@@ -1696,6 +1710,30 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			             stream_index, prof.n, ms(t_end - prof.since) / 1000.0, prof.bytes / n,
 			             prof.wait_ms / n, prof.wall_ms / n, prof.pass_a_ms / n, prof.pass_b_ms / n, prof.gpu_ms / n,
 			             frames_dropped_holes.load(), frames_dropped_codec.load());
+#ifdef NXVC_VK_DECODER_PASSB_SEGMENTS
+			// What "passB" above is actually made of. It is an ENVELOPE -- Pass A's
+			// end to Pass B's end -- so it contains the predictor dispatch and all
+			// three reconstruction segments. Printing only the envelope is what let
+			// 7.6 + 23.1 read as "the reconstruct kernel costs 23 ms" when most of
+			// the 23 is the integer pose warp the WARP_SKIP tiles run.
+			//
+			// "other" is the remainder, and it is not a rounding error: the segments
+			// are timestamps around dispatches, so the pipeline drain between them
+			// belongs to no segment. It is shown rather than distributed, because
+			// what it measures -- the cost of the split itself -- is a real number
+			// somebody optimising this will want.
+			{
+				const double w = prof.pass_w_ms / n;
+				const double bs = prof.pass_b_skip_ms / n;
+				const double bc = prof.pass_b_coded_ms / n;
+				const double bd = prof.pass_b_dir_ms / n;
+				const double env = prof.pass_b_ms / n;
+				spdlog::info("nxwarp[{}] passB {:.1f} ms = warp {:.1f} + skip {:.1f} + coded {:.1f} + dir {:.1f} + other {:.1f}; tiles skip {:.0f} / coded {:.0f} / dir {:.0f} (eye pass 0)",
+				             stream_index, env, w, bs, bc, bd,
+				             env - w - bs - bc - bd,
+				             prof.tiles_skip / n, prof.tiles_coded / n, prof.tiles_dir / n);
+			}
+#endif
 			spdlog::info("nxwarp[{}]: {} frames dropped late (queue kept to {})",
 			             stream_index, frames_dropped_late.load(), max_queued_frames);
 			spdlog::info("nxwarp[{}] stage: gap {:.1f} | wait-prev {:.1f} | submit {:.1f} (qlock {:.1f} + codec {:.1f}) | get_free {:.1f} | fence-pre {:.1f} | record {:.1f} | qsubmit {:.1f} | fence-post {:.1f} | publish {:.1f} ms; withheld {}, stride {}, arrival {:.1f} ms",
@@ -1733,6 +1771,16 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			// with the pixel count, so it is the one the stream scale moves.
 			prof_pass_a_ms.store(float(prof.pass_a_ms / n), std::memory_order_relaxed);
 			prof_pass_b_ms.store(float(prof.pass_b_ms / n), std::memory_order_relaxed);
+			prof_pass_w_ms.store(float(prof.pass_w_ms / n), std::memory_order_relaxed);
+			prof_pass_b_skip_ms.store(float(prof.pass_b_skip_ms / n), std::memory_order_relaxed);
+			prof_pass_b_coded_ms.store(float(prof.pass_b_coded_ms / n), std::memory_order_relaxed);
+			prof_pass_b_dir_ms.store(float(prof.pass_b_dir_ms / n), std::memory_order_relaxed);
+			prof_tiles_skip.store(float(prof.tiles_skip / n), std::memory_order_relaxed);
+			prof_tiles_coded.store(float(prof.tiles_coded / n), std::memory_order_relaxed);
+			prof_tiles_dir.store(float(prof.tiles_dir / n), std::memory_order_relaxed);
+			// Last, and after every value above: a reader that sees the new sequence
+			// must find the new numbers already there, not a half-updated window.
+			prof_window_seq.fetch_add(1, std::memory_order_release);
 			// Feed the shared stride from this stream's measured cost: ceil(wall / period).
 			// Streams only ever raise it quickly and lower it by one step per report, so
 			// a momentary hiccup does not flip the selection back and forth.

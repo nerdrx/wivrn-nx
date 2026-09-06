@@ -1362,6 +1362,8 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	{
 		const XrDuration age = frame_state.predictedDisplayTime - h->view_info.display_time;
 		displayed_pose_age = age;
+		pose_age_ns += uint64_t(std::max<XrDuration>(age, 0));
+		++pose_age_frames;
 		const double age_ms = double(age) / 1e6;
 		g_rp.pose_age_ms += age_ms;
 		g_rp.pose_age_max_ms = std::max(g_rp.pose_age_max_ms, age_ms);

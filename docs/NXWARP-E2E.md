@@ -201,7 +201,27 @@ wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 40 --first-fram
 # the same runs on the GPU encoder
 wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 12 --backend vk
 wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 40 --loss 0.05 --seed 7 --backend vk
+
+# total blackout: the link delivers nothing at all
+wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 12 --backend vk --loss 3
 ```
+
+`--loss 3` is not a typo and not a probability that got away: the draw is
+`uniform(0,1) < loss`, so anything at or above 1 drops **every** datagram. It is a case
+worth a line of its own, because the server must survive a client that hears nothing —
+keep coding, place nothing, invent nothing, and end — and because it is the shape of a
+headset that walked out of radio range rather than one on a bad link.
+
+The run asserts what a blackout should look like rather than what a lossy run should:
+the encoder keeps coding, the transport places no tiles and marks none late, nothing
+reassembles, nothing is published, and no feedback comes back — a receiver that hears
+nothing has no frame id and no band structure to report *on*, so silence is the correct
+answer and the encoder is required to make progress without it.
+
+It used to report **six failures** on a working tree, which is the worst answer a test
+can give: the code was right and six checks were asking a question the input had made
+meaningless ("did the frames that arrived decode", "is the published pose real"), so a
+real regression here would have been indistinguishable from the noise.
 
 `--reorder P` holds back a P fraction of datagrams by one to three datagram slots: a
 datagram held at slot `s` with delay `d` is released while slot `s+d+1` is handled, so
@@ -241,6 +261,21 @@ With a clean link it asserts the ceiling is held and that no frame is reported
 undelivered; with `--loss` it asserts the opposite — that the undelivered frames are
 reported *and* that the controller backs off. Both directions matter: this path used to
 report neither, and "the bitrate did not move" was the symptom.
+
+### What a lossy run may and may not assert
+
+"A lossy run drops the frames with holes rather than inventing them" is a statement about
+frames that HAVE holes, and at a few percent loss the class-A parity often recovers every
+one — which is the FEC succeeding, not the decoder failing. Asserting it unconditionally
+made the verdict a property of the seed: over twelve seeds of `--backend ref --frames 12
+--inter on --loss 0.05`, seeds 3 and 5 lost 9 and 4 datagrams, reassembled 12 of 12, and
+were reported as failures.
+
+So the invariant that always holds is asserted always — `published <= reassembled <= sent`,
+at any loss rate, which is the whole of "invents nothing" — and the stronger claim runs
+only when a frame actually failed to reassemble. Seven of those twelve seeds still reach
+it, so the check did not become vacuous; it stopped being a coin toss. When the parity
+covered everything the run says so in a note, rather than passing silently.
 
 `tests/bitrate_nxwarp_test.cpp` is the other half, and the one that isolates the cause.
 It drives the control law directly against two simulated eye decoders and separates the

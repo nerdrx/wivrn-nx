@@ -1051,6 +1051,57 @@ vectors (`atlas_size`, `atlas_geom`, `atlas_range`) are exactly that and are dea
 `atlas_mode == 0`, which is every session run so far. That is a hypothesis, not a
 measurement -- it has not been tried on hardware.
 
+### Every frame falls back to fixed chunks once the picture gets real
+
+Measured across one session (server88) while the headset went from sitting on a desk to
+being worn:
+
+| | on the desk | worn |
+|---|---|---|
+| bytes/frame | 17.2-17.5 kB | **108-130 kB** |
+| tile mapping | 100 % per-tile spans | **0 % spans, every frame on the chunk fallback** |
+| client decode | 15.7 ms | 22-35 ms |
+| server pacing | 53.8 fps | 26-38 fps |
+
+Nothing in the build changed between those rows. The cause is the content at a fixed
+quantiser, and the chain is short:
+
+* **The quantiser is pinned at its floor.** `min-qp` is 22 and every window reports
+  `QP 22.0 [22..22]` with `controller allows 43.4 Mbit/s (at min QP)`. The rate
+  controller was *under* target throughout -- 108-130 kB against a 142-215 kB target --
+  so it never had a reason to push QP up. At a fixed QP the encoder spends whatever the
+  picture costs.
+* **Every frame is an intra frame.** The Vulkan backend is `intra only`, so there is no
+  temporal prediction to absorb a change of view; each frame codes the whole picture from
+  scratch. A static view of a mostly-flat scene codes to almost nothing (30 B a tile); a
+  view someone is moving around a real scene does not (190 B a tile, mean).
+* **One fat tile loses the whole frame.** `nxwarp_spans_fit()` is all-or-nothing: it walks
+  the tile descriptors and returns false for the entire frame the moment one span exceeds
+  `max_tile_bytes` (`nxwarp_packetize.cpp:78`, `1166 bytes per transport tile` on this
+  link). At a 190 B mean over 578 tiles the tail reaches past 1166 on essentially every
+  frame, so the fallback is not intermittent -- it is total.
+
+Ruled out, with the evidence: the transport slot did not change (`1166` in both sessions),
+`kFrameLenBytes` is 4 rather than the 26 that was suspected, the QP band never moved, and
+effort 0 was already active during the small-frame windows -- the first window of the very
+same session that later ran at 110 kB was 17.5 kB.
+
+**Why it cannot split instead of giving up.** The span mapping is one datagram per tile:
+`nxwarp_spans_fit()` requires strictly ascending, unique tile indices, so a tile larger
+than a slot cannot be expressed as two spans of the same tile. Splitting would be a
+protocol change, not a tuning one.
+
+Two things could be done and neither is done here. The cheap one is to make the fallback
+**per band rather than per frame**, so an oversized region loses the span mapping and the
+rest of the frame keeps it -- most of the loss-resilience survives and no wire format
+changes. The complete one is a multi-span tile, which does change the wire.
+
+Until then it is a setting, and the log line already says which: raise `min-qp` so the
+tails fit, or raise the MTU so the slot is bigger. Note what is being traded -- the span
+mapping is a LOSS-RESILIENCE feature, so falling back costs nothing in quality or
+bandwidth, only the property that one lost datagram costs a few tiles instead of a frame.
+A stream on a clean link loses nothing by running on chunks.
+
 ### The timeline semaphore that is advertised and cannot be created
 
 The same driver advertises `VK_KHR_timeline_semaphore` and then returns `VK_INCOMPLETE`

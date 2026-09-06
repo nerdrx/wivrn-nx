@@ -90,6 +90,17 @@ public:
 	};
 	Q_ENUM(nxwarp_stereo)
 
+	// "tile-map": how a frame's bytes are laid on the transport's tile grid. See
+	// nxwarp_settings.h -- TileAuto and TileSpans behave identically today, and both are
+	// offered because the third is the one that changes behaviour.
+	enum nxwarp_tile_map
+	{
+		TileAuto,
+		TileSpans,
+		TileChunks,
+	};
+	Q_ENUM(nxwarp_tile_map)
+
 	// "coded-vectors": whether motion vectors are coded into the stream.
 	enum nxwarp_coded_vectors
 	{
@@ -120,6 +131,7 @@ public:
 	Q_PROPERTY(int nxwarpMinQp READ nxwarpMinQp WRITE set_nxwarpMinQp NOTIFY nxwarpMinQpChanged)
 	Q_PROPERTY(int nxwarpMaxQp READ nxwarpMaxQp WRITE set_nxwarpMaxQp NOTIFY nxwarpMaxQpChanged)
 	Q_PROPERTY(nxwarp_stereo nxwarpStereoFrame READ nxwarpStereoFrame WRITE set_nxwarpStereoFrame NOTIFY nxwarpStereoFrameChanged)
+	Q_PROPERTY(nxwarp_tile_map nxwarpTileMap READ nxwarpTileMap WRITE set_nxwarpTileMap NOTIFY nxwarpTileMapChanged)
 	Q_PROPERTY(nxwarp_coded_vectors nxwarpCodedVectors READ nxwarpCodedVectors WRITE set_nxwarpCodedVectors NOTIFY nxwarpCodedVectorsChanged)
 	Q_PROPERTY(bool nxwarpEffort READ nxwarpEffort WRITE set_nxwarpEffort NOTIFY nxwarpEffortChanged)
 	Q_PROPERTY(bool nxwarpInter READ nxwarpInter WRITE set_nxwarpInter NOTIFY nxwarpInterChanged)
@@ -165,6 +177,7 @@ public:
 	SETTER_GETTER_NOTIFY(int, nxwarpMinQp)
 	SETTER_GETTER_NOTIFY(int, nxwarpMaxQp)
 	SETTER_GETTER_NOTIFY(nxwarp_stereo, nxwarpStereoFrame)
+	SETTER_GETTER_NOTIFY(nxwarp_tile_map, nxwarpTileMap)
 	SETTER_GETTER_NOTIFY(nxwarp_coded_vectors, nxwarpCodedVectors)
 	SETTER_GETTER_NOTIFY(bool, nxwarpEffort)
 	SETTER_GETTER_NOTIFY(bool, nxwarpInter)

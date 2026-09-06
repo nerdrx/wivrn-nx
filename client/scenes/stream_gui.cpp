@@ -268,6 +268,7 @@ void scenes::stream::accumulate_fps(XrTime now)
 		float gpu_ms = 0, pass_a_ms = 0, pass_b_ms = 0, bytes = 0, arrival_ms = 0;
 		uint32_t stride = 1, width = 0, height = 0;
 		uint64_t tools = 0;
+		uint32_t frame_tiles = 0, grid_tiles = 0;
 		for (size_t i = 0; i < view_count; ++i)
 		{
 			// Eye streams only. The base layer is hardware HEVC, so the cast below
@@ -305,6 +306,13 @@ void scenes::stream::accumulate_fps(XrTime now)
 				height = st.encoded_height;
 				tools = st.stream_tools;
 			}
+			// Both eyes are mapped the same way, so last writer wins -- and with the
+			// eyes paired there is only one stream reporting at all.
+			if (st.grid_tiles)
+			{
+				frame_tiles = st.frame_tiles;
+				grid_tiles = st.grid_tiles;
+			}
 		}
 		// Not a rate: the mean of the decoder's own last two-second profile window,
 		// taken as it is rather than differenced.
@@ -324,6 +332,8 @@ void scenes::stream::accumulate_fps(XrTime now)
 		// states it when the decoders are built, where the .nxv header does not arrive
 		// until the first frame. See scenes::stream::eyes_in_one_stream().
 		fps.nxwarp_paired = eyes_in_one_stream();
+		fps.nxwarp_frame_tiles = frame_tiles;
+		fps.nxwarp_grid_tiles = grid_tiles;
 	}
 #endif
 	fps.nxwarp = nxwarp;
@@ -480,17 +490,30 @@ void scenes::stream::rebuild_fps_lines()
 		// std::string, so a pointer to it dangles the moment this statement ends. Inline
 		// inside the format call it would live long enough; hoisted, it does not.
 		const std::string entropy = fps.nxwarp_entropy_lite ? _("entropy lite") : _("entropy rANS");
+		// Which mapping the server is sending under, told from what arrived rather
+		// than from anything on the wire saying so: under the fixed-chunk mapping a
+		// frame is a PREFIX of the tile grid and carries one tile per MTU-sized piece
+		// of its bitstream, and under per-tile spans it carries every tile it coded.
+		// The two are not close -- 45 against 578 on a paired 1088x1088 -- so the test
+		// is a wide margin and not a threshold to tune. Blank until a frame has closed.
+		std::string mapping;
+		if (fps.nxwarp_grid_tiles and fps.nxwarp_frame_tiles)
+			mapping = fps.nxwarp_frame_tiles * 2 >= fps.nxwarp_grid_tiles
+			                  ? fmt::format(_F(" · spans, {} tiles/frame"), fps.nxwarp_frame_tiles)
+			                  : fmt::format(_F(" · chunks, {} tiles/frame"), fps.nxwarp_frame_tiles);
 		fps_line_cache[4] = fps.nxwarp_paired
-		                            ? fmt::format(_F("{}x{} paired · {} tiles · {}"),
+		                            ? fmt::format(_F("{}x{} paired · {} tiles · {}{}"),
 		                                          w,
 		                                          fps.nxwarp_height,
 		                                          tiles,
-		                                          entropy)
-		                            : fmt::format(_F("{}x{} · {} tiles · {}"),
+		                                          entropy,
+		                                          mapping)
+		                            : fmt::format(_F("{}x{} · {} tiles · {}{}"),
 		                                          w,
 		                                          fps.nxwarp_height,
 		                                          tiles,
-		                                          entropy);
+		                                          entropy,
+		                                          mapping);
 	}
 }
 

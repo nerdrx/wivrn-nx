@@ -565,7 +565,21 @@ class video_encoder_nxwarp : public video_encoder
 	// datagram costs the frame. The choice is per frame, so it has to be counted per
 	// frame -- "this backend supports spans" is not the same statement as "this frame
 	// used them", and the intra frame that opens a stream is usually the difference.
+	// The operator's "tile-map". See the option block in the constructor; `spans` differs
+	// from `automatic` only in that it is a statement of intent for a measurement run,
+	// since a frame whose tiles do not fit a transport slot cannot be carried that way
+	// under either.
+	enum class tile_map_t
+	{
+		automatic,
+		spans,
+		chunks,
+	};
+	tile_map_t tile_map = tile_map_t::automatic;
 	uint64_t prof_span_frames = 0, prof_chunk_frames = 0;
+	// The same two, as they stood at the last two-second report, so the log line can say
+	// what happened in the window rather than since the stream began.
+	uint64_t prof_span_reported = 0, prof_chunk_reported = 0;
 	// Coded tiles handed to the transport over the span frames: the number of transport
 	// slots those frames should have used, one per coded tile, at its own index.
 	uint64_t prof_span_tiles = 0;

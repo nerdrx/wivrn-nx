@@ -239,6 +239,32 @@ Kirigami.ScrollablePage {
             }
 
             RowLayout {
+                Kirigami.FormData.label: i18n("Tile mapping:")
+                visible: Settings.nxwarpSelected
+                Controls.ComboBox {
+                    id: nxwarp_tile_map
+                    model: [
+                        {
+                            label: i18nc("automatic tile mapping", "Auto"),
+                            value: Settings.TileAuto
+                        },
+                        {
+                            label: i18n("Per-tile spans"),
+                            value: Settings.TileSpans
+                        },
+                        {
+                            label: i18n("Fixed chunks (fallback)"),
+                            value: Settings.TileChunks
+                        }
+                    ]
+                    textRole: "label"
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("Which bytes of a frame travel at which tile position. With per-tile spans a tile's own bytes travel at its own position, so one lost datagram costs the few tiles it was carrying instead of the whole frame. Auto uses them whenever the encoder can and every tile fits a packet, and falls back per frame when one does not — at a low quantiser, tiles outgrow a packet and the whole frame falls back. Fixed chunks never uses them: it is the older behaviour, and the one to pick if a session gets worse after an update. The server log says which was used. Applies from the next connection.")
+                }
+            }
+
+            RowLayout {
                 Kirigami.FormData.label: i18n("Entropy coder:")
                 visible: Settings.nxwarpSelected
                 Controls.ComboBox {
@@ -670,6 +696,7 @@ Kirigami.ScrollablePage {
             Settings.nxwarpMinQp = nxwarp_min_qp.value;
             Settings.nxwarpMaxQp = nxwarp_max_qp.value;
             Settings.nxwarpStereoFrame = nxwarp_stereo.model[nxwarp_stereo.currentIndex].value;
+            Settings.nxwarpTileMap = nxwarp_tile_map.model[nxwarp_tile_map.currentIndex].value;
             Settings.nxwarpCodedVectors = nxwarp_coded_vectors.model[nxwarp_coded_vectors.currentIndex].value;
             Settings.nxwarpEffort = nxwarp_effort.checked;
             Settings.nxwarpInter = nxwarp_inter.checked;
@@ -697,6 +724,7 @@ Kirigami.ScrollablePage {
         nxwarp_min_qp.value = Settings.nxwarpMinQp;
         nxwarp_max_qp.value = Settings.nxwarpMaxQp;
         nxwarp_stereo.currentIndex = nxwarp_stereo.model.findIndex(i => i.value === Settings.nxwarpStereoFrame);
+        nxwarp_tile_map.currentIndex = nxwarp_tile_map.model.findIndex(i => i.value === Settings.nxwarpTileMap);
         nxwarp_coded_vectors.currentIndex = nxwarp_coded_vectors.model.findIndex(i => i.value === Settings.nxwarpCodedVectors);
         nxwarp_effort.checked = Settings.nxwarpEffort;
         nxwarp_inter.checked = Settings.nxwarpInter;

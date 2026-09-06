@@ -159,6 +159,16 @@ struct nxwarp_stream_stats
 	// above was derived at.
 	float encode_scale = 1;
 
+	// --- how this window's frames were laid on the transport's tile grid -----
+	//
+	// Reported rather than derived from the configuration, because the choice is made per
+	// FRAME and not per session: a frame with any tile too big for a transport slot falls
+	// back on its own, so "tile-map": "auto" can produce all spans, all chunks or a mix,
+	// and only the encoder knows which. A reader wanting the setting has the
+	// configuration; these two are what actually happened.
+	uint64_t span_frames = 0;
+	uint64_t chunk_frames = 0;
+
 	// --- the latency budget, one stage per field, milliseconds ---------------
 	//
 	// Mean over the frames of this window that reached the screen, from
@@ -263,6 +273,8 @@ inline void to_json(nlohmann::json & j, const nxwarp_stream_stats & s)
 	        {"encoded_height", s.encoded_height},
 	        {"paired_eyes", s.paired_eyes},
 	        {"encode_scale", r(s.encode_scale)},
+	        {"span_frames", s.span_frames},
+	        {"chunk_frames", s.chunk_frames},
 	        {"latency_encode_ms", r(s.latency_encode_ms)},
 	        {"latency_wait_send_ms", r(s.latency_wait_send_ms)},
 	        {"latency_send_ms", r(s.latency_send_ms)},
@@ -318,6 +330,8 @@ inline void from_json(const nlohmann::json & j, nxwarp_stream_stats & s)
 	get("encoded_height", s.encoded_height);
 	get("paired_eyes", s.paired_eyes);
 	get("encode_scale", s.encode_scale);
+	get("span_frames", s.span_frames);
+	get("chunk_frames", s.chunk_frames);
 	get("latency_encode_ms", s.latency_encode_ms);
 	get("latency_wait_send_ms", s.latency_wait_send_ms);
 	get("latency_send_ms", s.latency_send_ms);

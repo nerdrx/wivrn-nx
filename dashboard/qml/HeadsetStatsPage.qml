@@ -182,6 +182,22 @@ Kirigami.ScrollablePage {
                         }
 
                         RowLayout {
+                            Kirigami.FormData.label: i18n("Tile mapping:")
+                            visible: modelData.spanFrames + modelData.chunkFrames > 0
+                            Controls.Label {
+                                text: modelData.chunkFrames === 0
+                                      ? i18n("per-tile spans, all %1 frames", modelData.spanFrames)
+                                      : (modelData.spanFrames === 0
+                                         ? i18n("fixed chunks, all %1 frames", modelData.chunkFrames)
+                                         : i18n("%1 frames on per-tile spans, %2 on fixed chunks",
+                                                modelData.spanFrames, modelData.chunkFrames))
+                            }
+                            Kirigami.ContextualHelpButton {
+                                toolTipText: i18n("Which bytes of a frame travel at which tile position. With per-tile spans one lost datagram costs the few tiles it was carrying instead of the whole frame. The choice is made per frame, so a mix here is normal: a frame with any tile too big for a packet falls back on its own, which happens at a low quantiser. All frames on fixed chunks when the setting is Auto means every frame is falling back — raise the quantiser, or the MTU.")
+                            }
+                        }
+
+                        RowLayout {
                             Kirigami.FormData.label: i18n("Encoder effort:")
                             Controls.Label {
                                 text: modelData.effort >= 1

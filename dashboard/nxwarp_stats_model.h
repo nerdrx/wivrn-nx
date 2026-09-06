@@ -92,6 +92,12 @@ struct nxwarp_stream_stat
 	Q_PROPERTY(int encodedHeight READ encodedHeight CONSTANT)
 	Q_PROPERTY(int tiles READ tiles CONSTANT)
 	Q_PROPERTY(double encodeScale READ encodeScale CONSTANT)
+	// How this window's frames were laid on the transport's tile grid. Counts and not a
+	// mode, because the choice is per frame: "auto" can produce all spans, all chunks or
+	// a mix, and a reader that showed the SETTING would be showing something that is not
+	// necessarily what happened.
+	Q_PROPERTY(int spanFrames READ spanFrames CONSTANT)
+	Q_PROPERTY(int chunkFrames READ chunkFrames CONSTANT)
 
 	QML_VALUE_TYPE(nxwarp_stream_stat)
 
@@ -246,6 +252,14 @@ public:
 	int tiles() const
 	{
 		return int(s.tiles());
+	}
+	int spanFrames() const
+	{
+		return int(s.span_frames);
+	}
+	int chunkFrames() const
+	{
+		return int(s.chunk_frames);
 	}
 	double encodeScale() const
 	{

@@ -506,6 +506,11 @@ public:
 	// touched the frame.
 	virtual void on_nxwarp_frame_not_held(uint16_t frame_id,
 	                                      from_headset::nxwarp_frame_not_held::reason why) {}
+	// The headset's own GPU decode breakdown for this stream, about twice a second.
+	// Reported, never acted on: it exists so the dashboard can show where the decode
+	// time goes beside the encoder's numbers. See from_headset::nxwarp_decode_profile
+	// for why it is a packet of its own and not another field on the feedback.
+	virtual void on_nxwarp_decode_profile(const from_headset::nxwarp_decode_profile &) {}
 
 protected:
 	// called on present to submit command buffers for the image.

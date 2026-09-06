@@ -176,10 +176,58 @@ nxwarp[0]: 320x240 on <device>, 5 x 4 tiles, 1166 bytes per tile
 once the codec stream header arrives. If you see neither, the negotiation picked another
 codec — check that **both** ends were built with `WIVRN_USE_NXWARP=ON`.
 
+### Where the headset's decode time goes
+
+The HUD's decode line reports the two halves of the GPU decode:
+
+```
+decode 34.2 ms · GPU 30.7 (A 7.6 / B 23.1)
+```
+
+`B` there is an **envelope**, not a kernel. nxvc measures it from the end of Pass A to the
+end of Pass B, so it contains the predictor dispatch and all three reconstruction
+segments. Reading it as "the reconstruct kernel costs 23 ms" is the wrong conclusion, and
+for a while it was the only one the line supported. The next line breaks it up:
+
+```
+B 23.1 = warp 3.1 · skip 19.4 · coded 4.2 · dir 1.6 · other 2.4 ms · tiles 241/39/9
+```
+
+  * **warp** — Pass W, the predictor dispatch.
+  * **skip** — `WARP_SKIP` tiles. These run the normative integer pose warp themselves,
+    and on a settled inter stream they are usually most of the envelope. A stream that
+    codes almost nothing can still be expensive to decode, which is why a large share
+    here means lowering the bitrate will not help.
+  * **coded** — every other non-INTRA tile.
+  * **dir** — INTRA tiles, on the directional-intra wavefront.
+  * **other** — the pipeline drain between those dispatches. The four segments are
+    timestamps taken around dispatches, so the gap between them belongs to none of them;
+    it is what the segmentation itself costs. It is shown rather than folded into the
+    parts, so the equation balances without any of the terms being wrong.
+
+The tile counts are what make a zero segment legible: no tiles means there was nothing to
+do, tiles with no time means the device cannot timestamp that dispatch.
+
+All of it is measured around **eye pass 0**, the convention nxvc already uses for
+`pass_w_ms`: a paired stream runs the segments once per eye and these cover the first.
+
+The same numbers reach the dashboard's headset statistics card, carried by
+`from_headset::nxwarp_decode_profile` — a packet of its own rather than another field on
+`nxwarp_feedback`, because it is a two-second profile window and the feedback goes out
+several times a frame. Nothing on the server acts on it; a lost one costs a stale card.
+They appear in the `NxwarpStats` D-Bus property as the `client_pass_*` fields, with
+`client_pass_b_other_ms` published for convenience and recomputed on the way in rather
+than trusted.
+
+The split needs an nxvc with `NXVC_VK_DECODER_PASSB_SEGMENTS`. Built against an older
+prefix the client still compiles, reports `segments_known = false`, and both the HUD line
+and the dashboard rows are absent rather than showing zeroes.
+
 ### A protocol break
 
 Adding the codec to the enumeration changes WiVRn's protocol version hash, and so does the
-new `view_info` field on `nxwarp_datagram`. **A client and a server from this branch talk
+new `view_info` field on `nxwarp_datagram`, and so does
+`from_headset::nxwarp_decode_profile`. **A client and a server from this branch talk
 only to each other.** An older NX Warp client will not connect to this server, and vice
 versa. Update both ends together.
 

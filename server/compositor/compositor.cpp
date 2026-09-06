@@ -1876,6 +1876,15 @@ void compositor::on_nxwarp_feedback(const from_headset::nxwarp_feedback & fb)
 	                                                 fb.held_base, fb.held_mask);
 }
 
+void compositor::on_nxwarp_decode_profile(const from_headset::nxwarp_decode_profile & p)
+{
+	auto snapshot = get_encoders();
+	if (p.stream_item_idx >= snapshot.size() or not snapshot[p.stream_item_idx])
+		return;
+
+	snapshot[p.stream_item_idx]->on_nxwarp_decode_profile(p);
+}
+
 void compositor::on_nxwarp_frame_not_held(const from_headset::nxwarp_frame_not_held & fb)
 {
 	auto snapshot = get_encoders();

@@ -266,6 +266,9 @@ void scenes::stream::accumulate_fps(XrTime now)
 		// what deadlocks against a waiting writer.
 		float ms = 0;
 		float gpu_ms = 0, pass_a_ms = 0, pass_b_ms = 0, bytes = 0, arrival_ms = 0;
+		float pass_w_ms = 0, pass_b_skip_ms = 0, pass_b_coded_ms = 0, pass_b_dir_ms = 0;
+		float tiles_skip = 0, tiles_coded = 0, tiles_dir = 0;
+		bool pass_segments = false;
 		uint32_t stride = 1, width = 0, height = 0;
 		uint64_t tools = 0;
 		for (size_t i = 0; i < view_count; ++i)
@@ -293,6 +296,47 @@ void scenes::stream::accumulate_fps(XrTime now)
 			gpu_ms = std::max(gpu_ms, st.decode_gpu_ms);
 			pass_a_ms = std::max(pass_a_ms, st.decode_pass_a_ms);
 			pass_b_ms = std::max(pass_b_ms, st.decode_pass_b_ms);
+			// Taken from the SAME eye as the envelope would be, in the sense that
+			// matters here: each is the worse of the two, because the eyes run the
+			// same stride on the same GPU and the slower one sets the frame rate.
+			// That is what the wall and pass figures above already do.
+			pass_w_ms = std::max(pass_w_ms, st.decode_pass_w_ms);
+			pass_b_skip_ms = std::max(pass_b_skip_ms, st.decode_pass_b_skip_ms);
+			pass_b_coded_ms = std::max(pass_b_coded_ms, st.decode_pass_b_coded_ms);
+			pass_b_dir_ms = std::max(pass_b_dir_ms, st.decode_pass_b_dir_ms);
+			// Tile counts are per eye and describe that eye's work, so the max is
+			// the right pick beside the time it explains.
+			tiles_skip = std::max(tiles_skip, st.tiles_skip_seg);
+			tiles_coded = std::max(tiles_coded, st.tiles_coded_seg);
+			tiles_dir = std::max(tiles_dir, st.tiles_dir_seg);
+			pass_segments = pass_segments or st.pass_segments_known;
+
+			// Hand this eye's window to the server the first time we see it, so the
+			// dashboard can show what the HUD shows. Keyed on the decoder's own
+			// window sequence rather than a timer here: it sends each published
+			// window exactly once, and it sends nothing at all while the decoder is
+			// idle -- which a timer would not manage.
+			//
+			// This block runs whether or not the overlay is visible (accumulate_fps
+			// is called from accumulate_metrics every frame and throttles itself), so
+			// the dashboard does not depend on somebody looking at the HUD.
+			if (st.window_seq != nxwarp_profile_seq[i])
+			{
+				nxwarp_profile_seq[i] = st.window_seq;
+				send_nxwarp_decode_profile(from_headset::nxwarp_decode_profile{
+				        .stream_item_idx = uint8_t(i),
+				        .segments_known = st.pass_segments_known,
+				        .pass_a_ms = st.decode_pass_a_ms,
+				        .pass_b_ms = st.decode_pass_b_ms,
+				        .pass_w_ms = st.decode_pass_w_ms,
+				        .pass_b_skip_ms = st.decode_pass_b_skip_ms,
+				        .pass_b_coded_ms = st.decode_pass_b_coded_ms,
+				        .pass_b_dir_ms = st.decode_pass_b_dir_ms,
+				        .tiles_skip = st.tiles_skip_seg,
+				        .tiles_coded = st.tiles_coded_seg,
+				        .tiles_dir = st.tiles_dir_seg,
+				});
+			}
 			// Bytes are per eye and both eyes are coded the same way, so their sum is
 			// what the link actually carries per displayed frame.
 			bytes += st.bytes_per_frame;
@@ -312,6 +356,14 @@ void scenes::stream::accumulate_fps(XrTime now)
 		fps.nxwarp_gpu_ms = gpu_ms;
 		fps.nxwarp_pass_a_ms = pass_a_ms;
 		fps.nxwarp_pass_b_ms = pass_b_ms;
+		fps.nxwarp_pass_w_ms = pass_w_ms;
+		fps.nxwarp_pass_b_skip_ms = pass_b_skip_ms;
+		fps.nxwarp_pass_b_coded_ms = pass_b_coded_ms;
+		fps.nxwarp_pass_b_dir_ms = pass_b_dir_ms;
+		fps.nxwarp_tiles_skip = tiles_skip;
+		fps.nxwarp_tiles_coded = tiles_coded;
+		fps.nxwarp_tiles_dir = tiles_dir;
+		fps.nxwarp_pass_segments = pass_segments;
 		fps.nxwarp_bytes = bytes;
 		fps.nxwarp_arrival_ms = arrival_ms;
 		fps.nxwarp_stride = stride;
@@ -449,6 +501,12 @@ void scenes::stream::rebuild_fps_lines()
 	// What a decode costs. The two passes are the whole reason this line exists: pass B
 	// scales with the pixel count, so it is the half the stream scale moves, and seeing it
 	// next to the wall figure is what tells a slow session from a saturated one.
+	// B here is the ENVELOPE -- Pass A's end to Pass B's end -- which is what nxvc
+	// reports and what this line has always shown. What it did not say is that the
+	// envelope contains the predictor dispatch and three separate reconstruction
+	// segments, so "A 7.6 / B 23.1" read as "the reconstruct kernel costs 23 ms".
+	// The line below breaks it up; this one keeps the envelope, because the envelope
+	// is the number that has to fit in the frame period.
 	fps_line_cache[2] = fmt::format(_F("decode {:.1f} ms · GPU {:.1f} (A {:.1f} / B {:.1f})"),
 	                                fps.nxwarp_ms,
 	                                fps.nxwarp_gpu_ms,
@@ -491,6 +549,49 @@ void scenes::stream::rebuild_fps_lines()
 		                                          fps.nxwarp_height,
 		                                          tiles,
 		                                          entropy);
+	}
+
+	// What pass B is actually made of.
+	//
+	// The parts are shown as an equation that SUMS, because the point of the line is
+	// that the envelope is not one kernel. "warp" is Pass W, the predictor dispatch;
+	// "skip" is the WARP_SKIP tiles, which run the normative integer pose warp
+	// themselves and are usually the largest term by a wide margin; "coded" is every
+	// other non-INTRA tile and "dir" the directional-intra wavefront.
+	//
+	// "other" is the remainder and is left visible on purpose. The four parts are
+	// timestamps taken around dispatches, so the pipeline drain between them belongs
+	// to none of them -- it is what the segmentation itself costs. Folding it into
+	// the parts would make them add up by making them wrong; dropping it would leave
+	// an equation that visibly does not balance and invite the reader to assume a
+	// bug. Naming it is the only option that is both honest and readable.
+	//
+	// Absent entirely when the numbers are not measured -- an nxvc without the
+	// segment timers, or a device with no timestamp support -- rather than shown as
+	// a convincing row of zeroes.
+	if (fps.nxwarp_pass_segments and fps.nxwarp_pass_b_ms > 0)
+	{
+		const float parts = fps.nxwarp_pass_w_ms + fps.nxwarp_pass_b_skip_ms +
+		                    fps.nxwarp_pass_b_coded_ms + fps.nxwarp_pass_b_dir_ms;
+		// Clamped at zero: the envelope and the segments are separate timestamp
+		// pairs, so at the noise floor of a very cheap frame the parts can total a
+		// hair over the envelope, and a HUD is not the place to show -0.0.
+		const float other = std::max(0.f, fps.nxwarp_pass_b_ms - parts);
+		fps_line_cache[5] = fmt::format(
+		        _F("B {:.1f} = warp {:.1f} · skip {:.1f} · coded {:.1f} · dir {:.1f} · other {:.1f} ms"),
+		        fps.nxwarp_pass_b_ms,
+		        fps.nxwarp_pass_w_ms,
+		        fps.nxwarp_pass_b_skip_ms,
+		        fps.nxwarp_pass_b_coded_ms,
+		        fps.nxwarp_pass_b_dir_ms,
+		        other);
+		// The tile counts that explain the times: a segment at 0 ms with no tiles was
+		// empty, one at 0 ms with tiles is a device that cannot time it.
+		if (fps.nxwarp_tiles_skip or fps.nxwarp_tiles_coded or fps.nxwarp_tiles_dir)
+			fps_line_cache[5] += fmt::format(_F(" · tiles {:.0f}/{:.0f}/{:.0f}"),
+			                                 fps.nxwarp_tiles_skip,
+			                                 fps.nxwarp_tiles_coded,
+			                                 fps.nxwarp_tiles_dir);
 	}
 }
 

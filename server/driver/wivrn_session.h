@@ -230,6 +230,7 @@ public:
 	void operator()(from_headset::feedback &&);
 	void operator()(from_headset::nack &&);
 	void operator()(from_headset::nxwarp_feedback &&);
+	void operator()(from_headset::nxwarp_decode_profile &&);
 	void operator()(from_headset::nxwarp_frame_not_held &&);
 	void operator()(from_headset::battery &&);
 	void operator()(from_headset::wifi_state &&);

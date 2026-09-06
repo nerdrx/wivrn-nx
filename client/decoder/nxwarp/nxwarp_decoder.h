@@ -72,6 +72,27 @@
 namespace wivrn
 {
 
+// Whether this build's nxvc breaks Pass B into its three dispatch segments.
+//
+// NXVC_VK_DECODER_PASSB_SEGMENTS is a macro because the six fields were APPENDED to
+// nxvc_vkd_stats, and a struct field is not something the preprocessor can see -- the
+// header itself says so. Guarding on it keeps this client compiling against a prefix
+// from before the split, which matters during a rollout because the encoder and the
+// decoder are versioned independently.
+//
+// It is a function rather than a bare #ifdef at every use so the reporting code reads
+// the same either way and the "not measured" case stays a value the UI can show,
+// instead of a set of fields that silently do not exist.
+constexpr bool nxwarp_pass_segments_supported()
+{
+#ifdef NXVC_VK_DECODER_PASSB_SEGMENTS
+	return true;
+#else
+	return false;
+#endif
+}
+
+
 // The decode stride, which is a process-wide value living in the decoder's translation unit (both
 // eyes share one). Declared here so the in-view statistics overlay can read it without reaching
 // into the decoder, and without the stride becoming a per-decoder member it is not.
@@ -99,6 +120,17 @@ class nxwarp_decoder : public decoder
 		std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
 		uint64_t n = 0;
 		double wait_ms = 0, wall_ms = 0, pass_a_ms = 0, pass_b_ms = 0, gpu_ms = 0;
+		// Pass B's three dispatch segments, and Pass W, which pass_b_ms CONTAINS.
+		//
+		// pass_b_ms is the whole Pass A -> Pass B window, so it holds the predictor
+		// dispatch as well as the reconstruction -- which made "passB 23.1" read as
+		// the cost of the reconstruct kernel when most of it is the integer pose warp
+		// on WARP_SKIP tiles. These are the parts, measured around eye pass 0 the way
+		// nxvc measures pass_w_ms.
+		double pass_w_ms = 0;
+		double pass_b_skip_ms = 0, pass_b_coded_ms = 0, pass_b_dir_ms = 0;
+		// Tiles in each segment, so a zero segment says whether it was cheap or empty.
+		double tiles_skip = 0, tiles_coded = 0, tiles_dir = 0;
 		uint64_t bytes = 0;
 		// --- where the wall time actually goes, stage by stage.
 		//
@@ -438,6 +470,35 @@ public:
 		// is the one that scales with the pixel count. Same two-second window as above.
 		float decode_pass_a_ms = 0;
 		float decode_pass_b_ms = 0;
+		// The parts of pass B, which pass_b_ms is the envelope of rather than the sum.
+		//
+		// pass_b_ms spans Pass A's end to Pass B's end, so it contains Pass W (the
+		// predictor) and all three reconstruction segments, plus the pipeline drain
+		// between them. Reporting only the envelope hid where the time went: at
+		// 1088x1088 the split is roughly 7.6 ms of Pass A against 23.1 of "pass B",
+		// of which the integer warp on WARP_SKIP tiles is most.
+		//
+		// These do NOT sum to decode_pass_b_ms, and that is deliberate on nxvc's side
+		// too: they are timestamps around dispatches, so the drain between segments
+		// falls outside all of them. Whatever is left over is real time and is shown
+		// as "other" rather than distributed into the parts.
+		float decode_pass_w_ms = 0;
+		float decode_pass_b_skip_ms = 0;
+		float decode_pass_b_coded_ms = 0;
+		float decode_pass_b_dir_ms = 0;
+		// Mean tiles per frame in each segment, eye pass 0. A segment reporting 0 ms
+		// with 0 tiles was empty; 0 ms with tiles is a device without timestamps.
+		float tiles_skip_seg = 0;
+		float tiles_coded_seg = 0;
+		float tiles_dir_seg = 0;
+		// Bumped once every time the decoder republishes its two-second window. It is
+		// what lets a reader send each window exactly once without a timer of its own
+		// and without sending the same numbers twice.
+		uint64_t window_seq = 0;
+		// Whether the numbers above mean anything: false when built or running against
+		// an nxvc without the segment timers, so a reader can tell "not measured" from
+		// "measured as zero" instead of showing a convincing row of noughts.
+		bool pass_segments_known = false;
 		// Frames decoded and deliberately not published (a resync notice arrived for a
 		// frame they predict from). Monotonic, like the other counters here.
 		uint64_t frames_withheld = 0;
@@ -469,6 +530,15 @@ public:
 		        .bytes_per_frame = prof_bytes.load(std::memory_order_relaxed),
 		        .decode_pass_a_ms = prof_pass_a_ms.load(std::memory_order_relaxed),
 		        .decode_pass_b_ms = prof_pass_b_ms.load(std::memory_order_relaxed),
+		        .decode_pass_w_ms = prof_pass_w_ms.load(std::memory_order_relaxed),
+		        .decode_pass_b_skip_ms = prof_pass_b_skip_ms.load(std::memory_order_relaxed),
+		        .decode_pass_b_coded_ms = prof_pass_b_coded_ms.load(std::memory_order_relaxed),
+		        .decode_pass_b_dir_ms = prof_pass_b_dir_ms.load(std::memory_order_relaxed),
+		        .tiles_skip_seg = prof_tiles_skip.load(std::memory_order_relaxed),
+		        .tiles_coded_seg = prof_tiles_coded.load(std::memory_order_relaxed),
+		        .tiles_dir_seg = prof_tiles_dir.load(std::memory_order_relaxed),
+		        .window_seq = prof_window_seq.load(std::memory_order_relaxed),
+		        .pass_segments_known = nxwarp_pass_segments_supported(),
 		        .frames_withheld = frames_withheld.load(std::memory_order_relaxed),
 		        .decode_stride = nxwarp_decode_stride(),
 		        .arrival_ms = arrival_period_ms.load(std::memory_order_relaxed),
@@ -634,6 +704,10 @@ private:
 	std::atomic<float> prof_wall_ms = 0, prof_gpu_ms = 0, prof_bytes = 0;
 	// The pass split of the same window, for live_stats above.
 	std::atomic<float> prof_pass_a_ms = 0, prof_pass_b_ms = 0;
+	std::atomic<float> prof_pass_w_ms = 0;
+	std::atomic<float> prof_pass_b_skip_ms = 0, prof_pass_b_coded_ms = 0, prof_pass_b_dir_ms = 0;
+	std::atomic<float> prof_tiles_skip = 0, prof_tiles_coded = 0, prof_tiles_dir = 0;
+	std::atomic<uint64_t> prof_window_seq = 0;
 	// What the stream header said, published once for live_stats above.
 	std::atomic<uint32_t> hdr_width = 0, hdr_height = 0;
 	std::atomic<uint64_t> hdr_tools = 0;

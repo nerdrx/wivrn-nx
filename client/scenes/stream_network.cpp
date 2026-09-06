@@ -287,6 +287,19 @@ void scenes::stream::send_nxwarp_feedback(uint8_t stream_index, uint8_t path_id,
 	});
 }
 
+// By value, not by const reference: typed_socket::send is constrained to
+// not_lvalue_reference, so the packet has to arrive as an rvalue it can move from.
+void scenes::stream::send_nxwarp_decode_profile(from_headset::nxwarp_decode_profile profile)
+{
+	if (not network_session)
+		return;
+	// Control socket, but deliberately without the try/catch retry the not-held packet
+	// below has: nothing on the server makes a decision from this, so a lost one is a
+	// card that shows the previous window for another two seconds. Spending a retry on
+	// a statistic would put it ahead of packets that change what the encoder does.
+	network_session->send_control(std::move(profile));
+}
+
 void scenes::stream::send_nxwarp_frame_not_held(
         uint8_t stream_index, uint16_t frame_id,
         from_headset::nxwarp_frame_not_held::reason why)

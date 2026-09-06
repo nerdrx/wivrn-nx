@@ -49,6 +49,25 @@ struct nxwarp_stream_stat
 	// Zero until the headset has reported one.
 	Q_PROPERTY(double clientDecodeMs READ clientDecodeMs CONSTANT)
 	Q_PROPERTY(bool clientDecodeKnown READ clientDecodeKnown CONSTANT)
+	// Where that decode time goes on the headset. passB is the ENVELOPE and the five
+	// below are what it is made of -- warp, the three reconstruction segments, and the
+	// drain between dispatches that no segment timer covers. They sum to it by
+	// construction, because "other" is defined as the remainder.
+	Q_PROPERTY(bool passSegmentsKnown READ passSegmentsKnown CONSTANT)
+	Q_PROPERTY(double passAMs READ passAMs CONSTANT)
+	Q_PROPERTY(double passBMs READ passBMs CONSTANT)
+	Q_PROPERTY(double passWMs READ passWMs CONSTANT)
+	Q_PROPERTY(double passBSkipMs READ passBSkipMs CONSTANT)
+	Q_PROPERTY(double passBCodedMs READ passBCodedMs CONSTANT)
+	Q_PROPERTY(double passBDirMs READ passBDirMs CONSTANT)
+	Q_PROPERTY(double passBOtherMs READ passBOtherMs CONSTANT)
+	Q_PROPERTY(double tilesSkip READ tilesSkip CONSTANT)
+	Q_PROPERTY(double tilesCoded READ tilesCoded CONSTANT)
+	Q_PROPERTY(double tilesDir READ tilesDir CONSTANT)
+	// The share of the envelope the skipped-tile warp accounts for, as a percentage.
+	// It is the one number that answers "is the headset slow, or is it just warping" --
+	// which is the question the envelope alone could not be asked.
+	Q_PROPERTY(double skipSharePct READ skipSharePct CONSTANT)
 	Q_PROPERTY(double framesNotSent READ framesNotSent CONSTANT)
 
 	Q_PROPERTY(double encodeMsMean READ encodeMsMean CONSTANT)
@@ -133,6 +152,59 @@ public:
 	bool clientDecodeKnown() const
 	{
 		return s.client_decode_ms > 0;
+	}
+	bool passSegmentsKnown() const
+	{
+		// The envelope has to be real too: a headset whose nxvc has the timers but
+		// whose device cannot stamp them reports segments_known with everything at
+		// zero, and a card of noughts is worse than no card.
+		return s.client_pass_segments_known and s.client_pass_b_ms > 0;
+	}
+	double passAMs() const
+	{
+		return s.client_pass_a_ms;
+	}
+	double passBMs() const
+	{
+		return s.client_pass_b_ms;
+	}
+	double passWMs() const
+	{
+		return s.client_pass_w_ms;
+	}
+	double passBSkipMs() const
+	{
+		return s.client_pass_b_skip_ms;
+	}
+	double passBCodedMs() const
+	{
+		return s.client_pass_b_coded_ms;
+	}
+	double passBDirMs() const
+	{
+		return s.client_pass_b_dir_ms;
+	}
+	double passBOtherMs() const
+	{
+		return s.client_pass_b_other_ms();
+	}
+	double tilesSkip() const
+	{
+		return s.client_tiles_skip;
+	}
+	double tilesCoded() const
+	{
+		return s.client_tiles_coded;
+	}
+	double tilesDir() const
+	{
+		return s.client_tiles_dir;
+	}
+	double skipSharePct() const
+	{
+		return s.client_pass_b_ms > 0
+		               ? 100.0 * double(s.client_pass_b_skip_ms) / double(s.client_pass_b_ms)
+		               : 0.0;
 	}
 	double framesNotSent() const
 	{

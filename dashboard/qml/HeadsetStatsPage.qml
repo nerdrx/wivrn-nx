@@ -92,6 +92,66 @@ Kirigami.ScrollablePage {
                             }
                         }
 
+                        // Where the headset's decode time actually goes. Absent when the
+                        // headset has not reported a breakdown -- an older client, or a
+                        // device that cannot timestamp the segments -- rather than shown
+                        // as a row of zeroes that reads like a measurement.
+                        RowLayout {
+                            visible: modelData.passSegmentsKnown
+                            Kirigami.FormData.label: i18n("Headset decode:")
+                            Controls.Label {
+                                text: i18n("pass A %1 + pass B %2 ms",
+                                           modelData.passAMs.toFixed(1),
+                                           modelData.passBMs.toFixed(1))
+                            }
+                            Kirigami.ContextualHelpButton {
+                                toolTipText: i18n("The two halves of the headset's GPU decode. Pass A is the entropy decode; pass B is everything after it, and it is the half that grows with the pixel count.")
+                            }
+                        }
+
+                        RowLayout {
+                            visible: modelData.passSegmentsKnown
+                            Kirigami.FormData.label: i18n("Pass B breakdown:")
+                            Controls.Label {
+                                text: i18n("warp %1 · skip %2 · coded %3 · intra %4 · other %5 ms",
+                                           modelData.passWMs.toFixed(1),
+                                           modelData.passBSkipMs.toFixed(1),
+                                           modelData.passBCodedMs.toFixed(1),
+                                           modelData.passBDirMs.toFixed(1),
+                                           modelData.passBOtherMs.toFixed(1))
+                            }
+                            Kirigami.ContextualHelpButton {
+                                toolTipText: i18n("Pass B is not one kernel. It contains the predictor dispatch (warp) and three separate reconstruction segments: skipped tiles, which run the integer pose warp themselves and are usually the largest, other inter tiles (coded), and intra tiles. 'Other' is the pipeline drain between those dispatches -- real time that belongs to none of them, shown rather than hidden so the parts add up to the total.")
+                            }
+                        }
+
+                        RowLayout {
+                            visible: modelData.passSegmentsKnown && modelData.passBMs > 0
+                            Kirigami.FormData.label: i18n("Spent on skipped tiles:")
+                            Controls.Label {
+                                text: i18n("%1 % of pass B, over %2 tiles",
+                                           modelData.skipSharePct.toFixed(0),
+                                           modelData.tilesSkip.toFixed(0))
+                            }
+                            Kirigami.ContextualHelpButton {
+                                toolTipText: i18n("A skipped tile still costs the headset an integer pose warp, so a stream that codes almost nothing can still be expensive to decode. When this share is large the decode is bound by the warp, not by the picture, and lowering the bitrate will not help.")
+                            }
+                        }
+
+                        RowLayout {
+                            visible: modelData.passSegmentsKnown
+                            Kirigami.FormData.label: i18n("Tiles per segment:")
+                            Controls.Label {
+                                text: i18n("%1 skipped · %2 coded · %3 intra",
+                                           modelData.tilesSkip.toFixed(0),
+                                           modelData.tilesCoded.toFixed(0),
+                                           modelData.tilesDir.toFixed(0))
+                            }
+                            Kirigami.ContextualHelpButton {
+                                toolTipText: i18n("How many tiles each pass B segment handled, per eye. It is what makes a segment reporting no time legible: no tiles means there was nothing to do, while tiles with no time means the device could not measure it.")
+                            }
+                        }
+
                         RowLayout {
                             Kirigami.FormData.label: i18n("Frames not sent:")
                             Controls.Label {

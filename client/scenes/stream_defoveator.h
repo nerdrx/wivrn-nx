@@ -65,6 +65,38 @@ class stream_defoveator
 	// Whether FSR (EASU + RCAS) is compiled into the currently built pipelines, same
 	// specialization-constant scheme as cas_full_baked above.
 	bool fsr_baked = false;
+	// [atlas prototype] whether the per-tile warp is compiled into the current
+	// pipelines, same specialization scheme as the two above.
+	int atlas_baked = 0;
+	static constexpr uint32_t kAtlasTiles = 17;
+	// The v1 configuration of ADR-0029: 1088x1088 per eye, 64x64 tiles, 17x17 = 289
+	// tiles. The atlas is the whole eye picture in the coded sample domain.
+	static constexpr uint32_t kAtlasPicture = 1088;
+	// The ring layout over the pair: the luma band is both eyes side by side, and the
+	// two half-resolution chroma planes sit under it in one more band.
+	static constexpr uint32_t kAtlasW = kAtlasPicture * 2;
+	static constexpr uint32_t kAtlasH = kAtlasPicture + kAtlasPicture / 2;
+	// The synthetic atlas: Y at full extent, interleaved Co/Cg at half (4:2:0), one
+	// layer per eye, plus the 64-byte-per-tile table in a uniform buffer. None of it is
+	// allocated until the prototype is first asked for.
+	// One R16_UNORM allocation in the decoder's ring layout (both eyes side by side,
+	// luma band then the two chroma planes at half resolution) with TWO views of the
+	// same memory -- sampled for mode 1, storage for mode 2 -- plus the converted
+	// RGBA8 copy mode 3 is priced against.
+	image_allocation atlas_r16_image, atlas_rgba8_image;
+	vk::raii::ImageView atlas_r16_sampled = nullptr;
+	vk::raii::ImageView atlas_r16_storage = nullptr;
+	vk::raii::ImageView atlas_rgba8_view = nullptr;
+	// Set when the device will not take R16_UNORM as a storage image, which makes
+	// mode 2 unmeasurable rather than slow; it is reported, not silently skipped.
+	bool atlas_storage_ok = false;
+	buffer_allocation atlas_table_buffer;
+	// Keeps the one-shot pixel upload alive until its copy has retired.
+	buffer_allocation atlas_staging_keepalive;
+	bool atlas_ready = false;
+	vk::raii::Sampler atlas_sampler = nullptr;
+	uint32_t atlas_seed = 0;
+	void ensure_atlas_table(vk::raii::CommandBuffer & command_buffer);
 
 	// Motion smoothing texture the sampler above is bound with
 	image_allocation motion_image;
@@ -83,6 +115,7 @@ class stream_defoveator
 	std::vector<vk::raii::ImageView> output_image_views;
 	std::vector<vk::raii::Framebuffer> framebuffers;
 	vk::Extent2D output_extent;
+	float out_scale = 1.0f;
 
 	void ensure_vertices(size_t num_vertices);
 	vertex * get_vertices(size_t view);
@@ -167,7 +200,17 @@ public:
 	        const frame_blend & blend,
 	        int destination,
 	        bool cas_full_kernel = false,
-	        bool fsr = false);
+	        bool fsr = false,
+	        int atlas_prototype = 0);
 
-	static XrExtent2Di defoveated_size(const wivrn::to_headset::foveation_parameter &);
+	// `scale` < 1 renders the pass into fewer fragments and leaves the last upscale to
+	// the runtime's compositor, which resamples the layer during timewarp regardless.
+	static XrExtent2Di defoveated_size(const wivrn::to_headset::foveation_parameter &, float scale = 1.0f);
+
+	// The scale defoveate() itself lays its viewport out with. Must match what the
+	// caller sized the swapchain and the layer rect with, or the picture is cropped.
+	void set_output_scale(float s)
+	{
+		out_scale = s;
+	}
 };

@@ -42,6 +42,37 @@ static std::atomic<int64_t> g_stride_decay_ms{0};
 // time, is a stream that waited for the other eye. One that starts before it ended
 // overlapped with it. That difference is the whole of hypothesis (2) and neither the
 // host clock nor nxvc's own stats can see it.
+// --- what every stream tells the server one frame costs.
+//
+// The pair, not the eye. Measured on a Pico 4 at stream_scale 0.7 with a queue per eye:
+// both eyes decoded the same 90-91 frames per two seconds and nxvc's own GPU time was
+// the same on both (5.5 vs 5.4 ms), but their WALL times were 10.1-11.2 and 15.3-16.3 ms
+// -- because the GPU runs them strictly one after the other and eye 1 is always second
+// (its copy began 6.4 ms after eye 0's ended, eye 0's began 15.6 ms after eye 1's). The
+// server paces each stream on the number the stream reports, so it paced eye 0 to
+// 79.7 fps and eye 1 to 54.9.
+//
+// That asymmetry is pure waste, not a difference in capability. scenes::stream composes
+// only a frame EVERY decoder has produced ("Failed to find a common frame for all
+// decoders"), so the 25 fps of extra eye-0 frames could never be shown; they cost wire,
+// power and GPU to produce and were then discarded. The pair's cost is what decides
+// whether a frame reaches the screen, so the pair's cost is what every stream reports.
+//
+// The maximum rather than the mean: a pair is ready when the SLOWER eye is ready.
+static constexpr size_t kMaxStreams = 8;
+static std::atomic<uint16_t> g_decode_us[kMaxStreams] = {};
+
+// This stream's own figure in, the pair's out.
+static uint16_t publish_decode_us(uint8_t stream_index, uint16_t own)
+{
+	if (stream_index < kMaxStreams)
+		g_decode_us[stream_index].store(own, std::memory_order_relaxed);
+	uint16_t worst = own;
+	for (auto & v: g_decode_us)
+		worst = std::max(worst, v.load(std::memory_order_relaxed));
+	return worst;
+}
+
 static std::atomic<uint64_t> g_last_copy_end_ts{0};
 static std::atomic<uint32_t> g_last_copy_stream{0xffffffffu};
 
@@ -806,7 +837,8 @@ void nxwarp_decoder::fire_bands_through(inflight_frame & f, uint8_t last_band)
 		uint32_t ack_mask = 0;
 		read_held_ack(ack_base, ack_mask);
 		host.send_feedback(stream_index, f.path_id, std::move(packet),
-		                   decode_us_report.load(std::memory_order_relaxed),
+		                   publish_decode_us(stream_index,
+		                                     decode_us_report.load(std::memory_order_relaxed)),
 		                   ack_base, ack_mask);
 	}
 }

@@ -137,6 +137,19 @@ wivrn::nxwarp_codec_config::coded_vectors_t nxwarp_coded_vectors_from(const std:
 	                    v));
 }
 
+// "entropy": "rans" | "lite".  An unknown value is an error rather than a
+// fallback, for the same reason "coded-vectors" is.
+wivrn::nxwarp_codec_config::entropy_t nxwarp_entropy_from(const std::string & v)
+{
+	using e = wivrn::nxwarp_codec_config::entropy_t;
+	if (v == "rans")
+		return e::rans;
+	if (v == "lite")
+		return e::lite;
+	throw std::runtime_error(
+	        std::format("nxwarp: \"entropy\": \"{}\" is not one of rans, lite", v));
+}
+
 std::string option_string(const std::map<std::string, std::string> & options,
                           const char * key,
                           const char * fallback)
@@ -247,6 +260,8 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	        .intra_period = option_u32(settings.options, "intra-period", 180),
 	        .coded_vectors = nxwarp_coded_vectors_from(
 	                option_string(settings.options, "coded-vectors", "default")),
+	        .entropy = nxwarp_entropy_from(
+	                option_string(settings.options, "entropy", "rans")),
 	        .intra_dir = option_bool(settings.options, "intra-dir", true),
 	        .preset = option_u32(settings.options, "preset", 1),
 	        .threads = option_u32(settings.options, "threads", 0),
@@ -260,6 +275,17 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	// An unknown value is an error rather than a fallback: a typo that
 	// silently gives you the 200 ms CPU encoder looks exactly like the GPU
 	// encoder being slow.
+	// ENTROPY_LITE is a property of the CLIENT's decoder and this server has no
+	// way to ask: headset_info_packet carries `supported_codecs` and no nxvc
+	// tool mask, so a client without bit 30 refuses the stream header and shows
+	// nothing. Say so once, loudly, rather than let a wrong option look like a
+	// broken headset.
+	if (codec_cfg.entropy == nxwarp_codec_config::entropy_t::lite)
+		U_LOG_W("nxwarp: \"entropy\": \"lite\" sets stream tool bit 30. There is "
+		        "no tool-mask handshake, so this is only correct for a client "
+		        "whose decoder implements ENTROPY_LITE; one that does not will "
+		        "refuse the stream header.");
+
 	const std::string backend = option_string(settings.options, "backend", "ref");
 	if (backend == "ref")
 	{

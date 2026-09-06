@@ -74,6 +74,30 @@ struct nxwarp_codec_config
 		statik = 2,
 	};
 	coded_vectors_t coded_vectors = coded_vectors_t::def;
+	// The entropy tool the bitstream uses. `rans` is interleaved rANS, the
+	// default and the only thing every NX Warp decoder can read. `lite` is
+	// ENTROPY_LITE (stream tool bit 30), which trades bytes for the CLIENT's
+	// decode time: Pass A costs 8-11 ms per eye per frame on the Pico 4's
+	// Adreno 650 at 289 tiles because it is latency-bound on the serial rANS
+	// round chain, and Lite has no chain at all.
+	//
+	// It is NOT negotiated, because there is nothing to negotiate with: the
+	// client sends `supported_codecs` (a video_codec enum) in
+	// headset_info_packet and nothing about nxvc tool bits, so the server has
+	// no way to learn whether a particular headset's decoder implements bit
+	// 30. A decoder without it refuses the stream HEADER, which is a black
+	// screen and not a fallback. So this option is an explicit opt-in for a
+	// client known to support it, and the server says so in the log when it
+	// is used. Adding the tool mask to headset_info_packet is the work that
+	// would make this negotiable.
+	//
+	// Only the Vulkan backend reads it.
+	enum class entropy_t
+	{
+		rans = 0,
+		lite = 1,
+	};
+	entropy_t entropy = entropy_t::rans;
 	// Encoder-side speed knobs; none of them changes how a stream decodes.
 	// Directional intra (tool 17): costs the CPU encoder most of its time at
 	// this resolution; off codes the DC-plane predictor only.

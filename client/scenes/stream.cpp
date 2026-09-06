@@ -1261,6 +1261,37 @@ float scenes::stream::resolve_defoveate_scale(
 // like debug.wivrn.jit and unlike debug.wivrn.decoupled, because the decision is taken
 // per frame and nothing is built from it -- so a flip takes effect on the next refresh
 // and both halves can be measured inside one session against one server.
+// Whether the display pass skips the cells the optics cannot show.
+//
+// Off by default and it should stay off until someone has looked through the headset with
+// it on: every direction the geometry can be conservative in, it is, but the failure it
+// would produce is a cropped picture and no build-machine test can rule that out.
+// debug.wivrn.lensmask is the measurement override, polled like the others so both halves
+// fit in one session.
+bool scenes::stream::lens_mask_display_enabled()
+{
+	bool enabled = application::get_config().lens_mask_display;
+
+#ifdef __ANDROID__
+	static std::chrono::steady_clock::time_point next_poll{};
+	static int forced = -1;
+
+	const auto now = std::chrono::steady_clock::now();
+	if (now >= next_poll)
+	{
+		next_poll = now + std::chrono::seconds(1);
+		char value[PROP_VALUE_MAX] = {};
+		const int len = __system_property_get("debug.wivrn.lensmask", value);
+		forced = len <= 0 ? -1 : (value[0] == '0' ? 0 : 1);
+	}
+
+	if (forced >= 0)
+		enabled = forced != 0;
+#endif
+
+	return enabled;
+}
+
 bool scenes::stream::reduce_gpu_load_enabled()
 {
 	bool enabled = application::get_config().reduce_gpu_load;
@@ -1821,6 +1852,40 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		// viewport out at the old size while the layer rect used the new one, which
 		// crops the picture rather than scaling it.
 		defoveator->set_output_scale(defoveate_scale_);
+
+		// Which grid cells the optics can never show. Rebuilt per frame because it
+		// depends on the foveation and on this frame's FOV, and it is a few dozen
+		// ellipse tests -- far cheaper than the pixels it removes.
+		//
+		// The overscan margin the session encodes is passed straight through, so the
+		// edge-bleed ring is grown INTO the visible region and can never be masked
+		// away: it is off the panel at the render pose and on it at the display pose,
+		// which is the whole reason it is encoded.
+		{
+			std::array<wivrn::stream_grid::cell_mask, view_count> masks{};
+			if (lens_mask_display_enabled())
+			{
+				// The margin this session actually encodes, floored at the
+				// default. Overshooting only ever grows the protected region and
+				// masks FEWER cells, so when the wire value is stale or zero the
+				// error is on the side of drawing too much.
+				const double overscan = std::max(
+				        double(wivrn::view_geometry::clamp_overscan(server_overscan)),
+				        double(wivrn::view_geometry::default_overscan));
+				for (size_t i = 0; i < view_count; ++i)
+					masks[i] = wivrn::stream_grid::lens_cell_mask(
+					        wivrn::view_geometry::fov_angles{
+					                fov[i].angleLeft,
+					                fov[i].angleRight,
+					                fov[i].angleDown,
+					                fov[i].angleUp,
+					        },
+					        foveation[i].x,
+					        foveation[i].y,
+					        overscan);
+			}
+			defoveator->set_lens_masks(masks);
+		}
 
 		// Packed defoveated size per view, for the vsync cache signature below.
 		const std::array<int32_t, 2 * view_count> extents_packed{

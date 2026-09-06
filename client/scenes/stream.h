@@ -698,6 +698,8 @@ public:
 	static bool jit_enabled();
 	// Whether the re-present cache is on; see the definition in stream.cpp.
 	static bool reduce_gpu_load_enabled();
+	// Whether the display pass skips cells outside the lens; see stream.cpp.
+	static bool lens_mask_display_enabled();
 	void on_focused() override;
 	void on_unfocused() override;
 	void on_xr_event(const xr::event &) override;

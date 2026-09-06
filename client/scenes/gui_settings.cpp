@@ -745,6 +745,16 @@ void settings_streaming(const settings_context & ctx)
 	});
 
 	list.push_back({
+	        .id = "##lens_mask_display",
+	        .label = _("Skip what the lenses hide (experimental)"),
+	        .description = _("Do not draw the corners of the streamed picture that fall outside the round view through the lenses. Saves GPU on the headset, which is shared with decoding, so it can help the frame rate as well as the battery. Conservative by design: anything the lenses might show, and the extra margin the picture is extended by, are always drawn. Turn it off if you ever see the edges of the view cut off."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.lens_mask_display; },
+	        .set_bool = [&config](bool v) { config.lens_mask_display = v; config.save(); },
+	        .default_bool = default_config.lens_mask_display,
+	});
+
+	list.push_back({
 	        .id = "##encoder_failover",
 	        .label = _("Encoder failover"),
 	        .description = _("If the graphics card's video encoder stops working in the middle of a session, let the computer carry on encoding that eye in software instead of leaving it frozen until you reconnect. Costs CPU on the computer while it lasts, and only works for H.264."),

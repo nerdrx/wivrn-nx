@@ -18,19 +18,31 @@
 // tree carries the same pair of functions — because a mapping that is described in two
 // places and implemented once is a mapping that will drift.
 //
-// The short version: the codec's frame bitstream is cut into `chunk_bytes` pieces and
-// chunk i is carried by tile index i of the transport's grid, in raster order. Chunk 0
-// carries a 4-byte little-endian length prefix in front of the frame. Reassembly is a
-// concatenation in tile-index order, a length check, and nothing else.
+// The short version, and it is the same sentence under both mappings the server can send:
+// the tiles that arrived, concatenated in tile-index order, are the frame's bytes, with a
+// 4-byte little-endian length prefix in front. Reassembly is that concatenation and the
+// length check, and nothing else.
 //
-// Why it is not one tile per tile yet: the CPU reference codec's C ABI reports a tile's
-// payload length but not its offset in the frame, so the server cannot hand the transport
-// real per-tile spans. Everything else on the path is real — the runs, the class-A
-// parity, the pose header, the band deadlines, the feedback, the client shadow — and the
-// bytes round-trip exactly; what is lost is per-tile independence, so a chunk that never
-// arrives costs the frame rather than one tile. When the Vulkan encoder lands behind the
-// server's nxwarp_codec the mapping becomes the identity, and **this file does not
-// change**: it still reassembles tiles in index order.
+// The two mappings differ only in where the tile boundaries fall. Under the CHUNK mapping
+// the frame bitstream is cut into `chunk_bytes` pieces and piece i rides tile index i, so
+// a frame is a prefix of the grid and a lost datagram costs the whole frame. Under the
+// PER-TILE SPAN mapping a codec tile's own bytes ride its own index, so a lost datagram
+// costs the tiles it carried. Nothing on the wire says which was used and nothing here
+// needs to know: the length prefix is exact under both.
+//
+// What the span mapping DID change here, and it was not the algorithm:
+//
+//   * the prefix rides the lowest tile carrying bytes, not tile 0, because a frame that
+//     did not code tile 0 puts its leading bytes on the first tile it did;
+//   * the two per-tile loss tests — no hole in the index run from 0, no short tile but the
+//     last — are gone. They were the chunk mapping's way of noticing a loss and are WRONG
+//     under spans, where a tile the frame did not code carries nothing and is
+//     indistinguishable from one that was lost;
+//   * and the cost model. A frame used to be ~45 tiles of a 578-tile stereo grid and is
+//     now all of it, so anything here that was O(grid) is now O(grid) per frame at the
+//     headset's frame rate. There is one grid walk, it is in scan(), and both entry points
+//     share it; the buffer is sized to the frame rather than to the grid. See the notes in
+//     the .cpp — both of those were measured regressions on a Pico 4, not tidying.
 
 #include <cstddef>
 #include <cstdint>

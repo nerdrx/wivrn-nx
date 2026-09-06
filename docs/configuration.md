@@ -431,7 +431,24 @@ Per-stream `options` (all optional):
 | `entropy` | `auto` | entropy coder: `rans` spends headset decode time to make the stream smaller, `lite` spends bitrate to make it cheaper to decode, `auto` picks from the tools the headset advertises. An unrecognised value is an error, not a fallback |
 | `coded-vectors` | `default` | whether motion vectors are coded into the stream (`default`), left for the decoder to re-derive (`none`), or fixed (`static`). An unrecognised value is an error, not a fallback |
 | `band-rows` | `6` | tile rows per transport band, which is the unit of pacing and of feedback |
+| `tile-map` | `auto` | how a frame's bytes are laid on the transport's tile grid. `auto` uses per-tile spans when the codec reports them and every coded tile fits a transport slot, and the fixed-chunk mapping otherwise, decided per frame; `chunks` never uses spans; `spans` is `auto` under a different name, kept so a measurement run can say which it meant. See below |
 | `mtu` | `1280` | transport MTU. Leaves room for WiVRn's own packet envelope inside a 1400-byte datagram |
+
+**`"tile-map"`, and when to move it.** With spans, a codec tile's own bytes travel at its
+own tile index, so a lost datagram costs the tiles it carried instead of the whole frame,
+and the per-tile receipt map the encoder predicts from finally names real tiles. It is the
+default and it is what you want. `chunks` exists for two reasons: it is the A/B for
+anything the new mapping is suspected of costing — same clip, same QP, same frames, two
+mappings — and it is somewhere to stand if a live session regresses. The server logs which
+one it used every two seconds:
+
+```
+nxwarp: stream 0 tile mapping: 178 frame(s) with per-tile spans, 0 with the fixed-chunk fallback ("tile-map": "auto")
+```
+
+A frame with any tile larger than a transport slot cannot be carried at one tile per slot
+and falls back whole, so an all-fallback line under `auto` means the quantiser is low
+enough that tiles are outgrowing the MTU — raise `qp`, or `mtu` if the link allows it.
 
 **`"backend": "vk"` is intra-only, and that is not free.** It implements the DC-plane
 intra half of the v1 bitstream and nothing else: no inter prediction (`"inter": "on"`

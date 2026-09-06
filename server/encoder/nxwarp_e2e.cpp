@@ -146,6 +146,10 @@
 //                      slots. Default 3, which reorders within a frame; past a frame's
 //                      worth of datagrams it reorders ACROSS frames at the same tile
 //                      position, which is what makes a tile superseded rather than late.
+//   --tile-map M       "auto" (default), "spans" or "chunks": how a frame's bytes are laid
+//                      on the transport's tile grid. The A/B for anything the per-tile
+//                      span mapping is suspected of costing -- same clip, same QP, same
+//                      frames, two mappings.
 //   --tile-stream      run the arrival-order atlas model of docs/NXWARP-TILESTREAM.md
 //                      section 6 beside the real decode and assert it ends in the same
 //                      state as the frame-complete one over the same delivered tiles.
@@ -1509,6 +1513,11 @@ int main(int argc, char ** argv)
 	// decoder saw and asserts on it, so every other figure a --tile-stream run prints is
 	// the figure the same run without it prints.
 	bool tile_stream = false;
+	// The encoder's "tile-map" option, straight through. It is what makes the cost of the
+	// per-tile span mapping measurable at all: the same clip, the same QP, the same
+	// frames, laid on the grid two different ways. Without it a comparison has to move
+	// the quantiser to move the mapping, and then the frames are not the same frames.
+	std::string tile_map = "auto";
 	// Where the frame counter starts. video_encoder_nxwarp puts uint16_t(frame_id) on
 	// the wire, so starting near 65536 walks the stream through the 16-bit wrap -- about
 	// twelve minutes into a 90 fps session, and the point at which one went dark.
@@ -1602,6 +1611,8 @@ int main(int argc, char ** argv)
 		}
 		else if (a == "--tile-stream")
 			tile_stream = true;
+		else if (a == "--tile-map")
+			tile_map = next();
 		else if (a == "--idr-at")
 			idr_at = uint32_t(std::stoul(next()));
 		else if (a == "--rc")
@@ -1751,6 +1762,7 @@ int main(int argc, char ** argv)
 	// the frame count depend on how fast this machine encodes. The server's own default
 	// is "auto"; --pace auto is how that is exercised.
 	settings.options["pace"] = pace;
+	settings.options["tile-map"] = tile_map;
 	settings.options["min-qp"] = std::to_string(min_qp);
 	settings.options["max-qp"] = std::to_string(max_qp);
 

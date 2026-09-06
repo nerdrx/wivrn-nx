@@ -327,6 +327,34 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 			pace_interval = 1.0 / fps;
 		}
 	}
+	// "tile-map": how a frame's bytes are laid on the transport's tile grid.
+	//
+	//   "auto"   (default) per-tile spans when the codec reports them and every coded
+	//            tile fits a transport slot; the fixed-chunk mapping otherwise, decided
+	//            per frame.
+	//   "spans"  the same, minus the per-frame fit test -- a frame whose tiles do not
+	//            fit still falls back, because it physically cannot be carried, but
+	//            nothing else does. For measurement, not for a session.
+	//   "chunks" never spans. The mapping this encoder had before P1, kept because it
+	//            is the A/B against which any cost of the new one is measured, and
+	//            because a live session that regresses needs somewhere to stand.
+	//
+	// An unknown value is an error rather than a fallback, for the same reason
+	// "backend", "rc" and "pace" are.
+	{
+		const std::string tm = option_string(settings.options, "tile-map", "auto");
+		if (tm == "auto")
+			tile_map = tile_map_t::automatic;
+		else if (tm == "spans")
+			tile_map = tile_map_t::spans;
+		else if (tm == "chunks")
+			tile_map = tile_map_t::chunks;
+		else
+			throw std::runtime_error(std::format(
+			        "unknown NX Warp \"tile-map\" \"{}\"; expected \"auto\", "
+			        "\"spans\" or \"chunks\"",
+			        tm));
+	}
 	rc_min_qp = std::min(63u, option_u32(settings.options, "min-qp", 20));
 	rc_max_qp = std::min(63u, option_u32(settings.options, "max-qp", 44));
 	if (rc_min_qp > rc_max_qp)
@@ -1671,6 +1699,32 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				        achieved,
 				        unsigned(current_qp),
 				        pace_note.c_str());
+			// How the frames of this window were laid on the tile grid. The
+			// harness has printed this since P1 landed and the SERVER never did,
+			// so a live session had no way to tell whether the mapping it was
+			// running was the new one -- which is the first question to ask of
+			// anything that changed with it. Logged unconditionally, including
+			// the all-chunks case, because "it took the fallback" is exactly the
+			// answer that was unobtainable.
+			{
+				const uint64_t sf = prof_span_frames - prof_span_reported;
+				const uint64_t cf = prof_chunk_frames - prof_chunk_reported;
+				prof_span_reported = prof_span_frames;
+				prof_chunk_reported = prof_chunk_frames;
+				if (sf or cf)
+					U_LOG_I("nxwarp: stream %d tile mapping: %llu frame(s) with "
+					        "per-tile spans, %llu with the fixed-chunk fallback "
+					        "(\"tile-map\": \"%s\"%s)",
+					        int(stream_idx),
+					        (unsigned long long)sf,
+					        (unsigned long long)cf,
+					        tile_map == tile_map_t::chunks
+					                ? "chunks"
+					                : (tile_map == tile_map_t::spans ? "spans" : "auto"),
+					        (tile_map != tile_map_t::chunks and sf == 0)
+					                ? ", every frame too big for a transport slot"
+					                : "");
+			}
 			// What the headset threw away since the last report, and why. Not on
 			// the line above: it is usually zero, and when it is not it is the
 			// thing to look at rather than a field to scan past. Every one of
@@ -1878,7 +1932,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// the frame's tiles, not of the session: the same stream takes spans on an inter
 	// frame of tens of small coded tiles and the fallback on the intra frame that opens
 	// it.
-	const bool spans = codec->reports_tile_spans() and
+	const bool spans = tile_map != tile_map_t::chunks and codec->reports_tile_spans() and
 	                   nxwarp_spans_fit(descs, stream_cfg.max_tile_bytes());
 
 	std::vector<nxt::Datagram> datagrams;

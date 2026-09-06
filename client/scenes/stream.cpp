@@ -1605,7 +1605,8 @@ void scenes::stream::render(const XrFrameState & frame_state)
 				                      blend,
 				                      image_index,
 				                      config.cas_full_kernel,
-				                      fsr_on);
+				                      fsr_on,
+				                      config.atlas_prototype);
 			}
 		}
 

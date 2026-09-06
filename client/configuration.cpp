@@ -358,6 +358,7 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("deband_strength", &configuration::deband_strength),
 	        scalar("reduce_gpu_load", &configuration::reduce_gpu_load),
 	        scalar("defoveate_scale", &configuration::defoveate_scale),
+	        scalar("atlas_prototype", &configuration::atlas_prototype),
 	        scalar("enable_stream_gui", &configuration::enable_stream_gui),
 	        scalar("app_list_view", &configuration::app_list_view),
 	        scalar("app_icon_size", &configuration::app_icon_size),

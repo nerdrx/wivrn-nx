@@ -44,6 +44,8 @@ layout(push_constant) uniform pc
 	// x: dither strength, in units of one 8-bit step (1/255) of triangular-PDF noise;
 	//    0 disables it and the output is then byte identical to no debanding
 	vec4 deband;
+	// [atlas prototype] xy: the atlas picture size in samples, zw: its reciprocal.
+	vec4 atlas_size;
 };
 
 #ifdef VERT_SHADER
@@ -83,6 +85,27 @@ layout(constant_id = 2) const bool cas_full_kernel = false;
 // pipeline rebuild rather than a per-pixel branch.
 layout(constant_id = 3) const bool fsr_enable = false;
 
+// --- [atlas prototype] --------------------------------------------------------------
+//
+// The shape the atlas reference model asks the display pass for: instead of sampling a
+// finished picture, every fragment finds the TILE it belongs to, reads that tile's own
+// warp from a small table (the tile's source pose reduced to a 2D affine plus a rotation,
+// which is what a pose difference comes to over one tile), and samples the tile atlas
+// through the hardware sampler. Late-latched: the table is whatever arrived, tile by
+// tile, and the pass runs at panel rate whether or not any of it is new.
+//
+// This is a COST prototype driven by a synthetic table, not the real model. What it
+// measures is the only thing that is in doubt: what per-tile indirection plus a warped
+// bilinear tap costs per fragment on this GPU, at panel resolution and at stream
+// resolution. The pixels it produces are meaningless.
+layout(constant_id = 4) const bool atlas_warp = false;
+// Tiles per eye across and down. 17x17 is the model's figure.
+layout(constant_id = 5) const int atlas_tiles = 17;
+// Which eye's half of the table this pipeline reads. The pass is one draw per eye, as
+// the defoveation pass already is; a single draw for both would index this from the
+// fragment's position instead and change nothing about the per-fragment cost.
+layout(constant_id = 6) const int atlas_eye = 0;
+
 layout(set = 0, binding = 0) uniform sampler2D rgb[alpha + 1];
 // One cell per motion vector, covering the whole eye image, sampled with the
 // hardware bilinear filter so the warp varies smoothly across cell boundaries
@@ -92,6 +115,27 @@ layout(set = 0, binding = 1) uniform sampler2D motion_field;
 // no usable previous frame, this is bound to rgb[0] itself and motion.z is zero, so the
 // mix below never runs and the output is byte identical to not having the feature.
 layout(set = 0, binding = 2) uniform sampler2D prev_rgb;
+
+// [atlas prototype] The atlas, laid out as ADR-0029 section 1 specifies a RefPicture:
+// the whole eye picture, planes in the CODED sample domain (Y/Co/Cg, before the inverse
+// colour transform), full tile extent, so the pass samples it directly with no repacking
+// and does the colour transform itself. 4:2:0 here, so Y is full resolution and the
+// interleaved Co/Cg plane is half.
+layout(set = 0, binding = 3) uniform sampler2D atlas_y;
+layout(set = 0, binding = 4) uniform sampler2D atlas_cocg;
+
+// The per-tile table, ADR-0029 section 1: 64 bytes per tile position per eye, 289 tiles
+// per eye at the v1 configuration, 37 kB for the pair -- a uniform buffer, as the ADR
+// says. Bytes 0..35 are the composed homography C mapping this frame's centred sample
+// coordinates to the tile's source frame; the client has already composed C with
+// H(pose_t <- pose_N) in float for late latching, which is per tile and not per fragment
+// and so is not in this shader.
+//
+// Four vec4 per tile: rows 0, 1 and 2 of C in .xyz, then src_frame/gen/flags/res_level.
+layout(set = 0, binding = 5) uniform atlas_table_t
+{
+	vec4 e[4 * 289 * 2];
+} tbl;
 
 layout(location = 0) in vec4 inUV;
 layout(location = 1) in vec2 inPosition;
@@ -452,6 +496,41 @@ void main()
 	// opaque pixel pays a single centre sample whether or not it is sharpened. When FSR is
 	// active EASU replaces the colour but the tap still supplies colour.a (only read on the
 	// no-alpha-stream path below).
+	if (atlas_warp)
+	{
+		// Which tile this fragment lands in. Every fragment of a tile reads the same
+		// three uniform vectors, which is the access pattern the constant cache is
+		// for and the reason the ADR puts the table in a uniform buffer.
+		vec2 t = clamp(inUV.xy, 0.0, 0.999999) * float(atlas_tiles);
+		ivec2 c = ivec2(t);
+		int idx = ((atlas_eye * atlas_tiles + c.y) * atlas_tiles + c.x) * 4;
+		vec3 r0 = tbl.e[idx].xyz;
+		vec3 r1 = tbl.e[idx + 1].xyz;
+		vec3 r2 = tbl.e[idx + 2].xyz;
+
+		// Centred sample coordinates of this fragment, through C, back to the tile's
+		// source frame. One homography, one perspective divide -- ADR-0029 section 5's
+		// "one step", which is the whole point of the model.
+		vec2 centred = (inUV.xy - 0.5) * atlas_size.xy;
+		vec3 h = vec3(centred, 1.0);
+		vec3 q = vec3(dot(r0, h), dot(r1, h), dot(r2, h));
+		vec2 src = q.xy / q.z;
+		vec2 auv = clamp(src * atlas_size.zw + 0.5, 0.0, 1.0);
+
+		// Two taps, bilinear by the sampler, then the inverse colour transform the
+		// coded sample domain leaves to whoever reads it.
+		float Y = texture(atlas_y, auv).r;
+		vec2 CoCg = texture(atlas_cocg, auv).rg * 2.0 - 1.0;
+		float tmp = Y - CoCg.y * 0.5;
+		float G = CoCg.y + tmp;
+		float B = tmp - CoCg.x * 0.5;
+		float R = B + CoCg.x;
+		outColor = vec4(R, G, B, 1.0);
+		if (do_srgb)
+			outColor = sRGB_to_linear_rgba(outColor);
+		return;
+	}
+
 	vec4 colour = texture(rgb[0], uv);
 	if (fsr_enable)
 	{

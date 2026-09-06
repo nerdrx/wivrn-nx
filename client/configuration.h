@@ -331,6 +331,13 @@ public:
 	// headset.
 	float defoveate_scale = 1.0f;
 
+	// [atlas prototype] Replace the display pass's plain sample with the atlas
+	// reference model's shape: every fragment finds its tile, reads that tile's warp
+	// from a 17x17 table and samples through it. Synthetic table, meaningless pixels;
+	// this exists to price the pass shape on real hardware before the model is built.
+	// Off, and no part of it is allocated until it is turned on.
+	bool atlas_prototype = false;
+
 	bool passthrough_enabled = false;
 	bool mic_unprocessed_audio = false;
 

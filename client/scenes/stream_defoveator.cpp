@@ -18,6 +18,7 @@
  */
 
 #include <cmath>
+#include <glm/gtc/packing.hpp>
 #include "stream_defoveator.h"
 #include "application.h"
 #include "utils/ranges.h"
@@ -50,12 +51,21 @@ struct vert_pc
 	std::array<float, 4> motion;
 	std::array<float, 4> glow;
 	std::array<float, 4> deband;
+	// [atlas prototype] atlas picture size in samples, and its reciprocal.
+	std::array<float, 4> atlas_size;
 };
 
 // The motion field is stored as one signed byte per axis, scaled by the longest
 // vector in the field. R8G8Snorm is one of the formats every implementation must
 // support as a linearly filtered sampled image.
 static const vk::Format motion_format = vk::Format::eR8G8Snorm;
+// [atlas prototype] the per-tile table. Half floats: the warp is a small offset and a
+// rotation, neither of which wants 32 bits, and half the table is half the cache.
+// [atlas prototype] the synthetic atlas: a RefPicture-shaped pair of planes in the coded
+// sample domain. Y at full extent, interleaved Co/Cg at half (4:2:0), which is the v1
+// configuration the ADR's measurement table is written against.
+static const vk::Format atlas_y_format = vk::Format::eR8Unorm;
+static const vk::Format atlas_cocg_format = vk::Format::eR8G8Unorm;
 
 void stream_defoveator::ensure_vertices(size_t num_vertices)
 {
@@ -118,6 +128,29 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 	                .stageFlags = vk::ShaderStageFlagBits::eFragment,
 	                .pImmutableSamplers = samplers.data(),
 	        },
+	        // [atlas prototype] the atlas planes and the per-tile table. Always in the
+	        // layout and always bound, so the two paths share one descriptor set and
+	        // the specialization constant is the only difference between them.
+	        vk::DescriptorSetLayoutBinding{
+	                .binding = 3,
+	                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+	                .descriptorCount = 1,
+	                .stageFlags = vk::ShaderStageFlagBits::eFragment,
+	                .pImmutableSamplers = &*atlas_sampler,
+	        },
+	        vk::DescriptorSetLayoutBinding{
+	                .binding = 4,
+	                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+	                .descriptorCount = 1,
+	                .stageFlags = vk::ShaderStageFlagBits::eFragment,
+	                .pImmutableSamplers = &*atlas_sampler,
+	        },
+	        vk::DescriptorSetLayoutBinding{
+	                .binding = 5,
+	                .descriptorType = vk::DescriptorType::eUniformBuffer,
+	                .descriptorCount = 1,
+	                .stageFlags = vk::ShaderStageFlagBits::eFragment,
+	        },
 	};
 
 	target.descriptor_set_layout = device.createDescriptorSetLayout(vk::DescriptorSetLayoutCreateInfo{
@@ -157,7 +190,10 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 	        int32_t(alpha),
 	        VkBool32(application::get_hmd_traits().needs_srgb_conversion),
 	        VkBool32(cas_full_baked),
-	        VkBool32(fsr_baked));
+	        VkBool32(fsr_baked),
+	        VkBool32(atlas_baked),
+	        int32_t(kAtlasTiles),
+	        int32_t(view));
 	auto fragment_shader = load_shader(device, "reprojection.frag");
 
 	vk::pipeline_builder pipeline_info{
@@ -263,16 +299,34 @@ stream_defoveator::stream_defoveator(
 
 	renderpass = vk::raii::RenderPass(device, renderpass_info.get());
 
-	vk::DescriptorPoolSize pool_size{
-	        .type = vk::DescriptorType::eCombinedImageSampler,
-	        // rgb, alpha, the motion field and the previous frame, for both variants
-	        .descriptorCount = view_count * 8,
+	std::array pool_sizes{
+	        vk::DescriptorPoolSize{
+	                .type = vk::DescriptorType::eCombinedImageSampler,
+	                // rgb, alpha, the motion field, the previous frame and the two
+	                // atlas planes, for both variants
+	                .descriptorCount = view_count * 12,
+	        },
+	        // [atlas prototype] the per-tile table
+	        vk::DescriptorPoolSize{
+	                .type = vk::DescriptorType::eUniformBuffer,
+	                .descriptorCount = view_count * 2,
+	        },
 	};
 
 	ds_pool = device.createDescriptorPool(vk::DescriptorPoolCreateInfo{
 	        .maxSets = view_count * 2,
-	        .poolSizeCount = 1,
-	        .pPoolSizes = &pool_size,
+	        .poolSizeCount = pool_sizes.size(),
+	        .pPoolSizes = pool_sizes.data(),
+	});
+
+	// [atlas prototype] bilinear, by the sampler, as ADR-0029 section 5 asks for.
+	atlas_sampler = device.createSampler(vk::SamplerCreateInfo{
+	        .magFilter = vk::Filter::eLinear,
+	        .minFilter = vk::Filter::eLinear,
+	        .mipmapMode = vk::SamplerMipmapMode::eNearest,
+	        .addressModeU = vk::SamplerAddressMode::eClampToEdge,
+	        .addressModeV = vk::SamplerAddressMode::eClampToEdge,
+	        .addressModeW = vk::SamplerAddressMode::eClampToEdge,
 	});
 
 	motion_sampler = device.createSampler(vk::SamplerCreateInfo{
@@ -407,6 +461,191 @@ static size_t required_vertices(const wivrn::to_headset::foveation_parameter & p
 	return (2 * (p.x.size() + 1) + 1) * p.y.size();
 }
 
+
+// [atlas prototype] Build (once) and refill (every frame) the synthetic atlas and table.
+//
+// ADR-0029 section 5 is the specification being priced: the client warps each atlas tile
+// from its source pose to the pose it wants IN ONE STEP, sampling an atlas laid out as a
+// RefPicture (whole eye picture, Y/Co/Cg in the coded sample domain) through a per-tile
+// 64-byte table whose first 36 bytes are the composed homography C. The late-latch
+// composition C . H(pose_t <- pose_N) is per TILE and is done here, in float, on the
+// host: 578 3x3 multiplies a frame, which is why it is not in the fragment shader and
+// why it is not what the budget is about.
+//
+// The pixels are synthetic and meaningless. What is being measured is the per-fragment
+// cost of the shape: three uniform reads, one homography with its perspective divide,
+// two bilinear taps and the inverse colour transform. The table is refilled every frame
+// -- a real one changes every frame, and a table a driver could hoist out of the loop
+// would measure nothing.
+void stream_defoveator::ensure_atlas_table(vk::raii::CommandBuffer & command_buffer)
+{
+	if (not atlas_baked)
+		return;
+
+	const uint32_t P = kAtlasPicture, H = kAtlasPicture / 2;
+	const size_t entries = size_t(kAtlasTiles) * kAtlasTiles * view_count;
+
+	if (not atlas_y_image)
+	{
+		auto make_image = [&](image_allocation & img, std::vector<vk::raii::ImageView> & views,
+		                      vk::Format fmt, uint32_t w, uint32_t h) {
+			img = image_allocation(
+			        device,
+			        vk::ImageCreateInfo{
+			                .imageType = vk::ImageType::e2D,
+			                .format = fmt,
+			                .extent = {.width = w, .height = h, .depth = 1},
+			                .mipLevels = 1,
+			                .arrayLayers = view_count,
+			                .samples = vk::SampleCountFlagBits::e1,
+			                .usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst,
+			        },
+			        VmaAllocationCreateInfo{.usage = VMA_MEMORY_USAGE_AUTO});
+			views.clear();
+			views.reserve(view_count);
+			for (uint32_t view = 0; view < view_count; ++view)
+				views.emplace_back(
+				        device,
+				        vk::ImageViewCreateInfo{
+				                .image = img,
+				                .viewType = vk::ImageViewType::e2D,
+				                .format = fmt,
+				                .subresourceRange = {
+				                        .aspectMask = vk::ImageAspectFlagBits::eColor,
+				                        .levelCount = 1,
+				                        .baseArrayLayer = view,
+				                        .layerCount = 1,
+				                },
+				        });
+		};
+		make_image(atlas_y_image, atlas_y_views, atlas_y_format, P, P);
+		make_image(atlas_cocg_image, atlas_cocg_views, atlas_cocg_format, H, H);
+
+		// 64 bytes per tile position per eye, as the ADR's table is; four vec4 here,
+		// three of which carry C and the fourth src_frame/gen/flags/res_level.
+		atlas_table_buffer = buffer_allocation(
+		        device,
+		        vk::BufferCreateInfo{
+		                .size = vk::DeviceSize(entries) * 64,
+		                .usage = vk::BufferUsageFlagBits::eUniformBuffer,
+		        },
+		        VmaAllocationCreateInfo{
+		                .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+		                .usage = VMA_MEMORY_USAGE_AUTO,
+		        });
+		atlas_ready = false;
+	}
+
+	// The atlas pixels are filled once: their CONTENT does not affect what is being
+	// measured, only their layout and extent do, and re-uploading 1.6 MB a frame would
+	// measure the upload instead of the pass.
+	if (not atlas_ready)
+	{
+		buffer_allocation staging(
+		        device,
+		        vk::BufferCreateInfo{
+		                .size = vk::DeviceSize(P) * P * view_count + vk::DeviceSize(H) * H * 2 * view_count,
+		                .usage = vk::BufferUsageFlagBits::eTransferSrc,
+		        },
+		        VmaAllocationCreateInfo{
+		                .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+		                .usage = VMA_MEMORY_USAGE_AUTO,
+		        });
+		std::vector<uint8_t> px(size_t(P) * P * view_count + size_t(H) * H * 2 * view_count);
+		for (size_t i = 0; i < px.size(); ++i)
+			px[i] = uint8_t((i * 37 + (i >> 7) * 11) & 0xff);
+		vmaCopyMemoryToAllocation(vk_allocator::instance(), px.data(), staging, 0, px.size());
+
+		auto to_dst = [&](vk::Image img) {
+			vk::ImageMemoryBarrier b{
+			        .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
+			        .oldLayout = vk::ImageLayout::eUndefined,
+			        .newLayout = vk::ImageLayout::eTransferDstOptimal,
+			        .image = img,
+			        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, view_count},
+			};
+			command_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe,
+			                               vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, b);
+		};
+		auto to_read = [&](vk::Image img) {
+			vk::ImageMemoryBarrier b{
+			        .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+			        .dstAccessMask = vk::AccessFlagBits::eShaderRead,
+			        .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+			        .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+			        .image = img,
+			        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, view_count},
+			};
+			command_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+			                               vk::PipelineStageFlagBits::eFragmentShader, {}, {}, {}, b);
+		};
+		to_dst(atlas_y_image);
+		command_buffer.copyBufferToImage(
+		        staging, atlas_y_image, vk::ImageLayout::eTransferDstOptimal,
+		        vk::BufferImageCopy{
+		                .imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, view_count},
+		                .imageExtent = {P, P, 1},
+		        });
+		to_read(atlas_y_image);
+		to_dst(atlas_cocg_image);
+		command_buffer.copyBufferToImage(
+		        staging, atlas_cocg_image, vk::ImageLayout::eTransferDstOptimal,
+		        vk::BufferImageCopy{
+		                .bufferOffset = vk::DeviceSize(P) * P * view_count,
+		                .imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, view_count},
+		                .imageExtent = {H, H, 1},
+		        });
+		to_read(atlas_cocg_image);
+		// The staging buffer must outlive the copy; the caller waits on the frame
+		// fence before recording the next one, and this branch runs once.
+		atlas_staging_keepalive = std::move(staging);
+		atlas_ready = true;
+	}
+
+	// The table, every frame. Per tile: C composed with the late-latch pose delta, in
+	// float, exactly as ADR-0029 section 5 has the client do it.
+	{
+		++atlas_seed;
+		const float ang = float(atlas_seed) * 0.0007f;
+		// H(pose_t <- pose_N): one small rotation about the picture centre, which is
+		// what a refresh of head motion comes to.
+		const float ch = std::cos(ang), sh = std::sin(ang);
+		float * dst = static_cast<float *>(atlas_table_buffer.map());
+		size_t k = 0;
+		for (uint32_t view = 0; view < view_count; ++view)
+			for (uint32_t ty = 0; ty < kAtlasTiles; ++ty)
+				for (uint32_t tx = 0; tx < kAtlasTiles; ++tx)
+				{
+					// The tile's own C, as the codec would have composed it over
+					// however many frames since it was last coded: a small
+					// rotation, a small scale and a perspective term.
+					const uint32_t n = (tx * 73856093u) ^ (ty * 19349663u) ^ (view * 83492791u);
+					const float r0 = float((n >> 8) & 0xffff) / 65535.f - 0.5f;
+					const float r1 = float((n >> 16) & 0xffff) / 65535.f - 0.5f;
+					const float a = r0 * 0.01f + ang;
+					const float c = std::cos(a), s = std::sin(a);
+					const float sc = 1.f + r1 * 0.01f;
+					// C . H(pose_t <- pose_N), both rotations, composed in float.
+					const float cc = c * ch - s * sh, ss = s * ch + c * sh;
+					const float C[9] = {
+					        sc * cc, -sc * ss, r0 * 8.f,
+					        sc * ss, sc * cc, r1 * 8.f,
+					        r0 * 2e-6f, r1 * 2e-6f, 1.f,
+					};
+					dst[k + 0] = C[0]; dst[k + 1] = C[1]; dst[k + 2] = C[2]; dst[k + 3] = 0;
+					dst[k + 4] = C[3]; dst[k + 5] = C[4]; dst[k + 6] = C[5]; dst[k + 7] = 0;
+					dst[k + 8] = C[6]; dst[k + 9] = C[7]; dst[k + 10] = C[8]; dst[k + 11] = 0;
+					// src_frame, gen, flags, res_level
+					dst[k + 12] = float(atlas_seed);
+					dst[k + 13] = 1.f;
+					dst[k + 14] = 1.f;
+					dst[k + 15] = 0.f;
+					k += 16;
+				}
+		atlas_table_buffer.unmap();
+	}
+}
+
 void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
                                   const std::array<wivrn::to_headset::foveation_parameter, 2> & foveation,
                                   const std::array<input, 2> & inputs,
@@ -417,7 +656,8 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
                                   const frame_blend & blend,
                                   int destination,
                                   bool cas_full_kernel,
-                                  bool fsr)
+                                  bool fsr,
+                                  bool atlas_prototype)
 {
 	if (destination < 0 || destination >= (int)output_images.size())
 		throw std::runtime_error("Invalid destination image index");
@@ -426,12 +666,19 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 	// rebuilding the pipelines. The caller has waited on the frame fence before recording,
 	// so nothing is still reading the old pipelines. They only ever flip from a settings
 	// toggle, a rare event.
-	if (cas_full_kernel != cas_full_baked or fsr != fsr_baked)
+	if (cas_full_kernel != cas_full_baked or fsr != fsr_baked or atlas_prototype != atlas_baked)
 	{
 		reset_pipelines();
 		cas_full_baked = cas_full_kernel;
 		fsr_baked = fsr;
+		atlas_baked = atlas_prototype;
 	}
+
+	// [atlas prototype] the table has to exist before a descriptor can point at it, so
+	// it is built the first time the prototype is asked for and refilled every frame
+	// after -- a real atlas table changes every frame, and a table the driver could
+	// hoist out of the loop would measure the wrong thing.
+	ensure_atlas_table(command_buffer);
 
 	ensure_vertices(std::max(required_vertices(foveation[0]), required_vertices(foveation[1])));
 
@@ -631,6 +878,23 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		        .imageLayout = blend_on ? input.layout_prev_rgb : input.layout_rgb,
 		};
 
+		// [atlas prototype] always bound so the two paths share a descriptor set.
+		// With no table built yet (the prototype is off) it points at the motion
+		// texture, which the shader never reads on that path.
+		vk::DescriptorImageInfo atlas_y_info{
+		        .imageView = atlas_y_views.empty() ? *motion_views[view] : *atlas_y_views[view],
+		        .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+		};
+		vk::DescriptorImageInfo atlas_cocg_info{
+		        .imageView = atlas_cocg_views.empty() ? *motion_views[view] : *atlas_cocg_views[view],
+		        .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+		};
+		vk::DescriptorBufferInfo atlas_table_info{
+		        .buffer = atlas_table_buffer ? vk::Buffer(atlas_table_buffer) : vk::Buffer(buffer),
+		        .offset = 0,
+		        .range = VK_WHOLE_SIZE,
+		};
+
 		std::array descriptor_writes{
 		        vk::WriteDescriptorSet{
 		                .dstSet = pipeline.ds,
@@ -653,6 +917,27 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
 		                .pImageInfo = &prev_info,
 		        },
+		        vk::WriteDescriptorSet{
+		                .dstSet = pipeline.ds,
+		                .dstBinding = 3,
+		                .descriptorCount = 1,
+		                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+		                .pImageInfo = &atlas_y_info,
+		        },
+		        vk::WriteDescriptorSet{
+		                .dstSet = pipeline.ds,
+		                .dstBinding = 4,
+		                .descriptorCount = 1,
+		                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+		                .pImageInfo = &atlas_cocg_info,
+		        },
+		        vk::WriteDescriptorSet{
+		                .dstSet = pipeline.ds,
+		                .dstBinding = 5,
+		                .descriptorCount = 1,
+		                .descriptorType = vk::DescriptorType::eUniformBuffer,
+		                .pBufferInfo = &atlas_table_info,
+		        },
 		};
 
 		vert_pc pc{
@@ -670,6 +955,8 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		        .motion = {motion_step, motion_scale, blend_on ? blend.weight : 0.f, 0},
 		        .glow = {post.glow, post.glow_margin, 0, 0},
 		        .deband = {post.deband, 0, 0, 0},
+		        .atlas_size = {float(kAtlasPicture), float(kAtlasPicture),
+		                       1.f / float(kAtlasPicture), 1.f / float(kAtlasPicture)},
 		};
 
 		device.updateDescriptorSets(descriptor_writes, {});

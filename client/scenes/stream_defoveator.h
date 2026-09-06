@@ -65,6 +65,25 @@ class stream_defoveator
 	// Whether FSR (EASU + RCAS) is compiled into the currently built pipelines, same
 	// specialization-constant scheme as cas_full_baked above.
 	bool fsr_baked = false;
+	// [atlas prototype] whether the per-tile warp is compiled into the current
+	// pipelines, same specialization scheme as the two above.
+	bool atlas_baked = false;
+	static constexpr uint32_t kAtlasTiles = 17;
+	// The v1 configuration of ADR-0029: 1088x1088 per eye, 64x64 tiles, 17x17 = 289
+	// tiles. The atlas is the whole eye picture in the coded sample domain.
+	static constexpr uint32_t kAtlasPicture = 1088;
+	// The synthetic atlas: Y at full extent, interleaved Co/Cg at half (4:2:0), one
+	// layer per eye, plus the 64-byte-per-tile table in a uniform buffer. None of it is
+	// allocated until the prototype is first asked for.
+	image_allocation atlas_y_image, atlas_cocg_image;
+	std::vector<vk::raii::ImageView> atlas_y_views, atlas_cocg_views;
+	buffer_allocation atlas_table_buffer;
+	// Keeps the one-shot pixel upload alive until its copy has retired.
+	buffer_allocation atlas_staging_keepalive;
+	bool atlas_ready = false;
+	vk::raii::Sampler atlas_sampler = nullptr;
+	uint32_t atlas_seed = 0;
+	void ensure_atlas_table(vk::raii::CommandBuffer & command_buffer);
 
 	// Motion smoothing texture the sampler above is bound with
 	image_allocation motion_image;
@@ -168,7 +187,8 @@ public:
 	        const frame_blend & blend,
 	        int destination,
 	        bool cas_full_kernel = false,
-	        bool fsr = false);
+	        bool fsr = false,
+	        bool atlas_prototype = false);
 
 	// `scale` < 1 renders the pass into fewer fragments and leaves the last upscale to
 	// the runtime's compositor, which resamples the layer during timewarp regardless.

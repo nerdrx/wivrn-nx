@@ -851,28 +851,58 @@ Consequences, each of which is a real decision:
 Today the client maps stream index to compositing role by position
 (`stream.cpp`, `decoder_count = view_count + 2`). Stream 1 becoming a base layer
 breaks that, and papering over it with a second positional rule would make the
-next change worse. The change is to say the role on the wire:
+next change worse. The change is to say the role on the wire.
+
+**Correction to the sketch this section first carried.** It proposed adding the
+field to `video_stream_description::item`. There is no such type:
+`video_stream_description` is a FLAT struct with parallel per-stream arrays
+(`std::array<video_codec, 4> codec`) and scalars whose geometry the client
+derives. The change follows that shape instead, and the enum belongs to
+namespace `wivrn` beside `video_codec`, not to `to_headset` — a mistake worth
+recording because it is exactly the kind that compiles nowhere and wastes a
+build:
 
 ```cpp
-// common/wivrn_packets.h, in video_stream_description::item
+// common/wivrn_packets.h, namespace wivrn, beside video_codec
 enum class stream_role : uint8_t {
-    view  = 0,   // a view's picture; `eyes` says how many it carries
+    view  = 0,   // a view's picture; `paired_eyes` says how many it carries
     alpha = 1,
     quad  = 2,
     base  = 3,   // an atlas patch source; not composited on its own
 };
-stream_role role  = stream_role::view;
-uint8_t     eyes  = 1;   // views carried by this ONE stream
-uint8_t     serves_stream = 0xff;  // for `base`: whose atlas it fills
+
+// in video_stream_description
+std::array<stream_role, 4> role = {view, view, alpha, quad};  // = the old rule
+std::array<uint8_t, 4> serves_stream = {0xff, 0xff, 0xff, 0xff};
+constexpr stream_role role_of(uint8_t stream_index) const;
 ```
+
+The defaults reproduce the positional rule exactly, so a description built
+without touching them behaves as it did before — which is the property that
+made the client rewrite safe to do in one pass.
+
+`stream_size()` becomes role-driven rather than a switch on the index, and a
+`base` stream reports its **coded** size, which is pair-wide. That is a real
+asymmetry with the view streams, which report per-eye, and it exists because
+the nxvc stream carries its eye count in a header of its own
+(`nxvc_vkd_stream_info::eyes`) and an HEVC SPS does not: it just states a
+width, so the number the decoder is created with has to be the true one.
 
 The client then routes by `role`, not by index: `view` streams go to the
 defoveator as today, `base` streams go to the nxwarp decoder's atlas as patch
-sources and are never presented on their own. `serves_stream` is what lets a
-base stream name the enhancement stream whose atlas it fills, so the pairing is
-explicit rather than "stream 1 fills stream 0 because it is stream 1".
+sources and are never presented on their own — never collected as a view blit
+handle, never in the reprojection path, never counted in "views ready" — while
+still getting a decoder and still sending feedback like any other stream.
+`serves_stream` is what lets a base stream name the enhancement stream whose
+atlas it fills, so the pairing is explicit rather than "stream 1 fills stream 0
+because it is stream 1".
 
-This is a protocol change and it needs the `protocol_version` hash to move.
+This is a protocol change and it needs the `protocol_version` hash to move. It
+does so **on its own**: `serialization_traits` derives the hash from the type,
+and feeds every enumerator name and value of an enum into it, so adding the
+field and the enum moves the version with no manual revision bump. Client and
+server ship together, as they already must for `video_codec::nxwarp`.
+
 It is also the change that makes the *next* stream-shaped feature cheap, which
 is worth the one-time cost.
 
@@ -924,6 +954,53 @@ commitment:
 All three write the same logical layout, so their readbacks are byte-comparable
 and the format decision can be made on cost alone.
 
+### 11.2 The pricing, measured — and the answer is the SSBO
+
+`hybrid-proto/src/test_base_patch.c --size 1088x1088 --bench 50`, on the part
+that decides it. Byte-exactness against the CPU model passes on all three
+variants at this geometry, on both devices, so these are three ways of writing
+the identical bytes and the choice really is cost alone.
+
+| variant | Adreno 650 (Pico 4) | per tile | RX 7900 XTX (RADV) | per tile |
+|---|---|---|---|---|
+| `STORE=0` SSBO u16 pairs | **1.205 ms** | **2.08 µs** | 0.152 ms | 0.26 µs |
+| `STORE=1` R16_UINT image | 1.944 ms | 3.36 µs | **0.025 ms** | **0.04 µs** |
+| `STORE=2` R8_UNORM image | 2.065 ms | 3.57 µs | 0.025 ms | 0.04 µs |
+
+578 patches — every tile of both eyes at 1088² per eye — 50 iterations, three
+runs agreeing to 0.4 %, on an idle headset with no session running.
+
+**Take the SSBO.** Three things follow, and the first is the one that matters
+most:
+
+1. **The ordering is inverted between the two parts.** The storage images beat
+   the SSBO by 6× on the desktop GPU and lose to it by 1.6× on the Adreno. This
+   question therefore cannot be settled on a host, and any host measurement of
+   it — including `bench/README.md`'s "an integer storage image costs ~3× a
+   UNORM one on this part", which is a desktop number — is evidence about the
+   wrong device. The atlas lives on the headset.
+2. **R8_UNORM buys nothing here.** §9.3 argued that `CT_NONE` makes an 8-bit
+   atlas *legal* by removing the 9-bit YCoCg-R chroma plane, and that is still
+   true and still worth having as a footprint argument — half the atlas memory
+   and half its bandwidth. But it is the **slowest** of the three on the store
+   path, so it must be justified on footprint and not on speed.
+3. **The full-frame refresh is 1.20 ms per pair, not the 1.07 ms projected.**
+   The gate's cost table (`NXWARP-HYBRID-GATE.md` §4) derived that figure from
+   Part I §3.2's 1.9 µs/tile, measured on the *harder* kernel that still had a
+   colour matrix in it. Measured directly on the identity kernel with the
+   per-tile table write included, it is 2.08 µs/tile. The conclusion does not
+   move — 1.20 ms/pair is 29 % of the 4.2 ms budget against nxvc-only's ~4.00 ms
+   — but the number in that table should be read as 1.20, and the reason the
+   simpler kernel is *dearer* than the harder one is not explained by anything
+   measured here and is left standing as an oddity rather than rationalised.
+
+**What this does not cover.** The base picture here is a plain
+`G8_B8R8_2PLANE_420_UNORM` image, not an `AHardwareBuffer` imported under an
+external format. The sampler configuration is identical, but an Adreno external
+format may not sample at the same cost, so the *absolute* numbers could move.
+The *ordering* is a property of the three store paths, which are the only thing
+that differs between the variants, and that is what the decision rests on.
+
 ### 12. Status: what is implemented on this branch
 
 | item | state |
@@ -931,13 +1008,111 @@ and the format decision can be made on cost alone.
 | §9 colour finding | read out of both ends of the pipeline; the kernel is written to it |
 | `base_patch.comp`, three storage variants | **written**, one source, `-DSTORE=0/1/2` |
 | `base_patch_layout.h`: layout math + CPU model | **written** |
-| Host byte-exactness test (RADV) | **written and PASSING**, §12.1 |
+| Host byte-exactness test (RADV) | **written and PASSING**, §12.1, also at 1088² |
 | Encoder-side FFmpeg shadow decode + test | **written and PASSING**, §12.2 |
-| Device leg (Adreno) + atlas format pricing | **blocked**: the Pico dropped off USB mid-task |
-| §10.3 stream layout in `encoder_settings` | designed; not implemented |
-| §10.4 `stream_role` on the wire | designed; not implemented (protocol bump) |
-| Shared pair-compose refactor | designed; not implemented |
-| §13 corpus capture | route identified; **needs a live-session slot** |
+| Device leg (Adreno) byte-exactness | **PASSING** on the Pico 4, §12.1 |
+| Atlas format pricing | **measured, and it picks the SSBO**, §11.2 |
+| §10.3 stream layout in `encoder_settings` | **implemented**: base on stream 1, opt-in, HEVC-only, CTB 64, full-range |
+| §10.4 `stream_role` on the wire | **implemented** on both ends; hash moves on its own |
+| Shared pair-compose refactor | **implemented** as `wivrn::pair_compose`, shared and composed once per frame |
+| Base encoder fed the composed pair | **implemented** in `video_encoder::present_image`, waiting on the compositor timeline |
+| Paired path under the e2e harness | **implemented**: `wivrn-nxwarp-e2e --eyes 2`, with a negative control |
+| Encoder-side base-sourced patches into the encoder's atlas | **not implemented**: needs the encoder agent's call shape, §12.3 |
+| Client-side atlas import of a base frame | **stub**: `handle_base_frame()`, waiting on `nxvc_vk_atlas_write_tiles` |
+| §13 corpus capture | route identified and written as a runbook, §13.4; **needs a live-session slot** |
+
+Two things the paired e2e leg is worth reading for, beyond "it passes".
+
+**It has a negative control.** The right eye is the left one rotated half a
+picture with its luma inverted (`255 - y == y` has no integer solution, so every
+luma sample differs), and the two halves are scored separately. Filling layer 1
+with the left eye instead drops the right-eye score from 41.24 dB to 12.59 dB
+and fails the run. An assertion that cannot fail is not evidence, and this one
+can.
+
+**It found a real defect that was not mine.** On a paired encoder,
+`nxvc_vk_encoder_set_view()` is refused — the library wants one view per eye,
+because the two eyes have different poses and each gets its own warp record —
+so `video_encoder_nxwarp`, which called the single-view form unconditionally,
+gave a paired stream **no pose on either eye**. It was invisible for as long as
+the paired path was only ever exercised all-intra, where the library documents
+that it accepts and ignores views because there is no reference to warp. On a
+paired inter stream it is not invisible and it does not fail loudly: the
+predictor warps confidently from nothing. Fixed here by adding the pair form
+(`nxwarp_codec::set_views`) and calling it with both eyes. This is a defect in
+the `nx-warp-stereo` feature, not in the base layer, and nothing but the paired
+harness would have found it.
+
+**What the harness still does not prove.** No Vulkan validation layer is
+installed on this machine, so the widened barriers in `pair_compose` are shown
+to produce correct output on RADV but are not shown to be *formally* sufficient.
+Installing `vulkan-validation-layers` and re-running `--eyes 2` is the cheap way
+to close that, and it is a system package rather than something this branch can
+do for itself.
+
+### 12.3 The interface the encoder-side shadow decode needs
+
+Option B has the encoder run a conforming HEVC decoder (FFmpeg) over its own
+base bitstream, so that the encoder's model of the atlas contains the same
+base-sourced patches the headset's does — without which the encoder cannot know
+which tiles are already covered and the skip decision is guesswork. The decode
+half exists and passes (§12.2). What does not exist is the call that turns a
+decoded base picture into patches in the ENCODER's atlas, because that atlas
+belongs to the encoder agent's component and its shape is theirs to state.
+
+This is the interface this side needs. It is deliberately the mirror of the
+decoder's `nxvc_vk_atlas_write_tiles(dec, eye, first_tile, count, src,
+src_frame, flags)`, so that both ends describe a base patch the same way:
+
+```c
+/* Write `count` tiles of `eye`'s sub-picture, starting at the eye-minor linear
+ * tile index `first_tile`, from a decoded base picture already in the atlas
+ * layout, into the ENCODER's shadow atlas.
+ *
+ *   src         three 8-bit planes at the PER-EYE geometry, Y/Cb/Cr, in the
+ *               coded sample domain -- which under CT_NONE is BT.709
+ *               full-range YCbCr 4:2:0, i.e. the identity (see 9). Host
+ *               memory: this is FFmpeg's output, not a VkImage.
+ *   src_stride  per plane, in samples.
+ *   src_frame   the frame number the base picture was composed from; it goes
+ *               into each tile's record verbatim, exactly as 11.1 says.
+ *   flags       must include the base_sourced bit (SYNTAX 13.12.1 bit 2), and
+ *               the encoder must be able to read it back per tile -- knowing a
+ *               tile is base-sourced is the point of the shadow.
+ *
+ * Returns the number of tiles actually written, so a partial write is visible
+ * rather than silent. */
+int nxvc_enc_atlas_write_tiles(nxvc_encoder * enc,
+                               uint32_t eye,
+                               uint32_t first_tile,
+                               uint32_t count,
+                               const uint8_t * const src[3],
+                               const int src_stride[3],
+                               uint32_t src_frame,
+                               uint32_t flags);
+```
+
+Three questions for the encoder agent that this side cannot answer, and which
+the call shape depends on:
+
+1. **Host or device?** The decoder's form takes device memory because its
+   pixels arrive from a hardware decoder. FFmpeg's arrive in host memory, so a
+   device-side form would make this side stage them itself, which is only worth
+   doing if the encoder's atlas is a GPU resource. Which is it?
+2. **Is `count` over a contiguous run, or is a tile list wanted?** A full-frame
+   base refresh — which §7 of the gate recommends, since the gate passes 100 %
+   of tiles — is one contiguous run per eye, so the run form is enough for the
+   policy actually proposed. A tile list only becomes necessary if the refresh
+   goes partial.
+3. **Does the encoder's skip decision read `base_sourced` back, or does the
+   caller keep its own record?** This side can keep the record, but if the
+   encoder's own tile state already has a flags byte then storing it twice is
+   how the two drift apart.
+
+Until this lands, the encoder computes its skip decisions with no knowledge of
+the base layer, which is safe (it codes tiles the base already covers, so the
+picture is right and the bitrate is wasted) but throws away the whole saving the
+gate measured.
 
 ### 12.1 The host byte-exactness test
 

@@ -83,12 +83,28 @@
 // Run:
 //   wivrn-nxwarp-e2e --yuv in.yuv --width W --height H [--frames N] [--loss 0.05]
 //                    [--reorder 0.05] [--first-frame 65500] [--seed S] [--nxv-out f.nxv] [--decoded-out f.yuv] [--nxv-dec PATH]
-//                    [--backend ref|vk] [--qp N] [--inter on|off]
+//                    [--backend ref|vk] [--qp N] [--inter on|off] [--eyes 1|2]
 //                    [--intra-period N] [--coded-vectors default|none|static]
 //                    [--reconnect-at N] [--start-frame-id F]
 //                    [--pace auto|off|FPS] [--client-decode-ms N] [--present-hz N]
 //                    [--feedback-delay N]
 //
+//   --eyes             1 (the default, and every run that predates this flag) or 2, which
+//                      is encoder_settings::eyes: ONE stream carrying BOTH eyes as a
+//                      single nxvc stereo frame. The source image gains a second array
+//                      layer, the encoder reads layer 0 and layer 1, and
+//                      wivrn::pair_compose brings them into one picture `eyes * width`
+//                      across. It needs --backend vk (the reference backend is fed one
+//                      layer through host memory) and a per-eye width that is a multiple
+//                      of 64 (the pair's eye boundary has to fall on a tile boundary),
+//                      and both are refused up front with a message rather than a frame
+//                      that quietly fails to encode.
+//
+//                      The right eye is the left rotated half a picture with its luma
+//                      inverted, so it differs from the left at EVERY luma sample: a
+//                      compose that dropped a layer, duplicated one or swapped them
+//                      cannot come out looking right on any clip. Scored half by half
+//                      against a side-by-side the harness composes itself.
 //   --pace             the encoder's "pace" option. OFF by default here and "auto" on the
 //                      server: the pace is a wall-clock decision about the interval
 //                      between SENT frames, so leaving it on would make every other
@@ -657,6 +673,12 @@ struct source_image
 	vk::raii::Semaphore done = nullptr;
 	void * staging_map = nullptr;
 	uint32_t w = 0, h = 0;
+	// Array layers, which is how WiVRn keeps the two eyes: one image, eye 0 in
+	// layer 0 and eye 1 in layer 1. One layer is the mono stream and is what
+	// every run of this harness did before `--eyes 2` existed; two is the shape
+	// the paired encoder reads, and the only shape in which pair_compose is
+	// exercised at all.
+	uint32_t layers = 1;
 };
 
 uint32_t find_memory(vk_bundle & vk, uint32_t bits, vk::MemoryPropertyFlags want)
@@ -670,11 +692,12 @@ uint32_t find_memory(vk_bundle & vk, uint32_t bits, vk::MemoryPropertyFlags want
 	throw std::runtime_error("no suitable memory type");
 }
 
-source_image make_source_image(vk_bundle & vk, uint32_t w, uint32_t h)
+source_image make_source_image(vk_bundle & vk, uint32_t w, uint32_t h, uint32_t layers = 1)
 {
 	source_image s;
 	s.w = w;
 	s.h = h;
+	s.layers = layers;
 
 	// The exact image the compositor hands the encoder: one Y plane, one
 	// interleaved CbCr plane at half resolution — and created the way
@@ -698,7 +721,7 @@ source_image make_source_image(vk_bundle & vk, uint32_t w, uint32_t h)
 	                .format = formats.back(),
 	                .extent = {.width = w, .height = h, .depth = 1},
 	                .mipLevels = 1,
-	                .arrayLayers = 1,
+	                .arrayLayers = layers,
 	                .samples = vk::SampleCountFlagBits::e1,
 	                .tiling = vk::ImageTiling::eOptimal,
 	                .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferDst |
@@ -722,7 +745,7 @@ source_image make_source_image(vk_bundle & vk, uint32_t w, uint32_t h)
 	        });
 	s.image.bindMemory(*s.memory, 0);
 
-	const vk::DeviceSize bytes = vk::DeviceSize(w) * h * 3 / 2;
+	const vk::DeviceSize bytes = vk::DeviceSize(w) * h * 3 / 2 * layers;
 	s.staging = vk::raii::Buffer(
 	        vk.device,
 	        vk::BufferCreateInfo{.size = bytes, .usage = vk::BufferUsageFlagBits::eTransferSrc});
@@ -751,22 +774,29 @@ source_image make_source_image(vk_bundle & vk, uint32_t w, uint32_t h)
 	return s;
 }
 
-// Copy one yuv420p frame in, converting the two chroma planes to the interleaved layout
-// the two-plane image wants, and leave the image in eGeneral — which is the layout
-// video_encoder_nxwarp's own copyImageToBuffer reads it from.
+// Copy `s.layers` yuv420p frames in — one per array layer, laid out back to back in
+// `yuv` — converting the two chroma planes to the interleaved layout the two-plane image
+// wants, and leave the image in eGeneral — which is the layout video_encoder_nxwarp's own
+// copyImageToBuffer reads it from.
 void upload(vk_bundle & vk, source_image & s, std::span<const uint8_t> yuv)
 {
 	const size_t y_size = size_t(s.w) * s.h;
 	const size_t c_size = y_size / 4;
+	const size_t frame_bytes = y_size + 2 * c_size;
 	auto * dst = (uint8_t *)s.staging_map;
-	std::memcpy(dst, yuv.data(), y_size);
-	const uint8_t * cb = yuv.data() + y_size;
-	const uint8_t * cr = cb + c_size;
-	uint8_t * uv = dst + y_size;
-	for (size_t i = 0; i < c_size; ++i)
+	for (uint32_t layer = 0; layer < s.layers; ++layer)
 	{
-		uv[2 * i] = cb[i];
-		uv[2 * i + 1] = cr[i];
+		const uint8_t * in = yuv.data() + size_t(layer) * frame_bytes;
+		uint8_t * out = dst + size_t(layer) * frame_bytes;
+		std::memcpy(out, in, y_size);
+		const uint8_t * cb = in + y_size;
+		const uint8_t * cr = cb + c_size;
+		uint8_t * uv = out + y_size;
+		for (size_t i = 0; i < c_size; ++i)
+		{
+			uv[2 * i] = cb[i];
+			uv[2 * i + 1] = cr[i];
+		}
 	}
 
 	s.cmd.reset();
@@ -777,23 +807,27 @@ void upload(vk_bundle & vk, source_image & s, std::span<const uint8_t> yuv)
 	        .oldLayout = vk::ImageLayout::eUndefined,
 	        .newLayout = vk::ImageLayout::eTransferDstOptimal,
 	        .image = *s.image,
-	        .subresourceRange = {vk::ImageAspectFlagBits::ePlane0 | vk::ImageAspectFlagBits::ePlane1, 0, 1, 0, 1},
+	        .subresourceRange = {vk::ImageAspectFlagBits::ePlane0 | vk::ImageAspectFlagBits::ePlane1, 0, 1, 0, s.layers},
 	};
 	s.cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTransfer,
 	                      {}, {}, {}, to_dst);
 
-	std::array<vk::BufferImageCopy, 2> regions{
-	        vk::BufferImageCopy{
-	                .bufferOffset = 0,
-	                .imageSubresource = {vk::ImageAspectFlagBits::ePlane0, 0, 0, 1},
-	                .imageExtent = {s.w, s.h, 1},
-	        },
-	        vk::BufferImageCopy{
-	                .bufferOffset = y_size,
-	                .imageSubresource = {vk::ImageAspectFlagBits::ePlane1, 0, 0, 1},
-	                .imageExtent = {s.w / 2, s.h / 2, 1},
-	        },
-	};
+	std::vector<vk::BufferImageCopy> regions;
+	regions.reserve(2 * s.layers);
+	for (uint32_t layer = 0; layer < s.layers; ++layer)
+	{
+		const vk::DeviceSize base = vk::DeviceSize(layer) * frame_bytes;
+		regions.push_back(vk::BufferImageCopy{
+		        .bufferOffset = base,
+		        .imageSubresource = {vk::ImageAspectFlagBits::ePlane0, 0, layer, 1},
+		        .imageExtent = {s.w, s.h, 1},
+		});
+		regions.push_back(vk::BufferImageCopy{
+		        .bufferOffset = base + y_size,
+		        .imageSubresource = {vk::ImageAspectFlagBits::ePlane1, 0, layer, 1},
+		        .imageExtent = {s.w / 2, s.h / 2, 1},
+		});
+	}
 	s.cmd.copyBufferToImage(*s.staging, *s.image, vk::ImageLayout::eTransferDstOptimal, regions);
 
 	vk::ImageMemoryBarrier to_general{
@@ -802,7 +836,7 @@ void upload(vk_bundle & vk, source_image & s, std::span<const uint8_t> yuv)
 	        .oldLayout = vk::ImageLayout::eTransferDstOptimal,
 	        .newLayout = vk::ImageLayout::eGeneral,
 	        .image = *s.image,
-	        .subresourceRange = {vk::ImageAspectFlagBits::ePlane0 | vk::ImageAspectFlagBits::ePlane1, 0, 1, 0, 1},
+	        .subresourceRange = {vk::ImageAspectFlagBits::ePlane0 | vk::ImageAspectFlagBits::ePlane1, 0, 1, 0, s.layers},
 	};
 	s.cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eTransfer,
 	                      {}, {}, {}, to_general);
@@ -818,6 +852,129 @@ void upload(vk_bundle & vk, source_image & s, std::span<const uint8_t> yuv)
 	        .pSignalSemaphores = &*s.done,
 	};
 	vk.queue.queue.submit(si);
+}
+
+// ---------------------------------------------------------------------------
+// The second eye, and the picture the compose owes back.
+//
+// A harness that filled both array layers with the same frame would pass with a
+// pair_compose that dropped a layer, duplicated one, or swapped them -- the three
+// ways that code can be wrong and the only reasons to run it here at all. So the
+// right eye is DERIVED from the left by a transform that no half of a wrongly
+// composed picture can accidentally satisfy:
+//
+//   * every row is rotated left by half a picture, which catches a right half
+//     placed at the wrong x offset as well as one taken from the wrong layer;
+//   * the luma is then inverted. 255 - y == y has no integer solution, so EVERY
+//     luma sample of the right eye differs from the one the left eye holds at
+//     the same position. A duplicated layer cannot come out looking right no
+//     matter how flat or how periodic the source clip happens to be, which a
+//     shift alone could not promise.
+//
+// The chroma is rotated with the luma and not inverted: the rotation already
+// makes the two layers' chroma differ, and leaving the inversion off keeps the
+// picture a plausible one for a codec to code rather than a colour the corpus
+// never contains.
+std::vector<uint8_t> make_right_eye(std::span<const uint8_t> left, uint32_t w, uint32_t h)
+{
+	const size_t y_size = size_t(w) * h;
+	const size_t c_size = y_size / 4;
+	const uint32_t cw = w / 2, ch = h / 2;
+	std::vector<uint8_t> out(y_size + 2 * c_size);
+	for (uint32_t y = 0; y < h; ++y)
+	{
+		const uint8_t * row = left.data() + size_t(y) * w;
+		uint8_t * dst = out.data() + size_t(y) * w;
+		for (uint32_t x = 0; x < w; ++x)
+			dst[x] = uint8_t(255 - row[(x + w / 2) % w]);
+	}
+	for (uint32_t p = 0; p < 2; ++p)
+	{
+		const uint8_t * plane = left.data() + y_size + size_t(p) * c_size;
+		uint8_t * dst_plane = out.data() + y_size + size_t(p) * c_size;
+		for (uint32_t y = 0; y < ch; ++y)
+		{
+			const uint8_t * row = plane + size_t(y) * cw;
+			uint8_t * dst = dst_plane + size_t(y) * cw;
+			for (uint32_t x = 0; x < cw; ++x)
+				dst[x] = row[(x + cw / 2) % cw];
+		}
+	}
+	return out;
+}
+
+// The two eyes side by side, eye 0 on the left, as yuv420p at `2 * w` by `h`.
+// This is what pair_compose is supposed to hand the codec and therefore what the
+// decoded picture has to resemble -- the harness's own arithmetic, so a compose
+// that gets the halves wrong shows up as PSNR against a picture it never built.
+std::vector<uint8_t> compose_pair(std::span<const uint8_t> l, std::span<const uint8_t> r,
+                                  uint32_t w, uint32_t h)
+{
+	const size_t y_size = size_t(w) * h;
+	const size_t c_size = y_size / 4;
+	const uint32_t cw = w / 2, ch = h / 2;
+	std::vector<uint8_t> out(2 * (y_size + 2 * c_size));
+	uint8_t * y_dst = out.data();
+	for (uint32_t y = 0; y < h; ++y)
+	{
+		std::memcpy(y_dst + size_t(y) * 2 * w, l.data() + size_t(y) * w, w);
+		std::memcpy(y_dst + size_t(y) * 2 * w + w, r.data() + size_t(y) * w, w);
+	}
+	for (uint32_t p = 0; p < 2; ++p)
+	{
+		uint8_t * dst = out.data() + 2 * y_size + size_t(p) * 2 * c_size;
+		const uint8_t * ls = l.data() + y_size + size_t(p) * c_size;
+		const uint8_t * rs = r.data() + y_size + size_t(p) * c_size;
+		for (uint32_t y = 0; y < ch; ++y)
+		{
+			std::memcpy(dst + size_t(y) * 2 * cw, ls + size_t(y) * cw, cw);
+			std::memcpy(dst + size_t(y) * 2 * cw + cw, rs + size_t(y) * cw, cw);
+		}
+	}
+	return out;
+}
+
+// PSNR of ONE half of a side-by-side pair against the same half of the picture it
+// should have been. The whole-picture number already fails when a half is wrong,
+// but it fails without saying WHICH half -- and "the right eye scored 6 dB while
+// the left scored 41" is the sentence that tells a compose fault apart from a
+// codec fault, so it is worth the second pass.
+double psnr_half(std::span<const uint8_t> a, std::span<const uint8_t> b,
+                 uint32_t pair_w, uint32_t h, uint32_t half)
+{
+	const size_t y_size = size_t(pair_w) * h;
+	if (a.size() != b.size() or a.size() != y_size * 3 / 2)
+		return -1;
+	const uint32_t w = pair_w / 2;
+	const uint32_t cw = pair_w / 2, ch = h / 2;
+	const size_t c_size = y_size / 4;
+	double se = 0;
+	size_t n = 0;
+	auto acc = [&](const uint8_t * pa, const uint8_t * pb, size_t count) {
+		for (size_t i = 0; i < count; ++i)
+		{
+			const double d = double(pa[i]) - double(pb[i]);
+			se += d * d;
+		}
+		n += count;
+	};
+	for (uint32_t y = 0; y < h; ++y)
+		acc(a.data() + size_t(y) * pair_w + size_t(half) * w,
+		    b.data() + size_t(y) * pair_w + size_t(half) * w, w);
+	for (uint32_t p = 0; p < 2; ++p)
+	{
+		const uint8_t * pa = a.data() + y_size + size_t(p) * c_size;
+		const uint8_t * pb = b.data() + y_size + size_t(p) * c_size;
+		for (uint32_t y = 0; y < ch; ++y)
+			acc(pa + size_t(y) * cw + size_t(half) * (cw / 2),
+			    pb + size_t(y) * cw + size_t(half) * (cw / 2), cw / 2);
+	}
+	if (not n)
+		return -1;
+	const double mse = se / double(n);
+	if (mse == 0)
+		return 1e9;
+	return 10.0 * std::log10(255.0 * 255.0 / mse);
 }
 
 // Read a two-plane 4:2:0 image back to yuv420p, waiting on the decoder's timeline first.
@@ -980,6 +1137,14 @@ int main(int argc, char ** argv)
 	// That is the case last_resync_id exists for, and this is how it gets exercised.
 	uint32_t feedback_delay = 0;
 	uint32_t width = 320, height = 240, frames = 12, seed = 1;
+	// Eyes this ONE stream carries, 1 or 2 -- encoder_settings::eyes, verbatim. At 2 the
+	// source image gains a second array layer, the encoder reads both of them, and
+	// wivrn::pair_compose brings them into one side-by-side picture that nxvc codes as a
+	// single stereo frame. Nothing off a headset exercised that path before this flag, so
+	// a regression in the compose -- a dropped layer, a duplicated one, the wrong image
+	// usage or a barrier too narrow for the stage that reads it next -- was invisible
+	// here. The default is 1 and every existing invocation is unchanged by it.
+	uint32_t eyes = 1;
 	double loss = 0.0, reorder = 0.0;
 	// The headset app restarted, or the link dropped and came back, while the server's
 	// session stayed up: the client end is thrown away and rebuilt -- new decoder, new
@@ -1034,6 +1199,8 @@ int main(int argc, char ** argv)
 			reorder = std::stod(next());
 		else if (a == "--first-frame")
 			first_frame = std::stoull(next());
+		else if (a == "--eyes")
+			eyes = uint32_t(std::stoul(next()));
 		else if (a == "--seed")
 			seed = uint32_t(std::stoul(next()));
 		else if (a == "--nxv-out")
@@ -1103,8 +1270,49 @@ int main(int argc, char ** argv)
 		return 2;
 	}
 
+	// --- what --eyes 2 requires, checked before anything is built ----------------
+	//
+	// Refused here rather than deeper down because both of these come out of the codec
+	// as a frame that does not encode, which reaches this harness as "the encoder
+	// produced no datagrams" -- a true statement about a run that was never going to
+	// work, and one that says nothing about why.
+	if (eyes != 1 and eyes != 2)
+	{
+		std::fprintf(stderr, "--eyes must be 1 or 2, not %u\n", eyes);
+		return 2;
+	}
+	if (eyes == 2 and width % 64 != 0)
+	{
+		// nxvc's tile grid is 64 wide and the pair is `eyes * width` samples across
+		// with the eye boundary falling on a tile boundary ([SYN] 3.3), so a per-eye
+		// width that is not a multiple of 64 has no stereo frame to describe and the
+		// codec refuses the configuration outright.
+		std::fprintf(stderr,
+		             "--eyes 2 needs a PER-EYE width that is a multiple of 64; %u is not "
+		             "(%u would be the nearest below, %u the nearest above)\n",
+		             width, width / 64 * 64, (width / 64 + 1) * 64);
+		return 2;
+	}
+	if (eyes == 2 and backend != "vk")
+	{
+		// The pair is composed on the device, out of two array layers of the
+		// compositor image, so it exists only on the path that reads that image
+		// directly. The CPU reference backend is fed a host-side plane copied out of
+		// ONE layer (video_encoder_nxwarp's readback path takes src_layer and nothing
+		// else), which is a mono frame however `eyes` is set.
+		std::fprintf(stderr, "--eyes 2 needs --backend vk: the reference backend is fed one "
+		                     "array layer through host memory and never sees the pair\n");
+		return 2;
+	}
+
 	auto yuv = read_file(yuv_path);
 	const size_t frame_bytes = size_t(width) * height * 3 / 2;
+	// The geometry everything downstream of the encoder is measured in. With the eyes
+	// paired the DECODED picture is the pair -- `eyes * width` wide -- while `width`
+	// stays per eye everywhere the encoder and the stream description use it, which is
+	// nxvc's own convention and the server's.
+	const uint32_t pair_width = width * eyes;
+	const size_t pair_frame_bytes = size_t(pair_width) * height * 3 / 2;
 	if (yuv.size() < frame_bytes)
 	{
 		std::fprintf(stderr, "%s holds %zu bytes, one %ux%u yuv420p frame is %zu\n",
@@ -1130,6 +1338,13 @@ int main(int argc, char ** argv)
 	settings.bitrate_multiplier = 1.0;
 	settings.bit_depth = 8;
 	settings.src_layer = 0;
+	// The paired stream, exactly as encoder_settings describes it: one stream carrying
+	// both eyes, reading layer 0 and layer 1 of the one compositor image. At one eye
+	// src_layer_right is never read, so it is left at its default and the settings this
+	// harness builds are byte for byte what they were.
+	settings.eyes = eyes;
+	if (eyes == 2)
+		settings.src_layer_right = 1;
 	settings.options["qp"] = std::to_string(qp);
 	settings.options["backend"] = backend;
 	settings.options["inter"] = inter;
@@ -1190,7 +1405,12 @@ int main(int argc, char ** argv)
 	desc.refresh_rate = 90;
 
 	e2e_host host(vk);
-	host.width = width;
+	// The picture the decoder publishes, which is the pair when the stream is paired.
+	// The stream DESCRIPTION above stays per eye: there is no wire field for the eye
+	// count and the decoder learns it from the .nxv stream header, rebuilding its image
+	// pool at twice the width when it does (nxwarp_decoder::build_image_pool). Reading
+	// back at `width` here would silently take the left eye and call it the frame.
+	host.width = pair_width;
 	host.height = height;
 	auto make_decoder = [&] {
 		auto d = std::make_unique<nxwarp_decoder>(vk.device, vk.physical_device,
@@ -1204,7 +1424,16 @@ int main(int argc, char ** argv)
 	lossy_link link(*dec, loss, reorder, seed);
 	enc.set_packet_sink(&link);
 
-	auto src = make_source_image(vk, width, height);
+	auto src = make_source_image(vk, width, height, eyes);
+	if (eyes == 2)
+		std::printf("eyes: 2 -- one stream, layers 0 and 1 of the source image, composed to "
+		            "%ux%u; the right eye is the left rotated half a picture with its luma "
+		            "inverted, so a compose that dropped or duplicated a layer cannot pass\n",
+		            pair_width, height);
+	// Layer 0 then layer 1, back to back, which is what upload() reads. Empty at one eye:
+	// the mono path hands upload() the span into the source file exactly as before, with
+	// no copy in between, so nothing about that run moves.
+	std::vector<uint8_t> layered;
 
 	// ---- WiVRn's own automatic bitrate, closed over this run --------------------
 	//
@@ -1358,8 +1587,23 @@ int main(int argc, char ** argv)
 		}
 
 		std::span<const uint8_t> frame(yuv.data() + size_t(f % available) * frame_bytes, frame_bytes);
-		source_frames.emplace_back(frame.begin(), frame.end());
-		upload(vk, src, frame);
+		if (eyes == 2)
+		{
+			// `source_frames` is what every picture is scored against, so at two
+			// eyes it has to be the PAIR the compose owes back and not the eye the
+			// file holds. This is the check on pair_compose: the decoded picture is
+			// compared to a side-by-side the harness built itself, half by half.
+			auto right = make_right_eye(frame, width, height);
+			layered.assign(frame.begin(), frame.end());
+			layered.insert(layered.end(), right.begin(), right.end());
+			source_frames.push_back(compose_pair(frame, right, width, height));
+			upload(vk, src, layered);
+		}
+		else
+		{
+			source_frames.emplace_back(frame.begin(), frame.end());
+			upload(vk, src, frame);
+		}
 
 		auto vi = make_view_info(f);
 		presented.push_back(vi);
@@ -2007,7 +2251,11 @@ int main(int argc, char ** argv)
 			// reconnect is offset by however many units the old client had produced.
 			// The frame ids the decoder reports with each unit are what checks the
 			// arithmetic rather than assuming it.
-			const size_t frame_size = size_t(width) * height * 3 / 2;
+			// The DECODED frame, which is the pair when the eyes are paired -- both
+			// nxv-dec and the GPU decoder emit one picture `eyes * width` across, so
+			// dividing by a per-eye frame here would cut every picture in half and
+			// compare the wrong bytes.
+			const size_t frame_size = pair_frame_bytes;
 			const size_t ref_frames = ref.size() / frame_size;
 			const size_t gpu_frames = gpu.size() / frame_size;
 			std::printf("nxv-dec decoded %zu frames, the GPU decoder published %zu "
@@ -2163,6 +2411,63 @@ int main(int argc, char ** argv)
 			{
 				std::printf("PSNR vs source over %zu frames: mean %.2f dB, worst %.2f dB\n",
 				            counted, total / double(counted), worst);
+
+				// --- the two halves, separately, when there are two ---------------
+				//
+				// eyes-gated because there is only one half at one eye, and the
+				// whole-picture number above already is it. It is NOT a weaker
+				// statement than the mono one: the whole-picture PSNR already fails
+				// when a half is wrong, and this only says WHICH half -- which is the
+				// difference between "pair_compose put the wrong pixels in the right
+				// eye" and "the codec had a bad day", and the only reason this run
+				// exists.
+				if (eyes == 2)
+				{
+					double lo[2] = {1e9, 1e9};
+					double sum[2] = {0, 0};
+					size_t n_half = 0;
+					for (size_t i = 0; i < host.pictures.size() and i < host.frames.size(); ++i)
+					{
+						size_t src_idx = presented.size();
+						for (size_t j = 0; j < presented.size(); ++j)
+							if (same(presented[j], host.frames[i].view_info))
+							{
+								src_idx = j;
+								break;
+							}
+						if (src_idx >= source_frames.size() or
+						    host.frames[i].view_info.display_time == 0)
+							continue;
+						const double l = psnr_half(host.pictures[i], source_frames[src_idx],
+						                           pair_width, height, 0);
+						const double r = psnr_half(host.pictures[i], source_frames[src_idx],
+						                           pair_width, height, 1);
+						if (l < 0 or r < 0)
+							continue;
+						lo[0] = std::min(lo[0], l);
+						lo[1] = std::min(lo[1], r);
+						sum[0] += l;
+						sum[1] += r;
+						++n_half;
+					}
+					if (n_half)
+					{
+						std::printf("stereo compose: left eye mean %.2f dB (worst %.2f), "
+						            "right eye mean %.2f dB (worst %.2f) over %zu frames\n",
+						            sum[0] / double(n_half), lo[0],
+						            sum[1] / double(n_half), lo[1], n_half);
+						// The right eye is the half a broken compose gets wrong: a
+						// dropped layer leaves it undefined, a duplicated one leaves
+						// it holding the left eye's pixels against an inverted
+						// reference, and both land far under this floor.
+						check(lo[1] > 20.0,
+						      "the RIGHT eye of the composed pair is the right eye "
+						      "(PSNR > 20 dB)");
+						check(lo[0] > 20.0,
+						      "the LEFT eye of the composed pair is the left eye "
+						      "(PSNR > 20 dB)");
+					}
+				}
 				// Which frames the low scores belong to, and whether each one opened
 				// a run or continued one. A frame that continues a run is inter and
 				// may legitimately be a stale warp; a frame that OPENS one is the

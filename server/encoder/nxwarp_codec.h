@@ -163,6 +163,22 @@ public:
 	// called before every encode(); without it the codec emits an identity warp.
 	virtual void set_view(const nxwarp_codec_view &) = 0;
 
+	// The PAIRED form. nxvc wants one view per eye when the encoder was created
+	// with `eyes == 2`, because the two eyes have different poses and each gets
+	// its own warp record; handing such an encoder a single view is refused
+	// outright, so a paired inter stream that only ever called set_view() has no
+	// pose on EITHER eye and its predictor warps from nothing. Views are in eye
+	// order, eye 0 first, and `count` must equal the encoder's eye count.
+	//
+	// The default forwards the first view to set_view(), which is right for
+	// every backend that has no pair concept: at one eye the two calls are the
+	// same call.
+	virtual void set_views(const nxwarp_codec_view * views, uint32_t count)
+	{
+		if (count > 0)
+			set_view(views[0]);
+	}
+
 	// The quantiser, 0..63, for the frames that follow. This is the whole of the
 	// rate-control surface a backend exposes: no NX Warp codec moves the QP on
 	// its own, so the controller lives in video_encoder_nxwarp and this is how

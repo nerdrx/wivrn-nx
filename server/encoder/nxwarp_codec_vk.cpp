@@ -23,6 +23,7 @@
 
 #include "util/u_logging.h"
 
+#include <algorithm>
 #include <format>
 #include <stdexcept>
 #include <vector>
@@ -281,21 +282,48 @@ public:
 	// call.  On an intra stream the library accepts and ignores it.
 	void set_view(const wivrn::nxwarp_codec_view & v) override
 	{
-		nxvc_vke_view nv{};
-		nv.qx = v.qx;
-		nv.qy = v.qy;
-		nv.qz = v.qz;
-		nv.qw = v.qw;
-		nv.fov_left = v.fov_left;
-		nv.fov_right = v.fov_right;
-		nv.fov_up = v.fov_up;
-		nv.fov_down = v.fov_down;
+		set_views(&v, 1);
+	}
 
-		const nxvc_vke_status st = nxvc_vk_encoder_set_view(enc, &nv);
+	// nxvc_vk_encoder_set_views() requires `count == create_info::eyes`, so on a
+	// PAIRED encoder the single-view form is refused with `bad argument` and the
+	// frame is coded with no pose at all -- on both eyes. That is invisible on an
+	// all-intra stream, which is why it survived: the library documents that it
+	// accepts and ignores views when there is no reference to warp. On a paired
+	// INTER stream it is not invisible, and it does not degrade gracefully
+	// either; it makes the predictor warp confidently from nothing, which looks
+	// like a bad codec rather than a missing call.
+	void set_views(const wivrn::nxwarp_codec_view * views, uint32_t count) override
+	{
+		if (count == 0 or views == nullptr)
+			return;
+
+		nxvc_vke_view nv[2]{};
+		const uint32_t n = std::min<uint32_t>(count, uint32_t(std::size(nv)));
+		for (uint32_t i = 0; i < n; ++i)
+		{
+			nv[i].qx = views[i].qx;
+			nv[i].qy = views[i].qy;
+			nv[i].qz = views[i].qz;
+			nv[i].qw = views[i].qw;
+			nv[i].fov_left = views[i].fov_left;
+			nv[i].fov_right = views[i].fov_right;
+			nv[i].fov_up = views[i].fov_up;
+			nv[i].fov_down = views[i].fov_down;
+		}
+		// A caller that gave fewer views than this encoder has eyes gets the
+		// last one repeated. That is wrong-but-close rather than refused: it is
+		// the same pose in both eyes, which is a small parallax error, where the
+		// refusal is no pose at all.
+		for (uint32_t i = n; i < eyes and i < uint32_t(std::size(nv)); ++i)
+			nv[i] = nv[n - 1];
+
+		const nxvc_vke_status st = nxvc_vk_encoder_set_views(enc, nv, eyes);
 		if (st != NXVC_VKE_OK and not warned_view)
 		{
 			warned_view = true;
-			U_LOG_W("nxwarp: the GPU encoder refused a view: %s (%s)",
+			U_LOG_W("nxwarp: the GPU encoder refused %u view(s): %s (%s)",
+			        unsigned(eyes),
 			        nxvc_vk_encoder_status_string(st),
 			        nxvc_vk_encoder_last_error(enc));
 		}

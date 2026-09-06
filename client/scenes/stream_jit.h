@@ -115,6 +115,18 @@ struct jit_scheduler
 	// ten seconds to walk back from a 12 ms spike to a 3 ms steady state at 90 Hz.
 	int64_t cost_decay_ns_per_frame = 10'000;
 
+	// Ceiling on the cost the peak hold will remember, in multiples of the refresh
+	// period. Measured on the device: the first iterations of a stream scene cost 60-70
+	// ms (swapchain creation, pipeline warm-up, the first decode), and at the decay rate
+	// above that single outlier keeps the budget over the whole available slack for
+	// more than a minute -- so the schedule sleeps zero for the first minute of every
+	// session, which is most of a short one.
+	//
+	// Remembering it precisely buys nothing. Once the budget exceeds the slack the
+	// runtime hands over, the sleep is zero whatever the number is; the only thing a
+	// larger value changes is how long recovery takes. So the hold saturates here.
+	int64_t cost_ceiling_periods = 4;
+
 	// --- measured state ----------------------------------------------------------
 	int64_t cost_peak_ns = 0;
 	uint64_t frames_seen = 0;
@@ -186,7 +198,26 @@ struct jit_scheduler
 	//                sleep cap ratchets down by
 	void account(int64_t cost, int64_t budget, int64_t slept_ns, int64_t lead, bool period_jump, int64_t period)
 	{
-		cost_peak_ns = std::max(cost, cost_peak_ns - cost_decay_ns_per_frame);
+		const int64_t ceiling = period > 0 ? period * cost_ceiling_periods : 0;
+		// Two-speed decay, and the threshold is where it is for a reason that the
+		// harness found the hard way. Coverage of a REPEATING spike is arithmetic: the
+		// hold must not fall further than the margin between one spike and the next,
+		// or every spike overruns. At 10 us a frame and a 200-frame interval that is
+		// 2 ms, which the margin reaches; a proportional decay applied everywhere made
+		// it 9 ms, which it does not, and case [3] went from one late frame to six.
+		//
+		// So the flat rate stays wherever the schedule is still doing its job, and the
+		// fast rate applies only ABOVE two refresh periods -- a region where the budget
+		// already exceeds anything the slack can hide, the sleep is zero regardless,
+		// and holding the value precisely buys nothing but a slower recovery. That is
+		// the region a 67 ms scene start lands in, and the only one it needs.
+		const int64_t fast_above = period > 0 ? period * 2 : 0;
+		const int64_t decay = (fast_above > 0 and cost_peak_ns > fast_above)
+		                              ? std::max(cost_decay_ns_per_frame, cost_peak_ns / 256)
+		                              : cost_decay_ns_per_frame;
+		cost_peak_ns = std::max(cost, cost_peak_ns - decay);
+		if (ceiling > 0)
+			cost_peak_ns = std::min(cost_peak_ns, ceiling);
 		++frames_seen;
 
 		sleep_total_ns += slept_ns;
@@ -199,11 +230,20 @@ struct jit_scheduler
 		lead_min_ns = lead_n == 0 ? lead : std::min(lead_min_ns, lead);
 		++lead_n;
 
-		// Only ever widens, and only on a frame that actually slept: a loop that is
-		// already late for reasons of its own (a stall, a swapchain rebuild, the
-		// first frames of a session) would otherwise ratchet the margin to its cap
-		// before the schedule has done anything at all.
-		if (slept_ns > 0)
+		// Only ever widens, and only on a frame whose sleep could plausibly BE the
+		// cause. `slept_ns > 0` was the first attempt at that and it is far too weak:
+		// measured on the device, the opening seconds of a stream scene skip refreshes
+		// for their own reasons while the schedule is sleeping a fraction of a
+		// millisecond out of fifty of slack, and charging those to the sleep ratcheted
+		// the cap to zero within one report window -- switching the feature off for the
+		// rest of the session before it had ever slept a meaningful amount.
+		//
+		// A sleep shorter than one refresh period cannot have pushed a submission
+		// across a refresh boundary it would otherwise have made: the submission moved
+		// by less than the distance between boundaries. So that is the bar. It keeps
+		// every miss the schedule can actually cause, and drops the ones it cannot.
+		const int64_t attributable = period > 0 ? period : margin_skip_step_ns;
+		if (slept_ns >= attributable)
 		{
 			int64_t widen = 0;
 			// A pass that outran its budget is a costing error: the margin is the

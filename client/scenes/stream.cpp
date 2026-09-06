@@ -1248,6 +1248,41 @@ float scenes::stream::resolve_defoveate_scale(
 // switch the schedule mid-session without touching the headset. An empty or absent
 // property means "whatever the setting says", which is the case on every device that is
 // not being measured.
+// Whether the display pass may re-present the image already in the swapchain.
+//
+// The setting is `reduce_gpu_load` and it is off by default. It is the second-largest GPU
+// consumer's cheapest lever: the render loop turns 43.6 times a second while 38.5 decoded
+// frames arrive, so about one iteration in eight redraws an image identical to the last
+// one, and the pass costs 6.37 ms of GPU each time (docs/CLIENT-REPROJECTION.md).
+//
+// The override exists so that is an A/B rather than an argument. Polled once a second,
+// like debug.wivrn.jit and unlike debug.wivrn.decoupled, because the decision is taken
+// per frame and nothing is built from it -- so a flip takes effect on the next refresh
+// and both halves can be measured inside one session against one server.
+bool scenes::stream::reduce_gpu_load_enabled()
+{
+	bool enabled = application::get_config().reduce_gpu_load;
+
+#ifdef __ANDROID__
+	static std::chrono::steady_clock::time_point next_poll{};
+	static int forced = -1;
+
+	const auto now = std::chrono::steady_clock::now();
+	if (now >= next_poll)
+	{
+		next_poll = now + std::chrono::seconds(1);
+		char value[PROP_VALUE_MAX] = {};
+		const int len = __system_property_get("debug.wivrn.reducegpu", value);
+		forced = len <= 0 ? -1 : (value[0] == '0' ? 0 : 1);
+	}
+
+	if (forced >= 0)
+		enabled = forced != 0;
+#endif
+
+	return enabled;
+}
+
 bool scenes::stream::jit_enabled()
 {
 	bool enabled = application::get_config().jit_display;
@@ -2053,7 +2088,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			// signature is unchanged, and no promoted quad is on screen (the quad has
 			// its own swapchain and blit path). When off, cache_hit is always false, so
 			// the render path below is byte identical to not having this feature.
-			cache_hit = config.reduce_gpu_load and defoveate_cache_valid and
+			cache_hit = reduce_gpu_load_enabled() and defoveate_cache_valid and
 			            not quad_info and state == defoveate_cache;
 
 			g_rp.cache_hits += cache_hit ? 1 : 0;
@@ -2070,7 +2105,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			g_rp.low_poly = post.low_poly;
 			g_rp.low_poly_levels = post.low_poly_levels;
 			g_rp.low_poly_full = post.low_poly_full;
-			g_rp.reduce_gpu_load = config.reduce_gpu_load;
+			g_rp.reduce_gpu_load = reduce_gpu_load_enabled();
 			if (not cache_hit)
 			{
 				// defoveate the image, apply scale/bias

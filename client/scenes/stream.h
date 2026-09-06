@@ -674,6 +674,8 @@ public:
 	void render(const XrFrameState &) override;
 	// Whether just-in-time display scheduling runs; see the definition in stream.cpp.
 	static bool jit_enabled();
+	// Whether the re-present cache is on; see the definition in stream.cpp.
+	static bool reduce_gpu_load_enabled();
 	void on_focused() override;
 	void on_unfocused() override;
 	void on_xr_event(const xr::event &) override;

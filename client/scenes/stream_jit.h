@@ -68,6 +68,23 @@ namespace wivrn
 //   skipped     the runtime's predicted display time advanced by more than one period,
 //               which means a refresh went by with nothing new submitted
 //
+// The cap is AIMD, and it took four passes on a real device to learn why it has to be.
+// It began monotone -- decrease only, never back up -- on the reasoning that a schedule
+// which only ever becomes safer cannot be the thing that drops a frame. That is true and
+// it is useless: a cap that only falls converges on the worst transient the session ever
+// had, not on the steady state. Measured, every time: the opening seconds of a stream
+// scene sleep too optimistically because the cost estimate has not seen an expensive
+// frame yet, four attributable misses follow, the cap steps 45 -> 34 -> 23 -> 12 -> 0.6 ms,
+// and then the estimate settles at a 20 ms pass with 51 ms of slack -- 30 ms of sleep
+// there is room for and the cap will not allow, for the rest of the session, with zero
+// misses reported in every window after.
+//
+// So the cap falls a whole refresh period on a miss and climbs one back after a long
+// clean run. The margin is what the guard constrains, and the margin is still
+// widen-only: it never narrows, on any path. Decrease stays immediate and increase stays
+// slow, which is the same shape as the server's own bitrate controller and for the same
+// reason -- a mistake costs one frame, a recovery costs seconds.
+//
 // `skipped` is the one that needs a second control, and it is the reason `sleep_cap_ns`
 // exists next to the margin. A runtime paces xrWaitFrame against the frames it still has
 // in flight, and the depth of that pipeline is not something the client is told. Sleeping
@@ -131,8 +148,15 @@ struct jit_scheduler
 	int64_t cost_peak_ns = 0;
 	uint64_t frames_seen = 0;
 	int64_t margin_ns = 0;
-	// The ratchet described above. Starts permissive and only ever shrinks.
+	// The cap on the sleep. Multiplicative-decrease on a miss the sleep caused,
+	// additive-increase after a long clean run -- see the AIMD note above.
 	int64_t sleep_cap_ns = 45'000'000;
+	// Consecutive accounted frames with no attributable miss. Resets to zero on one.
+	uint64_t clean_run = 0;
+	// How long that run must be before the cap probes upward by one refresh period.
+	// 256 frames is about three seconds at 90 Hz and six at the ~45 this device
+	// actually turns, so a recovery costs seconds and a mistake costs one frame.
+	uint64_t clean_run_to_probe = 256;
 
 	// Counters, for the report line. Reset with reset_counters(), which leaves the
 	// LEARNT state (the cost window and the margin) alone: a two-second report window
@@ -267,6 +291,8 @@ struct jit_scheduler
 		// there was room for.
 		const bool would_have_made_it_unslept = lead + slept_ns > 0;
 
+		bool missed_here = false;
+		bool period_jump_charged = false;
 		if (slept_ns >= attributable)
 		{
 			int64_t widen = 0;
@@ -293,10 +319,32 @@ struct jit_scheduler
 			if (period_jump and pass_could_have_kept_up)
 			{
 				++missed_skipped;
+				period_jump_charged = true;
 				ratchet(period);
 			}
 			if (widen > 0)
 				margin_ns = std::min(max_margin_ns, margin_ns + widen);
+
+			missed_here = widen > 0 or period_jump_charged;
+		}
+
+		// Additive increase. A frame that could have been charged for a miss and was
+		// not is evidence the cap has room; enough of them in a row and it takes one
+		// refresh period back. Only frames that actually slept count, so a session
+		// sitting at cap zero still probes (its sleep is below the attribution bar, so
+		// it cannot be blamed for anything either) but one that never sleeps because
+		// the budget already exceeds the slack does not climb on evidence it has not
+		// gathered.
+		if (missed_here)
+			clean_run = 0;
+		else if (slept_ns > 0 or sleep_cap_ns < max_sleep_ns)
+			++clean_run;
+
+		if (clean_run >= clean_run_to_probe and sleep_cap_ns < max_sleep_ns)
+		{
+			clean_run = 0;
+			const int64_t step = period > 0 ? period : margin_skip_step_ns;
+			sleep_cap_ns = std::min(max_sleep_ns, sleep_cap_ns + step);
 		}
 	}
 
@@ -304,6 +352,7 @@ struct jit_scheduler
 	// free-running again, which is the behaviour this replaces and so is always safe).
 	void ratchet(int64_t period)
 	{
+		clean_run = 0;
 		const int64_t step = period > 0 ? period : margin_skip_step_ns;
 		sleep_cap_ns = std::max<int64_t>(0, sleep_cap_ns - step);
 	}

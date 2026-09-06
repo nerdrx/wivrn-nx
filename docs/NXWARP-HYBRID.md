@@ -1072,3 +1072,130 @@ large parallax). For re-running the patch-source gate, **`wivrn-vrchat-1440` is
 the one that matters**: it is the content class expected to set the bitrate
 floor, and therefore the one most likely to push a base tile below the 35 dB
 gate boundary the gate found.
+
+### 13.4 The capture procedure, exactly
+
+Runnable as written. Derived from `tools/quality/capture/wivrn_capture.py plan`
+and `tools/quality/README.md` §1c, which are the authority; the additions here
+are the three things that document does not know about this branch (the eye
+pairing, the `stream_scale` cap, and the arithmetic for a take that fits).
+
+A person must be in the headset: there is no headless or fake-driver mode
+(`XRT_BUILD_DRIVER_SIMULATED OFF` in `server/CMakeLists.txt`), the compositor
+path only runs with a real client connected and an OpenXR app submitting
+layers, and the content has to be played.
+
+**Step 1 — server configuration.** `$HOME/.config/wivrn/config.json` (or
+`$HOME/.var/app/io.github.wivrn.wivrn/config/wivrn/config.json` for the
+flatpak). Back up the existing file first; this is a capture configuration and
+is not what anyone wants to stream with.
+
+```json
+{
+    "encoder": "raw",
+    "stream_scale": 1.0,
+    "foveation_strength": 0,
+    "foveation_adaptive": false,
+    "mirror": false,
+    "bit-depth": 8
+}
+```
+
+* `"encoder": "raw"` is the uncompressed encoder (`video_encoder_raw.cpp`,
+  8-bit only). It is what makes the dump a frame rather than a bitstream.
+* **`"encoder": "raw"` also settles the eye pairing**, and this is the caution
+  the upstream recipe cannot contain: `encoder_settings.cpp`'s `stereo-frame`
+  pairs the eyes only when **both** eye streams are `video_codec::nxwarp`
+  (`both_nxwarp`), so with the raw encoder the pairing declines on its own and
+  the dump is per-eye. If you capture with an nxwarp encoder instead, stream 0
+  is the **pair**, `dump-0.yuv` is `2*width x height` side by side, and the
+  `--w/--h` you pass to `convert` below would be wrong. With `raw` there is
+  nothing to remember.
+* `stream_scale 1.0` plus `render_scale 1.0` and `foveation_strength 0` is what
+  degenerates the foveation LUT to an identity — `foveation::compute_params`
+  emits a 1:1 LUT when the encode extent is at least the source view extent.
+  Frames captured without this "are not comparable with anything"
+  (`corpus/README.md`).
+
+**Step 2 — headset-side toggles**, in the headset's own settings, not the
+server config: `render_scale` 1.0, **FSR1 off**, **motion smoothing off**.
+Motion smoothing synthesises frames (`motion_warp_commit`) and a synthesised
+frame is not a render target; it must not enter a codec test.
+
+**Step 3 — run the server with the three dump variables.**
+
+```sh
+S=/run/media/nerdrx/Lex/claude/nx-scratch/capture
+mkdir -p "$S"
+WIVRN_DUMP_VIDEO="$S/dump" \
+WIVRN_DUMP_TIMINGS="$S/timings.csv" \
+WIVRN_DUMP_HEAD="$S/head.csv" \
+  wivrn-server
+```
+
+`WIVRN_DUMP=list` prints the device names the build can dump, if
+`WIVRN_DUMP_HEAD` turns out to be the wrong suffix. This produces
+`dump-0.yuv` and `dump-1.yuv` (left and right eye), each a sequence of **NV12**
+frames at the encode resolution, plus the two CSVs.
+
+**Step 4 — connect, run VRChat, play for the take.** Then stop the server so
+the files are closed.
+
+**Step 5 — expected sizes, so the take is chosen deliberately.** At 1440×1440
+NV12 a frame is `1440*1440*3/2` = **3 110 400 B ≈ 3.11 MB**, so per eye at
+90 fps:
+
+| take | per eye | both eyes |
+|---|---|---|
+| 10 s | 2.8 GB | 5.6 GB |
+| **30 s** | **8.4 GB** | **16.8 GB** |
+| 60 s | 16.8 GB | 33.6 GB |
+
+`nx-scratch` is on the Lex NVMe with ~366 GB free (it is *not* tmpfs), so any
+of these fits. **30 s of one eye is enough to re-run the patch-source gate** —
+that gate's whole evaluation window was 12 frames — and 60 s is what
+PAPER 2.11 item 1 asks for if the recording is to serve the parity kill test
+too. The frames also traverse the network at ~280 MB/s per eye, so this is a
+loopback or short-run exercise.
+
+**Step 6 — convert, with the resolution the server actually logged.** Do not
+assume 1440; read it from the server's startup log (`stream 0 encodes WxH per
+eye`) or from `ls -l dump-0.yuv` divided by `frames * 1.5`.
+
+```sh
+cd /run/media/nerdrx/Lex/claude/nx-warp/tools/quality
+export NXW_CORPUS=/run/media/nerdrx/Lex/claude/nx-scratch/nx-warp/corpus
+python3 capture/wivrn_capture.py convert --in "$S/dump-0.yuv" --w 1440 --h 1440 \
+    --out "$NXW_CORPUS" --name wivrn-vrchat-1440 --pix yuv420p,yuv444p
+python3 capture/wivrn_capture.py poses --timings "$S/timings.csv" \
+    --head "$S/head.csv" --out "$NXW_CORPUS/wivrn-vrchat-1440.poses.json"
+cd /run/media/nerdrx/Lex/claude/nx-warp
+python3 corpus/fetch.py --record --only wivrn-vrchat-1440
+```
+
+`convert` de-interleaves NV12 into planar 4:2:0 and replicates chroma for a
+4:4:4 copy. `poses` joins the frame-indexed timing CSV to the pose track by
+timestamp — `head.csv` is sampled at its own rate, not one row per frame — and
+warns when the nearest pose sample for a frame is more than a frame time away.
+`fetch.py --record` writes the frame count and hashes into `MANIFEST.json`,
+which is what turns the entry's `"frames": 0` into a real one.
+
+**Step 7 — restore the configuration.** `raw` is uncompressed and
+`foveation_strength 0` is not a streaming setting.
+
+Independent confirmation of §9 worth noting: `tools/quality/README.md` §1c
+states the dumped frame is "BT.709 **full range** with an sRGB transfer already
+applied", reached from the WiVRn side without reference to this work. That is
+the same conclusion §9 draws from `foveation.comp`, and it is why the base
+layer must be encoded full-range.
+
+**Then re-run the gate**, which needs no further capture work:
+
+```sh
+cd /run/media/nerdrx/Lex/claude/wivrn-nx-hybrid/hybrid-proto/gate
+# point the fixtures at the new sequence and re-run mkbase2.sh / final.sh / table2.py
+```
+
+The number to watch is the gate pass fraction at QP 22. On the two synthetic
+fixtures it was 100.0 % with the worst tile 1.9 dB clear of the boundary; the
+gate bites near 35 dB, and VRChat is the content class expected to reach it.

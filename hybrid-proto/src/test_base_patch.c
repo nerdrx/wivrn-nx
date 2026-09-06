@@ -38,8 +38,11 @@
 		}                                                                     \
 	} while (0)
 
-#define EW 256           // per-eye width  (4 tiles)
-#define EH 192           // per-eye height (3 tiles)
+// Per-eye extent. The default is a small correctness fixture (4x3 tiles); the
+// pricing wants a real one, so --size WxH overrides it (1088x1088 is Part I's
+// and the gate's geometry, 17x17 tiles per eye).
+static int EW = 256;
+static int EH = 192;
 #define EYES 2
 
 static VkInstance inst;
@@ -57,6 +60,15 @@ static VkDescriptorPool dpool;
 static VkDescriptorSet dset;
 
 static nxbp_layout L;
+static VkQueryPool qpool;
+static float ts_period;
+static int bench_iters = 0;
+
+static int cmpd(const void * a, const void * b)
+{
+	double x = *(const double *)a, y = *(const double *)b;
+	return x < y ? -1 : x > y;
+}
 
 struct pc_t {
 	int32_t baseSize[2];
@@ -206,6 +218,27 @@ static VkPipeline mkpipe(const char * path)
 int main(int argc, char ** argv)
 {
 	const char * spvdir = argc > 1 ? argv[1] : "build";
+	// --bench N repeats each variant N times with GPU timestamps, which is the
+	// atlas-format pricing ATLAS-DECODER.md's open question asks for. The store
+	// paths are the only thing that differs between the variants, so this
+	// prices them without needing MediaCodec or an AHardwareBuffer -- the AHB
+	// import and its channel order are measured separately (Part I 3.2, 3.3).
+	for (int i = 2; i < argc; i++)
+	{
+		if (!strcmp(argv[i], "--bench") && i + 1 < argc)
+			bench_iters = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--size") && i + 1 < argc)
+		{
+			int w = 0, h = 0;
+			if (sscanf(argv[++i], "%dx%d", &w, &h) != 2 || w % 64 || h % 64 || w <= 0 || h <= 0)
+			{
+				fprintf(stderr, "--size WxH: both must be positive multiples of 64\n");
+				return 2;
+			}
+			EW = w;
+			EH = h;
+		}
+	}
 
 	// ---- device
 	VkApplicationInfo ai = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -248,6 +281,12 @@ int main(int argc, char ** argv)
 	                                   .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
 	                                   .commandBufferCount = 1};
 	VKC(vkAllocateCommandBuffers(dev, &cba, &cb));
+	{
+		VkQueryPoolCreateInfo qp = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+		                            .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 2};
+		VKC(vkCreateQueryPool(dev, &qp, NULL, &qpool));
+		ts_period = props.limits.timestampPeriod;
+	}
 
 	// ---- the ycbcr conversion: identical configuration to the Android path
 	VkSamplerYcbcrConversionCreateInfo cc = {
@@ -493,6 +532,50 @@ int main(int argc, char ** argv)
 			fails++;
 		}
 		if (tbad) fails++;
+	}
+
+	// ---- pricing: time each variant's dispatch alone
+	if (bench_iters > 0)
+	{
+		printf("  --- atlas store pricing, %d iterations, %d patches (%d tiles/eye x %d eyes)\n",
+		       bench_iters, npatch, L.cols_per_eye * L.rows, EYES);
+		double * v = malloc(sizeof(double) * bench_iters);
+		for (int s = 0; s < 3; s++)
+		{
+			for (int it = 0; it < bench_iters; it++)
+			{
+				begin();
+				vkCmdResetQueryPool(cb, qpool, 0, 2);
+				if (it == 0)
+				{
+					barrier(atlas16.i, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+					        VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT);
+					barrier(atlas8.i, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+					        VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT);
+				}
+				vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, qpool, 0);
+				vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[s]);
+				vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, plyt, 0, 1, &dset, 0, NULL);
+				vkCmdPushConstants(cb, plyt, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
+				vkCmdDispatch(cb, NXBP_TILE / 2 / 16, NXBP_TILE / 16, npatch);
+				vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qpool, 1);
+				submit();
+				uint64_t ts[2] = {0, 0};
+				if (vkGetQueryPoolResults(dev, qpool, 0, 2, sizeof ts, ts, sizeof ts[0],
+				                          VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS)
+					v[it] = (double)(ts[1] - ts[0]) * ts_period / 1e6;
+				else
+					v[it] = 0;
+			}
+			qsort(v, bench_iters, sizeof(double), cmpd);
+			double sum = 0;
+			for (int i = 0; i < bench_iters; i++) sum += v[i];
+			const char * nm = s == 0 ? "SSBO u16 pairs" : (s == 1 ? "R16_UINT image " : "R8_UNORM image ");
+			printf("  STORE=%d %s  mean %.4f ms  p50 %.4f  min %.4f  | per tile %.2f us\n",
+			       s, nm, sum / bench_iters, v[bench_iters / 2], v[0],
+			       (sum / bench_iters) * 1000.0 / npatch);
+		}
+		free(v);
 	}
 
 	// ---- the swizzle must actually be consumed

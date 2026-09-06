@@ -756,7 +756,43 @@ not a reason to refuse to start.
 
 ---
 
-## 5. What works, and what does not
+## 5. Device landmines
+
+Things the hardware does that no specification made us expect, each of which cost real
+time before it was understood. Written down so the next one is a grep.
+
+### The Adreno 650 refuses a 208-byte push-constant block
+
+The reprojection pass's push constants grew from **176 to 208 bytes** and the Pico 4's
+Adreno 650 began failing `vkCreateGraphicsPipelines` on the first streamed frame. The
+client exited; from the server the client had simply vanished, which reads as a network
+fault. It was variously blamed on the encoder, the link and the merge before it was
+blamed on the pipeline.
+
+`maxPushConstantsSize` on this device is **256 bytes** and the Vulkan guaranteed minimum
+is 128, so 208 is legal by every number anyone would look up. It is still refused in this
+pipeline. 176 works.
+
+The client now logs the limit at startup, next to the driver version:
+
+```
+    maxPushConstantsSize: 256 bytes
+```
+
+which is worth having precisely because the number does not predict the failure -- what it
+gives you is the one line to compare against the block size when a pipeline creation
+fails for no reason the validation layers explain. The block itself has a `static_assert`
+tripwire so growing it past what has been proven on hardware stops the build instead of
+the session.
+
+### The timeline semaphore that is advertised and cannot be created
+
+The same driver advertises `VK_KHR_timeline_semaphore` and then returns `VK_INCOMPLETE`
+from `vkCreateSemaphore` for one. The NX Warp decoder falls back to host fencing, which is
+why `decoupled_display` measures identical on this device with the setting on and off:
+both paths end at the same fallback. See the decoupled A/B in the session reports.
+
+## 5b. What works, and what does not
 
 Works, end to end, in process:
 

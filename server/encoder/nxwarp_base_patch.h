@@ -43,14 +43,17 @@
 //      "a tile's source address is its destination address plus offset" is
 //      only true once this has been done.
 //
-// A REPORTED GAP.  nxvc publishes no query for the ring-slot layout, so
-// nxwarp_codec_vk::atlas_layout() reproduces nxvw_ring_layout() from nx-warp's
-// private vk/decoder/inter/inter_layout.h -- the same duplication
-// hybrid-proto/src/base_patch_layout.h carries, with the same rule: if the two
-// disagree, nx-warp's header is right and this is the bug.  It is duplicated
-// rather than included so the server does not take a build dependency on the
-// decoder's private headers.  A public accessor on the encoder would delete
-// this whole hazard and is worth asking for.
+// WHERE THE LAYOUT COMES FROM.  The encoder, via
+// nxvc_vk_encoder_atlas_layout(), out of the same RingLayout its own region
+// builder uses -- so the offsets, strides and tile extents here are not a
+// second derivation that could drift from the library's.  This file used to
+// reproduce nxvw_ring_layout() from the decoder's private inter_layout.h, as
+// hybrid-proto/src/base_patch_layout.h still does; that copy is gone.
+//
+// One rule the accessor is explicit about and this staging obeys: a tile is
+// clipped WITHIN ITS EYE, against the per-eye plane width, never against the
+// pair's full span -- otherwise a short last column of the left eye runs into
+// the first column of the right.
 //
 // WHAT IS NOT HERE.  Nothing routes an encoded base access unit from stream 1
 // to stream 0 yet, and there is no HEVC decode on the server at all: the

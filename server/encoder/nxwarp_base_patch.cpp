@@ -116,12 +116,19 @@ bool base_patcher::stage(const base_picture & pic)
 			{
 				// The source row runs across the pair, so eye e starts at
 				// column e * pw of it; the destination puts that eye at
-				// column e * pw of a stride-padded row. Same arithmetic on
-				// both sides, which is the whole reason the API can then say
-				// a tile's source address is its destination address plus an
-				// offset.
+				// eye_stride samples per eye into a stride-padded row. Same
+				// arithmetic on both sides, which is the whole reason the API
+				// can then say a tile's source address is its destination
+				// address plus an offset.
+				//
+				// The x loop runs to this EYE's width, never to the pair's
+				// span. That is the same rule the encoder's own copies follow
+				// -- a picture that is not a whole number of tiles has a short
+				// last column, and clipping pair-wide would run the left eye's
+				// remainder into the first column of the right one.
 				const uint8_t * s = src + row * sstride + size_t(e) * pw;
-				uint16_t * d = dst + size_t(row) * L.stride[p] + size_t(e) * pw;
+				uint16_t * d = dst + size_t(row) * L.stride[p] +
+				               size_t(e) * L.eye_stride[p];
 				// Zero-extend, not a range conversion: the base is encoded
 				// full-range BT.709 precisely so that this is the identity.
 				for (uint32_t x = 0; x < pw; ++x)

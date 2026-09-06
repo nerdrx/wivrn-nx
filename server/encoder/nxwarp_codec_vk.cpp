@@ -421,36 +421,38 @@ public:
 		return atlas;
 	}
 
-	// nxvc publishes no query for the ring-slot layout, so this reproduces
-	// nxvw_ring_layout() from vk/decoder/inter/inter_layout.h. See the header
-	// note in nxwarp_base_patch.h for why that is a reported gap and not a
-	// design: if the two ever disagree, nx-warp's header is right.
+	// Straight from the encoder. This used to reproduce nxvw_ring_layout() out
+	// of the decoder's private inter_layout.h, with a note saying that if the
+	// two ever disagreed the library was right and this was the bug. The library
+	// now says it itself, from the same RingLayout its own region builder uses,
+	// so there is no second copy left to drift.
 	bool atlas_layout(atlas_slot_layout & L) const override
 	{
 		if (not atlas)
 			return false;
-		const uint32_t cw = width / 2, ch = height / 2;
+		nxvc_vke_atlas_layout a{};
+		if (nxvc_vk_encoder_atlas_layout(enc, &a) != NXVC_VKE_OK)
+			return false;
 		L = {};
-		L.planes = 3;
-		uint32_t o = 0;
-		for (uint32_t p = 0; p < 4; ++p)
+		L.planes = a.plane_count;
+		for (uint32_t p = 0; p < 4 and p < a.plane_count; ++p)
 		{
-			const uint32_t pw = (p == 1 or p == 2) ? cw : width;
-			const uint32_t ph = (p == 1 or p == 2) ? ch : height;
-			L.off[p] = o;
-			// The eye pair's width rounded up to an even number of samples, so
-			// that every row starts on the uint boundary the ring's packed-u16
-			// stores address.
-			L.stride[p] = (pw * eyes + 1) & ~1u;
-			L.plane_w[p] = pw;
-			L.plane_h[p] = ph;
-			if (p < L.planes)
-				o += L.stride[p] * ph;
+			L.off[p] = a.plane[p].offset_u16;
+			L.stride[p] = a.plane[p].stride_u16;
+			L.plane_w[p] = a.plane[p].width;
+			L.plane_h[p] = a.plane[p].height;
+			// Kept separate from plane_w even though the header says they are
+			// equal today: it is what the staging advances by per eye, and
+			// spelling it as its own number means a layout that ever pads
+			// between the eyes moves this code by nothing.
+			L.eye_stride[p] = a.plane[p].eye_stride;
+			L.tile_extent[p] = a.plane[p].tile_extent;
 		}
-		L.slot_u16 = o;
-		L.cols_per_eye = cols / eyes;
-		L.rows = rows;
-		L.cols = cols;
+		L.slot_u16 = a.slot_bytes / (a.bytes_per_sample ? a.bytes_per_sample : 2);
+		L.slot_bytes = a.slot_bytes;
+		L.cols_per_eye = a.tiles_x;
+		L.rows = a.tiles_y;
+		L.cols = a.tiles_x * a.eyes;
 		return true;
 	}
 

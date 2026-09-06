@@ -375,17 +375,21 @@ public:
 	}
 
 	// The shape of one reference-ring slot, which is the shape the staging
-	// buffer must already be in. nxvc has no public query for this -- see the
-	// note in nxwarp_base_patch.h -- so the backend that knows the layout
-	// states it here rather than every caller reproducing it.
+	// buffer must already be in. Reported by the encoder itself
+	// (nxvc_vk_encoder_atlas_layout), from the same RingLayout its own region
+	// builder uses, so there is no copy of the arithmetic on this side to
+	// disagree with it.
 	struct atlas_slot_layout
 	{
 		uint32_t off[4]{};     // plane offset, u16 elements into the slot
 		uint32_t stride[4]{};  // plane row stride, u16 elements
-		uint32_t plane_w[4]{}; // PER-EYE plane width, samples
+		uint32_t plane_w[4]{};     // PER-EYE plane width, samples
 		uint32_t plane_h[4]{};
+		uint32_t eye_stride[4]{};  // samples to advance per eye
+		uint32_t tile_extent[4]{}; // tile side in samples: 64 luma, 32 chroma
 		uint32_t planes = 0;
-		uint32_t slot_u16 = 0; // u16 elements one slot occupies
+		uint32_t slot_u16 = 0;     // u16 elements one slot occupies
+		uint32_t slot_bytes = 0;
 		uint32_t cols_per_eye = 0, rows = 0, cols = 0;
 	};
 	virtual bool atlas_layout(atlas_slot_layout &) const

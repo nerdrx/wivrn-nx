@@ -1038,9 +1038,54 @@ struct render_probe
 // Clamped once here rather than at each of the three places that need it: the swapchain,
 // the layer rect and the pass's own viewport must agree exactly or the picture is cropped
 // instead of scaled.
-float scenes::stream::defoveate_scale() const
+float scenes::stream::resolve_defoveate_scale(
+        const std::array<wivrn::to_headset::foveation_parameter, view_count> & foveation) const
 {
-	return std::clamp(application::get_config().defoveate_scale, 0.4f, 1.0f);
+	const float cfg = application::get_config().defoveate_scale;
+	if (cfg > 0.f)
+		return std::clamp(cfg, 0.4f, 1.0f);
+
+	// AUTO. The pass's output is the size the stream already is, so it does no
+	// enlargement: a 1088x1088 stream is drawn at 1088x1088 and the runtime's
+	// compositor performs the one resampling it was always going to perform when it
+	// timewarps the layer. Measured on a Pico 4, this is the difference between
+	// 2160x2160 per eye at 8.4 ms a frame and 1080x1080 at 2.7 ms, with the render
+	// loop going from 34 to 73 iterations a second.
+	//
+	// The stream's per-eye size is the decoded image in hand, not anything configured:
+	// stream_scale, a mid-session renegotiation and a server that simply chose
+	// something else all arrive the same way. With no frame yet there is nothing to
+	// match, and the pass falls back to the defoveated size it has always used.
+	float s = 1.f;
+	bool have_any = false;
+	for (size_t i = 0; i < view_count; ++i)
+	{
+		const auto & h = current_blit_handles[i];
+		if (not h or h->extent.width == 0 or h->extent.height == 0)
+			continue;
+		const auto full = stream_defoveator::defoveated_size(foveation[i]);
+		if (full.width <= 0 or full.height <= 0)
+			continue;
+		// PER EYE, which is not the same as the decoded image: with both eyes in one
+		// stream the decoder's pool image is eyes*width wide and the handle's extent
+		// is the pair. Matching the pass's output to THAT would ask it to draw one
+		// eye at the width of two.
+		const uint32_t eye_w = eyes_in_one_stream() ? video_stream_description->width
+		                                            : h->extent.width;
+		if (eye_w == 0)
+			continue;
+		have_any = true;
+		// The smaller of the two ratios, so neither axis is ever enlarged. One
+		// scalar for both axes because the viewport and the swapchain take one.
+		s = std::min({s,
+		              float(eye_w) / float(full.width),
+		              float(h->extent.height) / float(full.height)});
+	}
+	if (not have_any)
+		return 1.f;
+	// The same floor an explicit value gets: below this the compositor is asked to
+	// enlarge by more than 2.5x and the periphery starts to show it.
+	return std::clamp(s, 0.4f, 1.0f);
 }
 
 void scenes::stream::render(const XrFrameState & frame_state)
@@ -1365,13 +1410,16 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	    state_ == state::reconnecting)
 	{
 		g_rp.gated_out++; // counted as "the gate LET IT THROUGH"; see the report line
+		// Resolved once, here, before anything is sized with it: the swapchain, the
+		// layer rect and the pass's viewport all read the member below.
+		defoveate_scale_ = resolve_defoveate_scale(foveation);
 		XrExtent2Di extents[view_count];
 		{
 			int32_t max_width = 0;
 			int32_t max_height = 0;
 			for (size_t i = 0; i < view_count; ++i)
 			{
-				extents[i] = stream_defoveator::defoveated_size(foveation[i], defoveate_scale());
+				extents[i] = stream_defoveator::defoveated_size(foveation[i], defoveate_scale_);
 				max_width = std::max(max_width, extents[i].width);
 				max_height = std::max(max_height, extents[i].height);
 			}
@@ -1401,6 +1449,12 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			}
 		}
 		assert(swapchain);
+		// Every frame, not only when the swapchain is rebuilt. At auto the scale moves
+		// when the stream's size does, and the swapchain is only ever rebuilt when it
+		// is too SMALL -- so a scale that shrank would leave the pass laying its
+		// viewport out at the old size while the layer rect used the new one, which
+		// crops the picture rather than scaling it.
+		defoveator->set_output_scale(defoveate_scale_);
 
 		// Packed defoveated size per view, for the vsync cache signature below.
 		const std::array<int32_t, 2 * view_count> extents_packed{
@@ -1941,7 +1995,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		spdlog::info("render: this app's own GPU pass {:.1f} ms per iteration", g_rp.app_gpu_ms / n);
 		spdlog::info("render: defoveate {}x{} per eye x2 = {:.2f} Mpx/frame at scale {:.2f} atlas-mode {}; {} re-presented from the cache (reduce_gpu_load {})",
 		             g_rp.out_w, g_rp.out_h,
-		             2.0 * double(g_rp.out_w) * double(g_rp.out_h) / 1e6, defoveate_scale(),
+		             2.0 * double(g_rp.out_w) * double(g_rp.out_h) / 1e6, defoveate_scale_,
 		             application::get_config().atlas_prototype,
 		             g_rp.cache_hits, g_rp.reduce_gpu_load ? "on" : "off");
 		spdlog::info("render: shader path sharpness {:.2f} fsr {} alpha {} motion {} blend {} glow {:.2f} vignette {:.2f} deband {:.2f}",
@@ -2073,7 +2127,7 @@ void scenes::stream::setup_reprojection_swapchain(uint32_t swapchain_width, uint
 	        swapchain.format());
 	// The pass must lay its viewport out with the same scale the swapchain and the
 	// layer rect were sized with, or the picture is cropped rather than scaled.
-	defoveator->set_output_scale(defoveate_scale());
+	defoveator->set_output_scale(defoveate_scale_);
 }
 
 scene::meta & scenes::stream::get_meta_scene()

@@ -259,8 +259,16 @@ private:
 
 	static bool is_interactable(stream_tab);
 	bool is_gui_interactable() const;
-	// configuration::defoveate_scale, clamped. See that field.
-	float defoveate_scale() const;
+	// configuration::defoveate_scale resolved for this frame: the configured value
+	// clamped, or, at the default of 0, the scale that makes the pass's output equal
+	// the stream's own per-eye size. See that field.
+	//
+	// Computed once per frame and remembered, because the swapchain, the layer rect
+	// and the pass's own viewport must all be sized with the SAME number or the
+	// picture is cropped instead of scaled -- and at auto the number depends on the
+	// decoded frames in hand, which change under it.
+	float defoveate_scale_ = 1.0f;
+	float resolve_defoveate_scale(const std::array<wivrn::to_headset::foveation_parameter, view_count> & foveation) const;
 
 	// settings sub-page, client-only: the wire stream_tab stays settings
 	enum class settings_page

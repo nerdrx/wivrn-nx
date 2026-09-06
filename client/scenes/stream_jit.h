@@ -242,7 +242,21 @@ struct jit_scheduler
 		// across a refresh boundary it would otherwise have made: the submission moved
 		// by less than the distance between boundaries. So that is the bar. It keeps
 		// every miss the schedule can actually cause, and drops the ones it cannot.
+		//
+		// The second half of the same question, and the one the device asked next: a
+		// loop whose PASS costs more than a refresh period cannot hold the display
+		// rate no matter when it starts. Measured on server69, the display pass costs
+		// 22-33 ms against an 11.1 ms period -- it blocks on the fence for the previous
+		// submission, which is coupled to a decode costing 16-30 ms of GPU. The
+		// runtime's predicted display time then advances two or three periods every
+		// single iteration, `period_jump` is true on all of them, and the ratchet
+		// walked the cap from 45 ms to 0.5 ms attributing to the sleep a skip that the
+		// pass had already made inevitable.
+		//
+		// So a skipped refresh is only the schedule's to answer for when the pass could
+		// have made that refresh in the first place.
 		const int64_t attributable = period > 0 ? period : margin_skip_step_ns;
+		const bool pass_could_have_kept_up = period <= 0 or cost < period;
 		if (slept_ns >= attributable)
 		{
 			int64_t widen = 0;
@@ -266,7 +280,7 @@ struct jit_scheduler
 			// is one frame too deep, so this only moves the cap -- by a whole
 			// refresh period, so a wrong guess about the depth is corrected in as
 			// many frames as the guess was periods out.
-			if (period_jump)
+			if (period_jump and pass_could_have_kept_up)
 			{
 				++missed_skipped;
 				ratchet(period);

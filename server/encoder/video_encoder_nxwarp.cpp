@@ -17,6 +17,8 @@
  */
 
 #include "video_encoder_nxwarp.h"
+
+#include "nxwarp_stats.h"
 #include <chrono>
 
 #include "nxwarp_packetize.h"
@@ -28,13 +30,13 @@
 
 #include <algorithm>
 #include <charconv>
-#include <cstdlib>
 #include <cmath>
+#include <cstdlib>
 #include <format>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
-#include <span>
 #include <utility>
 
 namespace
@@ -171,11 +173,22 @@ entropy_request nxwarp_entropy_from(const std::string & v)
 std::string nxwarp_tools_string(uint64_t m)
 {
 	static constexpr std::pair<int, const char *> names[] = {
-	        {0, "INTRA_DC_PLANE"}, {1, "TRANSFORM_SKIP"}, {2, "RES_LEVEL"},
-	        {3, "CHROMA444"}, {6, "CUSTOM_TABLES"}, {7, "NSUB_VAR"},
-	        {10, "INTER"}, {11, "WARP"}, {17, "INTRA_DIR"}, {20, "WM_ID"},
-	        {21, "CTX_V2"}, {22, "SIGN_HIDE"}, {25, "CTX_V3"}, {26, "TAB_V2"},
-	        {27, "XFORM_LARGE"}, {30, "ENTROPY_LITE"},
+	        {0, "INTRA_DC_PLANE"},
+	        {1, "TRANSFORM_SKIP"},
+	        {2, "RES_LEVEL"},
+	        {3, "CHROMA444"},
+	        {6, "CUSTOM_TABLES"},
+	        {7, "NSUB_VAR"},
+	        {10, "INTER"},
+	        {11, "WARP"},
+	        {17, "INTRA_DIR"},
+	        {20, "WM_ID"},
+	        {21, "CTX_V2"},
+	        {22, "SIGN_HIDE"},
+	        {25, "CTX_V3"},
+	        {26, "TAB_V2"},
+	        {27, "XFORM_LARGE"},
+	        {30, "ENTROPY_LITE"},
 	};
 	std::string out;
 	uint64_t left = m;
@@ -406,6 +419,15 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 			break;
 	}
 
+	// The same three facts the log states once, kept so every two-second report can carry
+	// them: a status page must not depend on having been open when the session started.
+	stats_entropy_name = codec_cfg.entropy == nxwarp_codec_config::entropy_t::lite ? "lite" : "rans";
+	stats_entropy_was_auto = entropy_req == entropy_request::automatic;
+	stats_negotiated_tools = client_tools;
+	encode_scale_reported = settings.encode_scale;
+	stats_width = settings.width;
+	stats_height = settings.height;
+
 	const std::string backend = option_string(settings.options, "backend", "ref");
 	if (backend == "ref")
 	{
@@ -565,7 +587,10 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 
 	const std::string rc_desc =
 	        rc_auto ? std::format("rate control from QP {} in {}..{} at {:.0f} Hz",
-	                              current_qp, rc_min_qp, rc_max_qp, rc_fps)
+	                              current_qp,
+	                              rc_min_qp,
+	                              rc_max_qp,
+	                              rc_fps)
 	                : std::format("fixed QP {}", base_qp);
 
 	const std::string pace_desc =
@@ -574,7 +599,8 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	                : (pace_mode == pace_mode_t::fixed
 	                           ? std::format("paced at a fixed {:.1f} fps", 1.0 / pace_interval)
 	                           : std::format("send pacing follows the headset's decode cost, {:.0f}..{:.0f} fps",
-	                                         1.0 / pace_max_interval, 1.0 / pace_min_interval));
+	                                         1.0 / pace_max_interval,
+	                                         1.0 / pace_min_interval));
 
 	U_LOG_I("nxwarp: stream %d %ux%u, %s, %s, %s, %ux%u tiles in %u band(s), %zu bytes per transport tile",
 	        int(stream_idx),
@@ -1524,12 +1550,17 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				U_LOG_I("nxwarp: stream %d encoded %llu frames in %.1f s: %.1f ms/frame (max %.1f), "
 				        "%.0f B/frame vs %.0f target (%+.0f%%), QP %.1f [%u..%u], "
 				        "controller allows %.1f Mbit/s%s%s",
-				        int(stream_idx), (unsigned long long)prof_n,
+				        int(stream_idx),
+				        (unsigned long long)prof_n,
 				        std::chrono::duration<double>(t_enc1 - prof_since).count(),
-				        prof_ms / prof_n, prof_max_ms,
-				        achieved, rc_target_bytes,
+				        prof_ms / prof_n,
+				        prof_max_ms,
+				        achieved,
+				        rc_target_bytes,
 				        100.0 * (achieved - rc_target_bytes) / rc_target_bytes,
-				        mean_qp, unsigned(prof_qp_lo), unsigned(prof_qp_hi),
+				        mean_qp,
+				        unsigned(prof_qp_lo),
+				        unsigned(prof_qp_hi),
 				        // What the session's bitrate controller currently allows this
 				        // stream, which is the number every other line here is derived
 				        // from and the one that is missing when the picture is worse
@@ -1543,9 +1574,13 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 			else
 				U_LOG_I("nxwarp: stream %d encoded %llu frames in %.1f s: %.1f ms/frame (max %.1f), "
 				        "%.0f B/frame at fixed QP %u%s",
-				        int(stream_idx), (unsigned long long)prof_n,
+				        int(stream_idx),
+				        (unsigned long long)prof_n,
 				        std::chrono::duration<double>(t_enc1 - prof_since).count(),
-				        prof_ms / prof_n, prof_max_ms, achieved, unsigned(current_qp),
+				        prof_ms / prof_n,
+				        prof_max_ms,
+				        achieved,
+				        unsigned(current_qp),
 				        pace_note.c_str());
 			// What the headset threw away since the last report, and why. Not on
 			// the line above: it is usually zero, and when it is not it is the
@@ -1557,8 +1592,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 			{
 				const uint64_t already = answered - not_held_answered_reported;
 				not_held_answered_reported = answered;
-				static constexpr const char * why_name[] = {"a hole", "the decode stride",
-				                                            "the worker backlog", "a codec refusal"};
+				static constexpr const char * why_name[] = {"a hole", "the decode stride", "the worker backlog", "a codec refusal"};
 				const uint8_t w = last_not_held_why.load();
 				U_LOG_I("nxwarp: stream %d the headset did not reconstruct %llu frame(s) since the "
 				        "last report; %llu of them cost an all-intra frame and %llu named a frame "
@@ -1572,6 +1606,76 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				        w < 4 ? why_name[w] : "an unknown cause");
 				not_held_reported = nh;
 			}
+			// The same window, published rather than logged. The user's rule is that
+			// nothing should need reading a log, and every number above is one a
+			// session actually needs. Built here, at the end of the block, so it
+			// reports exactly the window that was just logged and the counters below
+			// are reset once for both.
+			{
+				nxwarp_stream_stats st;
+				st.stream_index = uint8_t(stream_idx);
+				st.window_seconds = float(std::chrono::duration<double>(t_enc1 - prof_since).count());
+				st.frames_encoded = prof_n;
+				st.encode_ms_mean = float(prof_ms / prof_n);
+				st.encode_ms_max = float(prof_max_ms);
+				st.bytes_per_frame = float(achieved);
+				st.target_bytes_per_frame = rc_auto ? float(rc_target_bytes) : 0.f;
+				st.qp_mean = float(mean_qp);
+				st.qp_min = uint8_t(prof_qp_lo);
+				st.qp_max = uint8_t(prof_qp_hi);
+				st.rc_auto = rc_auto;
+				st.rc_unreachable = rc_unreachable;
+				st.controller_bitrate_bps = rc_bitrate;
+				st.pace_mode = pace_mode == pace_mode_t::off
+				                       ? nxwarp_pace_report::off
+				                       : (pace_mode == pace_mode_t::fixed
+				                                  ? nxwarp_pace_report::fixed
+				                                  : nxwarp_pace_report::automatic);
+				st.paced_fps = pace_interval > 0 ? float(1.0 / pace_interval) : 0.f;
+				st.client_decode_ms =
+				        float(client_decode_us.load(std::memory_order_relaxed)) / 1000.f;
+				st.frames_not_sent = prof_paced_out;
+
+				// Not-held, over the same window as everything else: the deltas
+				// against what the previous report already accounted for.
+				const uint64_t nh_now = not_held_total.load(std::memory_order_relaxed);
+				const uint64_t ans_now = not_held_already_answered.load(std::memory_order_relaxed);
+				st.not_reconstructed = nh_now - not_held_reported_stats;
+				const uint64_t answered_delta = ans_now - not_held_answered_stats;
+				st.not_reconstructed_costly =
+				        st.not_reconstructed > answered_delta
+				                ? st.not_reconstructed - answered_delta
+				                : 0;
+				not_held_reported_stats = nh_now;
+				not_held_answered_stats = ans_now;
+
+				// The reason that accounts for most of this window's, not merely
+				// the last one seen: "60 frames, mostly the decode stride" and
+				// "60 frames, mostly holes" call for opposite actions.
+				uint64_t best = 0;
+				st.dominant_reason = nxwarp_not_held_reason::unknown;
+				for (size_t i = 0; i < not_held_by_reason.size(); ++i)
+				{
+					const uint64_t now = not_held_by_reason[i].load(std::memory_order_relaxed);
+					const uint64_t delta = now - not_held_by_reason_reported[i];
+					not_held_by_reason_reported[i] = now;
+					if (delta > best)
+					{
+						best = delta;
+						st.dominant_reason = nxwarp_not_held_reason(i);
+					}
+				}
+				st.dominant_reason_count = best;
+
+				st.entropy = stats_entropy_name;
+				st.entropy_was_auto = stats_entropy_was_auto;
+				st.negotiated_tools = stats_negotiated_tools;
+				st.encoded_width = stats_width;
+				st.encoded_height = stats_height;
+				st.encode_scale = encode_scale_reported;
+				publish_nxwarp_stats(st);
+			}
+
 			prof_n = 0;
 			prof_ms = 0;
 			prof_max_ms = 0;
@@ -1731,7 +1835,8 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 }
 
 void wivrn::video_encoder_nxwarp::on_nxwarp_frame_not_held(
-        uint16_t frame_id, from_headset::nxwarp_frame_not_held::reason why)
+        uint16_t frame_id,
+        from_headset::nxwarp_frame_not_held::reason why)
 {
 	// Network thread. Nothing here but the flags: the receipt map is the encode
 	// thread's, and the next encode() is the only place it may be touched.
@@ -1746,6 +1851,8 @@ void wivrn::video_encoder_nxwarp::on_nxwarp_frame_not_held(
 	{
 		not_held_total.fetch_add(1, std::memory_order_relaxed);
 		not_held_already_answered.fetch_add(1, std::memory_order_relaxed);
+		if (uint8_t(why) < not_held_by_reason.size())
+			not_held_by_reason[uint8_t(why)].fetch_add(1, std::memory_order_relaxed);
 		if (why == from_headset::nxwarp_frame_not_held::reason::stride)
 			stride_not_held.fetch_add(1, std::memory_order_relaxed);
 		return;
@@ -1753,6 +1860,8 @@ void wivrn::video_encoder_nxwarp::on_nxwarp_frame_not_held(
 
 	last_not_held_id = frame_id;
 	last_not_held_why = uint8_t(why);
+	if (uint8_t(why) < not_held_by_reason.size())
+		not_held_by_reason[uint8_t(why)].fetch_add(1, std::memory_order_relaxed);
 	// The pace controller reads only the stride reason: it is the one that means "you
 	// are sending faster than I can decode". A hole is the link's, a codec refusal is
 	// the codec's, and slowing down for either would be answering a different question.

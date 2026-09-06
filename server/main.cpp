@@ -44,8 +44,10 @@
 #include "version.h"
 #include "wivrn_config.h"
 #include "wivrn_ipc.h"
+
 #include "wivrn_packets.h"
 #include "wivrn_sockets.h"
+#include <map>
 
 #include "wivrn_server_dbus.h"
 
@@ -783,6 +785,20 @@ gboolean headset_connected(gint fd, GIOCondition condition, gpointer user_data)
 	return G_SOURCE_CONTINUE;
 }
 
+// Newest NX Warp report per stream index, and the D-Bus property built from all of them. The
+// encoder reports each stream on its own two-second timer, so they arrive interleaved and the
+// property has to be rebuilt from the accumulated set rather than from the packet that just came.
+std::map<uint8_t, wivrn::nxwarp_stream_stats> nxwarp_stats_by_stream;
+
+void publish_nxwarp_stats_property()
+{
+	std::vector<wivrn::nxwarp_stream_stats> streams;
+	streams.reserve(nxwarp_stats_by_stream.size());
+	for (const auto & [index, stats]: nxwarp_stats_by_stream)
+		streams.push_back(stats);
+	wivrn_server_set_nxwarp_stats(dbus_server, wivrn::nxwarp_stats_to_json(streams).c_str());
+}
+
 gboolean control_received(gint fd, GIOCondition condition, gpointer user_data)
 {
 	auto packet = wivrn_ipc_socket_main_loop->receive();
@@ -818,6 +834,14 @@ gboolean control_received(gint fd, GIOCondition condition, gpointer user_data)
 			                   wivrn_server_set_headset_connected(dbus_server, true);
 			                   start_attach_listening();
 		                   },
+		                   [&](const wivrn::nxwarp_stream_stats & stats) {
+			                   // Newest report per stream, republished whole: the
+			                   // property is the current state of every stream, not a
+			                   // feed of events, so a page that opens between reports
+			                   // still shows something.
+			                   nxwarp_stats_by_stream[stats.stream_index] = stats;
+			                   publish_nxwarp_stats_property();
+		                   },
 		                   [&](const from_monado::headset_disconnected &) {
 			                   // The monado process is about to listen on the same
 			                   // port to wait for the headset to come back
@@ -826,6 +850,10 @@ gboolean control_received(gint fd, GIOCondition condition, gpointer user_data)
 			                   inhibitor.reset();
 			                   wivrn_server_set_headset_connected(dbus_server, false);
 			                   wivrn_server_set_client_tab(dbus_server, "");
+			                   // The numbers belonged to a session that is over.
+			                   // Leaving them up would be worse than showing none.
+			                   nxwarp_stats_by_stream.clear();
+			                   publish_nxwarp_stats_property();
 		                   },
 		                   [&](const wivrn::from_headset::stream_tab_changed & event) {
 			                   wivrn_server_set_client_tab(dbus_server, magic_enum::enum_name(event.tab).data());

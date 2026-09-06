@@ -526,6 +526,25 @@ composited frames were not sent.
 }
 ```
 
+### Watching it run
+
+The encoder's two-second report is on the bus as well as in the log, as `NxwarpStats` on
+`io.github.wivrn.Server`: a JSON array with one object per active stream, replaced whole every
+time a stream reports, and empty when nothing is streaming NX Warp. The schema is
+`common/nxwarp_stats.h`.
+
+```
+busctl --user get-property io.github.wivrn.Server /io/github/wivrn/Server \
+        io.github.wivrn.Server NxwarpStats
+```
+
+The dashboard renders it on the **Headset statistics** page, one card per stream: frames sent and
+the rate they are paced to, the headset's own decode time, frames the pacer held back, encode
+time, frame size against the controller's target, the quantiser and its band, the bitrate the
+controller allows, what the headset failed to reconstruct and the reason that accounts for most of
+it, the encoded size and tile count, and the negotiated entropy coder. Each line has a one-sentence
+note on what it means. Nothing there requires reading the log.
+
 ### In the dashboard
 
 None of this needs a text editor. Selecting **NX Warp** in the encoder drop-down on the

@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include "nxwarp_stats.h"
 #include "wivrn_packets.h"
 #include "wivrn_sockets.h"
 
@@ -57,7 +58,11 @@ using packets = std::variant<
         wivrn::from_headset::stream_tab_changed,
         headset_connected,
         headset_disconnected,
-        server_error>;
+        server_error,
+        // One NX Warp stream's two-second report, on its way to the NxwarpStats D-Bus
+        // property. The encoder runs in the monado process and the bus is owned by this
+        // one, so the numbers have to cross the IPC socket to be publishable at all.
+        wivrn::nxwarp_stream_stats>;
 } // namespace from_monado
 
 namespace to_monado

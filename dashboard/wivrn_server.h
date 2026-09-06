@@ -28,6 +28,7 @@
 #include <QtQml/qqmlregistration.h>
 #include <memory>
 
+#include "nxwarp_stats_model.h"
 #include "wivrn_qdbus_types.h"
 
 class IoGithubWivrnServerInterface;
@@ -194,6 +195,9 @@ public:
 
 	// Headset information, valid only if HeadsetConnected is true
 	Q_PROPERTY(QSize recommendedEyeSize READ recommendedEyeSize NOTIFY recommendedEyeSizeChanged)
+	// The NX Warp encoder's two-second report, one entry per active stream. Empty when
+	// nothing is streaming NX Warp; replaced whole every time the server publishes.
+	Q_PROPERTY(QList<nxwarp_stream_stat> nxwarpStats READ nxwarpStats NOTIFY nxwarpStatsChanged)
 	// Per-eye size the connected headset asked the server to encode, before "stream_scale".
 	// A null size means no headset has connected since the server started.
 	Q_PROPERTY(QSize streamEyeSize READ streamEyeSize NOTIFY streamEyeSizeChanged)
@@ -265,6 +269,11 @@ public:
 	bool isEncryptionEnabled() const
 	{
 		return m_isEncryptionEnabled;
+	}
+
+	QList<nxwarp_stream_stat> nxwarpStats() const
+	{
+		return m_nxwarpStats;
 	}
 
 	QSize streamEyeSize() const
@@ -378,6 +387,7 @@ private:
 
 	QSize m_recommendedEyeSize{};
 	QSize m_streamEyeSize{};
+	QList<nxwarp_stream_stat> m_nxwarpStats;
 	std::vector<float> m_availableRefreshRates{};
 	float m_preferredRefreshRate{};
 	bool m_eyeGaze{};
@@ -406,6 +416,7 @@ Q_SIGNALS:
 
 	void recommendedEyeSizeChanged(QSize);
 	void streamEyeSizeChanged(QSize);
+	void nxwarpStatsChanged();
 	void availableRefreshRatesChanged(const std::vector<float> &);
 	void preferredRefreshRateChanged(float);
 	void eyeGazeChanged(bool);

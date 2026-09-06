@@ -32,12 +32,15 @@
 // it relies on has moved and the right outcome is a loud crash naming the symbol, not a
 // silent no-op that makes the test pass while measuring nothing.
 
+#include "nxwarp_stats.h"
+
 #include "driver/clock_offset.h"
 #include "driver/wivrn_connection.h"
 #include "driver/wivrn_session.h"
 #include "encoder/encoder_settings.h"
 #include "encoder/video_encoder.h"
 #include "utils/wivrn_trace.h"
+#include <cstdio>
 
 #include "decoder/decoder.h"
 
@@ -187,3 +190,34 @@ wivrn::decoder::~decoder() = default;
 // encoder does its pixel work on the CPU and the decoder brings its own SPIR-V.
 extern const std::map<std::string, std::vector<uint32_t>> shaders;
 const std::map<std::string, std::vector<uint32_t>> shaders;
+
+// The e2e harness links the encoder with no IPC socket to the main process, so its two-second
+// reports have nowhere to go. Counting them is still worth something: it proves the encoder
+// actually emits one per window, which is what the D-Bus property depends on.
+namespace wivrn
+{
+uint64_t nxwarp_stats_published = 0;
+wivrn::nxwarp_stream_stats nxwarp_stats_last{};
+
+void publish_nxwarp_stats(const nxwarp_stream_stats & stats)
+{
+	++nxwarp_stats_published;
+	nxwarp_stats_last = stats;
+	// Printed rather than only counted: a harness run long enough to cross a two-second
+	// window is the only place the emit side of this can be watched end to end, since the
+	// harness has no socket to the main process and no bus.
+	std::fprintf(stderr,
+	             "[stats] stream %u: %llu frames in %.1f s, %.0f B/frame, QP %.1f, paced %.1f fps, "
+	             "%llu not sent, entropy %s, %ux%u\n",
+	             unsigned(stats.stream_index),
+	             (unsigned long long)stats.frames_encoded,
+	             double(stats.window_seconds),
+	             double(stats.bytes_per_frame),
+	             double(stats.qp_mean),
+	             double(stats.paced_fps),
+	             (unsigned long long)stats.frames_not_sent,
+	             stats.entropy.c_str(),
+	             unsigned(stats.encoded_width),
+	             unsigned(stats.encoded_height));
+}
+} // namespace wivrn

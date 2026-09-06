@@ -18,6 +18,7 @@ add_executable(wivrn-dashboard
     main.cpp
     wivrn_server.cpp
     wivrn_qdbus_types.cpp
+    nxwarp_stats_model.cpp
     apps.cpp
     dashboard_utils.cpp
     escape_string.cpp
@@ -129,6 +130,7 @@ add_executable(wivrn-dashboard-settings-test
     escape_string.cpp
     wivrn_server.cpp
     wivrn_qdbus_types.cpp
+    nxwarp_stats_model.cpp
     dashboard_utils.cpp
     adb.cpp
     ${DBUS_INTERFACE_SRC}
@@ -140,6 +142,45 @@ target_include_directories(wivrn-dashboard-settings-test PRIVATE
 )
 target_compile_features(wivrn-dashboard-settings-test PRIVATE cxx_std_23)
 target_link_libraries(wivrn-dashboard-settings-test PRIVATE
+    Qt6::Core
+    Qt6::DBus
+    Qt6::Qml
+    Qt6::Network
+    Qt6::Widgets
+    Qt6::Gui
+    KF6::CoreAddons
+    KF6::I18n
+    QCoro::Core
+    QCoro::Network
+    QCoro::Qml
+    wivrn-common-base
+    wivrn-common-server
+    wivrn-external
+)
+
+# The NX Warp statistics path: the IPC hop, the D-Bus JSON hop, the gadget the QML binds to, and
+# the QML's references. Same shape and the same reasoning as the settings test above.
+add_executable(wivrn-dashboard-stats-test
+    ${CMAKE_CURRENT_SOURCE_DIR}/../tests/dashboard_nxwarp_stats_test.cpp
+    settings.cpp
+    escape_string.cpp
+    wivrn_server.cpp
+    wivrn_qdbus_types.cpp
+    nxwarp_stats_model.cpp
+    dashboard_utils.cpp
+    adb.cpp
+    ${DBUS_INTERFACE_SRC}
+)
+target_include_directories(wivrn-dashboard-stats-test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}
+    ${CMAKE_SOURCE_DIR}/server
+)
+target_compile_features(wivrn-dashboard-stats-test PRIVATE cxx_std_23)
+target_link_libraries(wivrn-dashboard-stats-test PRIVATE
+    # wivrn_serialization.h is the IPC wire format: wivrn-common is what carries it, along with
+    # boost::pfr and the crypto its secrets path needs.
+    wivrn-common
     Qt6::Core
     Qt6::DBus
     Qt6::Qml

@@ -570,11 +570,38 @@ be shown to matter on its own. Build and run it the way its header comment says.
 
 ### Encoder effort
 
-`--effort 0|1` is the encoder's `"effort"` option, and the harness defaults to **1** as the
-server does: a harness that ran a configuration nobody ships would be measuring something
-else. Level 1 is the integer requantiser — a coefficient quantised to ±1 whose squared error
-is worth less than the bits it saves is dropped — and `--effort 0` is how a run reaches the
-pre-effort bitstream, which is what makes the two comparable in one binary.
+`--effort 0|1` is the encoder's `"effort"` option. **The harness no longer defaults it.**
+Omitting the flag leaves the option out of the settings map entirely, so the run gets whatever
+the server's own default is, and the run prints the level it actually used:
+
+```
+effort: 0 (dead-zone quantiser), the server's default, not asked for
+```
+
+That line is read off the constructed encoder (`resolved_effort()`) and not echoed from the
+command line. It has to be observed rather than echoed, because the level leaves no tool bit
+and cannot be recovered from the stream — and it is deliberately **not** read out of
+`nxwarp_stream_stats::effort`, the field the dashboard card shows: that blob is built inside
+the two-second reporting window, so a twelve-frame run publishes none and a reader would get
+the struct's initialiser, which is `1` and would have reported the exact opposite of the
+truth. The harness used to hard-code `"1"` to match
+the server, which made it structurally incapable of noticing the two disagreeing: it was
+passing the answer in. `--effort 0` and `--effort 1` still force a level, which is what makes
+the two bitstreams comparable in one binary.
+
+Three legs, 320x240, `--backend vk --qp 32 --frames 12 --inter on`, `--nxv-dec` pointed at the
+nxvc prefix:
+
+| run | reported level | B/frame | decoder check |
+| --- | --- | --- | --- |
+| *(no flag)* | `effort: 0 (dead-zone quantiser), the server's default, not asked for` | 3831 | nxv-dec decoded every unit this decoder consumed |
+| `--effort 0` | `effort: 0 (dead-zone quantiser), asked for on the command line` | 3683 | same |
+| `--effort 1` | `effort: 1 (integer requantiser), asked for on the command line` | 3406 | same |
+
+The first two agreeing is the whole point of the leg: the level nobody asked for is the level
+`--effort 0` asks for. The byte columns are not expected to match to the byte — the bounded
+worker queue publishes a different number of frames per run — so read them as the trade
+(`--effort 1` is smaller and, at 28.12 dB against 29.95, worse) and not as an identity check.
 
 | run (320x240, `--backend vk --qp 32`, 12 frames) | B/frame | PSNR | decoder check |
 | --- | --- | --- | --- |
@@ -586,14 +613,22 @@ pre-effort bitstream, which is what makes the two comparable in one binary.
 Read the byte column, not the size of the `.nxv` the run writes: that file holds the units
 the GPU decoder actually consumed, and the bounded worker queue decides how many those are.
 
+**And read the PSNR column with it.** That table is a fixed-QP comparison, so level 1's −7.6 %
+is bought with −0.91 dB; it is a *trade*, not a saving, and only a rate-distortion curve over
+several quantisers can say whether the trade is worth taking. Measured that way it is not, on
+anything but synthetic footage — **−2.4 % BD-rate on the pan fixture and +0.1 % to +3.2 % on
+all five rendered vrroom clips** — which is why the server's default is now `0`. See nx-warp
+`docs/GALLERY.md` Figure 12.
+
 **Both levels are the same bitstream.** The two streams above carry the identical tool mask
 (`0x0000000006600045` from `nxv-info`), because the level leaves no tool bit — it changes
 which levels are coded and nothing about how they decode. That is why nothing on the client
 had to change for this and why the headset's `nxvc_tools` handshake advertises nothing new.
 
-`"effort": "2"` is refused at startup rather than clamped, as nxvc refuses it: a wider motion
-search measures −0.05 % BD-rate for +12 % encoder time, and the reference's own trellis RDOQ
-cannot run on a GPU at all. On `--backend ref` the level reaches the non-directional path
+`"effort": "2"` is refused at startup rather than clamped, as nxvc refuses it. A wider motion
+search measures −0.05 % BD-rate for +12 % encoder time and is not it; the reference's integer
+trellis is **−2.8 % to −10.7 % on all six fixtures**, negative on every one of them, and is
+what a level 2 is expected to be once someone writes it for a GPU. On `--backend ref` the level reaches the non-directional path
 only — the scope nxvc pins byte-identical against the GPU encoder — so with `intra-dir` on,
 that backend's default, it changes nothing and the encoder logs a warning saying so.
 

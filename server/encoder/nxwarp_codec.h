@@ -127,13 +127,37 @@ struct nxwarp_codec_config
 	// the integer requantiser -- a level of +-1 whose squared error is worth
 	// less than the bits it saves is dropped.
 	//
-	// The default is 1 because it is measured free. On RADV at 2 x 1088x1088
-	// (578 tiles) it is -1.5 % BD-rate on rANS and -3.6 % on ENTROPY_LITE, at
-	// 9.12 -> 9.18 ms a frame, which is inside the run-to-run spread: the
-	// decision is 64 independent integer compares per block inside a pass
-	// that was already resident and already reading both arrays it needs.
-	// Lite gains twice as much because it spends a fixed field on every coded
-	// coefficient, so a dropped level saves a whole field.
+	// THE DEFAULT IS 0, and it used to be 1.  The level is free in time --
+	// on RADV at 2 x 1088x1088 (578 tiles) it is 9.12 -> 9.18 ms a frame,
+	// inside the run-to-run spread, because the decision is 64 independent
+	// integer compares per block inside a pass that was already resident --
+	// but free is not the same as worth taking, and on rendered content it
+	// is not.  Measured as BD-rate over QP 22/26/30/34/40 against the same
+	// encoder with the level off:
+	//
+	//     clip                     rANS      ENTROPY_LITE
+	//     pan8 (synthetic)       -2.41 %       -4.38 %
+	//     vrroom still           +1.09 %       +0.12 %
+	//     vrroom rest            +3.19 %       +2.99 %
+	//     vrroom mid             +2.35 %       +1.15 %
+	//     vrroom objmotion       +2.43 %       +2.73 %
+	//     vrroom fast            +2.65 %       +2.59 %
+	//
+	// It wins on exactly one fixture, and that fixture is band-limited
+	// synthetic noise over a rendered scene.  The requantiser prices a
+	// dropped coefficient against the current frame only, but a coded tile's
+	// reconstruction is also the next frame's reference: dropping pan8's
+	// noise leaves a cleaner reference and the gain compounds, while dropping
+	// a rendered scene's specular detail and thin geometry degrades it and
+	// the loss compounds instead.  Coding the same clips intra-only collapses
+	// the whole effect to between -0.9 % and +1.0 %, which is where that
+	// reading comes from.  See nx-warp docs/GALLERY.md Figure 12 and
+	// vk/encoder/README.md, "The effort levels, re-measured on rendered
+	// content".
+	//
+	// The level that does pay on all six fixtures is the reference codec's
+	// integer trellis, at -2.8 to -10.7 %.  It has no GPU implementation yet;
+	// when a level 2 arrives it is expected to be that, not a wider search.
 	//
 	// It changes which levels are coded and nothing about how they are
 	// decoded: the stream carries no tool bit for it, the headset's decoder
@@ -147,7 +171,7 @@ struct nxwarp_codec_config
 	// `intra_dir` on, which is that backend's default, the level therefore
 	// reaches nothing, and video_encoder_nxwarp says so in the log rather than
 	// leaving it to be discovered as two runs with the same byte count.
-	uint32_t effort = 1;
+	uint32_t effort = 0;
 	// SNAP TO IDENTITY, in 1/16 luma samples; 0 = off.
 	//
 	// When the frame's warp displaces every tile corner by less than this, the

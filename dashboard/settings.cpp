@@ -1069,6 +1069,11 @@ void Settings::set_nxwarpCodedVectors(const nxwarp_coded_vectors & value)
 // nxvc refuses one, and the measurements that say why are in its
 // vk/encoder/README.md -- so a two-valued knob is the whole of it rather than a
 // simplification of a range.
+//
+// The box starts UNCHECKED.  Level 1 was the default until it was measured
+// outside the synthetic pan fixture: on the five rendered vrroom clips it is
+// +0.1 % to +3.2 % BD-rate, on both entropy coders, and it wins only where the
+// +-1 coefficients it drops are a synthetic noise layer.
 bool Settings::nxwarpEffort() const
 {
 	return nxd::nxwarp_option_u32(m_jsonSettings, "effort", nxd::nxwarp_default_effort) >= 1;

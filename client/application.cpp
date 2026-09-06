@@ -941,6 +941,14 @@ void application::initialize_vulkan()
 	spdlog::info("    Vendor ID: 0x{:04x}", physical_device_properties.vendorID);
 	spdlog::info("    Device ID: 0x{:04x}", physical_device_properties.deviceID);
 	spdlog::info("    Driver version: {}", parse_driver_sersion(physical_device_properties));
+	// The limit that cost a day. The reprojection pass's push-constant block grew from
+	// 176 to 208 bytes and the Pico 4's Adreno 650 refused vkCreateGraphicsPipelines on
+	// the first streamed frame -- the client exited and the server saw a client that had
+	// simply vanished, which reads as a network fault and is not one. The Vulkan
+	// guaranteed minimum is 128 bytes; this device reports 256 but does not honour a
+	// block above 176 in this pipeline. Logging it makes the next such failure one grep
+	// rather than a bisect. See docs/NXWARP-E2E.md's landmine list.
+	spdlog::info("    maxPushConstantsSize: {} bytes", physical_device_properties.limits.maxPushConstantsSize);
 
 	std::vector<vk::QueueFamilyProperties> queue_properties = vk_physical_device.getQueueFamilyProperties();
 

@@ -967,6 +967,8 @@ void settings_post_processing(const settings_context & ctx)
 	        .get_bool = [&config] { return config.fsr; },
 	        .set_bool = [&config](bool v) { config.fsr = v; config.save(); },
 	        .default_bool = default_config.fsr,
+	        .enabled = [&config] { return not config.low_poly; },
+	        .disabled_tooltip = _("Low poly replaces the sampling path; turn it off to use FSR upscaling."),
 	});
 
 	list.push_back({
@@ -992,8 +994,8 @@ void settings_post_processing(const settings_context & ctx)
 	        .get_bool = [&config] { return config.cas_sharpening; },
 	        .set_bool = [&config](bool v) { config.cas_sharpening = v; config.save(); },
 	        .default_bool = default_config.cas_sharpening,
-	        .enabled = [&config] { return not config.fsr; },
-	        .disabled_tooltip = _("FSR upscaling already sharpens the image; turn it off to use contrast adaptive sharpening instead."),
+	        .enabled = [&config] { return not config.fsr and not config.low_poly; },
+	        .disabled_tooltip = config.low_poly ? _("Low poly already produces hard edges and replaces the sampling path; turn it off to use contrast adaptive sharpening instead.") : _("FSR upscaling already sharpens the image; turn it off to use contrast adaptive sharpening instead."),
 	});
 
 	list.push_back({
@@ -1007,8 +1009,8 @@ void settings_post_processing(const settings_context & ctx)
 	        .v_max = 100,
 	        .fmt = "%d%%",
 	        .default_int = int(std::lround(default_config.cas_sharpness * 100)),
-	        .enabled = [&config] { return config.cas_sharpening and not config.fsr; },
-	        .disabled_tooltip = config.fsr ? _("FSR upscaling already sharpens the image; turn it off to use contrast adaptive sharpening instead.") : _("Enable contrast adaptive sharpening to change this setting."),
+	        .enabled = [&config] { return config.cas_sharpening and not config.fsr and not config.low_poly; },
+	        .disabled_tooltip = config.low_poly ? _("Low poly already produces hard edges and replaces the sampling path; turn it off to use contrast adaptive sharpening instead.") : (config.fsr ? _("FSR upscaling already sharpens the image; turn it off to use contrast adaptive sharpening instead.") : _("Enable contrast adaptive sharpening to change this setting.")),
 	});
 
 	list.push_back({
@@ -1019,8 +1021,62 @@ void settings_post_processing(const settings_context & ctx)
 	        .get_bool = [&config] { return config.cas_full_kernel; },
 	        .set_bool = [&config](bool v) { config.cas_full_kernel = v; config.save(); },
 	        .default_bool = default_config.cas_full_kernel,
-	        .enabled = [&config] { return config.cas_sharpening and not config.fsr; },
-	        .disabled_tooltip = config.fsr ? _("FSR upscaling already sharpens the image; turn it off to use contrast adaptive sharpening instead.") : _("Enable contrast adaptive sharpening to change this setting."),
+	        .enabled = [&config] { return config.cas_sharpening and not config.fsr and not config.low_poly; },
+	        .disabled_tooltip = config.low_poly ? _("Low poly already produces hard edges and replaces the sampling path; turn it off to use contrast adaptive sharpening instead.") : (config.fsr ? _("FSR upscaling already sharpens the image; turn it off to use contrast adaptive sharpening instead.") : _("Enable contrast adaptive sharpening to change this setting.")),
+	});
+
+	list.push_back(section("pp_lowpoly", _cS("settings section", "Low poly")));
+
+	list.push_back({
+	        .id = "##low_poly",
+	        .label = _("Low poly"),
+	        .description = _("Block noise becomes flat regions with sharp edges; fine texture is lost. Costs about 2 ms of GPU per frame pair and replaces sharpening, so it is off by default."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.low_poly; },
+	        .set_bool = [&config](bool v) { config.low_poly = v; config.save(); },
+	        .default_bool = default_config.low_poly,
+	});
+
+	list.push_back({
+	        .id = "##low_poly_strength",
+	        .label = _C("setting name", "Low poly strength"),
+	        .description = _("How far the picture is pushed toward flat regions. 0% leaves the decoded image untouched; 100% shows only the filtered regions."),
+	        .ui = ui_kind::slider,
+	        .get_int = [&config] { return int(std::lround(config.low_poly_strength * 100)); },
+	        .set_int = [&config](int v) { config.low_poly_strength = v * 0.01f; config.save(); },
+	        .v_min = 0,
+	        .v_max = 100,
+	        .fmt = "%d%%",
+	        .default_int = int(std::lround(default_config.low_poly_strength * 100)),
+	        .enabled = [&config] { return config.low_poly; },
+	        .disabled_tooltip = _("Enable low poly to change this setting."),
+	});
+
+	list.push_back({
+	        .id = "##low_poly_levels",
+	        .label = _C("setting name", "Posterise levels"),
+	        .description = _("Snap each colour channel to this many values, which turns the flattened regions into flat colour outright. 0 leaves the colours as they are; low values are a strong stylisation."),
+	        .ui = ui_kind::slider,
+	        .get_int = [&config] { return config.low_poly_levels; },
+	        .set_int = [&config](int v) { config.low_poly_levels = v; config.save(); },
+	        .v_min = 0,
+	        .v_max = 32,
+	        .fmt = "%d",
+	        .default_int = default_config.low_poly_levels,
+	        .enabled = [&config] { return config.low_poly; },
+	        .disabled_tooltip = _("Enable low poly to change this setting."),
+	});
+
+	list.push_back({
+	        .id = "##low_poly_full_kernel",
+	        .label = _("Full low poly kernel"),
+	        .description = _("Use the dense 5x5 kernel instead of the cheaper wide one. Finer regions and boundaries that follow small detail more closely, at about two and a half times the GPU cost: measured on a Pico 4, 5.2 ms per frame pair against 2.1 ms."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.low_poly_full_kernel; },
+	        .set_bool = [&config](bool v) { config.low_poly_full_kernel = v; config.save(); },
+	        .default_bool = default_config.low_poly_full_kernel,
+	        .enabled = [&config] { return config.low_poly; },
+	        .disabled_tooltip = _("Enable low poly to change this setting."),
 	});
 
 	list.push_back(section("pp_ambient", _cS("settings section", "Ambient & color")));

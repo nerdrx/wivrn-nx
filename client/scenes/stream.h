@@ -217,6 +217,12 @@ private:
 		float vignette = 0;
 		float glow = 0;
 		float deband = 0;
+		// Low poly region filter: its strength and posterise levels. Part of the
+		// signature so the reduce_gpu_load cache cannot re-present an image filtered
+		// with the settings the user just changed away from.
+		float low_poly = 0;
+		float low_poly_levels = 0;
+		bool low_poly_full = false;
 		// Motion smoothing: whether it warps this refresh, how far, along which field
 		bool motion_on = false;
 		float motion_step = 0;

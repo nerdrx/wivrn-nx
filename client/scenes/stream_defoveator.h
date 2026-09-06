@@ -65,6 +65,12 @@ class stream_defoveator
 	// Whether FSR (EASU + RCAS) is compiled into the currently built pipelines, same
 	// specialization-constant scheme as cas_full_baked above.
 	bool fsr_baked = false;
+	// Whether the low poly region filter is compiled into the current pipelines. Same
+	// specialization scheme; derived from post.low_poly rather than passed separately,
+	// because unlike the CAS kernel and FSR it has no state of its own beyond the
+	// strength that already travels in post_processing.
+	bool lowpoly_baked = false;
+	bool lowpoly_full_baked = false;
 	// [atlas prototype] whether the per-tile warp is compiled into the current
 	// pipelines, same specialization scheme as the two above.
 	int atlas_baked = 0;
@@ -157,6 +163,17 @@ public:
 		float glow_margin = 0;
 		// Debanding: dither strength in units of one 8-bit step (1/255), 0 disables it
 		float deband = 0;
+		// "Low poly" edge-preserving region filter over the decoded image, taking the
+		// place of the plain sample. 0 disables it, and the pass is then byte identical
+		// to not having the feature: the kernel is a specialization constant, so with
+		// the filter off it is not merely branched around, it is not compiled in.
+		float low_poly = 0;
+		// Posterise levels per channel, counting both endpoints; below 2 is off. Only
+		// meaningful with low_poly above non-zero.
+		float low_poly_levels = 0;
+		// Dense 5x5 kernel instead of the default 17-fetch one. Only meaningful with
+		// low_poly above non-zero.
+		bool low_poly_full = false;
 	};
 
 	// Motion smoothing. Neutral by default: with a null field, or a zero step, the

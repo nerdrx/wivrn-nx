@@ -1325,8 +1325,17 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
 	};
 	item->current_layout = to_read.newLayout;
+	// eAllCommands, not eFragmentShader. The reader IS the fragment shader of the
+	// reprojection pass, but this command buffer does not run on a queue that has one:
+	// the decode work took the second queue, whose family is COMPUTE|TRANSFER with no
+	// graphics bit, and naming a graphics-only stage in dstStageMask there is
+	// VUID-vkCmdPipelineBarrier-dstStageMask-06462 -- the validation layers report it
+	// once per decoded frame. The pass that samples this image is on the other queue
+	// and is ordered against this one by the timeline semaphore, not by this barrier,
+	// so widening the destination scope to eAllCommands costs nothing and is what the
+	// queue can actually express.
 	cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
-	                    vk::PipelineStageFlagBits::eFragmentShader, {}, {}, {}, to_read);
+	                    vk::PipelineStageFlagBits::eAllCommands, {}, {}, {}, to_read);
 	if (have_ts)
 		cmd.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *ts_pool, 1);
 	cmd.end();

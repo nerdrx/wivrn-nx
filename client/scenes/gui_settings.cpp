@@ -506,6 +506,62 @@ void settings_streaming(const settings_context & ctx)
 	        .disabled_tooltip = _("Enable reduced resolution streaming to change this setting."),
 	});
 
+	// The display pass's own output size, which is a headset-side decision and lives in the
+	// headset's configuration: the dashboard edits the SERVER's config.json and has no route
+	// to this file, so this is the only place it can be set.
+	//
+	// Two rows for one field, because the field has two regimes and one slider cannot say
+	// "off". 0 is automatic -- the pass renders at the stream's own per-eye size and
+	// enlarges nothing -- and 0.4 to 1.0 is an explicit share of the full defoveated size.
+	// A slider whose bottom notch silently meant "automatic" would read as 40%, which is a
+	// different picture and a different frame time.
+	list.push_back({
+	        .id = "##defoveate_mode",
+	        .label = _C("setting name", "Display pass resolution"),
+	        .description = _("How large the reprojection pass draws each eye. Automatic draws it at the size the stream already is, so this pass enlarges nothing and the compositor does the one resampling it performs anyway when it timewarps the layer; on a Pico 4 that is 2160x2160 per eye and 8.4 ms a frame becoming 1080x1080 and 2.7 ms. Custom fixes the size at a share of the full defoveated size instead, which is the only way to ask for a sharper pass than the stream carries."),
+	        .ui = ui_kind::segmented,
+	        .get_int = [&config] { return config.defoveate_scale > 0 ? 1 : 0; },
+	        .set_int = [&config](int v) {
+		        // Custom starts at 100%, the full defoveated size: that is the behaviour
+		        // this setting had before automatic existed, so switching to Custom
+		        // changes nothing until the slider below is actually dragged. Seeding it
+		        // at whatever automatic happens to have resolved to this frame would
+		        // make the same click mean a different thing on every stream.
+		        config.defoveate_scale = v == 0 ? 0.f : 1.f;
+		        config.save(); },
+	        .options = [] { return std::vector<std::string>{
+		                        _C("Display pass resolution", "Automatic"),
+		                        _C("Display pass resolution", "Custom"),
+		                }; },
+	        .default_int = default_config.defoveate_scale > 0 ? 1 : 0,
+	});
+
+	list.push_back({
+	        .id = "##defoveate_scale",
+	        .label = _C("setting name", "Display pass size"),
+	        .description = _("Share of the full defoveated size the display pass renders. At 100% the pass enlarges the decoded image to the panel's own resolution itself, which is most of a frame's GPU time whatever the stream carries. Below 100% it renders fewer pixels and the compositor does the last enlargement while it is already resampling the layer, so the picture softens a little and the frame rate rises a lot."),
+	        .ui = ui_kind::slider,
+	        // At automatic the slider has no value of its own to show. It shows the floor
+	        // rather than a 0%, and it is disabled, so the row never claims the pass is
+	        // rendering at a size nobody chose.
+	        .get_int = [&config] { return config.defoveate_scale > 0 ? int(std::lround(config.defoveate_scale * 100)) : 100; },
+	        .set_int = [&config](int v) { config.defoveate_scale = std::clamp(v, 40, 100) * 0.01f; config.save(); },
+	        .v_min = 40,
+	        .v_max = 100,
+	        .fmt = "%d%%",
+	        .default_int = 100,
+	        // Live, including during a session. That is only true since the resolved scale
+	        // became a per-frame value: the reprojection swapchain is still rebuilt only
+	        // when the defoveated size GROWS, but set_output_scale is now called every
+	        // frame from render() rather than from that rebuild, so a scale that shrinks
+	        // no longer leaves the pass laying its viewport out at the old size against a
+	        // swapchain sized for the new one -- which cropped the picture instead of
+	        // scaling it. Automatic makes exactly that transition on its second frame, so
+	        // the fix had to exist for automatic to work at all, and the slider inherits it.
+	        .enabled = [&config] { return config.defoveate_scale > 0; },
+	        .disabled_tooltip = _("Set the display pass resolution to Custom to choose a size."),
+	});
+
 	list.push_back({
 	        .id = "##foveation",
 	        .label = _("Foveated encoding"),

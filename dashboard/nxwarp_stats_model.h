@@ -79,6 +79,14 @@ struct nxwarp_stream_stat
 	Q_PROPERTY(bool entropyWasAuto READ entropyWasAuto CONSTANT)
 	Q_PROPERTY(QString toolsText READ toolsText CONSTANT)
 
+	// Whether this stream carries both eyes as one stereo frame. The page turns this into
+	// the card's title; it stays a boolean here so the wording goes through i18n in the
+	// QML rather than being an untranslated string baked into C++.
+	Q_PROPERTY(bool paired READ paired CONSTANT)
+	// The frame actually coded and its tile count: the pair side by side when paired,
+	// one eye otherwise. This is what one decode dispatch on the headset costs.
+	Q_PROPERTY(int codedFrameWidth READ codedFrameWidth CONSTANT)
+	Q_PROPERTY(int codedFrameTiles READ codedFrameTiles CONSTANT)
 	Q_PROPERTY(int encodedWidth READ encodedWidth CONSTANT)
 	Q_PROPERTY(int encodedHeight READ encodedHeight CONSTANT)
 	Q_PROPERTY(int tiles READ tiles CONSTANT)
@@ -209,6 +217,18 @@ public:
 		if (s.negotiated_tools == 0)
 			return QStringLiteral("none reported");
 		return QStringLiteral("0x%1").arg(s.negotiated_tools, 0, 16);
+	}
+	bool paired() const
+	{
+		return s.paired();
+	}
+	int codedFrameWidth() const
+	{
+		return int(s.coded_frame_width());
+	}
+	int codedFrameTiles() const
+	{
+		return int(s.coded_frame_tiles());
 	}
 	int encodedWidth() const
 	{

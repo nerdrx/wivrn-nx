@@ -36,7 +36,7 @@ Kirigami.ScrollablePage {
             Layout.fillWidth: true
             visible: WivrnServer.nxwarpStats.length === 0
             type: Kirigami.MessageType.Information
-            text: i18n("No NX Warp stream is running. These statistics appear about two seconds after a session starts with the NX Warp encoder selected.")
+            text: i18n("No NX Warp stream is running. These statistics appear about two seconds after a session starts with the NX Warp encoder selected. With the eyes paired there is one card for both of them, not two.")
         }
 
         Repeater {
@@ -52,7 +52,12 @@ Kirigami.ScrollablePage {
 
                     RowLayout {
                         Kirigami.Heading {
-                            text: i18n("Stream %1", modelData.streamIndex)
+                            // A paired stream is not stream 0 with a broken stream 1: the
+                            // right eye has no encoder and will never report, so naming the
+                            // pair here is what stops the page reading as half-dead.
+                            text: modelData.paired
+                                  ? i18n("Stream %1 · both eyes paired", modelData.streamIndex)
+                                  : i18n("Stream %1", modelData.streamIndex)
                             level: 2
                         }
                         Item { Layout.fillWidth: true }
@@ -162,12 +167,17 @@ Kirigami.ScrollablePage {
                         RowLayout {
                             Kirigami.FormData.label: i18n("Encodes:")
                             Controls.Label {
-                                text: i18n("%1x%2 per eye, %3 tiles, scale %4",
-                                           modelData.encodedWidth, modelData.encodedHeight,
-                                           modelData.tiles, modelData.encodeScale.toFixed(2))
+                                text: modelData.paired
+                                      ? i18n("%1x%2 per eye, paired into one %3x%2 frame of %4 tiles, scale %5",
+                                             modelData.encodedWidth, modelData.encodedHeight,
+                                             modelData.codedFrameWidth, modelData.codedFrameTiles,
+                                             modelData.encodeScale.toFixed(2))
+                                      : i18n("%1x%2 per eye, %3 tiles, scale %4",
+                                             modelData.encodedWidth, modelData.encodedHeight,
+                                             modelData.tiles, modelData.encodeScale.toFixed(2))
                             }
                             Kirigami.ContextualHelpButton {
-                                toolTipText: i18n("The size actually encoded, after the headset's own resolution setting and the server's stream scale. The headset's decode cost follows the tile count almost exactly.")
+                                toolTipText: i18n("The size actually encoded, after the headset's own resolution setting and the server's stream scale. The headset's decode cost follows the tile count almost exactly; when the eyes are paired it decodes that one frame instead of two.")
                             }
                         }
 

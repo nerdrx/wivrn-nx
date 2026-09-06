@@ -150,15 +150,91 @@ Kirigami.ScrollablePage {
                 wrapMode: Text.WordWrap
                 opacity: 0.75
                 text: {
+                    // Named so the binding actually depends on them: encodedEyeSize and
+                    // willPairEyes are Q_INVOKABLE calls, which QML does not track, so
+                    // without these two reads the readout would keep showing the size and
+                    // the pairing verdict from whenever the label was last built. The
+                    // slider and the combo both write their property before this runs.
+                    let scale = Settings.streamScale;
+                    let stereo = Settings.nxwarpStereoFrame;
                     let s = WivrnServer.streamEyeSize;
                     if (!s || s.width <= 0 || s.height <= 0)
                         return i18n("Connect a headset once to see the resulting encode size.");
                     let e = Settings.encodedEyeSize(s.width, s.height);
                     let tiles = Settings.encodedTiles(s.width, s.height);
-                    return i18n("Encodes %1x%2 per eye (%3x%4 = %5 tiles), from the %6x%7 the headset asks for.",
-                                e.width, e.height,
-                                e.width / 64, e.height / 64, tiles,
-                                s.width, s.height);
+                    let base = i18n("Encodes %1x%2 per eye (%3x%4 = %5 tiles), from the %6x%7 the headset asks for.",
+                                    e.width, e.height,
+                                    e.width / 64, e.height / 64, tiles,
+                                    s.width, s.height);
+                    // What the stereo setting will actually do with that size. The refusal
+                    // case is the warning below rather than a sentence here, because it is
+                    // the one outcome where the setting and the result disagree.
+                    if (Settings.nxwarpSelected && !Settings.pairingRefused(s.width, s.height)) {
+                        if (Settings.willPairEyes()) {
+                            let p = Settings.pairedFrameSize(s.width, s.height);
+                            base += " " + i18n("Both eyes pair into one %1x%2 frame (%3 tiles) on stream 0.",
+                                               p.width, p.height,
+                                               Settings.pairedTiles(s.width, s.height));
+                        } else {
+                            base += " " + i18n("The eyes are encoded as two separate streams.");
+                        }
+                    }
+                    return base;
+                }
+            }
+
+            // The one case where the stereo setting asks for something this stream scale
+            // cannot deliver: the server pairs the eyes only when the per-eye width is a
+            // multiple of 64, and it discovers that AFTER deciding to pair, so it logs a
+            // warning and quietly runs two streams. stream_encode_size rounds every size
+            // up to 64 on both axes, so no position of the slider above reaches this
+            // today -- it is here so that an alignment change cannot make the setting lie
+            // silently, and the settings test pins that it is currently unreachable.
+            Kirigami.InlineMessage {
+                id: pairing_refused_warning
+                Layout.fillWidth: true
+                type: Kirigami.MessageType.Warning
+                visible: {
+                    let scale = Settings.streamScale;
+                    let stereo = Settings.nxwarpStereoFrame;
+                    let s = WivrnServer.streamEyeSize;
+                    if (!Settings.nxwarpSelected || !s || s.width <= 0 || s.height <= 0)
+                        return false;
+                    return Settings.pairingRefused(s.width, s.height);
+                }
+                text: {
+                    let s = WivrnServer.streamEyeSize;
+                    if (!s || s.width <= 0 || s.height <= 0)
+                        return "";
+                    let e = Settings.encodedEyeSize(s.width, s.height);
+                    return i18n("The eyes will not be paired at this stream scale: it encodes %1 pixels per eye across, and pairing needs a multiple of 64. The server will fall back to one stream per eye and the headset will run two decoders.", e.width);
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: i18n("Stereo frame:")
+                visible: Settings.nxwarpSelected
+                Controls.ComboBox {
+                    id: nxwarp_stereo
+                    model: [
+                        {
+                            label: i18nc("automatic stereo frame pairing", "Auto"),
+                            value: Settings.StereoAuto
+                        },
+                        {
+                            label: i18n("On"),
+                            value: Settings.StereoOn
+                        },
+                        {
+                            label: i18n("Off"),
+                            value: Settings.StereoOff
+                        }
+                    ]
+                    textRole: "label"
+                    onCurrentIndexChanged: if (settings.allowUpdates) {Settings.nxwarpStereoFrame = model[currentIndex].value}
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("Both eyes in one frame — the headset decodes once instead of twice, which measured 28% less GPU there. Auto pairs only when both eye streams are NX Warp and the per-eye width is a multiple of 64; the stream scale above always produces such a width, and the readout says which way it went. On forces it wherever auto would allow it, off keeps one stream and one encoder per eye. Costs the server one full-frame copy per frame. Applies from the next connection.")
                 }
             }
 
@@ -582,6 +658,7 @@ Kirigami.ScrollablePage {
             // letting an inverted range reach the server, which would refuse the session.
             Settings.nxwarpMinQp = nxwarp_min_qp.value;
             Settings.nxwarpMaxQp = nxwarp_max_qp.value;
+            Settings.nxwarpStereoFrame = nxwarp_stereo.model[nxwarp_stereo.currentIndex].value;
             Settings.nxwarpCodedVectors = nxwarp_coded_vectors.model[nxwarp_coded_vectors.currentIndex].value;
             Settings.nxwarpInter = nxwarp_inter.checked;
             Settings.nxwarpIntraPeriod = nxwarp_intra_period.value;
@@ -607,6 +684,7 @@ Kirigami.ScrollablePage {
         nxwarp_rc_auto.checked = Settings.nxwarpRcAuto;
         nxwarp_min_qp.value = Settings.nxwarpMinQp;
         nxwarp_max_qp.value = Settings.nxwarpMaxQp;
+        nxwarp_stereo.currentIndex = nxwarp_stereo.model.findIndex(i => i.value === Settings.nxwarpStereoFrame);
         nxwarp_coded_vectors.currentIndex = nxwarp_coded_vectors.model.findIndex(i => i.value === Settings.nxwarpCodedVectors);
         nxwarp_inter.checked = Settings.nxwarpInter;
         nxwarp_intra_period.value = Settings.nxwarpIntraPeriod;

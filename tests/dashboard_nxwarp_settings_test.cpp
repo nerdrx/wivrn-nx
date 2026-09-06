@@ -191,6 +191,7 @@ static const QList<control> controls{
         {"nxwarpRcAuto", false},
         {"nxwarpMinQp", 18},
         {"nxwarpMaxQp", 51},
+        {"nxwarpStereoFrame", QVariant::fromValue(int(Settings::StereoOff))},
         {"nxwarpCodedVectors", QVariant::fromValue(int(Settings::VectorsStatic))},
         {"nxwarpInter", true},
         {"nxwarpIntraPeriod", 240},
@@ -235,6 +236,7 @@ static void part_b()
 	check(nxd::nxwarp_option(written, "rc").value_or("") == "fixed", "rc=fixed");
 	check(nxd::nxwarp_option(written, "min-qp").value_or("") == "18", "min-qp=18");
 	check(nxd::nxwarp_option(written, "max-qp").value_or("") == "51", "max-qp=51");
+	check(nxd::nxwarp_option(written, "stereo-frame").value_or("") == "off", "stereo-frame=off");
 	check(nxd::nxwarp_option(written, "coded-vectors").value_or("") == "static", "coded-vectors=static");
 	check(nxd::nxwarp_option(written, "inter").value_or("") == "true", "inter=true");
 	check(nxd::nxwarp_option(written, "intra-period").value_or("") == "240", "intra-period=240");
@@ -276,6 +278,105 @@ static void part_b()
 		      "entropy set to Auto is erased, not written");
 		check(nxd::nxwarp_option(out, "inter") == std::nullopt,
 		      "inter set to its default is erased, not written");
+	}
+
+	// --- stereo pairing ------------------------------------------------------------------
+	//
+	// The pairing preview mirrors get_encoder_settings' gate. It has to agree with it or the
+	// slider tells the user something the server will not do.
+	{
+		Settings d;
+		d.load_json(live_config());
+		d.setProperty("streamScale", 1.0);
+
+		// auto (the key absent) pairs whenever the pair is NX Warp.
+		check(d.property("nxwarpStereoFrame").toInt() == int(Settings::StereoAuto),
+		      "the live config leaves stereo-frame at auto");
+		check(d.willPairEyes(), "auto pairs when NX Warp is selected");
+		check(d.pairedFrameSize(1088, 1088) == QSize(2176, 1088),
+		      "the pair is the two eyes side by side");
+		check(d.pairedTiles(1088, 1088) == 578, "and 34x17 = 578 tiles, twice one eye's 289");
+		check(d.encodedEyeSize(1088, 1088) == QSize(1088, 1088),
+		      "the per-eye size is unchanged by pairing");
+
+		// off never pairs.
+		d.setProperty("nxwarpStereoFrame", int(Settings::StereoOff));
+		check(not d.willPairEyes(), "off does not pair");
+		check(d.pairedFrameSize(1088, 1088).isEmpty(), "and reports no paired frame");
+		check(nxd::nxwarp_option(d.configuration(), "stereo-frame").value_or("") == "off",
+		      "off is written out");
+
+		// on pairs, and auto erases the key rather than writing the default.
+		d.setProperty("nxwarpStereoFrame", int(Settings::StereoOn));
+		check(d.willPairEyes(), "on pairs");
+		check(nxd::nxwarp_option(d.configuration(), "stereo-frame").value_or("") == "on",
+		      "on is written out");
+		d.setProperty("nxwarpStereoFrame", int(Settings::StereoAuto));
+		check(nxd::nxwarp_option(d.configuration(), "stereo-frame") == std::nullopt,
+		      "auto is erased, not written");
+	}
+	{
+		// Without NX Warp there is nothing to pair, whatever the mode says. This is the
+		// half of the gate that is about the codec rather than the setting.
+		Settings d;
+		d.load_json(nlohmann::json::parse(R"({"encoder": "vaapi"})"));
+		d.setProperty("nxwarpStereoFrame", int(Settings::StereoOn));
+		check(not d.willPairEyes(), "on does not pair a non-NX Warp encoder");
+		check(d.pairedTiles(1088, 1088) == 0, "and reports no paired tiles");
+	}
+	{
+		// The size half of the server's gate, driven directly: pairing needs a per-eye
+		// width that is a multiple of 64 so the seam falls on a tile boundary. This is
+		// what the slider's warning is bound to, and it is the only way to see the
+		// warning's true branch at all -- see the sweep below.
+		Settings d;
+		d.load_json(live_config());
+		check(d.pairingWidthOk(1088), "1088 is 17 tiles across and pairs");
+		check(d.pairingWidthOk(64), "one tile pairs");
+		check(not d.pairingWidthOk(1000), "1000 is not a multiple of 64 and does not");
+		check(not d.pairingWidthOk(1087), "nor is one pixel short of a tile boundary");
+		check(not d.pairingWidthOk(0), "and a size of nothing is not a pairable width");
+	}
+	{
+		// The whole gate as the page asks it. "Refused" is specifically "asked for and then
+		// turned down on the size": choosing off is not a refusal, and neither is an
+		// encoder that was never going to pair.
+		Settings d;
+		d.load_json(live_config());
+		d.setProperty("streamScale", 1.0);
+		check(not d.pairingRefused(1088, 1088), "an aligned size is not refused");
+		d.setProperty("nxwarpStereoFrame", int(Settings::StereoOff));
+		check(not d.pairingRefused(1088, 1088), "off is a choice, not a refusal");
+		d.setProperty("nxwarpStereoFrame", int(Settings::StereoAuto));
+		check(not d.pairingRefused(0, 0), "and no headset size refuses nothing");
+	}
+	{
+		// stream_encode_size rounds up to exactly the alignment the gate wants, so no
+		// position of the slider can reach the refusal above: the warning is a guardrail
+		// against an alignment change rather than something a user will see today. If this
+		// ever fails, the warning has started to matter -- and it is already built.
+		Settings d;
+		d.load_json(live_config());
+		int checked = 0;
+		bool ok = true;
+		for (int pct = 50; pct <= 100 and ok; pct += 5)
+		{
+			d.setProperty("streamScale", pct / 100.0);
+			for (int size: {960, 1000, 1088, 1216, 1440, 1832, 2064, 2160})
+			{
+				const QSize e = d.encodedEyeSize(size, size);
+				++checked;
+				if (e.width() % 64 or e.height() % 64 or d.pairingRefused(size, size))
+				{
+					check(false, "a slider position produced a width the server would refuse");
+					ok = false;
+					break;
+				}
+			}
+		}
+		if (ok)
+			check(true, "no slider position trips the multiple-of-64 pairing gate");
+		std::printf("       (%d scale/size combinations)\n", checked);
 	}
 
 	// stream_scale at 1.0 is the option absent, and the dashed spelling is normalised away.
@@ -461,6 +562,7 @@ static void part_d(const char * qml_path)
 	        {"nxwarp_rc_auto", true},
 	        {"nxwarp_min_qp", true},
 	        {"nxwarp_max_qp", true},
+	        {"nxwarp_stereo", true},
 	        {"nxwarp_coded_vectors", true},
 	        {"nxwarp_inter", true},
 	        {"nxwarp_intra_period", true},
@@ -472,6 +574,21 @@ static void part_d(const char * qml_path)
 		check(load_body.contains(id + "."), ("load() fills " + id).toStdString());
 		if (in_save)
 			check(save_body.contains(id + "."), ("save() reads " + id).toStdString());
+	}
+
+	// The pairing warning is a pure binding, so it appears in neither load() nor save() and
+	// the loop above cannot see it. It is also the one control here that nothing a user can
+	// do makes visible today (see part B), which is exactly why a silent deletion would go
+	// unnoticed -- so its existence and its binding are checked by name.
+	check(src.contains("id: pairing_refused_warning"),
+	      "the page declares the pairing refusal warning");
+	{
+		const int at = src.indexOf("id: pairing_refused_warning");
+		const QString tail = at < 0 ? QString() : src.mid(at, 1400);
+		check(tail.contains("Settings.pairingRefused("),
+		      "and it is bound to Settings.pairingRefused, not to a hardcoded false");
+		check(tail.contains("Kirigami.MessageType.Warning"),
+		      "and it is a warning rather than an information notice");
 	}
 
 	// And every NX Warp property is written somewhere in the page, not just read.

@@ -433,6 +433,7 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	stats_entropy_was_auto = entropy_req == entropy_request::automatic;
 	stats_negotiated_tools = client_tools;
 	encode_scale_reported = settings.encode_scale;
+	stats_eyes = settings.eyes ? settings.eyes : 1;
 	stats_width = settings.width;
 	stats_height = settings.height;
 
@@ -1710,6 +1711,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				st.entropy = stats_entropy_name;
 				st.entropy_was_auto = stats_entropy_was_auto;
 				st.negotiated_tools = stats_negotiated_tools;
+				st.paired_eyes = uint8_t(stats_eyes);
 				st.encoded_width = stats_width;
 				st.encoded_height = stats_height;
 				st.encode_scale = encode_scale_reported;

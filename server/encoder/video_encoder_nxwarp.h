@@ -267,6 +267,8 @@ class video_encoder_nxwarp : public video_encoder
 	uint64_t not_held_answered_stats = 0;
 	// settings.encode_scale and the size it produced, kept for the report.
 	float encode_scale_reported = 1;
+	// settings.eyes: 2 when this stream carries both eyes as one stereo frame.
+	uint32_t stats_eyes = 1;
 	uint16_t stats_width = 0;
 	uint16_t stats_height = 0;
 

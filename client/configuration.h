@@ -463,6 +463,25 @@ public:
 	float override_foveation_distance = 3;
 
 	bool high_power_mode = true;
+	// XR_EXT_performance_settings, per domain: 0 auto, 1 sustained_high,
+	// 2 boost.  `auto` is NOT "do nothing" -- it is the policy this client has
+	// always had, which is `high_power_mode` driving sustained_high or
+	// sustained_low, plus sustained_high in the lobby.  A default that changed
+	// behaviour would not be a default.
+	//
+	// 1 and 2 PIN the domain: the level is applied on every scene entry and
+	// `high_power_mode` no longer speaks for that domain.  `boost` is the
+	// transient level of the extension -- the runtime may bound how long it
+	// honours it, may ignore it, and is expected to send an
+	// XrEventDataPerfSettingsEXT when it takes it away, which the HUD shows.
+	//
+	// It stays `auto` until a device A/B says otherwise.  See the warning in
+	// docs/nxwarp.md: VK_EXT_global_priority HIGH was a 10x REGRESSION on this
+	// headset because the compositor lost the scheduling fight, and the only
+	// difference between that experiment and this one is that this is the
+	// sanctioned API rather than a Vulkan back door.
+	uint32_t perf_level_cpu = 0;
+	uint32_t perf_level_gpu = 0;
 	uint32_t fps_divider = 1;
 
 	// Allow unsafe config values

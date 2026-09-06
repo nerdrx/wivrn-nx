@@ -136,6 +136,13 @@ private:
 	xr::session xr_session;
 	XrSessionState session_state = XR_SESSION_STATE_UNKNOWN;
 
+	// The last XrEventDataPerfSettingsEXT the runtime sent, if any.  It is the
+	// only feedback XR_EXT_performance_settings has -- a level being asked for
+	// says nothing about whether it was honoured -- so it is kept for the HUD
+	// rather than only logged.
+	XrEventDataPerfSettingsEXT last_perf_event{};
+	bool have_perf_event = false;
+
 	std::array<xr::space, size_t(xr::spaces::count)> spaces;
 	xr::actionset xr_actionset;
 	std::vector<std::tuple<XrAction, XrActionType, std::string>> actions;
@@ -405,6 +412,15 @@ public:
 
 	// The OpenXR instance, for the one thing anything outside a scene needs from it: the
 	// runtime clock. Decoders time-stamp feedback against it.
+	// The last performance-settings notification, for the HUD.  Empty until the
+	// runtime sends one, which on a runtime that never throttles is for ever.
+	static std::optional<XrEventDataPerfSettingsEXT> get_last_perf_event()
+	{
+		if (not instance().have_perf_event)
+			return std::nullopt;
+		return instance().last_perf_event;
+	}
+
 	static xr::instance & get_xr_instance()
 	{
 		return instance().xr_instance;

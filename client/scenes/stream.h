@@ -635,7 +635,7 @@ private:
 	// Built once per sample window by accumulate_fps and cached here, NOT formatted per
 	// frame: both call sites draw them every frame, and the numbers in them only move when
 	// the decoder's two-second profile window turns over.
-	static constexpr size_t fps_line_count = 6;
+	static constexpr size_t fps_line_count = 7;
 	std::array<std::string, fps_line_count> fps_line_cache{};
 	// The decoder window sequence last reported to the server, per stream. Zero is the
 	// value a decoder that has published nothing reports, so nothing is sent until a

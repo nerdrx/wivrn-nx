@@ -193,6 +193,14 @@ xr::instance::instance(std::string_view application_name, std::vector<const char
 #endif
 	}
 
+	// A power/performance extension the runtime offers that this build has no
+	// definition for is worth NAMING in the log, because it is the only way we
+	// learn that a vendor route exists at all.  Nothing here calls one: the
+	// OpenXR SDK this client builds against defines no Pico or BD performance
+	// extension, and hand-declaring a vendor entry point from a name in a log
+	// is how a client starts crashing on the next runtime update.  If one shows
+	// up here, that is the moment to go and read its specification.
+	std::vector<std::string> vendor_perf;
 	spdlog::info("Available OpenXR extensions:");
 	bool debug_utils_found = false;
 	auto all_extensions = xr::instance::extensions();
@@ -203,6 +211,16 @@ xr::instance::instance(std::string_view application_name, std::vector<const char
 			spdlog::info("    {} (version {}) (blacklisted)", i.extensionName, i.extensionVersion);
 		else
 			spdlog::info("    {} (version {})", i.extensionName, i.extensionVersion);
+		{
+			const std::string_view n{i.extensionName};
+			const bool perfish = n.find("performance") != std::string_view::npos or
+			                     n.find("power") != std::string_view::npos or
+			                     n.find("cpu_level") != std::string_view::npos or
+			                     n.find("gpu_level") != std::string_view::npos or
+			                     n.find("performance_metrics") != std::string_view::npos;
+			if (perfish and n != XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME)
+				vendor_perf.emplace_back(n);
+		}
 #ifndef NDEBUG
 		if (!strcmp(i.extensionName, "XR_EXT_debug_utils"))
 		{
@@ -210,6 +228,23 @@ xr::instance::instance(std::string_view application_name, std::vector<const char
 			extensions.push_back("XR_EXT_debug_utils");
 		}
 #endif
+	}
+
+	// One line that answers "does this runtime have a performance API, and
+	// which one" without anyone having to read the whole extension dump.
+	{
+		const bool ext_perf = std::ranges::any_of(all_extensions, [](const XrExtensionProperties & e) {
+			return std::string_view{e.extensionName} == XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME;
+		});
+		std::string vendor = vendor_perf.empty() ? std::string("none") : std::string();
+		for (const auto & v: vendor_perf)
+			vendor += (vendor.empty() ? "" : ", ") + v;
+		spdlog::info("Performance APIs: {} = {}, vendor power/performance extensions = {}",
+		             XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME,
+		             ext_perf ? "available" : "ABSENT", vendor);
+		if (not vendor_perf.empty())
+			spdlog::info("    (offered by the runtime, NOT used: this build has no "
+			             "definition for them -- see client/xr/instance.cpp)");
 	}
 
 	XrInstanceCreateInfo create_info{

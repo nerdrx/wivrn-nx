@@ -390,6 +390,8 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("animated_lobby", &configuration::animated_lobby),
 	        scalar("warp_transition", &configuration::warp_transition),
 	        scalar("high_power_mode", &configuration::high_power_mode),
+	        scalar("perf_level_cpu", &configuration::perf_level_cpu),
+	        scalar("perf_level_gpu", &configuration::perf_level_gpu),
 	        scalar("fps_divider", &configuration::fps_divider),
 	        scalar("extended_config", &configuration::extended_config),
 	        scalar("preferred_refresh_rate", &configuration::preferred_refresh_rate),

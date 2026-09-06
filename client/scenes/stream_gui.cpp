@@ -616,6 +616,33 @@ void scenes::stream::rebuild_fps_lines()
 			                                 fps.nxwarp_tiles_coded,
 			                                 fps.nxwarp_tiles_dir);
 	}
+
+	// The performance levels: what we ASKED the runtime for, and the last thing
+	// it told us it did.  The two halves are separate on purpose --
+	// xrPerfSettingsSetPerformanceLevelEXT succeeding says nothing about
+	// whether the level was honoured, and the notification is the only thing
+	// that ever contradicts it.  Absent entirely when the extension is not
+	// there, rather than shown as a confident "sustained_low".
+	{
+		// `session` is the scene's own reference (scene::session).
+		if (session.has_performance_settings())
+		{
+			const char * cpu = session.applied_valid[0]
+			                           ? xr::to_string(session.applied_level[0])
+			                           : "?";
+			const char * gpu = session.applied_valid[1]
+			                           ? xr::to_string(session.applied_level[1])
+			                           : "?";
+			fps_line_cache[6] = fmt::format(_F("perf asked CPU {} · GPU {}"), cpu, gpu);
+			if (const auto e = application::get_last_perf_event())
+				fps_line_cache[6] += fmt::format(
+				        _F(" · runtime {}/{} {} → {}"),
+				        xr::to_string(e->domain), xr::to_string(e->subDomain),
+				        xr::to_string(e->fromLevel), xr::to_string(e->toLevel));
+		}
+		else
+			fps_line_cache[6].clear();
+	}
 }
 
 // The cached block, drawn. Both views call this so they cannot drift apart.

@@ -45,6 +45,7 @@ union event
 	XrEventDataPassthroughStateChangedFB passthrough_state_changed;
 	XrEventDataVisibilityMaskChangedKHR visibility_mask_changed;
 	XrEventDataUserPresenceChangedEXT user_presence_changed;
+	XrEventDataPerfSettingsEXT perf_settings;
 };
 class instance : public utils::handle<XrInstance, xrDestroyInstance>
 {

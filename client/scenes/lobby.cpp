@@ -1466,8 +1466,20 @@ void scenes::lobby::on_focused()
 	setup_passthrough();
 	discover.emplace();
 
-	session.set_performance_level(XR_PERF_SETTINGS_DOMAIN_CPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
-	session.set_performance_level(XR_PERF_SETTINGS_DOMAIN_GPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
+	// The lobby has always asked for sustained_high whatever the toggle says,
+	// and `lobby_high` keeps that: it is a menu, it is brief, and the frames
+	// are cheap.  A PINNED level still wins, because pinning is the point of it.
+	{
+		const auto & cfg = application::get_config();
+		session.set_performance_level(
+		        XR_PERF_SETTINGS_DOMAIN_CPU_EXT,
+		        xr::resolve_performance_level(cfg.perf_level_cpu, cfg.high_power_mode,
+		                                      true));
+		session.set_performance_level(
+		        XR_PERF_SETTINGS_DOMAIN_GPU_EXT,
+		        xr::resolve_performance_level(cfg.perf_level_gpu, cfg.high_power_mode,
+		                                      true));
+	}
 }
 
 void scenes::lobby::setup_passthrough()

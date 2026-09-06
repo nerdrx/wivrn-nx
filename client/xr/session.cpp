@@ -19,6 +19,8 @@
 
 #include "session.h"
 
+#include <spdlog/spdlog.h>
+
 #include "details/enumerate.h"
 #include "openxr/openxr.h"
 #include "utils/contains.h"
@@ -378,8 +380,113 @@ void xr::session::disable_passthrough()
 	passthrough.emplace<std::monostate>();
 }
 
+// The one place the SETTING becomes a level, so the lobby and the stream cannot
+// drift apart about what "auto" means.
+//
+// `auto` is deliberately not "do nothing": it is the policy this client has
+// always run -- high_power_mode picking sustained_high or sustained_low -- so
+// that leaving the new setting alone changes nothing at all.  `lobby_high` is
+// the lobby's own rule, which has always asked for sustained_high whatever the
+// toggle said.
+XrPerfSettingsLevelEXT xr::resolve_performance_level(uint32_t setting, bool high_power,
+                                                     bool lobby_high)
+{
+	switch (setting)
+	{
+		case 1:
+			return XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT;
+		case 2:
+			return XR_PERF_SETTINGS_LEVEL_BOOST_EXT;
+		default:
+			break;
+	}
+	if (lobby_high or high_power)
+		return XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT;
+	return XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT;
+}
+
+const char * xr::to_string(XrPerfSettingsLevelEXT level)
+{
+	switch (level)
+	{
+		case XR_PERF_SETTINGS_LEVEL_POWER_SAVINGS_EXT:
+			return "power_savings";
+		case XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT:
+			return "sustained_low";
+		case XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT:
+			return "sustained_high";
+		case XR_PERF_SETTINGS_LEVEL_BOOST_EXT:
+			return "boost";
+		default:
+			return "?";
+	}
+}
+
+const char * xr::to_string(XrPerfSettingsDomainEXT domain)
+{
+	switch (domain)
+	{
+		case XR_PERF_SETTINGS_DOMAIN_CPU_EXT:
+			return "CPU";
+		case XR_PERF_SETTINGS_DOMAIN_GPU_EXT:
+			return "GPU";
+		default:
+			return "?";
+	}
+}
+
+const char * xr::to_string(XrPerfSettingsSubDomainEXT sub)
+{
+	switch (sub)
+	{
+		case XR_PERF_SETTINGS_SUB_DOMAIN_COMPOSITING_EXT:
+			return "compositing";
+		case XR_PERF_SETTINGS_SUB_DOMAIN_RENDERING_EXT:
+			return "rendering";
+		case XR_PERF_SETTINGS_SUB_DOMAIN_THERMAL_EXT:
+			return "thermal";
+		default:
+			return "?";
+	}
+}
+
+const char * xr::to_string(XrPerfSettingsNotificationLevelEXT n)
+{
+	switch (n)
+	{
+		case XR_PERF_SETTINGS_NOTIF_LEVEL_NORMAL_EXT:
+			return "normal";
+		case XR_PERF_SETTINGS_NOTIF_LEVEL_WARNING_EXT:
+			return "warning";
+		case XR_PERF_SETTINGS_NOTIF_LEVEL_IMPAIRED_EXT:
+			return "impaired";
+		default:
+			return "?";
+	}
+}
+
+// The applied level is recorded whether or not the runtime has an opinion about
+// it: xrPerfSettingsSetPerformanceLevelEXT returns success without promising
+// the level was honoured, and the only thing that ever says otherwise is an
+// XrEventDataPerfSettingsEXT arriving later.  So this records what was ASKED,
+// the HUD says so in those words, and the event is what reports what happened.
 void xr::session::set_performance_level(XrPerfSettingsDomainEXT domain, XrPerfSettingsLevelEXT level)
 {
-	if (xrPerfSettingsSetPerformanceLevelEXT)
-		xrPerfSettingsSetPerformanceLevelEXT(*this, domain, level);
+	if (not xrPerfSettingsSetPerformanceLevelEXT)
+		return;
+	const XrResult r = xrPerfSettingsSetPerformanceLevelEXT(*this, domain, level);
+	const int i = domain == XR_PERF_SETTINGS_DOMAIN_GPU_EXT ? 1 : 0;
+	if (XR_SUCCEEDED(r))
+	{
+		applied_level[i] = level;
+		applied_valid[i] = true;
+		spdlog::info("Performance level: {} domain asked for {}", to_string(domain),
+		             to_string(level));
+	}
+	else
+	{
+		applied_valid[i] = false;
+		spdlog::warn("Performance level: {} domain refused {} ({})", to_string(domain),
+		             to_string(level), xr::to_string(r));
+	}
 }

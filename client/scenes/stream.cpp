@@ -641,15 +641,20 @@ void scenes::stream::on_focused()
 	foveation_ok = get_action("foveation_ok").first;
 	foveation_cancel = get_action("foveation_cancel").first;
 
-	if (application::get_config().high_power_mode)
+	// The performance levels, per domain.  At the default setting this is
+	// exactly the high_power_mode policy that has always been here; a pinned
+	// level overrides it for that domain alone.  See configuration.h, and the
+	// warning there about VK_EXT_global_priority.
 	{
-		session.set_performance_level(XR_PERF_SETTINGS_DOMAIN_CPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
-		session.set_performance_level(XR_PERF_SETTINGS_DOMAIN_GPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
-	}
-	else
-	{
-		session.set_performance_level(XR_PERF_SETTINGS_DOMAIN_CPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT);
-		session.set_performance_level(XR_PERF_SETTINGS_DOMAIN_GPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT);
+		const auto & cfg = application::get_config();
+		session.set_performance_level(
+		        XR_PERF_SETTINGS_DOMAIN_CPU_EXT,
+		        xr::resolve_performance_level(cfg.perf_level_cpu, cfg.high_power_mode,
+		                                      false));
+		session.set_performance_level(
+		        XR_PERF_SETTINGS_DOMAIN_GPU_EXT,
+		        xr::resolve_performance_level(cfg.perf_level_gpu, cfg.high_power_mode,
+		                                      false));
 	}
 }
 

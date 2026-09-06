@@ -1,0 +1,215 @@
+{
+ "name": "server74-encode-only",
+ "note": "The first of the server74/75 pair. No logcat exists for it, so every client-side field is absent by construction rather than by a parse failure.",
+ "verdict": "Server side only: one session, 57 encode reports, no client capture was taken.",
+ "generated": "2026-09-06T20:52:38",
+ "tool": "tools/capture-record.py",
+ "window": {
+  "client_from": null,
+  "client_to": null,
+  "server_report_from": 0,
+  "server_report_to": null,
+  "note": "Server logs carry no timestamps, so the wall-clock window applies to the client capture only; the server side is selected by report index."
+ },
+ "provenance": {
+  "server": {
+   "path": "/run/media/nerdrx/Lex/claude/nx-scratch/live/server74.log",
+   "bytes": 41973,
+   "mtime": "2026-09-06T12:14:21",
+   "sha256": "c64caacea0dbf87468c9a810e2d62df73ed6155eb22cf4f4be9ccea16f6a2003"
+  },
+  "client": null
+ },
+ "server": {
+  "session": {
+   "build": {
+    "v": "nx-1.4.1-4-g537bab91"
+   },
+   "gpu": {
+    "gpu": "AMD Radeon RX 7900 XTX (RADV NAVI31)"
+   },
+   "geometry": {
+    "w": "2176",
+    "h": "1088",
+    "tiles": "578"
+   },
+   "entropy": {
+    "req": "auto",
+    "got": "lite"
+   },
+   "tools": {
+    "enc": "0x42200c05",
+    "names": "INTRA_DC_PLANE RES_LEVEL INTER WARP CTX_V2 CTX_V3 ENTROPY_LITE",
+    "client": "0x777a1fff"
+   },
+   "backend": {
+    "backend": "nxvc_vk_encoder GPU compute encoder, nxvc_vk_encoder (E0/E3/E4/E5, intra only) (34x17 tiles, intra only, one QP per frame)"
+   },
+   "bitrate_cfg": {
+    "algo": "AIMD (v1)",
+    "ceil": "50.0",
+    "floor": "10.0"
+   },
+   "fec": {
+    "fec": "one parity shard per 8 video shards"
+   },
+   "rc": {
+    "bps": "43360433",
+    "bpf": "60223",
+    "hz": "90",
+    "lo": "22",
+    "hi": "40"
+   },
+   "not_reconstructed_last_reason": "dropped by the worker backlog",
+   "encoder_configuration": [
+    "* nxwarp (nxwarp 8-bit)",
+    "size: 1088x1088",
+    "bitrate: 48.7Mbit/s",
+    "* nxwarp (nxwarp 8-bit)",
+    "size: 1088x544",
+    "bitrate: 1.2Mbit/s"
+   ],
+   "encode_reports_in_log": 57,
+   "report_lines_not_parsed": 0
+  },
+  "metrics": {
+   "bytes_per_frame": {
+    "n": 57,
+    "mean": 17519.8596,
+    "min": 16327,
+    "max": 32679,
+    "stdev": 2063.711,
+    "unit": "B"
+   },
+   "client_decode_ms": {
+    "n": 56,
+    "mean": 23.4071,
+    "min": 20.5,
+    "max": 65.5,
+    "stdev": 5.8104,
+    "unit": "ms"
+   },
+   "controller_mbit": {
+    "n": 57,
+    "mean": 43.4,
+    "min": 43.4,
+    "max": 43.4,
+    "stdev": 0.0,
+    "unit": "Mbit/s"
+   },
+   "encode_ms": {
+    "n": 57,
+    "mean": 3.4333,
+    "min": 3.1,
+    "max": 3.7,
+    "stdev": 0.1058,
+    "unit": "ms"
+   },
+   "encode_ms_max": {
+    "n": 57,
+    "mean": 5.3965,
+    "min": 4.4,
+    "max": 10.7,
+    "stdev": 1.1089,
+    "unit": "ms"
+   },
+   "frames_not_sent": {
+    "n": 57,
+    "mean": 92.6842,
+    "min": 7,
+    "max": 116,
+    "stdev": 15.4147,
+    "unit": "frames"
+   },
+   "frames_per_report": {
+    "n": 57,
+    "mean": 84.3158,
+    "min": 25,
+    "max": 90,
+    "stdev": 8.8482,
+    "unit": "frames"
+   },
+   "not_reconstructed": {
+    "n": 47,
+    "mean": 4.1489,
+    "min": 1,
+    "max": 76,
+    "stdev": 10.8045,
+    "unit": "frames"
+   },
+   "not_reconstructed_cost_intra": {
+    "n": 47,
+    "mean": 3.3191,
+    "min": 1,
+    "max": 42,
+    "stdev": 5.8685,
+    "unit": "frames"
+   },
+   "not_reconstructed_free": {
+    "n": 47,
+    "mean": 0.8298,
+    "min": 0,
+    "max": 34,
+    "stdev": 4.9796,
+    "unit": "frames"
+   },
+   "paced_fps": {
+    "n": 57,
+    "mean": 39.8842,
+    "min": 37.1,
+    "max": 90.0,
+    "stdev": 7.3152,
+    "unit": "fps"
+   },
+   "qp_hi": {
+    "n": 57,
+    "mean": 22.1053,
+    "min": 22,
+    "max": 28,
+    "stdev": 0.7947
+   },
+   "qp_lo": {
+    "n": 57,
+    "mean": 22.0,
+    "min": 22,
+    "max": 22,
+    "stdev": 0.0
+   },
+   "qp_mean": {
+    "n": 57,
+    "mean": 22.0018,
+    "min": 22.0,
+    "max": 22.1,
+    "stdev": 0.0132
+   },
+   "rate_error_pct": {
+    "n": 57,
+    "mean": -87.0526,
+    "min": -89,
+    "max": -46,
+    "stdev": 5.5563,
+    "unit": "%"
+   },
+   "report_seconds": {
+    "n": 57,
+    "mean": 2.293,
+    "min": 2.0,
+    "max": 18.7,
+    "stdev": 2.212,
+    "unit": "s"
+   },
+   "target_bytes_per_frame": {
+    "n": 57,
+    "mean": 139043.5789,
+    "min": 60223,
+    "max": 145937,
+    "stdev": 11267.9256,
+    "unit": "B"
+   }
+  }
+ },
+ "client": {
+  "session": {},
+  "metrics": {}
+ }
+}

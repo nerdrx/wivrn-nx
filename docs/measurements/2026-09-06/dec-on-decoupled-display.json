@@ -1,0 +1,805 @@
+{
+ "name": "dec-on-decoupled-display",
+ "note": "The A leg of a decoupled-display A/B. TWO CAVEATS, both from the log rather than from the intent: neither capture carries a line naming which hand-over the session actually took, so the mode here is asserted by the FILENAME and by nothing else; and the measured difference against the B leg is 43.23 against 43.45 iterations/s, 93.06 against 92.69 ms of pose age and 16.74 against 16.73 ms of GPU -- flat. Either the setting did not take, or at this operating point it does not move these numbers. The record is kept as evidence of the second question, not as evidence for the first.",
+ "verdict": "An A/B that came out flat: against dec-off-coupled-display nothing moves by more than the run-to-run spread.",
+ "generated": "2026-09-06T20:52:38",
+ "tool": "tools/capture-record.py",
+ "window": {
+  "client_from": "15:11:57",
+  "client_to": "15:13:01",
+  "server_report_from": 0,
+  "server_report_to": null,
+  "note": "Server logs carry no timestamps, so the wall-clock window applies to the client capture only; the server side is selected by report index."
+ },
+ "provenance": {
+  "server": {
+   "path": "/run/media/nerdrx/Lex/claude/nx-scratch/live/dec-on-server.log",
+   "bytes": 21417,
+   "mtime": "2026-09-06T15:13:01",
+   "sha256": "bd2d20f50633b3c114bb99ac03f8a8fac4d42db588b9c026ab19a2038542b0ba"
+  },
+  "client": {
+   "path": "/run/media/nerdrx/Lex/claude/nx-scratch/live/dec-on.log",
+   "bytes": 116635,
+   "mtime": "2026-09-06T15:13:01",
+   "sha256": "ee475f71351f037bd90db45bd29263424c70fd1b6eef039cd376415b259cac3f"
+  }
+ },
+ "server": {
+  "session": {
+   "tile_map_mode": "auto",
+   "not_reconstructed_last_reason": "dropped by the worker backlog",
+   "encode_reports_in_log": 30,
+   "report_lines_not_parsed": 0
+  },
+  "metrics": {
+   "bytes_per_frame": {
+    "n": 30,
+    "mean": 17150.8333,
+    "min": 17147,
+    "max": 17175,
+    "stdev": 7.3254,
+    "unit": "B"
+   },
+   "client_decode_ms": {
+    "n": 30,
+    "mean": 23.0967,
+    "min": 20.8,
+    "max": 23.7,
+    "stdev": 0.8282,
+    "unit": "ms"
+   },
+   "controller_mbit": {
+    "n": 30,
+    "mean": 43.4,
+    "min": 43.4,
+    "max": 43.4,
+    "stdev": 0.0,
+    "unit": "Mbit/s"
+   },
+   "encode_ms": {
+    "n": 30,
+    "mean": 3.64,
+    "min": 3.5,
+    "max": 3.8,
+    "stdev": 0.077,
+    "unit": "ms"
+   },
+   "encode_ms_max": {
+    "n": 30,
+    "mean": 5.2833,
+    "min": 4.7,
+    "max": 6.0,
+    "stdev": 0.4356,
+    "unit": "ms"
+   },
+   "frames_not_sent": {
+    "n": 30,
+    "mean": 93.9333,
+    "min": 91,
+    "max": 100,
+    "stdev": 2.2118,
+    "unit": "frames"
+   },
+   "frames_per_report": {
+    "n": 30,
+    "mean": 87.2333,
+    "min": 81,
+    "max": 91,
+    "stdev": 2.3295,
+    "unit": "frames"
+   },
+   "not_reconstructed": {
+    "n": 26,
+    "mean": 2.5385,
+    "min": 1,
+    "max": 5,
+    "stdev": 1.1395,
+    "unit": "frames"
+   },
+   "not_reconstructed_cost_intra": {
+    "n": 26,
+    "mean": 2.5385,
+    "min": 1,
+    "max": 5,
+    "stdev": 1.1395,
+    "unit": "frames"
+   },
+   "not_reconstructed_free": {
+    "n": 26,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "frames"
+   },
+   "paced_fps": {
+    "n": 30,
+    "mean": 38.0267,
+    "min": 37.1,
+    "max": 39.8,
+    "stdev": 0.604,
+    "unit": "fps"
+   },
+   "qp_hi": {
+    "n": 30,
+    "mean": 22.0,
+    "min": 22,
+    "max": 22,
+    "stdev": 0.0
+   },
+   "qp_lo": {
+    "n": 30,
+    "mean": 22.0,
+    "min": 22,
+    "max": 22,
+    "stdev": 0.0
+   },
+   "qp_mean": {
+    "n": 30,
+    "mean": 22.0,
+    "min": 22.0,
+    "max": 22.0,
+    "stdev": 0.0
+   },
+   "rate_error_pct": {
+    "n": 30,
+    "mean": -87.9667,
+    "min": -88,
+    "max": -87,
+    "stdev": 0.1826,
+    "unit": "%"
+   },
+   "report_seconds": {
+    "n": 30,
+    "mean": 2.0,
+    "min": 2.0,
+    "max": 2.0,
+    "stdev": 0.0,
+    "unit": "s"
+   },
+   "target_bytes_per_frame": {
+    "n": 30,
+    "mean": 142524.8667,
+    "min": 135699,
+    "max": 146059,
+    "stdev": 2196.3075,
+    "unit": "B"
+   },
+   "tilemap_chunk_frames": {
+    "n": 30,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "frames"
+   },
+   "tilemap_span_frames": {
+    "n": 30,
+    "mean": 87.2333,
+    "min": 81,
+    "max": 91,
+    "stdev": 2.3295,
+    "unit": "frames"
+   }
+  }
+ },
+ "client": {
+  "session": {
+   "defoveate_per_eye": "1088x1088",
+   "atlas_mode": 0,
+   "timestamped_lines": 544,
+   "lines_in_window": 544,
+   "stat_lines_not_parsed": 0,
+   "wifi": null
+  },
+  "metrics": {
+   "bytes_per_frame": {
+    "n": 32,
+    "mean": 17152.4688,
+    "min": 17142,
+    "max": 17219,
+    "stdev": 13.1001,
+    "unit": "B"
+   },
+   "cache_represented": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "frames"
+   },
+   "defoveate_mpx": {
+    "n": 32,
+    "mean": 2.37,
+    "min": 2.37,
+    "max": 2.37,
+    "stdev": 0.0,
+    "unit": "Mpx"
+   },
+   "defoveate_scale": {
+    "n": 32,
+    "mean": 0.5,
+    "min": 0.5,
+    "max": 0.5,
+    "stdev": 0.0
+   },
+   "display_pass_ms": {
+    "n": 32,
+    "mean": 6.3406,
+    "min": 6.3,
+    "max": 6.4,
+    "stdev": 0.0499,
+    "unit": "ms"
+   },
+   "display_period_ms": {
+    "n": 32,
+    "mean": 23.1406,
+    "min": 22.2,
+    "max": 23.7,
+    "stdev": 0.3191,
+    "unit": "ms"
+   },
+   "frames_per_report": {
+    "n": 32,
+    "mean": 84.9688,
+    "min": 81,
+    "max": 86,
+    "stdev": 1.2044,
+    "unit": "frames"
+   },
+   "gpu_ms_per_stereo_frame": {
+    "n": 32,
+    "mean": 16.7437,
+    "min": 16.6,
+    "max": 17.0,
+    "stdev": 0.0982,
+    "unit": "ms"
+   },
+   "holes": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "frames"
+   },
+   "iter_fence_ms": {
+    "n": 32,
+    "mean": 4.75,
+    "min": 2.7,
+    "max": 7.7,
+    "stdev": 1.0346,
+    "unit": "ms"
+   },
+   "iter_fence_worst_ms": {
+    "n": 32,
+    "mean": 20.3031,
+    "min": 10.2,
+    "max": 23.7,
+    "stdev": 3.9624,
+    "unit": "ms"
+   },
+   "iter_queries_ms": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "iter_render_ms": {
+    "n": 32,
+    "mean": 5.2344,
+    "min": 3.1,
+    "max": 8.2,
+    "stdev": 1.0447,
+    "unit": "ms"
+   },
+   "iter_submit_ms": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "loop_gated_out": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "iterations"
+   },
+   "loop_iterations": {
+    "n": 32,
+    "mean": 86.9062,
+    "min": 85,
+    "max": 90,
+    "stdev": 1.2276,
+    "unit": "iterations"
+   },
+   "loop_nothing_to_show": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "iterations"
+   },
+   "loop_rate": {
+    "n": 32,
+    "mean": 43.2344,
+    "min": 42.2,
+    "max": 45.0,
+    "stdev": 0.6057,
+    "unit": "/s"
+   },
+   "loop_submitted_layer": {
+    "n": 32,
+    "mean": 86.9062,
+    "min": 85,
+    "max": 90,
+    "stdev": 1.2276,
+    "unit": "iterations"
+   },
+   "misses_late": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "frames"
+   },
+   "misses_overrun": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "frames"
+   },
+   "misses_skipped_refresh": {
+    "n": 32,
+    "mean": 0.3438,
+    "min": 0,
+    "max": 1,
+    "stdev": 0.4826,
+    "unit": "frames"
+   },
+   "net_datagrams_per_report": {
+    "n": 32,
+    "mean": 10020.5625,
+    "min": 8554,
+    "max": 10440,
+    "stdev": 398.0792,
+    "unit": "datagrams"
+   },
+   "net_decoded_total": {
+    "n": 32,
+    "last": 4250,
+    "first": 1618,
+    "delta": 2632,
+    "unit": "frames"
+   },
+   "net_frames_closed": {
+    "n": 32,
+    "mean": 87.0938,
+    "min": 81,
+    "max": 90,
+    "stdev": 2.2769,
+    "unit": "frames"
+   },
+   "net_frames_late": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "frames"
+   },
+   "net_frames_with_hole": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "frames"
+   },
+   "net_ms_per_datagram": {
+    "n": 32,
+    "mean": 0.0122,
+    "min": 0.012,
+    "max": 0.014,
+    "stdev": 0.0004,
+    "unit": "ms"
+   },
+   "net_ms_per_second": {
+    "n": 32,
+    "mean": 61.1403,
+    "min": 56.8,
+    "max": 64.47,
+    "stdev": 2.0263,
+    "unit": "ms/s"
+   },
+   "net_out_of_order": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "datagrams"
+   },
+   "net_queued_for_worker": {
+    "n": 32,
+    "mean": 0.0312,
+    "min": 0,
+    "max": 1,
+    "stdev": 0.1768,
+    "unit": "frames"
+   },
+   "net_stragglers_dropped": {
+    "n": 32,
+    "last": 4574,
+    "first": 1874,
+    "delta": 2700,
+    "unit": "datagrams"
+   },
+   "passA_ms": {
+    "n": 32,
+    "mean": 3.0031,
+    "min": 2.9,
+    "max": 3.1,
+    "stdev": 0.04,
+    "unit": "ms"
+   },
+   "passB_coded_ms": {
+    "n": 32,
+    "mean": 5.4469,
+    "min": 5.4,
+    "max": 5.5,
+    "stdev": 0.0507,
+    "unit": "ms"
+   },
+   "passB_dir_ms": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "passB_ms": {
+    "n": 32,
+    "mean": 13.7438,
+    "min": 13.5,
+    "max": 13.9,
+    "stdev": 0.0878,
+    "unit": "ms"
+   },
+   "passB_other_ms": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "passB_skip_ms": {
+    "n": 32,
+    "mean": 8.2312,
+    "min": 8.1,
+    "max": 8.4,
+    "stdev": 0.1091,
+    "unit": "ms"
+   },
+   "passB_tiles_coded": {
+    "n": 32,
+    "mean": 289.0312,
+    "min": 289,
+    "max": 290,
+    "stdev": 0.1768,
+    "unit": "tiles"
+   },
+   "passB_tiles_dir": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "tiles"
+   },
+   "passB_tiles_skip": {
+    "n": 32,
+    "mean": 288.9688,
+    "min": 288,
+    "max": 289,
+    "stdev": 0.1768,
+    "unit": "tiles"
+   },
+   "passB_total_ms": {
+    "n": 32,
+    "mean": 13.7438,
+    "min": 13.5,
+    "max": 13.9,
+    "stdev": 0.0878,
+    "unit": "ms"
+   },
+   "passB_warp_ms": {
+    "n": 32,
+    "mean": 0.1,
+    "min": 0.1,
+    "max": 0.1,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "pose_age_mean_ms": {
+    "n": 32,
+    "mean": 93.0594,
+    "min": 88.3,
+    "max": 98.0,
+    "stdev": 2.1246,
+    "unit": "ms"
+   },
+   "pose_age_worst_ms": {
+    "n": 32,
+    "mean": 130.1781,
+    "min": 108.9,
+    "max": 154.2,
+    "stdev": 8.6389,
+    "unit": "ms"
+   },
+   "pose_frames": {
+    "n": 32,
+    "mean": 86.9062,
+    "min": 85,
+    "max": 90,
+    "stdev": 1.2276,
+    "unit": "frames"
+   },
+   "reassembly_buffer_kB": {
+    "n": 32,
+    "mean": 17.0,
+    "min": 17,
+    "max": 17,
+    "stdev": 0.0,
+    "unit": "kB"
+   },
+   "reassembly_held_kB": {
+    "n": 32,
+    "mean": 17.0,
+    "min": 17,
+    "max": 17,
+    "stdev": 0.0,
+    "unit": "kB"
+   },
+   "reassembly_ms_per_frame": {
+    "n": 32,
+    "mean": 0.0262,
+    "min": 0.02,
+    "max": 0.03,
+    "stdev": 0.0049,
+    "unit": "ms"
+   },
+   "reassembly_ratio": {
+    "n": 32,
+    "mean": 1.0,
+    "min": 1.0,
+    "max": 1.0,
+    "stdev": 0.0,
+    "unit": "x"
+   },
+   "refused": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0,
+    "max": 0,
+    "stdev": 0.0,
+    "unit": "frames"
+   },
+   "report_seconds": {
+    "n": 32,
+    "mean": 2.0,
+    "min": 2.0,
+    "max": 2.0,
+    "stdev": 0.0,
+    "unit": "s"
+   },
+   "rx_datagrams": {
+    "n": 32,
+    "last": 504305,
+    "first": 193739,
+    "delta": 310566,
+    "unit": "datagrams"
+   },
+   "rx_late": {
+    "n": 32,
+    "last": 444,
+    "first": 311,
+    "delta": 133,
+    "unit": "datagrams"
+   },
+   "rx_placed": {
+    "n": 32,
+    "last": 1317160,
+    "first": 536727,
+    "delta": 780433,
+    "unit": "datagrams"
+   },
+   "sel_arrival_ms": {
+    "n": 32,
+    "mean": 23.4438,
+    "min": 22.0,
+    "max": 26.4,
+    "stdev": 1.2799,
+    "unit": "ms"
+   },
+   "sel_decoded": {
+    "n": 32,
+    "last": 4250,
+    "first": 1618,
+    "delta": 2632,
+    "unit": "frames"
+   },
+   "sel_dropped_late": {
+    "n": 32,
+    "last": 221,
+    "first": 155,
+    "delta": 66,
+    "unit": "frames"
+   },
+   "sel_withheld": {
+    "n": 32,
+    "last": 138,
+    "first": 72,
+    "delta": 66,
+    "unit": "frames"
+   },
+   "stage_arrival_ms": {
+    "n": 32,
+    "mean": 23.2031,
+    "min": 22.0,
+    "max": 26.4,
+    "stdev": 1.2272,
+    "unit": "ms"
+   },
+   "stage_fence_post_ms": {
+    "n": 32,
+    "mean": 22.0844,
+    "min": 21.7,
+    "max": 22.7,
+    "stdev": 0.2701,
+    "unit": "ms"
+   },
+   "stage_fence_pre_ms": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "stage_gap_ms": {
+    "n": 32,
+    "mean": 0.7562,
+    "min": 0.1,
+    "max": 2.1,
+    "stdev": 0.4724,
+    "unit": "ms"
+   },
+   "stage_get_free_ms": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "stage_publish_ms": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "stage_qsubmit_ms": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "stage_record_ms": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "stage_stride": {
+    "n": 32,
+    "mean": 1.0,
+    "min": 1,
+    "max": 1,
+    "stdev": 0.0
+   },
+   "stage_submit_codec_ms": {
+    "n": 32,
+    "mean": 0.8,
+    "min": 0.8,
+    "max": 0.8,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "stage_submit_ms": {
+    "n": 32,
+    "mean": 0.8,
+    "min": 0.8,
+    "max": 0.8,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "stage_submit_qlock_ms": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "stage_wait_prev_ms": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "stage_withheld": {
+    "n": 32,
+    "mean": 2.1562,
+    "min": 0,
+    "max": 4,
+    "stdev": 1.4393,
+    "unit": "frames"
+   },
+   "submit_lead_mean_ms": {
+    "n": 32,
+    "mean": 46.9125,
+    "min": 45.6,
+    "max": 48.5,
+    "stdev": 0.6384,
+    "unit": "ms"
+   },
+   "submit_lead_worst_ms": {
+    "n": 32,
+    "mean": 28.8438,
+    "min": 19.1,
+    "max": 38.9,
+    "stdev": 4.7195,
+    "unit": "ms"
+   },
+   "wait_prev_ms": {
+    "n": 32,
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "stdev": 0.0,
+    "unit": "ms"
+   },
+   "wall_ms": {
+    "n": 32,
+    "mean": 22.9406,
+    "min": 22.5,
+    "max": 23.5,
+    "stdev": 0.2601,
+    "unit": "ms"
+   }
+  }
+ }
+}

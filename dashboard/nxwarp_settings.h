@@ -57,6 +57,7 @@ inline constexpr std::string_view nxwarp_default_pace = "auto";
 inline constexpr std::string_view nxwarp_default_rc = "auto";
 inline constexpr std::string_view nxwarp_default_coded_vectors = "default";
 inline constexpr bool nxwarp_default_inter = false;
+inline constexpr std::string_view nxwarp_default_stereo_frame = "auto";
 inline constexpr uint32_t nxwarp_default_intra_period = 180;
 inline constexpr uint32_t nxwarp_default_min_qp = 20;
 inline constexpr uint32_t nxwarp_default_max_qp = 44;
@@ -235,6 +236,61 @@ inline void set_nxwarp_option_bool(nlohmann::json & settings, const char * key, 
 		set_nxwarp_option(settings, key, std::nullopt);
 	else
 		set_nxwarp_option(settings, key, value ? "true" : "false");
+}
+
+// "stereo-frame": code BOTH eyes of a frame as ONE nxvc stereo frame (eyes = 2,
+// side by side, eye 0 left) on a single stream, instead of one stream and one encoder
+// per eye.
+//
+// Why it is worth a switch rather than simply being on: it is a large win on the
+// headset and a small cost on the server, and the two are measured on different
+// machines. On the Pico 4 the GPU serialises the two eyes' decoders (concurrent over
+// sequential wall time 0.977 -- there is no concurrency to be had), while decoding the
+// pair as one stream costs 49.25 ms of GPU against 68.93 for two mono decodes: -28.6 %,
+// almost all of it in Pass A, whose cost is a step function of workgroup count and is
+// starved at one eye's 289 tiles. The encoder sees the same shape from the other side,
+// -45 % on its E-stages for the pair. Against that, the server pays one full-frame
+// on-device copy per frame to bring WiVRn's two array layers into the side-by-side
+// picture nxvc's image entry point wants.
+//
+//   auto  the default: on when the whole eye pair is NX Warp, off otherwise
+//   on    force it, including in configurations "auto" declines
+//   off   one stream and one encoder per eye, the shape before this existed
+enum class stereo_frame_mode
+{
+	automatic,
+	on,
+	off,
+};
+
+inline stereo_frame_mode nxwarp_stereo_frame_mode(const nlohmann::json & settings)
+{
+	auto v = nxwarp_option(settings, "stereo-frame");
+	if (not v or *v == "auto")
+		return stereo_frame_mode::automatic;
+	if (*v == "on" or *v == "1" or *v == "true")
+		return stereo_frame_mode::on;
+	if (*v == "off" or *v == "0" or *v == "false")
+		return stereo_frame_mode::off;
+	// A value the server would refuse is reported as the default rather than as a
+	// setting the user cannot see, exactly as "pace" does.
+	return stereo_frame_mode::automatic;
+}
+
+inline void set_nxwarp_stereo_frame(nlohmann::json & settings, stereo_frame_mode mode)
+{
+	switch (mode)
+	{
+		case stereo_frame_mode::automatic:
+			set_nxwarp_option(settings, "stereo-frame", std::nullopt);
+			return;
+		case stereo_frame_mode::on:
+			set_nxwarp_option(settings, "stereo-frame", "on");
+			return;
+		case stereo_frame_mode::off:
+			set_nxwarp_option(settings, "stereo-frame", "off");
+			return;
+	}
 }
 
 // "pace" is three controls in one string: "auto", "off", or a frame rate held exactly. The GUI

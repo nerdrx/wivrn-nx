@@ -37,12 +37,28 @@ struct encoder_settings
 	video_codec codec; // left, right, alpha, quad
 	float fps;
 	// False when the stream is not used at all this session, in which case no
-	// encoder is created for it and it takes no share of the bitrate. Only the
-	// quad layer stream is ever disabled, when the headset did not ask for it.
+	// encoder is created for it and it takes no share of the bitrate. The quad
+	// layer stream is disabled when the headset did not ask for it, and the RIGHT
+	// EYE stream is disabled when NX Warp pairs the eyes into one stereo frame --
+	// see `eyes` below.
 	bool enabled = true;
 	// Array layer of the compositor image this stream is encoded from. Streams
 	// 0 to 2 read the shared eye image, the quad stream has an image of its own.
 	uint32_t src_layer = 0;
+	// Eyes this ONE stream carries, 1 or 2. Only the NX Warp encoder ever sets 2:
+	// nxvc can code both eyes of a frame as a single stereo frame, which is worth
+	// -28.6 % of the headset's decode GPU (the two eyes' decoders serialise there,
+	// and Pass A's cost is a step function of workgroup count that is starved at
+	// one eye's 289 tiles) and -45 % of the encoder's E-stages for the same
+	// reason. At 2 this stream reads BOTH `src_layer` and `src_layer_right`, the
+	// right-eye stream is disabled, and no encoder is created for it.
+	//
+	// This is the eye PAIRING and not the STEREO tool: the cross-eye predictor
+	// (nxvc tool bit 12) stays off and each eye is still coded independently, so
+	// nothing here depends on inter-view prediction being implemented.
+	uint32_t eyes = 1;
+	// The second eye's array layer, read only when `eyes` is 2.
+	uint32_t src_layer_right = 1;
 	// encoder identifier, such as nvenc, vaapi or x264
 	std::string encoder_name;
 	uint64_t bitrate;                           // bit/s

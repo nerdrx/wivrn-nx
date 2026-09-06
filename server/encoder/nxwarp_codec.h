@@ -209,6 +209,29 @@ public:
 	// tiles() describes the frame it just produced. The call submits and waits,
 	// so the image is free again when it returns — and must not be written
 	// before that.
+	// Encode BOTH eyes of a frame as one nxvc stereo frame, taking them from two
+	// ARRAY LAYERS of the compositor's image. Only meaningful when the codec was
+	// created with `eyes == 2`; at 1 it is encode_image(image, layer_left) and the
+	// right layer is ignored, so a caller need not branch.
+	//
+	// The split exists because the two sides disagree about where an eye lives:
+	// WiVRn keeps them in layers, nxvc's image entry point wants one side-by-side
+	// picture and uses `array_layer` to pick a layer of an array image, not an
+	// eye. The backend brings them together; see nxwarp_codec_vk.cpp.
+	virtual std::span<const uint8_t> encode_image_pair(VkImage image,
+	                                                   uint32_t layer_left,
+	                                                   uint32_t)
+	{
+		return encode_image(image, layer_left);
+	}
+
+	// Milliseconds the GPU spent bringing the two eyes together, as the device
+	// timed it. 0 on the mono path, and on a device with no timestamp support.
+	virtual double compose_ms() const
+	{
+		return 0;
+	}
+
 	virtual std::span<const uint8_t> encode_image(VkImage, uint32_t array_layer)
 	{
 		return {};

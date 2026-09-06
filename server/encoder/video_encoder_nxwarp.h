@@ -120,6 +120,10 @@ class video_encoder_nxwarp : public video_encoder
 	// class puts them on WiVRn's stream socket.
 	std::unique_ptr<nxt::Aead> aead;
 	std::unique_ptr<nxt::Sender> sender;
+	// Eyes this stream codes as one nxvc frame: 1, or 2 when the eyes are paired
+	// (encoder_settings::eyes). At 2 the encode reads both array layers.
+	uint32_t stereo_eyes = 1;
+	uint32_t src_layer_right = 1;
 	nxt::StreamConfig stream_cfg;
 	// The AEAD key material, kept because reset_stream() builds a new Sender with it.
 	nxt::Key session_key{}, session_salt{};

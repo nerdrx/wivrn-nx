@@ -397,6 +397,60 @@ std::array<encoder_settings, num_streams> get_encoder_settings(wivrn::vk_bundle 
 			dst.height /= 2;
 	}
 
+	// --- NX Warp: code both eyes as ONE stereo frame on stream 0.
+	//
+	// "stereo-frame": auto (the default) pairs the eyes when the whole pair is NX
+	// Warp; on forces it; off keeps one stream and one encoder per eye. auto
+	// declines a mixed pair because the win is a property of the pair -- the
+	// headset's two decoders serialise, so pairing is what removes the second
+	// dispatch, and pairing one eye with something that is not nxvc removes
+	// nothing.
+	//
+	// The right-eye stream keeps its entry in the description, so the headset's
+	// view-to-stream mapping is untouched and this needs no protocol change; what
+	// it loses is its encoder. The client learns the pair is on from the .nxv
+	// stream header it already parses (nxvc_vkd_stream_info::eyes == 2) and serves
+	// view 1 out of stream 0's second eye.
+	{
+		const auto & opts = res[0].options;
+		const auto it = opts.find("stereo-frame");
+		const std::string mode = it == opts.end() ? "auto" : it->second;
+		const bool both_nxwarp = res[0].enabled and res[1].enabled and
+		                         res[0].codec == video_codec::nxwarp and
+		                         res[1].codec == video_codec::nxwarp;
+		bool pair = false;
+		if (mode == "off" or mode == "0" or mode == "false")
+			pair = false;
+		else if (mode == "on" or mode == "1" or mode == "true")
+			pair = both_nxwarp;
+		else
+			pair = both_nxwarp; // auto
+
+		if (pair and mode != "off")
+		{
+			// nxvc refuses eyes == 2 unless the per-eye width is a multiple of
+			// 64, so that the seam falls on a tile boundary and each eye's
+			// sub-picture is addressable. stream_encode_size can land anywhere,
+			// so this is a real gate and not an assertion.
+			if (width % 64 != 0)
+			{
+				U_LOG_W("nxwarp: not pairing the eyes: the per-eye width %u is not a multiple of 64",
+				        unsigned(width));
+			}
+			else
+			{
+				res[0].eyes = 2;
+				res[0].src_layer = 0;
+				res[0].src_layer_right = 1;
+				res[1].enabled = false;
+				U_LOG_I("nxwarp: both eyes on stream 0 as one %ux%u stereo frame (%u tiles), stream 1 has no encoder",
+				        unsigned(width * 2),
+				        unsigned(height),
+				        unsigned(2 * ((width + 63) / 64) * ((height + 63) / 64)));
+			}
+		}
+	}
+
 	if (res[quad_stream_idx].enabled)
 	{
 		// The quad has an image of its own, so its size is not tied to the eyes:

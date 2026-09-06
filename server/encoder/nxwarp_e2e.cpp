@@ -135,6 +135,21 @@
 //                      makes, i.e. the server as it behaved before that call existed.
 //                      Reproduces the failure: every datagram after the reconnect fails
 //                      authentication and not one frame decodes again.
+//   --drop-datagram N[:K]
+//                      drop the Nth stream datagram (and K-1 after it), plus the parity
+//                      of whatever FEC group they were in, and nothing else. The parity
+//                      goes because class-A parity rebuilds a single lost datagram
+//                      outright, and the point of this option is to measure what a loss
+//                      the FEC did not cover costs -- per TILE, against the headset's own
+//                      receipt map, not as a total.
+//   --reorder-depth D  the deepest --reorder may push a datagram back, in datagram
+//                      slots. Default 3, which reorders within a frame; past a frame's
+//                      worth of datagrams it reorders ACROSS frames at the same tile
+//                      position, which is what makes a tile superseded rather than late.
+//   --tile-stream      run the arrival-order atlas model of docs/NXWARP-TILESTREAM.md
+//                      section 6 beside the real decode and assert it ends in the same
+//                      state as the frame-complete one over the same delivered tiles.
+//                      Observes only; every other figure the run prints is unchanged.
 //   --idr-at N         at frame N the encoder is asked for a keyframe
 //                      (compositor::request_idr -> video_encoder::reset), with the same
 //                      client still on the other end. The stream must not hiccup: an
@@ -167,8 +182,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <mutex>
 #include <random>
+#include <set>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -542,12 +559,73 @@ class lossy_link : public video_encoder::packet_sink
 	// the tail of frame N arrives after the head of N+1. On the wire this is what two
 	// eye streams interleaved on one socket, plus any path reordering, actually do.
 	double reorder;
+	// The deepest a held datagram may be pushed back, in datagram slots. Three is what
+	// this link has always done and is the shape of a path that reorders WITHIN a frame.
+	// Reaching the src_frame monotonicity rule of docs/NXWARP-TILESTREAM.md section 2
+	// needs more than that: a tile of frame N has to arrive after a tile of frame N+1 AT
+	// THE SAME POSITION, which at six or seven datagrams per frame means a datagram has
+	// to fall a whole frame behind, not a few slots.
+	uint32_t reorder_depth = 3;
 	// Datagrams waiting for their slot to come up: {slot at which it is released, packet}.
 	std::vector<std::pair<uint64_t, to_headset::nxwarp_datagram>> held;
 	uint64_t slot_index = 0;
 
 public:
 	uint64_t sent = 0, dropped = 0, delayed = 0;
+	// Data datagrams alone -- the ones carrying tiles. --drop-datagram is indexed on
+	// this and not on `sent`; see the note where it is used.
+	uint64_t data_sent = 0;
+	// One tile run as it travels: a datagram carries `count` CONSECUTIVE tile indices
+	// starting at `first`, of one frame. That is the transport's own unit -- the
+	// datagram header says so in three fields -- and it is the unit every claim below
+	// is made in. Under stereo the indices are over the eye PAIR grid
+	// (common/nxwarp_stream_grid.h), so nothing here has to know how many eyes there
+	// are: an index names a tile of the pair and that is all it has to name.
+	struct tile_run
+	{
+		uint16_t frame_id = 0;
+		uint32_t first = 0;
+		uint32_t count = 0;
+	};
+
+	// --drop-datagram: the 1-based index of the first stream datagram to drop, how many
+	// consecutive ones go with it, and what they were carrying when they went.
+	uint64_t drop_one = 0;
+	uint32_t drop_count = 1;
+	uint32_t dropped_tiles = 0;
+	std::vector<tile_run> dropped_runs;
+	// Parity datagrams suppressed along with them: see the note in send_stream. Counted
+	// separately because a parity datagram carries no tile of its own, so it changes
+	// nothing about WHAT was lost -- only about whether the loss could be repaired.
+	uint64_t dropped_parity = 0;
+	// The FEC groups the dropped datagrams belonged to, as (frame_id << 8) | group.
+	std::set<uint32_t> dropped_groups;
+	// Transport tiles the sender put on the link, over every datagram it offered --
+	// dropped ones included -- and the runs themselves.
+	uint64_t tiles_offered = 0;
+	std::vector<tile_run> offered_runs;
+	// Runs the link actually handed the decoder, IN DELIVERY ORDER. This is what the
+	// arrival-order model of docs/NXWARP-TILESTREAM.md section 6 is fed; it is the
+	// order the datagrams reached the client, reordering and all.
+	bool record_delivery = false;
+	std::vector<tile_run> delivered_runs;
+
+	// The datagram header the sender wrote, read back out of the payload. It is in the
+	// clear (the AEAD covers the tile bytes, not the routing), which is why the link can
+	// account for tile runs at all without holding the session key.
+	static bool header_of(const to_headset::nxwarp_datagram & p, nxt::DatagramHeader * h)
+	{
+		return p.payload.size() >= 24 and nxt::decode_header(p.payload.data(), h);
+	}
+
+	// Transport tiles in one datagram. tile_count 0 IS the parity marker, so this
+	// returns 0 for parity too, which is right: a parity datagram carries no tile of
+	// its own.
+	static uint32_t count_tiles(const to_headset::nxwarp_datagram & p)
+	{
+		nxt::DatagramHeader h{};
+		return header_of(p, &h) ? uint32_t(h.tile_count) : 0;
+	}
 	// The stream header, and the shadow reassembly of every frame, so the harness can
 	// rebuild the exact .nxv the decoder was fed.
 	std::vector<uint8_t> stream_header;
@@ -563,8 +641,10 @@ public:
 	// on the clip, this does not.
 	uint64_t resync_notices = 0;
 
-	lossy_link(nxwarp_decoder & dec, double loss, double reorder, uint32_t seed) :
-	        dec(&dec), rng(seed), loss(loss), reorder(reorder) {}
+	lossy_link(nxwarp_decoder & dec, double loss, double reorder, uint32_t seed,
+	           uint32_t reorder_depth) :
+	        dec(&dec), rng(seed), loss(loss), reorder(reorder),
+	        reorder_depth(reorder_depth) {}
 
 	// Point the link at the decoder that replaced the old one.
 	void retarget(nxwarp_decoder & d)
@@ -589,8 +669,50 @@ public:
 	void send_stream(to_headset::nxwarp_datagram && packet) override
 	{
 		++sent;
+		nxt::DatagramHeader h{};
+		const bool have_header = header_of(packet, &h);
+		if (have_header and h.tile_count)
+		{
+			tiles_offered += h.tile_count;
+			offered_runs.push_back({h.frame_id, h.tile_first, h.tile_count});
+		}
+		// --drop-datagram counts DATA datagrams, not everything on the link. Counting
+		// everything made the option's meaning depend on where the parity fell: "drop
+		// the 20th" would silently drop a parity block instead, which costs no tile,
+		// and the run would then pass every check by having lost nothing at all.
+		if (have_header and h.tile_count)
+			++data_sent;
 		const uint64_t slot = slot_index++;
 		release_due(slot);
+		// One named datagram, dropped and nothing else: see --drop-datagram.
+		if (drop_one and have_header and h.tile_count and data_sent >= drop_one and
+		    data_sent < drop_one + drop_count)
+		{
+			++dropped;
+			if (have_header and h.tile_count)
+			{
+				dropped_tiles += h.tile_count;
+				dropped_runs.push_back({h.frame_id, h.tile_first, h.tile_count});
+				if (h.fec_k)
+					dropped_groups.insert(uint32_t(h.frame_id) << 8 | h.fec_group);
+			}
+			return;
+		}
+		// The parity of a group one of those datagrams was in goes with it.
+		//
+		// Not to make the loss worse -- a parity datagram carries no tile, so dropping
+		// it costs no receipt -- but to make it REAL. Class-A parity rebuilds a single
+		// lost datagram outright, so with the parity delivered the measurement below
+		// would be of the FEC succeeding, which it already is elsewhere. The claim
+		// being made here is about what a loss the FEC did not cover costs, and this
+		// is what reaches past the FEC to it.
+		if (have_header and h.is_parity() and
+		    dropped_groups.count(uint32_t(h.frame_id) << 8 | h.fec_group))
+		{
+			++dropped;
+			++dropped_parity;
+			return;
+		}
 		if (loss > 0 and std::uniform_real_distribution<double>(0, 1)(rng) < loss)
 		{
 			++dropped;
@@ -599,7 +721,7 @@ public:
 		if (reorder > 0 and std::uniform_real_distribution<double>(0, 1)(rng) < reorder)
 		{
 			++delayed;
-			const uint64_t d = 1 + (uint64_t(rng()) % 3);
+			const uint64_t d = 1 + (uint64_t(rng()) % std::max<uint32_t>(1, reorder_depth));
 			held.emplace_back(slot + d, std::move(packet));
 			return;
 		}
@@ -647,11 +769,209 @@ private:
 
 	void deliver(to_headset::nxwarp_datagram && packet)
 	{
+		if (record_delivery)
+		{
+			nxt::DatagramHeader h{};
+			if (header_of(packet, &h) and h.tile_count)
+				delivered_runs.push_back({h.frame_id, h.tile_first, h.tile_count});
+		}
 		// Real serializer, both directions. A field that does not survive this does not
 		// reach the decoder, which is the whole point of routing it through here.
 		auto wire = to_wire(packet);
 		auto back = from_wire<to_headset::nxwarp_datagram>(std::move(wire));
 		dec->push_datagram(std::move(back));
+	}
+};
+
+// ===========================================================================
+// The arrival-order model (docs/NXWARP-TILESTREAM.md sections 2 and 6).
+// ===========================================================================
+//
+// Not a decoder. It is the ATLAS BOOKKEEPING of SYNTAX 13.12 with the pixels taken out,
+// which is the half the ordering rule lives in, and it exists so that the rule can be
+// tested before nxvc_vk_decode_tiles exists to test it against. What it keeps per tile
+// position is exactly what 13.12.3 step 3 writes back -- `src_frame`, `gen`, and the
+// composed `C` -- with `C` modelled as the ORDERED SEQUENCE of H steps folded into it.
+//
+// The fold is what makes the comparison mean something. 13.12.2 builds the composition
+// "one step at a time by right-multiplication", so two paths agree on C if and only if
+// they performed the same steps in the same order; a hash of that sequence has the same
+// property and can be compared with memcmp. An integer-matrix C would test the same claim
+// with more code and no more evidence, since the matrices themselves are nx-warp's to
+// verify and are pinned by its own conformance tests.
+//
+// Two ways of driving it, the same state either way:
+//
+//   * apply_ordered  -- the frame-complete path. A frame's delivered tiles are applied
+//                       together, in frame order, after an EAGER advance of every valid
+//                       entry by H_N. This is what today's client does, and what a
+//                       whole-frame decode call does.
+//   * apply_arrival  -- the tile-streaming path. Each run is applied when it arrives,
+//                       with the LAZY advance of section 2 and the src_frame
+//                       monotonicity rule, and a run that would move a position
+//                       backwards is `superseded` rather than lost.
+//
+// The proof obligation is that the two end in the same state. Section 6 states it as
+// byte-identity of the atlas, and that is what `operator==` here is.
+struct atlas_model
+{
+	struct entry
+	{
+		// -1 for a position no coded tile has ever landed on.
+		int64_t src_frame = -1;
+		int64_t advanced_to = -1;
+		uint32_t gen = 0;
+		// FNV-1a over the sequence of H indices folded into C since it was last
+		// reset to the identity. kIdentity is C == I.
+		uint64_t c = kIdentity;
+
+		static constexpr uint64_t kIdentity = 1469598103934665603ull;
+
+		bool operator==(const entry &) const = default;
+	};
+
+	std::vector<entry> tiles;
+	// A run dropped by 13.12.3 step 3: the position already holds a NEWER generation
+	// than the tile that arrived. Not a loss, and the reason the encoder is told about
+	// it is that "not the one I sent" has two causes and only the report separates them.
+	uint64_t superseded_runs = 0, superseded_tiles = 0;
+	uint64_t applied_runs = 0, applied_tiles = 0;
+
+	explicit atlas_model(size_t n) :
+	        tiles(n) {}
+
+	static uint64_t fold(uint64_t c, int64_t frame)
+	{
+		for (int i = 0; i < 8; ++i)
+		{
+			c ^= uint64_t(uint8_t(uint64_t(frame) >> (8 * i)));
+			c *= 1099511628211ull;
+		}
+		return c;
+	}
+
+	// 13.12.2: one right-multiplication per frame step, in order.
+	void advance_to(entry & e, int64_t frame)
+	{
+		while (e.advanced_to < frame)
+		{
+			++e.advanced_to;
+			e.c = fold(e.c, e.advanced_to);
+			++e.gen;
+		}
+	}
+
+	void decode_into(entry & e, int64_t frame)
+	{
+		e.c = entry::kIdentity;
+		e.src_frame = frame;
+		e.advanced_to = frame;
+		e.gen = 0;
+	}
+
+	// The frame-complete path. Every valid entry is advanced by H_N whether a tile of
+	// frame N lands on it or not, which is the eager form 13.12.2 is written in.
+	void apply_ordered(int64_t frame, const std::vector<uint32_t> & indices)
+	{
+		for (auto & e: tiles)
+		{
+			if (e.src_frame >= 0)
+				advance_to(e, frame);
+		}
+		for (uint32_t t: indices)
+		{
+			if (t >= tiles.size())
+				continue;
+			decode_into(tiles[t], frame);
+			++applied_tiles;
+		}
+		++applied_runs;
+	}
+
+	// The tile-streaming path. One arriving run, applied now.
+	void apply_arrival(int64_t frame, uint32_t first, uint32_t count)
+	{
+		bool any = false, all_superseded = true;
+		for (uint32_t t = first; t < first + count and t < tiles.size(); ++t)
+		{
+			auto & e = tiles[t];
+			any = true;
+			if (e.src_frame >= frame)
+			{
+				++superseded_tiles;
+				continue;
+			}
+			all_superseded = false;
+			advance_to(e, frame);
+			decode_into(e, frame);
+			++applied_tiles;
+		}
+		if (not any)
+			return;
+		if (all_superseded)
+			++superseded_runs;
+		else
+			++applied_runs;
+	}
+
+	// Bring every entry up to the same frame, so that two paths that stopped advancing
+	// at different points can be compared at all. Advancing forward is always legal --
+	// it is UN-advancing that section 2 shows is not bit-exact, and neither path ever
+	// does it.
+	void flush(int64_t frame)
+	{
+		for (auto & e: tiles)
+		{
+			if (e.src_frame >= 0)
+				advance_to(e, frame);
+		}
+	}
+
+	bool same_state_as(const atlas_model & other) const
+	{
+		return tiles == other.tiles;
+	}
+
+	size_t first_difference(const atlas_model & other) const
+	{
+		for (size_t i = 0; i < tiles.size() and i < other.tiles.size(); ++i)
+		{
+			if (not(tiles[i] == other.tiles[i]))
+				return i;
+		}
+		return size_t(-1);
+	}
+};
+
+// The 16-bit frame id on the wire, unwrapped into a monotonically increasing number.
+// src_frame monotonicity is a comparison, so it cannot be run on a counter that wraps:
+// after the wrap every arriving frame would look older than the atlas and every tile
+// would be reported superseded. --first-frame 65500 is the run that finds this.
+struct frame_id_unwrap
+{
+	int64_t base = 0;
+	uint16_t last = 0;
+	bool started = false;
+
+	int64_t operator()(uint16_t id)
+	{
+		if (not started)
+		{
+			started = true;
+			last = id;
+			return base + id;
+		}
+		if (uint16_t(id - last) < 0x8000)
+		{
+			if (id < last)
+				base += 0x10000;
+		}
+		else if (id > last)
+		{
+			base -= 0x10000;
+		}
+		last = id;
+		return base + id;
 	}
 };
 
@@ -1147,6 +1467,12 @@ int main(int argc, char ** argv)
 	// here. The default is 1 and every existing invocation is unchanged by it.
 	uint32_t eyes = 1;
 	double loss = 0.0, reorder = 0.0;
+	// How deep --reorder may push a datagram. Three is the historical behaviour and what
+	// every existing run is measured against; more than a frame's worth is what reaches
+	// the case where a tile of frame N arrives after a tile of frame N+1 at the same
+	// position, which is the only input the src_frame monotonicity rule has an opinion
+	// about.
+	uint32_t reorder_depth = 3;
 	// The headset app restarted, or the link dropped and came back, while the server's
 	// session stayed up: the client end is thrown away and rebuilt -- new decoder, new
 	// nxt::Receiver, no memory of the stream -- and the encoder and its nxt::Sender keep
@@ -1161,6 +1487,21 @@ int main(int argc, char ** argv)
 	// as hiccup -- the receiver on the other end is still counting, so an encoder that
 	// restarted its transport here would break a session that was working.
 	uint32_t idr_at = 0;
+	// Drop exactly ONE datagram, the `n`th the link carries, and nothing else.
+	//
+	// It is the measurement the per-tile span mapping exists for. Under the chunk
+	// mapping a datagram is a slice of the frame's byte stream, so losing one costs
+	// the WHOLE frame -- every tile of it, none of which can be decoded. Under real
+	// spans it costs exactly the tiles that datagram carried. The difference is not a
+	// ratio to be argued about, it is a count, and this makes it one.
+	uint32_t drop_datagram = 0;
+	uint32_t drop_datagram_count = 1;
+	// --tile-stream: run the arrival-order model of docs/NXWARP-TILESTREAM.md section 6
+	// alongside the real decode, and compare it against the frame-complete one. Off by
+	// default and it changes nothing about the run: it observes the same delivery the
+	// decoder saw and asserts on it, so every other figure a --tile-stream run prints is
+	// the figure the same run without it prints.
+	bool tile_stream = false;
 	// Where the frame counter starts. video_encoder_nxwarp puts uint16_t(frame_id) on
 	// the wire, so starting near 65536 walks the stream through the 16-bit wrap -- about
 	// twelve minutes into a 90 fps session, and the point at which one went dark.
@@ -1198,6 +1539,8 @@ int main(int argc, char ** argv)
 			loss = std::stod(next());
 		else if (a == "--reorder")
 			reorder = std::stod(next());
+		else if (a == "--reorder-depth")
+			reorder_depth = uint32_t(std::stoul(next()));
 		else if (a == "--first-frame")
 			first_frame = std::stoull(next());
 		else if (a == "--eyes")
@@ -1238,6 +1581,20 @@ int main(int argc, char ** argv)
 			first_frame = std::stoull(next());
 		else if (a == "--no-resume-notice")
 			no_resume_notice = true;
+		else if (a == "--drop-datagram")
+		{
+			// "n" or "n:k": drop k consecutive DATA datagrams from the nth. The
+			// parity of their FEC groups is suppressed with them -- see the
+			// note in lossy_link::send_stream -- so k is not how the test
+			// reaches past the FEC, it is only how much loss it wants.
+			const std::string v = next();
+			const size_t colon = v.find(':');
+			drop_datagram = uint32_t(std::stoul(v.substr(0, colon)));
+			drop_datagram_count =
+			        colon == std::string::npos ? 1u : uint32_t(std::stoul(v.substr(colon + 1)));
+		}
+		else if (a == "--tile-stream")
+			tile_stream = true;
 		else if (a == "--idr-at")
 			idr_at = uint32_t(std::stoul(next()));
 		else if (a == "--rc")
@@ -1430,7 +1787,12 @@ int main(int argc, char ** argv)
 	};
 	auto dec = make_decoder();
 
-	lossy_link link(*dec, loss, reorder, seed);
+	lossy_link link(*dec, loss, reorder, seed, reorder_depth);
+	link.drop_one = drop_datagram;
+	link.drop_count = drop_datagram_count;
+	// The delivery order is only kept when something is going to read it, because on a
+	// long run it is one entry per datagram and nothing else in the harness needs it.
+	link.record_delivery = tile_stream;
 	enc.set_packet_sink(&link);
 
 	auto src = make_source_image(vk, width, height, eyes);
@@ -1539,6 +1901,9 @@ int main(int argc, char ** argv)
 	uint64_t headers_at_reconnect = 0;
 	bool reconnected = false;
 	nxt::ReceiverStats post_stats{};
+	// See the note where this is filled: the shadow forgets a frame after eight, so the
+	// receipt map --drop-datagram is judged on has to be taken during the run.
+	std::map<uint16_t, std::vector<uint8_t>> dropped_frame_receipts;
 
 	if (first_frame)
 		std::printf("frame ids start at %llu (16-bit wrap at %llu, %s crossed by this run)\n",
@@ -1709,6 +2074,25 @@ int main(int argc, char ** argv)
 					any_stride_not_held = true;
 				}
 				enc.on_nxwarp_frame_not_held(p.frame_id, p.why);
+			}
+		}
+
+		// The receipt map for a frame that lost a datagram, read WHILE IT IS STILL
+		// THERE. nxt::ClientShadow keeps kShadowFrames (8) frames, so a run of any
+		// length has forgotten the frame long before the assertions at the bottom of
+		// this file get to ask about it; taken here, and overwritten each iteration,
+		// what survives to the end is the last state the shadow held for it, which is
+		// the one every feedback packet that could cover it has been folded into.
+		if (drop_datagram)
+		{
+			for (const auto & r: link.dropped_runs)
+			{
+				auto rec = enc.client_receipts(r.frame_id);
+				bool any_known = false;
+				for (uint8_t v: rec)
+					any_known |= v != video_encoder_nxwarp::receipt_unknown;
+				if (any_known)
+					dropped_frame_receipts[r.frame_id] = std::move(rec);
 			}
 		}
 
@@ -1926,7 +2310,11 @@ int main(int argc, char ** argv)
 	}
 
 	// ==== assertions ==========================================================
-	const bool clean = loss <= 0;
+	// --drop-datagram counts as lossy, obviously, and saying so is not a formality: the
+	// checks gated on `clean` are the ones that read "nothing went missing, so nothing
+	// may be missing", and a run that deliberately took a datagram off the wire is the
+	// one input for which they are false by construction.
+	const bool clean = loss <= 0 and drop_datagram == 0;
 
 	// A THIRD regime, between "clean" and "lossy": the link delivered nothing at
 	// all. `--loss 1` (or anything above it, which is how `--loss 3` behaves --
@@ -2129,12 +2517,27 @@ int main(int argc, char ** argv)
 		check(mismatched == 0,
 		      "every published view_info that arrived is bit-identical to the presented one (" +
 		              std::to_string(matched) + "/" + std::to_string(host.frames.size()) + ")");
-		if (defaulted)
-			std::printf("note: %zu published frame%s had no view_info -- its first datagram was "
-			            "lost and its tiles were recovered by FEC\n",
+		// "lost nothing" has to include "reordered nothing past the point of no
+		// return". A datagram held back further than the reassembly window is, to
+		// the frame it belonged to, exactly as absent as one that was dropped: the
+		// frame closes without it, the FEC rebuilds its tiles from the parity, and
+		// the view_info that rode the WiVRn packet around those tiles is gone with
+		// it. --reorder-depth past a frame's worth of datagrams reaches that, and
+		// the reference backend reaches it sooner than the Vulkan one because its
+		// frames are fewer and larger datagrams. It is the same defect the note
+		// above describes under loss, found by a second input.
+		const bool deep_reorder = reorder > 0 and reorder_depth > 3;
+		if (defaulted and not(clean and deep_reorder))
+			std::printf("note: %zu published frame%s had no view_info -- its first "
+			            "datagram was lost and its tiles were recovered by FEC\n",
 			            defaulted, defaulted == 1 ? "" : "s");
-		check(not clean or defaulted == 0,
+		check(not clean or deep_reorder or defaulted == 0,
 		      "a link that lost nothing publishes no frame with a default pose");
+		if (clean and deep_reorder and defaulted)
+			std::printf("note: %zu published frame%s had no view_info under a "
+			            "reorder depth of %u, with nothing lost -- the first "
+			            "datagram arrived after its frame had closed\n",
+			            defaulted, defaulted == 1 ? "" : "s", reorder_depth);
 
 		// And that it is not merely a default that happens to compare equal.
 		bool any_nonzero = false;
@@ -2153,6 +2556,236 @@ int main(int argc, char ** argv)
 	// per-tile receipt map from it. A run that produced feedback at all, and an encoder
 	// that accepted every packet without throwing, is what this level can observe from
 	// outside; the shadow's own state is checked by nx-warp's transport tests.
+	// --drop-datagram: what one lost datagram actually cost, as a SET of tiles.
+	//
+	// This is the measurement the per-tile span mapping exists for, and it is made
+	// against the positive acknowledgement itself rather than against a total. The
+	// encoder's client shadow holds, per tile of the frame, what the headset's feedback
+	// said about that position; so for the frame that carried the dropped datagram:
+	//
+	//   every tile the sender OFFERED and did not drop must read `received`
+	//   every tile it dropped must read `concealed`
+	//
+	// Both halves matter and neither alone is the claim. The first is "and nothing
+	// else": under the chunk mapping a datagram is a slice of the frame's byte stream,
+	// so the tiles either side of the hole are bytes of the same tiles and the loss
+	// spreads. The second is "exactly its tiles": a claim that only bounded the damage
+	// from above would pass on a run where the FEC quietly repaired everything, which is
+	// why the parity of the dropped datagram's own group goes with it.
+	//
+	// Tiles the sender never offered are outside the claim and are not looked at. A
+	// frame codes the tiles it codes; a position it skipped was never on the wire, and
+	// what the shadow says about it is a question for the receipt map's own semantics,
+	// not for this.
+	if (drop_datagram and link.dropped_runs.empty())
+		std::printf("note: --drop-datagram %u named a datagram past the end of this "
+		            "run (%llu data datagrams went out); nothing was dropped\n",
+		            drop_datagram, (unsigned long long)link.data_sent);
+	if (drop_datagram and not link.dropped_runs.empty())
+	{
+		std::printf("one datagram dropped: %u tile(s) in %zu run(s), %llu parity "
+		            "datagram(s) of the same FEC group(s) suppressed with them; "
+		            "%llu tiles offered over the run; %zu of %llu frames reassembled\n",
+		            link.dropped_tiles,
+		            link.dropped_runs.size(),
+		            (unsigned long long)link.dropped_parity,
+		            (unsigned long long)link.tiles_offered,
+		            host.units.size(),
+		            (unsigned long long)sent_frames);
+
+		// Per frame: what was offered, and what of it went missing.
+		std::map<uint16_t, std::set<uint32_t>> offered_by_frame, lost_by_frame;
+		for (const auto & r: link.offered_runs)
+		{
+			for (uint32_t t = r.first; t < r.first + r.count; ++t)
+				offered_by_frame[r.frame_id].insert(t);
+		}
+		for (const auto & r: link.dropped_runs)
+		{
+			for (uint32_t t = r.first; t < r.first + r.count; ++t)
+				lost_by_frame[r.frame_id].insert(t);
+		}
+
+		size_t frames_checked = 0, wrongly_concealed = 0, wrongly_received = 0;
+		size_t unknown_offered = 0;
+		for (const auto & [fid, lost]: lost_by_frame)
+		{
+			auto it = dropped_frame_receipts.find(fid);
+			if (it == dropped_frame_receipts.end())
+				continue; // no feedback ever covered it: nothing to read
+			const auto & receipts = it->second;
+			++frames_checked;
+			for (uint32_t t: offered_by_frame[fid])
+			{
+				if (t >= receipts.size())
+					continue;
+				const bool was_lost = lost.count(t) != 0;
+				if (receipts[t] == video_encoder_nxwarp::receipt_unknown)
+				{
+					++unknown_offered;
+					continue;
+				}
+				const bool concealed =
+				        receipts[t] == video_encoder_nxwarp::receipt_concealed;
+				if (was_lost and not concealed)
+					++wrongly_received;
+				if (not was_lost and concealed)
+					++wrongly_concealed;
+			}
+		}
+		std::printf("per-tile receipts over %zu frame(s) that lost a datagram: "
+		            "%zu tile(s) the link kept were reported concealed, "
+		            "%zu tile(s) it dropped were reported received, "
+		            "%zu offered tile(s) no feedback covered\n",
+		            frames_checked, wrongly_concealed, wrongly_received, unknown_offered);
+		// A run where no feedback came back at all says nothing either way, and
+		// saying so is better than passing on an empty set.
+		if (frames_checked == 0 or unknown_offered == offered_by_frame.size())
+			std::printf("note: no feedback covered the frame that lost a datagram; "
+			            "the receipt check had nothing to read\n");
+		else
+		{
+			check(wrongly_concealed == 0,
+			      "a lost datagram costs no receipt outside the tiles it carried (" +
+			              std::to_string(wrongly_concealed) + " spread)");
+			check(wrongly_received == 0,
+			      "every tile of the lost datagram is reported not held (" +
+			              std::to_string(wrongly_received) + " claimed held)");
+		}
+	}
+
+	// --- the arrival-order model (docs/NXWARP-TILESTREAM.md section 6) -----------
+	if (tile_stream)
+	{
+		// The grid the tile indices are in, taken from the widest index the sender
+		// used rather than re-derived: under stereo it spans the eye PAIR
+		// (common/nxwarp_stream_grid.h), and a model that guessed one eye's worth
+		// would silently drop half of every frame.
+		size_t n_tiles = 0;
+		for (const auto & r: link.delivered_runs)
+			n_tiles = std::max<size_t>(n_tiles, size_t(r.first) + r.count);
+
+		atlas_model arrival(n_tiles), ordered(n_tiles);
+		frame_id_unwrap unwrap;
+		// Delivery order, unwrapped once, kept so that both paths see the same
+		// frame numbers.
+		std::vector<std::pair<int64_t, lossy_link::tile_run>> arrivals;
+		arrivals.reserve(link.delivered_runs.size());
+		int64_t last_frame = -1;
+		for (const auto & r: link.delivered_runs)
+		{
+			const int64_t f = unwrap(r.frame_id);
+			arrivals.emplace_back(f, r);
+			last_frame = std::max(last_frame, f);
+		}
+
+		// The frame-complete path: the SAME delivered tiles, grouped by frame and
+		// applied in frame order. That is the only difference between the two runs,
+		// and it is the difference the proof is about.
+		std::map<int64_t, std::vector<uint32_t>> by_frame;
+		for (const auto & [f, r]: arrivals)
+		{
+			auto & v = by_frame[f];
+			for (uint32_t t = r.first; t < r.first + r.count; ++t)
+				v.push_back(t);
+		}
+		for (auto & [f, v]: by_frame)
+		{
+			std::sort(v.begin(), v.end());
+			v.erase(std::unique(v.begin(), v.end()), v.end());
+			ordered.apply_ordered(f, v);
+		}
+
+		// The tile-streaming path, in the order the link handed them over.
+		for (const auto & [f, r]: arrivals)
+			arrival.apply_arrival(f, r.first, r.count);
+
+		// Both to the same frame before comparing: see atlas_model::flush.
+		arrival.flush(last_frame);
+		ordered.flush(last_frame);
+
+		// How many runs SHOULD have been superseded, computed from the delivery
+		// order alone and not from the model: a run of frame N is superseded when
+		// every position it covers has already had a tile of some frame > N
+		// delivered. This is the assertion section 6 asks for -- the number is
+		// computable from the link's own order, so it is not a report.
+		std::vector<int64_t> newest(n_tiles, -1);
+		uint64_t expect_superseded_runs = 0, expect_superseded_tiles = 0;
+		for (const auto & [f, r]: arrivals)
+		{
+			bool any = false, all_super = true;
+			for (uint32_t t = r.first; t < r.first + r.count and t < n_tiles; ++t)
+			{
+				any = true;
+				if (newest[t] >= f)
+					++expect_superseded_tiles;
+				else
+				{
+					all_super = false;
+					newest[t] = f;
+				}
+			}
+			if (any and all_super)
+				++expect_superseded_runs;
+		}
+
+		std::printf("tile-stream model: %zu tile positions, %zu run(s) delivered over "
+		            "%zu frame(s); arrival order applied %llu run(s) / %llu tile(s), "
+		            "superseded %llu run(s) / %llu tile(s)\n",
+		            n_tiles, arrivals.size(), by_frame.size(),
+		            (unsigned long long)arrival.applied_runs,
+		            (unsigned long long)arrival.applied_tiles,
+		            (unsigned long long)arrival.superseded_runs,
+		            (unsigned long long)arrival.superseded_tiles);
+		check(arrival.superseded_runs == expect_superseded_runs and
+		              arrival.superseded_tiles == expect_superseded_tiles,
+		      "every superseded tile is one the delivery order predicts (" +
+		              std::to_string(arrival.superseded_tiles) + " model, " +
+		              std::to_string(expect_superseded_tiles) + " predicted)");
+		// THE proof obligation of section 6.
+		const size_t diff = arrival.first_difference(ordered);
+		check(arrival.same_state_as(ordered),
+		      "the atlas after the last frame is identical whether tiles were applied "
+		      "in arrival order or in frame order" +
+		              (diff == size_t(-1) ? std::string()
+		                                  : " (first difference at tile " +
+		                                            std::to_string(diff) + ")"));
+		if (arrival.superseded_tiles == 0)
+			std::printf("note: no tile was superseded in this run, so the model "
+			            "exercised the monotonicity rule only in the trivial "
+			            "direction -- --reorder is what makes it fire\n");
+	}
+
+	// --- which mapping the frames actually went out under ------------------------
+	//
+	// P1b of docs/NXWARP-TILESTREAM.md, made observable. "The backend reports spans" is
+	// a property of the backend; "this frame used them" is a property of the frame, and
+	// only the second one is what a lost datagram's cost depends on. The reference
+	// backend's C ABI has no tile offset, so it must show 0 span frames and the fallback
+	// must carry it; the Vulkan backend has the offsets and should show the opposite.
+	{
+		const auto p = enc.profile();
+		if (p.span_frames or p.chunk_frames)
+			std::printf("tile mapping: %llu frame(s) sent with per-tile spans "
+			            "(%llu coded tiles), %llu with the fixed-chunk fallback\n",
+			            (unsigned long long)p.span_frames,
+			            (unsigned long long)p.span_tiles,
+			            (unsigned long long)p.chunk_frames);
+		// The identity claim itself: one transport slot per coded tile, at its own
+		// index, and no slot spent on anything else. Only assertable when every frame
+		// took the same mapping, since the two put different numbers of tiles on the
+		// wire and the link counts one total.
+		if (p.span_frames and not p.chunk_frames)
+			check(link.tiles_offered == p.span_tiles,
+			      "every coded tile got exactly one transport slot (" +
+			              std::to_string(link.tiles_offered) + " on the wire, " +
+			              std::to_string(p.span_tiles) + " coded)");
+		if (backend == "ref")
+			check(p.span_frames == 0,
+			      "the reference backend reports no tile spans and takes the "
+			      "chunk mapping");
+	}
+
 	check(link.sent > 0, "encoder produced datagrams");
 	std::printf("feedback: %llu packets, %llu bytes returned to the encoder\n",
 	            (unsigned long long)feedback_packets, (unsigned long long)feedback_bytes);

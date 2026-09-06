@@ -74,22 +74,44 @@ bool is_complete(const nxt::StreamConfig & cfg,
 		}
 		++r.present;
 		total += by_index[i].size();
-		// Only the last chunk sent may be short, and the sender fills chunks in order,
-		// so a short one anywhere else is a malformed stream.
-		if (i != highest and by_index[i].size() != chunk)
-			r.short_chunk = true;
 	}
 	g_last_report = r;
 
-	if (r.present != r.expected or r.short_chunk)
-		return false;
+	// No per-tile length check, and no "every index from 0 must be present" check.
+	//
+	// Both were the CHUNK mapping's way of noticing a loss: under it every tile but
+	// the last is exactly `chunk` bytes and every index up to the last is sent, so a
+	// gap or a short one meant something went missing. Under the per-tile span
+	// mapping neither holds -- a coded tile is as long as its own content, and a tile
+	// the frame did not code carries nothing at all and is, from this side, identical
+	// to one that was lost.
+	//
+	// The length prefix already notices the same loss by better evidence: bytes that
+	// did not arrive make the total fall short of what the frame declared itself to
+	// be. That test is exact under both mappings, which is why the wire needs no flag
+	// saying which one produced the frame. `first_missing` and `present`/`expected`
+	// are still filled, because the two-second "hole" line is diagnostics and a gap in
+	// the index run is still worth reporting even when it is not fatal.
+	(void)chunk;
 
 	// The length prefix is what turns "everything that arrived" into "the whole frame":
 	// a frame whose tail chunks were lost reassembles into a prefix that is otherwise
 	// indistinguishable from a complete small frame.
-	if (by_index[0].size() < kFrameLenBytes or total < kFrameLenBytes)
+	// The prefix rides the LOWEST tile that carries bytes, which is not always tile 0.
+	//
+	// Under the chunk mapping it is always tile 0, because chunks fill the grid from
+	// the start. Under the per-tile span mapping tile 0 is sent only if the frame
+	// coded tile 0; when it did not, the frame's leading bytes -- header, row header
+	// and the prefix in front of them -- ride the first tile it DID code. Reading
+	// index 0 unconditionally made every such frame permanently incomplete, which is
+	// most frames on an inter stream.
+	uint32_t lowest = 0;
+	while (lowest < by_index.size() and by_index[lowest].empty())
+		++lowest;
+	if (lowest >= by_index.size() or by_index[lowest].size() < kFrameLenBytes or
+	    total < kFrameLenBytes)
 		return false;
-	return total >= size_t(kFrameLenBytes) + declared_len(by_index[0]);
+	return total >= size_t(kFrameLenBytes) + declared_len(by_index[lowest]);
 }
 
 std::vector<uint8_t> reassemble(const nxt::StreamConfig & cfg,
@@ -110,7 +132,9 @@ std::vector<uint8_t> reassemble(const nxt::StreamConfig & cfg,
 	for (uint32_t i = 0; i <= highest; ++i)
 		out.insert(out.end(), by_index[i].begin(), by_index[i].end());
 
-	const uint32_t declared = declared_len(by_index[0]);
+	// From the concatenation, not from index 0: the prefix is at the front of the
+	// bytes whichever tile carried it, and `out` is those bytes in index order.
+	const uint32_t declared = declared_len(out);
 	out.erase(out.begin(), out.begin() + kFrameLenBytes);
 	out.resize(declared);
 	return out;

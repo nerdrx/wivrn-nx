@@ -556,6 +556,16 @@ class video_encoder_nxwarp : public video_encoder
 	std::chrono::steady_clock::time_point oversize_logged{};
 	static constexpr std::chrono::seconds oversize_repeat{2};
 	// The same measurements as prof_*, but never reset, for profile().
+	// How each frame was laid on the tile grid. See nxwarp_packetize.h: with per-tile
+	// spans a codec tile's own bytes go at its own tile index, so a lost datagram costs
+	// the tiles it carried; without them the frame is cut into fixed chunks and a lost
+	// datagram costs the frame. The choice is per frame, so it has to be counted per
+	// frame -- "this backend supports spans" is not the same statement as "this frame
+	// used them", and the intra frame that opens a stream is usually the difference.
+	uint64_t prof_span_frames = 0, prof_chunk_frames = 0;
+	// Coded tiles handed to the transport over the span frames: the number of transport
+	// slots those frames should have used, one per coded tile, at its own index.
+	uint64_t prof_span_tiles = 0;
 	uint64_t prof_total_n = 0;
 	double prof_total_ms = 0, prof_total_max_ms = 0;
 	uint64_t prof_total_bytes = 0;
@@ -630,7 +640,63 @@ public:
 		double confirm_frames_mean = 0, confirm_ms_mean = 0;
 		uint64_t confirm_frames_max = 0;
 		double confirm_ms_max = 0;
+		// How the frames were laid on the tile grid: with per-tile spans, and with
+		// the fixed-chunk fallback. `span_tiles` is the coded tiles those span
+		// frames handed the transport, which is also the number of transport slots
+		// they should have used -- one per coded tile, at its own index. A harness
+		// that compares it with the tiles the link actually carried is checking
+		// that the mapping really is the identity and not merely permitted to be.
+		uint64_t span_frames = 0, chunk_frames = 0, span_tiles = 0;
 	};
+	// The client's per-tile receipt map for one frame, as the sender's shadow holds it
+	// after folding in every feedback packet that covered that frame. One byte per tile
+	// of the transport grid — which under stereo spans the eye PAIR, so the indices are
+	// the same ones the datagram headers carry.
+	//
+	// 1 received, 0 concealed (the headset's feedback said the tile did not arrive), 2
+	// unknown (no feedback has covered that position yet). Three values and not two,
+	// because "the headset told me it lost this" and "the headset has not said" are
+	// different facts and the second is not evidence of loss.
+	//
+	// Read-only, and for a harness: it is the positive acknowledgement itself, per tile
+	// rather than per frame, which is the only place the claim "one lost datagram costs
+	// exactly the tiles it carried" can be checked as a set rather than a count. Empty
+	// if the frame has fallen out of the shadow's ring (kShadowFrames deep).
+	enum : uint8_t
+	{
+		receipt_concealed = 0,
+		receipt_received = 1,
+		receipt_unknown = 2,
+	};
+	std::vector<uint8_t> client_receipts(uint16_t frame_id) const
+	{
+		std::vector<uint8_t> out;
+		if (not sender)
+			return out;
+		std::lock_guard lock(const_cast<std::mutex &>(sender_mutex));
+		const auto & shadow = sender->shadow();
+		out.resize(stream_cfg.tiles_per_frame(), receipt_unknown);
+		for (uint16_t row = 0; row < stream_cfg.rows; ++row)
+		{
+			for (uint16_t col = 0; col < stream_cfg.cols; ++col)
+			{
+				switch (shadow.state(frame_id, row, col))
+				{
+					case nxt::ShadowState::kReceived:
+						out[stream_cfg.tile_index(row, col)] = receipt_received;
+						break;
+					case nxt::ShadowState::kConcealed:
+						out[stream_cfg.tile_index(row, col)] = receipt_concealed;
+						break;
+					default:
+						out[stream_cfg.tile_index(row, col)] = receipt_unknown;
+						break;
+				}
+			}
+		}
+		return out;
+	}
+
 	encode_profile profile() const
 	{
 		return {prof_total_n,
@@ -648,7 +714,10 @@ public:
 		        confirm_n ? double(confirm_frames_sum) / double(confirm_n) : 0.0,
 		        confirm_n ? confirm_ms_sum / double(confirm_n) : 0.0,
 		        confirm_frames_max,
-		        confirm_ms_max};
+		        confirm_ms_max,
+		        prof_span_frames,
+		        prof_chunk_frames,
+		        prof_span_tiles};
 	}
 };
 

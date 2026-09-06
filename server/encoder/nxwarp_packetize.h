@@ -121,13 +121,34 @@ std::vector<nxt::Datagram> nxwarp_send_frame(nxt::Sender & sender,
                                              size_t chunk_bytes,
                                              uint32_t base_qp,
                                              uint32_t now_us,
-                                             uint16_t enc_us);
+                                             uint16_t enc_us,
+                                             bool tile_spans = false);
+
+// Whether a frame's tiles can be carried at their own indices, given the spans the
+// codec reported and the per-tile budget the transport has.
+//
+// A codec tile gets ONE transport slot, so a tile whose own bytes do not fit a slot
+// cannot be carried this way; the frame falls back to the chunk mapping whole rather
+// than half. That is not a corner case to wave at: at QP 22 on 1088x1088 intra the
+// mean tile is about 1.2 kB against a slot of about 1.2 kB, so frames of that shape
+// take the fallback and frames of the shape the atlas produces -- tens of coded tiles
+// of tens of bytes -- do not.
+bool nxwarp_spans_fit(std::span<const nxwarp_tile_desc> descs, size_t max_tile_bytes);
 
 // The inverse. `tiles` are everything Receiver::on_datagram delivered for one
 // frame, in any order. Returns the frame's bytes with the length prefix already
-// stripped, or an empty vector if the run of tile indices from 0 has a hole in
-// it, if a tile other than the last is short, or if fewer bytes arrived than the
-// prefix says the frame is — the three shapes a lost chunk can take.
+// stripped, or an empty vector if fewer bytes arrived than the prefix says the
+// frame is.
+//
+// One rule serves both mappings, which is why there is no flag on the wire saying
+// which was used. Under either, the delivered tiles concatenated in index order are
+// the frame's bytes; what differs is only where the boundaries fall. The old
+// per-tile checks -- no hole in the run from 0, no short tile except the last --
+// were the chunk mapping's way of noticing a loss, and the length prefix already
+// notices it: bytes that did not arrive make the total fall short of what the prefix
+// declares. Under real spans those checks are not merely unnecessary but WRONG, since
+// a skipped tile legitimately carries no bytes and is indistinguishable, from the
+// tile list alone, from one that was lost.
 std::vector<uint8_t> nxwarp_reassemble(const nxt::StreamConfig & cfg,
                                        std::span<const nxt::TileOutput> tiles,
                                        size_t chunk_bytes);

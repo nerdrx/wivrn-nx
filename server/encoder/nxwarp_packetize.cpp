@@ -20,6 +20,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
+#include <vector>
 
 size_t wivrn::nxwarp_chunk_bytes(const nxt::StreamConfig & cfg)
 {
@@ -45,6 +47,42 @@ nxt::FecPolicy wivrn::nxwarp_fec_policy()
 	return p;
 }
 
+bool wivrn::nxwarp_spans_fit(std::span<const nxwarp_tile_desc> descs, size_t max_tile_bytes)
+{
+	if (descs.empty() or max_tile_bytes == 0)
+		return false;
+	// A transport slot has to hold the tile's own bytes AND whatever non-tile bytes
+	// precede it -- the frame header before the first, a row header before the first
+	// of each row. Those are absorbed into the following tile's slot so that the
+	// concatenation in index order is the frame byte for byte, with no gaps and no
+	// slot spent on a header.
+	size_t prev_end = 0;
+	int64_t prev_index = -1;
+	for (const auto & d: descs)
+	{
+		if (d.length == 0)
+			continue;
+		// The client concatenates the tiles it received IN INDEX ORDER, so the frame
+		// comes back byte for byte only if the byte order and the index order are the
+		// same order. They are, for every layout this codec produces -- raster within
+		// an eye, eyes side by side, and under stereo the pair grid is what both the
+		// index and the bitstream are laid out in (common/nxwarp_stream_grid.h) -- but
+		// "they are" is a claim about another component, so it is checked rather than
+		// assumed. A layout that ever broke it falls back to the chunk mapping, which
+		// is slower to lose from and always correct.
+		if (int64_t(d.index) <= prev_index)
+			return false;
+		const size_t end = size_t(d.offset) + d.length;
+		if (end < prev_end)
+			return false; // spans must be ascending and disjoint
+		if (end - prev_end + kFrameLenBytes > max_tile_bytes)
+			return false;
+		prev_end = end;
+		prev_index = int64_t(d.index);
+	}
+	return prev_end > 0;
+}
+
 std::vector<nxt::Datagram> wivrn::nxwarp_send_frame(nxt::Sender & sender,
                                                     const nxt::StreamConfig & cfg,
                                                     uint16_t frame_id,
@@ -54,7 +92,8 @@ std::vector<nxt::Datagram> wivrn::nxwarp_send_frame(nxt::Sender & sender,
                                                     size_t chunk_bytes,
                                                     uint32_t base_qp,
                                                     uint32_t now_us,
-                                                    uint16_t enc_us)
+                                                    uint16_t enc_us,
+                                                    bool tile_spans)
 {
 	std::vector<nxt::Datagram> out;
 	if (bitstream.empty() or chunk_bytes <= kFrameLenBytes)
@@ -76,8 +115,44 @@ std::vector<nxt::Datagram> wivrn::nxwarp_send_frame(nxt::Sender & sender,
 	framed.insert(framed.end(), bitstream.begin(), bitstream.end());
 	const std::span<const uint8_t> payload(framed);
 
+	// The byte range each tile index carries. Under real spans a tile carries its
+	// own bytes plus the non-tile bytes that precede it (frame header, row header),
+	// so the concatenation in index order is the frame with no gaps; under the chunk
+	// mapping it carries a fixed slice. Both are built here so the send loop below
+	// does not care which it is.
+	std::vector<std::pair<size_t, size_t>> range;
+	if (tile_spans)
+	{
+		range.assign(cfg.tiles_per_frame(), {0, 0});
+		size_t prev_end = 0;
+		uint32_t last = 0;
+		bool any_span = false;
+		for (const auto & d: descs)
+		{
+			if (d.length == 0 or d.index >= range.size())
+				continue;
+			// +kFrameLenBytes: an offset is into the bitstream and the payload
+			// has the length prefix in front of it.
+			const size_t end = kFrameLenBytes + size_t(d.offset) + d.length;
+			if (end > payload.size() or end < prev_end)
+			{
+				return out; // malformed spans: refuse rather than mis-send
+			}
+			range[d.index] = {prev_end, end - prev_end};
+			prev_end = end;
+			last = d.index;
+			any_span = true;
+		}
+		if (not any_span)
+			return out;
+		// Anything after the last coded tile rides the last tile, so that the
+		// concatenation is the whole payload and not a prefix of it.
+		if (prev_end < payload.size())
+			range[last].second += payload.size() - prev_end;
+	}
+
 	const size_t chunks = (payload.size() + chunk_bytes - 1) / chunk_bytes;
-	if (chunks > cfg.tiles_per_frame())
+	if (not tile_spans and chunks > cfg.tiles_per_frame())
 		return out;
 
 	sender.begin_frame(frame_id, pose, now_us, 0);
@@ -94,10 +169,21 @@ std::vector<nxt::Datagram> wivrn::nxwarp_send_frame(nxt::Sender & sender,
 			for (uint16_t col = 0; col < cfg.cols; ++col)
 			{
 				const uint32_t t = cfg.tile_index(row, col);
-				if (t >= chunks)
-					continue;
-				const size_t off = size_t(t) * chunk_bytes;
-				const size_t len = std::min(chunk_bytes, payload.size() - off);
+				size_t off = 0, len = 0;
+				if (tile_spans)
+				{
+					off = range[t].first;
+					len = range[t].second;
+					if (len == 0)
+						continue; // a tile this frame did not code
+				}
+				else
+				{
+					if (t >= chunks)
+						continue;
+					off = size_t(t) * chunk_bytes;
+					len = std::min(chunk_bytes, payload.size() - off);
+				}
 
 				nxt::TileInput ti;
 				ti.frame_id = frame_id;
@@ -165,12 +251,16 @@ std::vector<uint8_t> wivrn::nxwarp_reassemble(const nxt::StreamConfig & cfg,
 	out.reserve(size_t(highest + 1) * chunk_bytes);
 	for (uint32_t i = 0; i <= highest; ++i)
 	{
-		if (by_index[i].empty())
-			return {}; // a hole: this frame cannot be decoded by this backend
-		// Only the last chunk sent may be short, and the sender fills chunks in
-		// order, so a short one anywhere else is a malformed stream.
-		if (i != highest and by_index[i].size() != chunk_bytes)
-			return {};
+		// No per-tile check here, deliberately, and it serves both mappings.
+		//
+		// It used to reject an empty tile as a hole and a short tile as
+		// malformed. Both were the chunk mapping's way of noticing a loss, and
+		// the length prefix below notices the same loss by the same evidence:
+		// bytes that did not arrive make the total fall short of what the frame
+		// declared itself to be. Under real per-tile spans the old checks are
+		// not merely redundant but WRONG -- a skipped tile carries no bytes and
+		// is, from the tile list alone, indistinguishable from a lost one, and a
+		// coded tile is short or long according to its own content.
 		out.insert(out.end(), by_index[i].begin(), by_index[i].end());
 	}
 

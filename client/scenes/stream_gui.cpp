@@ -255,6 +255,9 @@ void scenes::stream::accumulate_fps(XrTime now)
 		// inside it: taking it again would be a recursive shared lock, which is exactly
 		// what deadlocks against a waiting writer.
 		float ms = 0;
+		float gpu_ms = 0, pass_a_ms = 0, pass_b_ms = 0, bytes = 0, arrival_ms = 0;
+		uint32_t stride = 1, width = 0, height = 0;
+		uint64_t tools = 0;
 		for (size_t i = 0; i < view_count; ++i)
 		{
 			if (not decoders[i].decoder)
@@ -268,11 +271,41 @@ void scenes::stream::accumulate_fps(XrTime now)
 			c.nxwarp_decoded += st.frames_decoded;
 			c.nxwarp_late += st.frames_dropped_late;
 			c.nxwarp_holes += st.frames_dropped_holes;
+			c.nxwarp_withheld += st.frames_withheld;
 			ms = std::max(ms, st.decode_wall_ms);
+			// The window figures are per eye and the two eyes run the same stride on
+			// the same GPU, so the worse of them is the one that sets the frame rate --
+			// the same reason decode_wall_ms above is a max and not a mean.
+			gpu_ms = std::max(gpu_ms, st.decode_gpu_ms);
+			pass_a_ms = std::max(pass_a_ms, st.decode_pass_a_ms);
+			pass_b_ms = std::max(pass_b_ms, st.decode_pass_b_ms);
+			// Bytes are per eye and both eyes are coded the same way, so their sum is
+			// what the link actually carries per displayed frame.
+			bytes += st.bytes_per_frame;
+			arrival_ms = std::max(arrival_ms, st.arrival_ms);
+			// Fixed for the stream; identical on both eyes, so last writer wins.
+			stride = st.decode_stride;
+			if (st.encoded_width)
+			{
+				width = st.encoded_width;
+				height = st.encoded_height;
+				tools = st.stream_tools;
+			}
 		}
 		// Not a rate: the mean of the decoder's own last two-second profile window,
 		// taken as it is rather than differenced.
 		fps.nxwarp_ms = ms;
+		fps.nxwarp_gpu_ms = gpu_ms;
+		fps.nxwarp_pass_a_ms = pass_a_ms;
+		fps.nxwarp_pass_b_ms = pass_b_ms;
+		fps.nxwarp_bytes = bytes;
+		fps.nxwarp_arrival_ms = arrival_ms;
+		fps.nxwarp_stride = stride;
+		fps.nxwarp_width = width;
+		fps.nxwarp_height = height;
+		// NXVC_TOOL_ENTROPY_LITE, bit 30. Named here rather than including nxvc.h for
+		// one constant in a file that otherwise does not need the codec's headers.
+		fps.nxwarp_entropy_lite = (tools & (uint64_t(1) << 30)) != 0;
 	}
 #endif
 	fps.nxwarp = nxwarp;
@@ -296,32 +329,100 @@ void scenes::stream::accumulate_fps(XrTime now)
 			fps.nxwarp_decoded = rate(c.nxwarp_decoded, p.nxwarp_decoded);
 			fps.nxwarp_late = rate(c.nxwarp_late, p.nxwarp_late);
 			fps.nxwarp_holes = rate(c.nxwarp_holes, p.nxwarp_holes);
+			fps.nxwarp_withheld = rate(c.nxwarp_withheld, p.nxwarp_withheld);
 		}
 	}
 
 	fps_ring[fps_ring_head] = c;
 	fps_ring_head = (fps_ring_head + 1) % fps_ring_size;
 	fps_ring_count = std::min(fps_ring_count + 1, fps_ring_size);
+
+	// The one place the strings are built. See rebuild_fps_lines().
+	rebuild_fps_lines();
 }
 
-std::array<std::string, 2> scenes::stream::fps_lines() const
+// Built once per sample window, from accumulate_fps. Never called from the draw path: both
+// places that show these lines draw the cached strings, so a formatting cost that used to be
+// paid twice per frame is now paid four times a second, and only when a number moved.
+//
+// The NX Warp block is four lines under the shown/decoded one, in the order a question gets
+// asked: how many frames am I getting, what is the decode costing, what is on the wire, and
+// what was negotiated. Everything on them comes from the decoder's own two-second profile
+// window or from monotonic counters differenced over one second.
+void scenes::stream::rebuild_fps_lines()
 {
-	std::array<std::string, 2> lines;
+	for (auto & line: fps_line_cache)
+		line.clear();
 
 	std::string decoded = fmt::format("{:.0f}", fps.decoded[0]);
 	for (size_t i = 1; i < view_count; ++i)
 		decoded += fmt::format("/{:.0f}", fps.decoded[i]);
 
-	lines[0] = fmt::format(_F("Shown {:.0f} · decoded {} fps"), fps.displayed, decoded);
+	fps_line_cache[0] = fmt::format(_F("Shown {:.0f} · decoded {} fps"), fps.displayed, decoded);
 
-	if (fps.nxwarp)
-		lines[1] = fmt::format(_F("NX Warp: {:.0f} in · {:.0f} late · {:.0f} holes /s · decode {:.1f} ms"),
-		                       fps.nxwarp_closed,
-		                       fps.nxwarp_late,
-		                       fps.nxwarp_holes,
-		                       fps.nxwarp_ms);
+	if (not fps.nxwarp)
+		return;
 
-	return lines;
+	// Where the frames went. "in" is what the reassembler closed off the wire, which is the
+	// server's send rate as seen from here; late and holes are the two ways one is lost, and
+	// "held" is not a loss at all -- the frame decoded and was withheld on purpose. Every
+	// field is always drawn, including the zeroes: a block whose fields appear and disappear
+	// reflows under the reader, and on a HUD that is worse than a column of noughts.
+	fps_line_cache[1] = fmt::format(
+	        _F("NX Warp  in {:.0f} · dec {:.0f} · late {:.0f} · holes {:.0f} · held {:.0f} /s"),
+	        fps.nxwarp_closed,
+	        fps.nxwarp_decoded,
+	        fps.nxwarp_late,
+	        fps.nxwarp_holes,
+	        fps.nxwarp_withheld);
+
+	// What a decode costs. The two passes are the whole reason this line exists: pass B
+	// scales with the pixel count, so it is the half the stream scale moves, and seeing it
+	// next to the wall figure is what tells a slow session from a saturated one.
+	fps_line_cache[2] = fmt::format(_F("decode {:.1f} ms · GPU {:.1f} (A {:.1f} / B {:.1f})"),
+	                                fps.nxwarp_ms,
+	                                fps.nxwarp_gpu_ms,
+	                                fps.nxwarp_pass_a_ms,
+	                                fps.nxwarp_pass_b_ms);
+
+	// What is on the wire, and how often. Stride 1 means every arriving frame is decoded;
+	// above 1 the decoder is skipping, which is the number that explains a decode rate
+	// sitting at half the arrival rate.
+	fps_line_cache[3] = fmt::format(_F("{:.1f} kB/frame · arriving every {:.1f} ms · stride {}"),
+	                                fps.nxwarp_bytes / 1024.f,
+	                                fps.nxwarp_arrival_ms,
+	                                fps.nxwarp_stride);
+
+	// What was negotiated, which does not change once the stream is up but is the first
+	// thing anyone asks when the numbers above look wrong.
+	if (fps.nxwarp_width)
+		fps_line_cache[4] = fmt::format(_F("{}x{} · {} tiles · {}"),
+		                                fps.nxwarp_width,
+		                                fps.nxwarp_height,
+		                                (fps.nxwarp_width / 64) * (fps.nxwarp_height / 64),
+		                                fps.nxwarp_entropy_lite ? _S("entropy lite") : _S("entropy rANS"));
+}
+
+// The cached block, drawn. Both views call this so they cannot drift apart.
+//
+// Only the two rate lines are coloured against the panel refresh: the rest are costs and
+// negotiated facts, and colouring a millisecond figure by a frame rate threshold would be
+// a red number that means nothing.
+void scenes::stream::draw_fps_lines()
+{
+	const wivrn::ui::theme & t = wivrn::ui::current();
+	const auto & lines = fps_lines();
+	for (size_t i = 0; i < lines.size(); ++i)
+	{
+		if (lines[i].empty())
+			continue;
+		if (i == 0)
+			ImGui::TextColored(fps_colour(std::min(fps.displayed, fps.decoded[0])), "%s", lines[i].c_str());
+		else if (i == 1)
+			ImGui::TextColored(fps_colour(fps.nxwarp_decoded), "%s", lines[i].c_str());
+		else
+			ImGui::TextColored(t.text_muted, "%s", lines[i].c_str());
+	}
 }
 
 void scenes::stream::gui_performance_metrics()
@@ -512,17 +613,9 @@ void scenes::stream::gui_performance_metrics()
 		                .c_str());
 
 		// Directly under the latency figure: what the panel is actually being shown and
-		// what the decoders are actually producing. Two lines at most, the same two the
-		// compact view draws.
-		const auto lines = fps_lines();
-		for (size_t i = 0; i < lines.size(); ++i)
-		{
-			if (lines[i].empty())
-				continue;
-			ImGui::TextColored(fps_colour(i == 0 ? std::min(fps.displayed, fps.decoded[0]) : fps.nxwarp_decoded),
-			                   "%s",
-			                   lines[i].c_str());
-		}
+		// what the decoders are actually producing, then the NX Warp block. The same
+		// lines the compact view draws.
+		draw_fps_lines();
 
 		if (is_gui_interactable())
 			ImGui::Text("%s", _S("Press the grip button to move the window"));
@@ -1023,17 +1116,9 @@ void scenes::stream::gui_compact_view()
 		ImGui::EndTable();
 	}
 
-	// Directly under the latency figure, outside the two-column table so the two lines
-	// stay two lines and do not stretch the compact panel.
-	const auto lines = fps_lines();
-	for (size_t i = 0; i < lines.size(); ++i)
-	{
-		if (lines[i].empty())
-			continue;
-		ImGui::TextColored(fps_colour(i == 0 ? std::min(fps.displayed, fps.decoded[0]) : fps.nxwarp_decoded),
-		                   "%s",
-		                   lines[i].c_str());
-	}
+	// Directly under the latency figure, outside the two-column table so the block keeps
+	// its own width and does not stretch the compact panel.
+	draw_fps_lines();
 }
 
 static void send_settings_changed_packet(xr::session & session, wivrn_session * network, const configuration & config)

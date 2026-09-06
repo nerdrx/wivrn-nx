@@ -62,6 +62,14 @@ static void decay_decode_stride(std::chrono::milliseconds period)
 	g_decode_stride.compare_exchange_strong(cur, cur - 1, std::memory_order_relaxed);
 }
 
+// The process-wide decode stride, for the in-view statistics overlay. See the declaration in
+// nxwarp_decoder.h: both eyes share one stride, so it is a file static rather than a member, and
+// this is the only way out of this translation unit.
+uint32_t wivrn::nxwarp_decode_stride()
+{
+	return g_decode_stride.load(std::memory_order_relaxed);
+}
+
 uint64_t wivrn::nxwarp_client_tools(const vk::PhysicalDeviceProperties & props)
 {
 #ifdef NXVC_VK_DECODER_TOOLS_FOR
@@ -429,6 +437,11 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 	}
 	seen_any_frame = false;
 	any_retired = false;
+
+	// Published for the in-view statistics overlay; nothing else reads these.
+	hdr_width.store(si.width, std::memory_order_relaxed);
+	hdr_height.store(si.height, std::memory_order_relaxed);
+	hdr_tools.store(si.tools, std::memory_order_relaxed);
 
 	spdlog::info("nxwarp[{}]: {}x{} on {}, {} x {} tiles, {} bytes per tile",
 	             stream_index, si.width, si.height, nxvc_vk_decoder_device_name(nxvc),
@@ -1474,6 +1487,10 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			prof_wall_ms.store(float(prof.wall_ms / n), std::memory_order_relaxed);
 			prof_gpu_ms.store(float(prof.gpu_ms / n), std::memory_order_relaxed);
 			prof_bytes.store(float(prof.bytes / n), std::memory_order_relaxed);
+			// The pass split, for the in-view overlay: pass B is the half that scales
+			// with the pixel count, so it is the one the stream scale moves.
+			prof_pass_a_ms.store(float(prof.pass_a_ms / n), std::memory_order_relaxed);
+			prof_pass_b_ms.store(float(prof.pass_b_ms / n), std::memory_order_relaxed);
 			// Feed the shared stride from this stream's measured cost: ceil(wall / period).
 			// Streams only ever raise it quickly and lower it by one step per report, so
 			// a momentary hiccup does not flip the selection back and forth.

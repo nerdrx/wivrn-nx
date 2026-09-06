@@ -1546,6 +1546,12 @@ int main(int argc, char ** argv)
 	// long on its worker thread, so everything downstream of the wait is the real thing
 	// reacting to a real cost.
 	double client_decode_ms = 0;
+	// --decode-ms-per-kb: a simulated headset whose decode time GROWS WITH THE FRAME,
+	// which is what makes the decode-time rate controller a closed loop rather than a
+	// constant it can never satisfy. Bytes are the proxy for coded tiles here: the
+	// harness has them per frame and the two move together, and what the controller
+	// needs to see is a decode that responds to its own quantiser decisions.
+	double decode_ms_per_kb = 0;
 	// Present composited frames at this rate instead of as fast as the GPU allows.
 	// Zero (the default) is the old behaviour and is what every test that measures the
 	// encoder wants. It is the pacing tests that need it: the pace is a decision about
@@ -1775,6 +1781,8 @@ int main(int argc, char ** argv)
 			pace = next();
 		else if (a == "--client-decode-ms")
 			client_decode_ms = std::stod(next());
+		else if (a == "--decode-ms-per-kb")
+			decode_ms_per_kb = std::stod(next());
 		else if (a == "--present-hz")
 			present_hz = std::stod(next());
 		else if (a == "--feedback-delay")
@@ -2246,6 +2254,14 @@ int main(int argc, char ** argv)
 		const uint8_t slot = uint8_t(f % num_slots_used);
 		enc.present_image(*src.image, sem_info, slot, f, vi);
 		const auto before = enc.profile();
+		// Close the loop: the headset's decode cost for the NEXT report is what the
+		// LAST frame cost it. Using the previous frame is not a simplification, it is
+		// the real ordering -- feedback describes a frame that has already been sent.
+		if (decode_ms_per_kb > 0 and before.frames > 0)
+		{
+			const double last_kb = double(before.bytes) / double(before.frames) / 1024.0;
+			dec->set_simulated_decode_ms(std::clamp(decode_ms_per_kb * last_kb, 0.1, 60.0));
+		}
 		const uint64_t datagrams_before = link.sent;
 		(void)enc.encode(slot, f);
 		const auto after = enc.profile();
@@ -3556,6 +3572,18 @@ int main(int argc, char ** argv)
 		 * server's own default arriving from the other side of the encoder.
 		 * The level leaves no tool bit, so the stats are the only place it
 		 * can be read at all. */
+		/* The decode-time controller: the floor it is holding and what is
+		 * binding. Printed unconditionally, including the zero, because "the
+		 * deadline controller did nothing" is the result a run without
+		 * --decode-ms-per-kb is supposed to produce and a missing line would
+		 * read as a missing feature. */
+		{
+			const auto pr = enc.profile();
+			static const char * bind[] = {"nothing", "bytes", "decode", "transport ceiling"};
+			std::printf("decode controller: floor +%u, budget %.1f ms, binding %s\n",
+			            pr.decode_qp_floor, pr.decode_budget_ms,
+			            bind[pr.binding < 4 ? pr.binding : 0]);
+		}
 		const uint32_t used = enc.resolved_effort();
 		std::printf("effort: %u (%s), %s\n",
 		            used,

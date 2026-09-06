@@ -901,6 +901,14 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 void wivrn::video_encoder_nxwarp::run_rate_control(size_t last_frame_bytes,
                                                    bool frame_was_intra)
 {
+	// The deadline controller runs FIRST and unconditionally, before every early
+	// return below. The byte loop gives up when it has no bitrate target yet, or
+	// when the bytes are already on target -- and neither of those says anything
+	// about whether the headset can decode the frame in time. Putting this after
+	// any of those returns is how it silently never ran: measured, the floor stayed
+	// at +0 through a run whose simulated decode was twice its budget.
+	run_decode_rate_control();
+
 	if (not rc_auto)
 		return; // "fixed": the drop site logs the ceiling; nothing moves the QP
 
@@ -1050,6 +1058,23 @@ void wivrn::video_encoder_nxwarp::run_rate_control(size_t last_frame_bytes,
 	// a fact about the resolution that the next scene cut will re-discover.
 	const int floor_qp = int(effective_qp_floor());
 	const uint32_t want = uint32_t(std::clamp(int(current_qp) + step, floor_qp, int(rc_max_qp)));
+
+	// Which constraint actually decided this frame's quantiser. The byte loop only
+	// "binds" when it moved the value it asked for; if the clamp overrode it, the
+	// floor that did the overriding is what is binding, and the decode floor is the
+	// only one of those the operator can act on.
+	if (int(current_qp) + step < floor_qp)
+	{
+		if (rc_decode_floor > 0 and rc_decode_floor >= rc_ceiling_floor and rc_decode_floor >= rc_min_qp)
+			rc_binding = rc_binding_t::decode;
+		else if (rc_ceiling_floor > 0)
+			rc_binding = rc_binding_t::ceiling;
+		else
+			rc_binding = rc_binding_t::bytes;
+	}
+	else if (step != 0)
+		rc_binding = rc_binding_t::bytes;
+
 	if (want == current_qp)
 		return;
 
@@ -1058,6 +1083,60 @@ void wivrn::video_encoder_nxwarp::run_rate_control(size_t last_frame_bytes,
 	// try again next frame.
 	if (codec->set_qp(want))
 		current_qp = want;
+}
+
+// The decode-time controller.
+//
+// WHAT IT CONTROLS. The quantiser floor, from the headset's reported decode wall. The
+// byte controller aims at a bitrate; this one aims at a deadline, and when they disagree
+// the deadline wins, because a frame that arrives on time at a worse quantiser is a
+// picture and a frame that arrives late is a dropped one.
+//
+// WHY A FLOOR AND NOT A TARGET. It has to be able to out-rank `min-qp`. The operator sets
+// min-qp to say "do not spend quality below this"; the headset saying "I cannot decode
+// this in time" is not a quality opinion, and on a Pico 4 the two collide constantly --
+// min-qp 22 on worn content gave 110-130 kB frames, 35 ms decodes and a pacer that fell to
+// 26 fps. So this joins rc_ceiling_floor in effective_qp_floor(), above min-qp.
+//
+// AIMD, and asymmetric on purpose. Over budget steps up hard (+2 when the overrun is more
+// than half the budget again, +1 otherwise) because the cost of being late is a dropped
+// frame; under budget it releases one step at a time, and only with real headroom
+// (`release_frac`), so a decode that merely grazes the budget does not oscillate.
+void wivrn::video_encoder_nxwarp::run_decode_rate_control()
+{
+	if (not rc_auto)
+		return;
+
+	const uint16_t decode_us = client_decode_us.load(std::memory_order_relaxed);
+	if (not decode_us)
+		return; // no report yet: an unmeasured headset is not a slow one
+
+	const double decode_s = double(decode_us) * 1e-6;
+	const double budget = rc_decode_budget_s();
+	if (not(budget > 0))
+		return;
+
+	// Release only with real headroom, so grazing the budget is stable.
+	static constexpr double release_frac = 0.85;
+
+	if (decode_s > budget)
+	{
+		const uint32_t step = decode_s > budget * 1.5 ? 2u : 1u;
+		const uint32_t want = std::min(rc_max_qp, rc_decode_floor + step);
+		if (want != rc_decode_floor)
+		{
+			rc_decode_floor = want;
+			U_LOG_D("nxwarp: stream %d decode %.1f ms over budget %.1f ms, quantiser floor -> %u",
+			        int(stream_idx), decode_s * 1000.0, budget * 1000.0, unsigned(rc_decode_floor));
+		}
+		rc_binding = rc_binding_t::decode;
+	}
+	else if (rc_decode_floor > 0 and decode_s < budget * release_frac)
+	{
+		--rc_decode_floor;
+		if (rc_decode_floor == 0)
+			rc_binding = rc_binding_t::none;
+	}
 }
 
 // The pace controller.
@@ -2065,10 +2144,25 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				        prof_compose_max_ms,
 				        100.0 * prof_compose_ms / (prof_ms > 0 ? prof_ms : 1),
 				        prof_ms / prof_n);
+			// Which controller is binding, and the decode budget it is binding
+			// against. "The picture is soft" and "the picture is soft BECAUSE the
+			// headset cannot decode it fast enough" are different sentences, and
+			// only the second one tells the operator what to change.
+			std::string bind_note;
+			if (rc_auto)
+			{
+				const uint16_t dus = client_decode_us.load(std::memory_order_relaxed);
+				bind_note = std::format(
+				        ", binding: {} (decode {:.1f} of {:.1f} ms budget, floor +{})",
+				        rc_binding_name(rc_binding),
+				        double(dus) / 1000.0,
+				        rc_decode_budget_s() * 1000.0,
+				        unsigned(rc_decode_floor));
+			}
 			if (rc_auto and rc_target_bytes > 0)
 				U_LOG_I("nxwarp: stream %d encoded %llu frames in %.1f s: %.1f ms/frame (max %.1f), "
 				        "%.0f B/frame vs %.0f target (%+.0f%%), QP %.1f [%u..%u], "
-				        "controller allows %.1f Mbit/s%s%s",
+				        "controller allows %.1f Mbit/s%s%s%s",
 				        int(stream_idx),
 				        (unsigned long long)prof_n,
 				        std::chrono::duration<double>(t_enc1 - prof_since).count(),
@@ -2089,7 +2183,8 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				                       : (current_qp == rc_min_qp
 				                                  ? " (at min QP)"
 				                                  : (current_qp == rc_max_qp ? " (at max QP)" : "")),
-				        pace_note.c_str());
+				        pace_note.c_str(),
+				        bind_note.c_str());
 			else
 				U_LOG_I("nxwarp: stream %d encoded %llu frames in %.1f s: %.1f ms/frame (max %.1f), "
 				        "%.0f B/frame at fixed QP %u%s",

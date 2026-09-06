@@ -352,6 +352,10 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	        .eyes = stereo_eyes,
 	        .base_qp = current_qp,
 	        .inter = option_bool(settings.options, "inter", false),
+	        // "stereo-compose": "layers" (the default) or "blit". See
+	        // nxwarp_codec_config::eye_layers -- identical bitstream either way,
+	        // and "layers" is a full-frame device blit per frame cheaper.
+	        .eye_layers = option_string(settings.options, "stereo-compose", "layers") != "blit",
 	        .intra_period = option_u32(settings.options, "intra-period", 180),
 	        .coded_vectors = nxwarp_coded_vectors_from(
 	                option_string(settings.options, "coded-vectors", "default")),
@@ -1413,18 +1417,62 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	}
 
 	// --- the pose the predictor warps by ----------------------------------
+	//
+	// ONE VIEW PER EYE. A paired stream codes two eyes with two different poses
+	// and nxvc gives each its own warp record, so handing a paired encoder a
+	// single view is refused outright and the frame is predicted from no pose at
+	// all -- on both eyes. That was invisible for as long as the paired path was
+	// only exercised all-intra, where the library accepts and ignores views
+	// because there is no reference to warp; it is not invisible on a paired
+	// inter stream, and it does not fail loudly there either. The paired e2e
+	// (`--eyes 2`) is what surfaced it.
+	const auto view_at = [&](size_t index) {
+		const XrPosef & pose = view_info.pose[std::min(index, view_info.pose.size() - 1)];
+		const XrFovf & fov = view_info.fov[std::min(index, view_info.fov.size() - 1)];
+		return nxwarp_codec_view{
+		        .qx = pose.orientation.x,
+		        .qy = pose.orientation.y,
+		        .qz = pose.orientation.z,
+		        .qw = pose.orientation.w,
+		        .fov_left = fov.angleLeft,
+		        .fov_right = fov.angleRight,
+		        .fov_up = fov.angleUp,
+		        .fov_down = fov.angleDown,
+		};
+	};
+	// The pose that goes on the WIRE, in the per-frame pose header. That is one
+	// pose for the stream, not one per eye: the headset's own reprojection takes
+	// it as the frame's reference pose, and this stream's own eye is the one it
+	// was rendered for. Kept as its own binding because the encoder's later
+	// packetisation reads it long after the views above are gone.
 	const XrPosef & pose = view_info.pose[std::min<size_t>(eye, view_info.pose.size() - 1)];
-	const XrFovf & fov = view_info.fov[std::min<size_t>(eye, view_info.fov.size() - 1)];
-	codec->set_view(nxwarp_codec_view{
-	        .qx = pose.orientation.x,
-	        .qy = pose.orientation.y,
-	        .qz = pose.orientation.z,
-	        .qw = pose.orientation.w,
-	        .fov_left = fov.angleLeft,
-	        .fov_right = fov.angleRight,
-	        .fov_up = fov.angleUp,
-	        .fov_down = fov.angleDown,
-	});
+	if (stereo_eyes == 2)
+	{
+		// The eye layers must be ADJACENT for the encoder to read the pair
+		// straight out of the compositor's image, and WiVRn's compositor makes
+		// them so -- `arrayLayers = 3, // left, right then alpha` in
+		// compositor.cpp, with encoder_settings handing out src_layer 0 and
+		// src_layer_right 1. Checked once rather than trusted, because the
+		// consequence of it silently ceasing to be true is that the encoder
+		// reads the alpha plane as the right eye and the picture is wrong in a
+		// way no assertion downstream would name.
+		if (src_layer_right != src_layer + 1 and not warned_layer_gap)
+		{
+			warned_layer_gap = true;
+			U_LOG_W("nxwarp: eye layers %u and %u are not adjacent; falling back to the compose blit",
+			        unsigned(src_layer),
+			        unsigned(src_layer_right));
+		}
+		// Eye order, eye 0 first: this stream's own eye and then the right one,
+		// which are src_layer and src_layer_right and therefore views 0 and 1.
+		const nxwarp_codec_view views[2] = {view_at(0), view_at(1)};
+		codec->set_views(views, 2);
+	}
+	else
+	{
+		const nxwarp_codec_view v = view_at(eye);
+		codec->set_views(&v, 1);
+	}
 
 	if (not logged_rc_mode and pending_bitrate.load())
 	{
@@ -1472,7 +1520,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		// src_layer) exactly as before.
 		bitstream = codec_reads_image
 		                    ? (stereo_eyes == 2
-		                               ? codec->encode_image_pair(in[slot].image, src_layer, src_layer_right)
+		                               ? codec->encode_image_pair(in[slot].image, src_layer, src_layer_right, frame_id)
 		                               : codec->encode_image(in[slot].image, src_layer))
 		                    : codec->encode(y, extent.width, cb_plane.data(), cr_plane.data(), cw);
 	}

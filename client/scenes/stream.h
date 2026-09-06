@@ -81,7 +81,66 @@ private:
 	static const size_t view_count = 2;
 	// left, right, alpha, and the promoted quad layer
 	static const size_t decoder_count = view_count + 2;
-	static const size_t quad_stream_idx = 3;
+
+	// --- What each stream item IS (stream_role) ----------------------------
+	// The client used to read a stream's compositing role out of its index: 0 and 1 are
+	// the eyes, 2 is the alpha plane, 3 is the promoted quad layer. The server now says
+	// the role on the wire, because the hybrid base layer breaks that rule -- it is an
+	// atlas patch source, it is never composited on its own, and it lives in the stream-1
+	// slot the NX Warp eye pairing vacates.
+	//
+	// Cached here, once per description, rather than asked of the description at each of
+	// the dozen sites that need it: those sites are on the render thread's per-frame path,
+	// video_stream_description is an optional every one of them would have to check first,
+	// and one array lookup reads better than a call through it. Written by setup() under
+	// decoder_mutex, exactly where the description itself is written.
+	//
+	// The initial value is the historical positional rule, which is also the wire default.
+	// So every path before the first description behaves as it always has, and so does
+	// every session against a server that never sets a role.
+	std::array<wivrn::stream_role, decoder_count> stream_roles = {
+	        wivrn::stream_role::view,
+	        wivrn::stream_role::view,
+	        wivrn::stream_role::alpha,
+	        wivrn::stream_role::quad,
+	};
+	wivrn::stream_role stream_role_of(size_t stream_index) const
+	{
+		return stream_index < stream_roles.size()
+		               ? stream_roles[stream_index]
+		               : wivrn::stream_role::view;
+	}
+	// A picture that is composited into an eye. The only streams the reprojection pass,
+	// the projection layer and the "views ready" gate may ever look at.
+	//
+	// Stream 0 is a view in every session there is, and a handful of places still say so
+	// by writing 0: the de-jitter sample, the "is this a new frame" test, the motion field
+	// and the frame smoothing age all mean "the stream the frame cadence comes from". Only
+	// the slot stream 1 occupies is negotiable -- the eye pairing empties it and the base
+	// layer moves in -- so there is no reading of the description that puts something
+	// other than a view at 0.
+	bool is_view(size_t stream_index) const
+	{
+		return stream_role_of(stream_index) == wivrn::stream_role::view;
+	}
+	bool is_alpha(size_t stream_index) const
+	{
+		return stream_role_of(stream_index) == wivrn::stream_role::alpha;
+	}
+	// The hybrid base layer: decoded like any other stream, then handed to the atlas and
+	// never presented. See handle_base_frame(), which is the only consumer it has.
+	bool is_base(size_t stream_index) const
+	{
+		return stream_role_of(stream_index) == wivrn::stream_role::base;
+	}
+
+	// Index of the promoted quad layer stream, or decoder_count when this session has
+	// none. Found by role in setup(): 3 is its default, no longer its definition.
+	size_t quad_stream_idx = 3;
+	bool has_quad_stream() const
+	{
+		return quad_stream_idx < decoder_count;
+	}
 
 	struct accumulator_images
 	{
@@ -113,6 +172,19 @@ private:
 	//
 	// Callers must hold decoder_mutex.
 	bool eyes_in_one_stream() const;
+
+	// True when every stream that carries a VIEW and will ever produce a frame has
+	// produced one -- the gate that lets the scene call itself streaming and lets
+	// render() draw. The alpha plane, the quad layer and the base layer are deliberately
+	// not part of it: none of them is a picture the headset is waiting on to show
+	// anything, and a base stream in particular would hold the scene in
+	// state::initializing for the whole session if it were.
+	//
+	// Callers must hold decoder_mutex.
+	bool views_ready() const;
+
+	// The one place a decoded base layer frame arrives. See stream.cpp.
+	void handle_base_frame(uint8_t stream_index, const std::shared_ptr<wivrn::shard_accumulator::blit_handle> & handle);
 
 	// for frames inside accumulator images
 	std::mutex frames_mutex;

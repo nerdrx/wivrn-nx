@@ -1,0 +1,1 @@
+{"name":"lat-50m-qti","mode":0,"stream":"base_1088_50m.hevc","codec":"OMX.qcom.video.decoder.hevc","w":1088,"h":1088,"low_latency":0,"qti_low_latency":1,"frames":200,"n":200,"mean":5.1642,"p50":5.0646,"p95":7.2056,"p99":8.1739,"min":3.5881,"max":12.6668,"fps":0.000,"mean_interval":0.0000,"err":0,"color_format":2141391878,"stride":1152,"slice_height":1088,"dumped":0}

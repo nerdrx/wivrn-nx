@@ -1,0 +1,1 @@
+{"name":"thr-5m-base","mode":1,"stream":"base_1088_5m.hevc","codec":"OMX.qcom.video.decoder.hevc","w":1088,"h":1088,"low_latency":0,"qti_low_latency":0,"frames":200,"n":191,"mean":1.2870,"p50":0.9853,"p95":4.2059,"p99":7.4410,"min":0.0220,"max":16.6296,"fps":716.409,"mean_interval":1.2870,"err":0,"color_format":2141391878,"stride":1152,"slice_height":1088,"dumped":0}

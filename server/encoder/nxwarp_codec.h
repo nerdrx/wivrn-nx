@@ -67,6 +67,19 @@ struct nxwarp_codec_config
 	// ring. Off makes every frame all-intra, which is the safe default for a
 	// first end-to-end bring-up because it needs no client reference state.
 	bool inter = false;
+	// How a paired stream's two eyes reach E0. "layers" (the default) points the
+	// encoder at the two ARRAY LAYERS the compositor already keeps them in,
+	// which is what NXVC_VKE_IMAGE_EYE_LAYERS is for; "blit" copies them into
+	// one side-by-side picture first, which is what this did before the flag
+	// existed. The library pins that the two shapes produce the identical
+	// bitstream, so this is a cost switch and not a quality one -- "layers"
+	// removes a full-frame device blit per frame.
+	//
+	// The blit is kept, and kept reachable by configuration, for the case the
+	// flag cannot serve: eye layers that are not adjacent. Nothing produces that
+	// today, which is why the adjacency is checked at the call rather than
+	// trusted.
+	bool eye_layers = true;
 	// Rolling intra refresh period in frames. 1 forces every tile every frame.
 	uint32_t intra_period = 180;
 	// Which coded-vector mode the inter decision may choose on top of
@@ -163,6 +176,22 @@ public:
 	// called before every encode(); without it the codec emits an identity warp.
 	virtual void set_view(const nxwarp_codec_view &) = 0;
 
+	// The PAIRED form. nxvc wants one view per eye when the encoder was created
+	// with `eyes == 2`, because the two eyes have different poses and each gets
+	// its own warp record; handing such an encoder a single view is refused
+	// outright, so a paired inter stream that only ever called set_view() has no
+	// pose on EITHER eye and its predictor warps from nothing. Views are in eye
+	// order, eye 0 first, and `count` must equal the encoder's eye count.
+	//
+	// The default forwards the first view to set_view(), which is right for
+	// every backend that has no pair concept: at one eye the two calls are the
+	// same call.
+	virtual void set_views(const nxwarp_codec_view * views, uint32_t count)
+	{
+		if (count > 0)
+			set_view(views[0]);
+	}
+
 	// The quantiser, 0..63, for the frames that follow. This is the whole of the
 	// rate-control surface a backend exposes: no NX Warp codec moves the QP on
 	// its own, so the controller lives in video_encoder_nxwarp and this is how
@@ -217,10 +246,17 @@ public:
 	// The split exists because the two sides disagree about where an eye lives:
 	// WiVRn keeps them in layers, nxvc's image entry point wants one side-by-side
 	// picture and uses `array_layer` to pick a layer of an array image, not an
-	// eye. The backend brings them together; see nxwarp_codec_vk.cpp.
+	// eye. `wivrn::pair_compose` brings them together.
+	//
+	// `frame_index` identifies the compositor frame the layers belong to. It is
+	// not used by the codec: it is what lets the shared compose be paid ONCE for
+	// a frame that has two consumers -- the nxvc encoder here and the hybrid
+	// base layer's HEVC encoder, which wants the identical side-by-side picture.
+	// Callers must pass the same index both encoders see for the same frame.
 	virtual std::span<const uint8_t> encode_image_pair(VkImage image,
 	                                                   uint32_t layer_left,
-	                                                   uint32_t)
+	                                                   uint32_t,
+	                                                   uint64_t frame_index)
 	{
 		return encode_image(image, layer_left);
 	}

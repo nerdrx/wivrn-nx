@@ -56,9 +56,52 @@ static const double passthrough_bitrate_factor = 0.05;
 // when the encoders are created and not only per frame.
 static const double quad_bitrate_factor = 1.0;
 
+// The hybrid base layer's share of the ceiling, as a fraction.
+//
+// This is a POLICY number and deliberately not an area weight. The base is
+// pair-wide and so is the enhancement stream it serves, so weighting by
+// width*height would split the ceiling down the middle, and the gate measured
+// that the base does not want anything like half:
+// NXWARP-HYBRID-GATE.md §2 has it saturating at 3-5 Mbit/s per eye for
+// head-rotation content and 10-15 Mbit/s for dense static UI, against WiVRn
+// streams that run at 50-100 Mbit/s today. At the 100 Mbit/s default this
+// fraction is 12 Mbit/s for the pair, which is inside the measured saturation
+// band for both content classes; the remainder stays with the enhancement layer,
+// whose job under the gate's result is loss recovery, latency cover and foveal
+// detail rather than quality correction.
+//
+// It is a fraction of the ceiling rather than a fixed Mbit/s so that a session
+// configured well below the default does not spend most of its budget on the
+// base.
+static const double base_bitrate_fraction = 0.12;
+
 static void split_bitrate(std::array<wivrn::encoder_settings, num_streams> & encoders, uint64_t bitrate)
 {
 	assert(bitrate > 0);
+
+	// The base layer is taken off the top, before the area weighting, and the
+	// remainder is split among the others exactly as it was. Doing it this way
+	// rather than as another weight is what keeps the base's share a number
+	// somebody chose from a measurement.
+	uint64_t base_bitrate = 0;
+	for (auto & e: encoders)
+	{
+		if (not e.enabled or e.role != stream_role::base)
+			continue;
+		base_bitrate = uint64_t(bitrate * base_bitrate_fraction);
+		e.bitrate = base_bitrate;
+		e.bitrate_multiplier = base_bitrate_fraction;
+	}
+	if (base_bitrate >= bitrate)
+		base_bitrate = 0; // a degenerate ceiling; fall back to the plain split
+	const uint64_t ceiling = bitrate;
+	bitrate -= base_bitrate;
+	// What is left for everyone else, as a fraction of the ceiling. The
+	// multipliers below are relative to the CEILING and not to the remainder,
+	// because that is what the live rate control multiplies when the ceiling
+	// moves -- without this the shares would sum to 1 + base_bitrate_fraction.
+	const double rest_fraction = double(bitrate) / double(ceiling);
+
 	double total_weight = 0;
 	for (auto [i, encoder]: std::ranges::enumerate_view(encoders))
 	{
@@ -68,6 +111,8 @@ static void split_bitrate(std::array<wivrn::encoder_settings, num_streams> & enc
 			encoder.bitrate_multiplier = 0;
 			continue;
 		}
+		if (encoder.role == stream_role::base)
+			continue; // already served, off the top
 		double w = encoder.width * encoder.height;
 		if (i == 2)
 			w *= passthrough_bitrate_factor;
@@ -87,12 +132,14 @@ static void split_bitrate(std::array<wivrn::encoder_settings, num_streams> & enc
 		total_weight += w;
 	}
 
+	if (total_weight <= 0)
+		return;
 	for (auto & encoder: encoders)
 	{
-		if (not encoder.enabled)
+		if (not encoder.enabled or encoder.role == stream_role::base)
 			continue;
-		encoder.bitrate_multiplier = encoder.bitrate / total_weight;
-		encoder.bitrate = encoder.bitrate_multiplier * bitrate;
+		encoder.bitrate_multiplier = (encoder.bitrate / total_weight) * rest_fraction;
+		encoder.bitrate = encoder.bitrate_multiplier * ceiling;
 	}
 }
 
@@ -447,6 +494,102 @@ std::array<encoder_settings, num_streams> get_encoder_settings(wivrn::vk_bundle 
 				        unsigned(width * 2),
 				        unsigned(height),
 				        unsigned(2 * ((width + 63) / 64) * ((height + 63) / 64)));
+			}
+		}
+	}
+
+	// --- The hybrid base layer, on the stream-1 slot the pairing just vacated.
+	//
+	// A hardware HEVC picture of the SAME side-by-side eye pair, decoded on the
+	// headset's idle video ASIC and imported into the NX Warp atlas as
+	// base-sourced patches (ADR-0029 Cheat 7, flags bit 2). It is not a second
+	// view: it is never composited on its own, which is what `stream_role::base`
+	// says on the wire.
+	//
+	// Every precondition here is the pairing's precondition, which is why this
+	// slot is the right one and `num_streams = 6` buys nothing:
+	//   * the pair must have paired, or stream 1 still holds the right eye's
+	//     encoder and there is no slot;
+	//   * the per-eye width is already a multiple of 64, so with CTB 64 every
+	//     HEVC quantisation and deblocking boundary coincides with an nxvc tile
+	//     boundary in BOTH eyes, with no per-eye offset correction;
+	//   * both encoders want the identical side-by-side picture, so the compose
+	//     is produced once and consumed twice.
+	//
+	// Off by default. It is a protocol-visible feature whose client half is an
+	// atlas import that is still being built, so it is opted into explicitly and
+	// nothing changes for anyone who does not.
+	{
+		const auto & opts = res[0].options;
+		const auto it = opts.find("base-layer");
+		const std::string mode = it == opts.end() ? "off" : it->second;
+		const bool want = mode == "on" or mode == "1" or mode == "true";
+		const bool paired = res[0].eyes == 2 and not res[1].enabled;
+
+		if (want and not paired)
+			U_LOG_W("hybrid: base layer requested but the eyes are not paired; stream 1 still carries the right eye");
+		else if (want)
+		{
+			// Ask the prober for HEVC specifically. The base's whole reason to
+			// exist is that the headset has an idle HEVC ASIC, so falling back to
+			// H.264 or to x264 would be answering a different question -- an
+			// unavailable HEVC encoder means no base layer, not a worse one.
+			configuration::encoder want_h265;
+			want_h265.codec = video_codec::h265;
+			auto [name, codec] = prober.select_encoder(want_h265);
+			if (codec != video_codec::h265)
+			{
+				U_LOG_W("hybrid: no HEVC encoder available for the base layer; not enabling it");
+			}
+			else
+			{
+				auto & base = res[1];
+				base.enabled = true;
+				base.role = stream_role::base;
+				base.serves_stream = 0;
+				base.encoder_name = name;
+				base.codec = codec;
+				base.fps = res[0].fps;
+				base.device = res[0].device;
+				// The base reads the SAME pair the nxwarp encoder does. `width`
+				// and `height` stay per-eye here, exactly as they do on stream 0,
+				// and `eyes == 2` is what makes the coded picture pair-wide -- so
+				// there is one convention for a paired stream and not two.
+				base.eyes = 2;
+				base.src_layer = 0;
+				base.src_layer_right = 1;
+				base.encode_scale = res[0].encode_scale;
+				// Loss recovery is the enhancement layer's job here, not the
+				// base's: a lost base picture leaves the atlas stale and nxvc
+				// refreshes the affected tiles per-tile with no IDR
+				// (NXWARP-HYBRID.md §4.6). Keeping the base's own intra refresh
+				// on top of that would spend base bitrate on a recovery that has
+				// already happened.
+				base.intra_refresh = false;
+				base.ref_invalidation = res[0].ref_invalidation;
+				// bit_depth is settled below, for every stream at once. An nxwarp
+				// stream forces the whole session to 8 bits, and the base is on a
+				// paired nxwarp stream by construction, so it gets the 8 bits §9
+				// requires without asking for them here.
+				// CTB 64, low latency, and FULL-RANGE BT.709 -- the last is not a
+				// preference. The atlas's coded sample domain is BT.709 full-range
+				// YCbCr because the nxwarp encoder leaves nxvc at CT_NONE, so a
+				// limited-range base is a fixed offset on every base-sourced
+				// patch: a failure that looks like a gamma bug and is not one.
+				// NXWARP-HYBRID.md §9 is the derivation and hybrid-proto's
+				// test_base_shadow is the guard.
+				base.options = {
+				        {"ctu", "64"},
+				        {"bframes", "0"},
+				        {"color_range", "pc"},
+				        {"colorprim", "bt709"},
+				        {"colormatrix", "bt709"},
+				};
+				U_LOG_I("hybrid: base layer on stream 1, %s HEVC, one %ux%u side-by-side pair, serving stream %u",
+				        name.c_str(),
+				        unsigned(width * 2),
+				        unsigned(height),
+				        unsigned(base.serves_stream));
 			}
 		}
 	}

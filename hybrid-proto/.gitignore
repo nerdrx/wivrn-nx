@@ -1,0 +1,6 @@
+# Generated test material and build products: reproduce with gen-streams.sh
+# and build.sh rather than committing ~2 GB of HEVC and raw YUV.
+streams/
+build/
+results/*.yuv
+results/*.bin

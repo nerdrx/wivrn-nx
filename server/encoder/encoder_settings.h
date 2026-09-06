@@ -59,6 +59,15 @@ struct encoder_settings
 	uint32_t eyes = 1;
 	// The second eye's array layer, read only when `eyes` is 2.
 	uint32_t src_layer_right = 1;
+	// What this stream IS, and what the client is told on the wire. The default is
+	// the historical positional rule; only the hybrid base layer changes it, taking
+	// stream 1's slot when the eye pairing vacates it. See
+	// docs/NXWARP-HYBRID.md §10 and wivrn_packets.h's `stream_role`.
+	stream_role role = stream_role::view;
+	// For a `base` stream, the index of the stream whose atlas it fills. 0xff
+	// elsewhere. The base names its enhancement stream rather than the client
+	// inferring the pairing from the indices.
+	uint8_t serves_stream = 0xff;
 	// encoder identifier, such as nvenc, vaapi or x264
 	std::string encoder_name;
 	uint64_t bitrate;                           // bit/s

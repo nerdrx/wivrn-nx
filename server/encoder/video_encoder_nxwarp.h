@@ -124,6 +124,9 @@ class video_encoder_nxwarp : public video_encoder
 	// (encoder_settings::eyes). At 2 the encode reads both array layers.
 	uint32_t stereo_eyes = 1;
 	uint32_t src_layer_right = 1;
+	// One warning, not one per frame: non-adjacent eye layers are a wiring change,
+	// not a per-frame event.
+	bool warned_layer_gap = false;
 	nxt::StreamConfig stream_cfg;
 	// The AEAD key material, kept because reset_stream() builds a new Sender with it.
 	nxt::Key session_key{}, session_salt{};

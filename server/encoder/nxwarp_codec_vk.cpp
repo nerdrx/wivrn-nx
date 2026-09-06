@@ -17,11 +17,13 @@
  */
 
 #include "nxwarp_codec.h"
+#include "pair_compose.h"
 
 #include <nxvc/nxvc_vk_enc.h>
 
 #include "util/u_logging.h"
 
+#include <algorithm>
 #include <format>
 #include <stdexcept>
 #include <vector>
@@ -113,22 +115,20 @@ class nxwarp_codec_vk final : public wivrn::nxwarp_codec
 	uint32_t pair_width = 0;
 	std::string device;
 
-	// --- the stereo compose. See encode_image_pair().
+	// --- the stereo compose, now shared. See pair_compose.h: the base layer's
+	// HEVC encoder wants the identical side-by-side picture, so the full-frame
+	// copy is paid once per frame instead of once per consumer.
 	VkPhysicalDevice vk_phys = VK_NULL_HANDLE;
 	VkDevice vk_dev = VK_NULL_HANDLE;
 	VkQueue vk_queue = VK_NULL_HANDLE;
 	uint32_t vk_family = 0;
-	VkImage compose_image = VK_NULL_HANDLE;
-	VkDeviceMemory compose_mem = VK_NULL_HANDLE;
-	VkCommandPool compose_pool = VK_NULL_HANDLE;
-	VkCommandBuffer compose_cmd = VK_NULL_HANDLE;
-	VkFence compose_fence = VK_NULL_HANDLE;
-	VkQueryPool compose_qpool = VK_NULL_HANDLE;
-	bool compose_ready = false;
-	bool compose_undefined = true;
+	std::shared_ptr<wivrn::pair_compose> composer;
+	// "stereo-compose": "layers" (default) reads the eyes from two array
+	// layers; "blit" forces the side-by-side copy. The option exists so the
+	// blit path stays reachable and testable now that nothing takes it by
+	// default -- an unexercised fallback is not a fallback.
+	bool use_eye_layers = true;
 	bool compose_warned = false;
-	double timestamp_period_ns = 0; // 0 = the device cannot time this
-	double last_compose_ms = 0;
 
 	// Wall time of the last encode(), milliseconds, as the library measured it
 	// around its own submits. video_encoder_nxwarp times the whole call; this
@@ -248,6 +248,7 @@ public:
 		width = c.width;
 		height = c.height;
 		eyes = ci.eyes;
+		use_eye_layers = c.eye_layers;
 		pair_width = c.width * eyes;
 		nxvc_vk_encoder_tile_grid(enc, &cols, &rows);
 		device = nxvc_vk_encoder_device_name(enc);
@@ -287,21 +288,48 @@ public:
 	// call.  On an intra stream the library accepts and ignores it.
 	void set_view(const wivrn::nxwarp_codec_view & v) override
 	{
-		nxvc_vke_view nv{};
-		nv.qx = v.qx;
-		nv.qy = v.qy;
-		nv.qz = v.qz;
-		nv.qw = v.qw;
-		nv.fov_left = v.fov_left;
-		nv.fov_right = v.fov_right;
-		nv.fov_up = v.fov_up;
-		nv.fov_down = v.fov_down;
+		set_views(&v, 1);
+	}
 
-		const nxvc_vke_status st = nxvc_vk_encoder_set_view(enc, &nv);
+	// nxvc_vk_encoder_set_views() requires `count == create_info::eyes`, so on a
+	// PAIRED encoder the single-view form is refused with `bad argument` and the
+	// frame is coded with no pose at all -- on both eyes. That is invisible on an
+	// all-intra stream, which is why it survived: the library documents that it
+	// accepts and ignores views when there is no reference to warp. On a paired
+	// INTER stream it is not invisible, and it does not degrade gracefully
+	// either; it makes the predictor warp confidently from nothing, which looks
+	// like a bad codec rather than a missing call.
+	void set_views(const wivrn::nxwarp_codec_view * views, uint32_t count) override
+	{
+		if (count == 0 or views == nullptr)
+			return;
+
+		nxvc_vke_view nv[2]{};
+		const uint32_t n = std::min<uint32_t>(count, uint32_t(std::size(nv)));
+		for (uint32_t i = 0; i < n; ++i)
+		{
+			nv[i].qx = views[i].qx;
+			nv[i].qy = views[i].qy;
+			nv[i].qz = views[i].qz;
+			nv[i].qw = views[i].qw;
+			nv[i].fov_left = views[i].fov_left;
+			nv[i].fov_right = views[i].fov_right;
+			nv[i].fov_up = views[i].fov_up;
+			nv[i].fov_down = views[i].fov_down;
+		}
+		// A caller that gave fewer views than this encoder has eyes gets the
+		// last one repeated. That is wrong-but-close rather than refused: it is
+		// the same pose in both eyes, which is a small parallax error, where the
+		// refusal is no pose at all.
+		for (uint32_t i = n; i < eyes and i < uint32_t(std::size(nv)); ++i)
+			nv[i] = nv[n - 1];
+
+		const nxvc_vke_status st = nxvc_vk_encoder_set_views(enc, nv, eyes);
 		if (st != NXVC_VKE_OK and not warned_view)
 		{
 			warned_view = true;
-			U_LOG_W("nxwarp: the GPU encoder refused a view: %s (%s)",
+			U_LOG_W("nxwarp: the GPU encoder refused %u view(s): %s (%s)",
+			        unsigned(eyes),
 			        nxvc_vk_encoder_status_string(st),
 			        nxvc_vk_encoder_last_error(enc));
 		}
@@ -399,313 +427,73 @@ public:
 		return true;
 	}
 
-	// The stereo compose.
-	//
-	// WiVRn keeps the two eyes in separate ARRAY LAYERS of one image; nxvc's image
-	// entry point wants ONE side-by-side picture, `eyes * width` wide, and its
-	// `array_layer` selects a layer of an array image rather than an eye. So the
-	// pair has to be brought together somewhere, and this is the cheapest place:
-	// a GPU-side copy of each layer into the two halves of a scratch image, then
-	// the ordinary encode_image() on that.
-	//
-	// It costs one full-frame copy per frame that the mono path does not pay, and
-	// it does undo, for the stereo case only, the "no plane ever touches host
-	// memory" property the image entry point exists for -- but only in the sense
-	// that the picture is copied ON the device. Nothing crosses the bus and no
-	// plane is laid out on the host. encode_image_pair() times the copy with a
-	// timestamp pair so the cost is measured rather than asserted; the number
-	// comes back through last_compose_ms().
-	//
-	// The alternative -- widening the compositor's image so the eyes are already
-	// side by side -- would touch every other encoder's src_layer and make
-	// video_stream_description::width the pair's, which the client's alpha offset
-	// reads as one eye's. The right long-term fix is neither: it is teaching
-	// nxvc's E0 to read eye 1 from a second array layer, which it could do almost
-	// for free because its tile index is already pair-wide. That is a change in
-	// nx-warp, so it is a follow-up and not this.
-	bool ensure_compose()
-	{
-		if (compose_ready)
-			return true;
-
-		VkPhysicalDeviceProperties props{};
-		vkGetPhysicalDeviceProperties(vk_phys, &props);
-		// A timestamp period of 0 means the device does not support them; the
-		// compose still runs, it just is not timed.
-		timestamp_period_ns = props.limits.timestampPeriod;
-
-		// Exactly the image nxvc_vk_enc.h asks for: the two-plane 4:2:0 format,
-		// MUTABLE_FORMAT with a format list that names the UINT plane views (a
-		// list that omits them makes those views invalid and a driver may refuse
-		// them), and STORAGE reached through EXTENDED_USAGE because the planar
-		// format has no storage feature of its own. TRANSFER_DST is ours.
-		static const VkFormat view_formats[] = {
-		        VK_FORMAT_G8_B8R8_2PLANE_420_UNORM,
-		        VK_FORMAT_R8_UNORM,
-		        VK_FORMAT_R8G8_UNORM,
-		        VK_FORMAT_R8_UINT,
-		        VK_FORMAT_R8G8_UINT,
-		};
-		VkImageFormatListCreateInfo fmt_list{
-		        .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
-		        .viewFormatCount = uint32_t(std::size(view_formats)),
-		        .pViewFormats = view_formats,
-		};
-		VkImageCreateInfo ici{
-		        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-		        .pNext = &fmt_list,
-		        .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT |
-		                 VK_IMAGE_CREATE_EXTENDED_USAGE_BIT,
-		        .imageType = VK_IMAGE_TYPE_2D,
-		        .format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM,
-		        .extent = {pair_width, height, 1},
-		        .mipLevels = 1,
-		        .arrayLayers = 1,
-		        .samples = VK_SAMPLE_COUNT_1_BIT,
-		        .tiling = VK_IMAGE_TILING_OPTIMAL,
-		        .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-		        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-		        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-		};
-		if (vkCreateImage(vk_dev, &ici, nullptr, &compose_image) != VK_SUCCESS)
-			return compose_fail("could not create the compose image");
-
-		VkMemoryRequirements req{};
-		vkGetImageMemoryRequirements(vk_dev, compose_image, &req);
-		VkPhysicalDeviceMemoryProperties mem{};
-		vkGetPhysicalDeviceMemoryProperties(vk_phys, &mem);
-		uint32_t type = UINT32_MAX;
-		for (uint32_t i = 0; i < mem.memoryTypeCount; ++i)
-			if ((req.memoryTypeBits & (1u << i)) and
-			    (mem.memoryTypes[i].propertyFlags &
-			     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
-			{
-				type = i;
-				break;
-			}
-		if (type == UINT32_MAX)
-			return compose_fail("no device-local memory type for the compose image");
-
-		VkMemoryAllocateInfo mai{
-		        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-		        .allocationSize = req.size,
-		        .memoryTypeIndex = type,
-		};
-		if (vkAllocateMemory(vk_dev, &mai, nullptr, &compose_mem) != VK_SUCCESS)
-			return compose_fail("could not allocate the compose image");
-		if (vkBindImageMemory(vk_dev, compose_image, compose_mem, 0) != VK_SUCCESS)
-			return compose_fail("could not bind the compose image");
-
-		VkCommandPoolCreateInfo pci{
-		        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-		        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-		        .queueFamilyIndex = vk_family,
-		};
-		if (vkCreateCommandPool(vk_dev, &pci, nullptr, &compose_pool) != VK_SUCCESS)
-			return compose_fail("could not create the compose command pool");
-
-		VkCommandBufferAllocateInfo cbi{
-		        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-		        .commandPool = compose_pool,
-		        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-		        .commandBufferCount = 1,
-		};
-		if (vkAllocateCommandBuffers(vk_dev, &cbi, &compose_cmd) != VK_SUCCESS)
-			return compose_fail("could not allocate the compose command buffer");
-
-		VkFenceCreateInfo fci{.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-		if (vkCreateFence(vk_dev, &fci, nullptr, &compose_fence) != VK_SUCCESS)
-			return compose_fail("could not create the compose fence");
-
-		if (timestamp_period_ns > 0)
-		{
-			VkQueryPoolCreateInfo qci{
-			        .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
-			        .queryType = VK_QUERY_TYPE_TIMESTAMP,
-			        .queryCount = 2,
-			};
-			if (vkCreateQueryPool(vk_dev, &qci, nullptr, &compose_qpool) != VK_SUCCESS)
-				compose_qpool = VK_NULL_HANDLE; // not fatal, just untimed
-		}
-
-		compose_ready = true;
-		return true;
-	}
-
-	bool compose_fail(const char * why)
-	{
-		if (not compose_warned)
-		{
-			U_LOG_W("nxwarp: stereo compose unavailable: %s", why);
-			compose_warned = true;
-		}
-		return false;
-	}
-
-	// Copy one array layer of `src` into the half of the compose image at
-	// `dst_x`. A two-plane 4:2:0 image is copied a plane at a time: the chroma
-	// plane is half the luma in both axes, so its offset and extent are halved
-	// too. The per-eye width is a multiple of 64 (nxvc refuses eyes == 2
-	// otherwise), so `dst_x / 2` is exact and the seam falls on a chroma sample.
-	static void copy_layer(VkCommandBuffer cmd,
-	                       VkImage src,
-	                       uint32_t layer,
-	                       VkImage dst,
-	                       uint32_t dst_x,
-	                       uint32_t w,
-	                       uint32_t h)
-	{
-		const VkImageCopy regions[] = {
-		        {
-		                .srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT,
-		                                   .mipLevel = 0,
-		                                   .baseArrayLayer = layer,
-		                                   .layerCount = 1},
-		                .srcOffset = {0, 0, 0},
-		                .dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT,
-		                                   .mipLevel = 0,
-		                                   .baseArrayLayer = 0,
-		                                   .layerCount = 1},
-		                .dstOffset = {int32_t(dst_x), 0, 0},
-		                .extent = {w, h, 1},
-		        },
-		        {
-		                .srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT,
-		                                   .mipLevel = 0,
-		                                   .baseArrayLayer = layer,
-		                                   .layerCount = 1},
-		                .srcOffset = {0, 0, 0},
-		                .dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_PLANE_1_BIT,
-		                                   .mipLevel = 0,
-		                                   .baseArrayLayer = 0,
-		                                   .layerCount = 1},
-		                .dstOffset = {int32_t(dst_x / 2), 0, 0},
-		                .extent = {w / 2, h / 2, 1},
-		        },
-		};
-		vkCmdCopyImage(cmd,
-		               src,
-		               VK_IMAGE_LAYOUT_GENERAL,
-		               dst,
-		               VK_IMAGE_LAYOUT_GENERAL,
-		               uint32_t(std::size(regions)),
-		               regions);
-	}
-
 	std::span<const uint8_t> encode_image_pair(VkImage image,
-	                                           uint32_t layer_left,
-	                                           uint32_t layer_right) override
+	                                          uint32_t layer_left,
+	                                          uint32_t layer_right,
+	                                          uint64_t frame_index) override
 	{
 		if (eyes != 2)
 			return encode_image(image, layer_left);
-		if (not ensure_compose())
+
+		// THE BLIT IS NO LONGER THE DEFAULT. nxvc's E0 can read eye 1 from the
+		// array layer after eye 0 (NXVC_VKE_IMAGE_EYE_LAYERS), which is the
+		// layout WiVRn's compositor already has -- `arrayLayers = 3, // left,
+		// right then alpha`, so the eyes are layers 0 and 1 and are adjacent by
+		// construction. The library pins that both shapes produce the IDENTICAL
+		// bitstream, and E0's tile index is pair-wide either way, so taking this
+		// path removes a full-frame device blit per frame and changes nothing
+		// else.
+		//
+		// The blit survives for the two cases the flag cannot serve: layers that
+		// are not adjacent (nothing produces that today, which is exactly why it
+		// is asserted rather than assumed), and a consumer that genuinely needs
+		// one side-by-side picture -- which the hybrid base layer's HEVC encoder
+		// does, since no video encoder has a notion of an eye pair.
+		if (use_eye_layers and layer_right == layer_left + 1)
+			return encode_image_impl(image, layer_left, true);
+
+		if (not composer)
+			composer = wivrn::pair_compose::get(vk_phys, vk_dev, vk_queue, vk_family,
+			                                    width, height, eyes);
+		VkImage pair = composer ? composer->compose(image, layer_left, layer_right, frame_index)
+		                        : VK_NULL_HANDLE;
+		if (pair == VK_NULL_HANDLE)
+		{
+			if (not compose_warned)
+			{
+				U_LOG_W("nxwarp: the stereo compose is unavailable; this frame is dropped");
+				compose_warned = true;
+			}
 			return {};
-
-		vkResetCommandBuffer(compose_cmd, 0);
-		VkCommandBufferBeginInfo bi{
-		        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-		        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-		};
-		vkBeginCommandBuffer(compose_cmd, &bi);
-
-		// UNDEFINED only once: after the first frame the image already holds the
-		// previous pair, and discarding it would be a lie the driver is entitled
-		// to act on. Every later frame transitions GENERAL -> GENERAL, which is
-		// just the execution and memory dependency against the encoder's reads
-		// of the frame before.
-		VkImageMemoryBarrier to_dst{
-		        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-		        .srcAccessMask = compose_undefined ? VkAccessFlags(0)
-		                                           : VkAccessFlags(VK_ACCESS_SHADER_READ_BIT),
-		        .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-		        .oldLayout = compose_undefined ? VK_IMAGE_LAYOUT_UNDEFINED
-		                                       : VK_IMAGE_LAYOUT_GENERAL,
-		        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-		        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-		        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-		        .image = compose_image,
-		        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
-		};
-		vkCmdPipelineBarrier(compose_cmd,
-		                     compose_undefined ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
-		                                       : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-		                     VK_PIPELINE_STAGE_TRANSFER_BIT,
-		                     0, 0, nullptr, 0, nullptr, 1, &to_dst);
-		compose_undefined = false;
-
-		if (compose_qpool)
-		{
-			vkCmdResetQueryPool(compose_cmd, compose_qpool, 0, 2);
-			vkCmdWriteTimestamp(compose_cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-			                    compose_qpool, 0);
 		}
-
-		copy_layer(compose_cmd, image, layer_left, compose_image, 0, width, height);
-		copy_layer(compose_cmd, image, layer_right, compose_image, width, width, height);
-
-		if (compose_qpool)
-			vkCmdWriteTimestamp(compose_cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-			                    compose_qpool, 1);
-
-		// The encoder's E0 reads this as a storage image, so the copy has to be
-		// visible to a shader read before its submit runs. nxvc submits and waits
-		// on its own queue -- the same queue this went on -- so the barrier plus
-		// the fence below is the whole ordering.
-		VkImageMemoryBarrier to_read{
-		        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-		        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-		        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
-		        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
-		        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-		        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-		        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-		        .image = compose_image,
-		        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
-		};
-		vkCmdPipelineBarrier(compose_cmd,
-		                     VK_PIPELINE_STAGE_TRANSFER_BIT,
-		                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-		                     0, 0, nullptr, 0, nullptr, 1, &to_read);
-		vkEndCommandBuffer(compose_cmd);
-
-		vkResetFences(vk_dev, 1, &compose_fence);
-		VkSubmitInfo si{
-		        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-		        .commandBufferCount = 1,
-		        .pCommandBuffers = &compose_cmd,
-		};
-		if (vkQueueSubmit(vk_queue, 1, &si, compose_fence) != VK_SUCCESS)
-			return compose_fail("the compose submit failed"), std::span<const uint8_t>{};
-		vkWaitForFences(vk_dev, 1, &compose_fence, VK_TRUE, UINT64_MAX);
-
-		if (compose_qpool)
-		{
-			uint64_t ts[2] = {0, 0};
-			if (vkGetQueryPoolResults(vk_dev, compose_qpool, 0, 2, sizeof ts, ts,
-			                          sizeof(uint64_t),
-			                          VK_QUERY_RESULT_64_BIT |
-			                                  VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS and
-			    ts[1] >= ts[0])
-				last_compose_ms = double(ts[1] - ts[0]) * timestamp_period_ns * 1e-6;
-		}
-
-		return encode_image(compose_image, 0);
+		return encode_image(pair, 0);
 	}
 
 	double compose_ms() const override
 	{
-		return last_compose_ms;
+		return composer ? composer->last_ms() : 0.0;
 	}
 
 	std::span<const uint8_t> encode_image(VkImage image, uint32_t array_layer) override
+	{
+		return encode_image_impl(image, array_layer, false);
+	}
+
+	// `eye_layers` picks between the two shapes nxvc_vke_image can take, and
+	// `width` means a different thing in each: without the flag the picture in
+	// ONE LAYER is the side-by-side pair, so `width` is pair-wide; with it each
+	// layer holds one eye, so `width` is one eye's. Getting that backwards
+	// produces a plausible half-picture rather than an error, which is why the
+	// two are chosen together here and not by the caller.
+	std::span<const uint8_t> encode_image_impl(VkImage image, uint32_t array_layer, bool eye_layers)
 	{
 		nxvc_vke_image img{
 		        .image = image,
 		        .layout = VK_IMAGE_LAYOUT_GENERAL,
 		        .array_layer = array_layer,
-		        .width = pair_width,
+		        .width = eye_layers ? width : pair_width,
 		        .height = height,
-		        .flags = 0,
+		        .flags = eye_layers ? NXVC_VKE_IMAGE_EYE_LAYERS : 0u,
 		};
 		const uint8_t * bytes = nullptr;
 		size_t len = 0;

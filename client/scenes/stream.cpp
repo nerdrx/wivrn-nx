@@ -692,6 +692,66 @@ bool scenes::stream::eyes_in_one_stream() const
 	return video_stream_description and video_stream_description->paired_eyes > 1;
 }
 
+// Has every stream that carries a view produced a frame yet?
+//
+// This is the old `decoders[0].empty() or (not stereo and decoders[1].empty())` test said
+// by role instead of by index, and it answers the same on every session that has no base
+// layer. What it adds is that a stream which is not a view -- the alpha plane, the quad,
+// and above all the base layer sitting in the stream-1 slot -- cannot hold the gate shut.
+// A stream with no decoder is skipped for the reason it always was: the server sends it
+// no datagrams, so waiting for a frame from it would wait forever.
+//
+// At least one view must have delivered, so that a session with no view decoder at all
+// (which would mean no picture) stays out of state::streaming rather than falling through
+// this as vacuously true.
+bool scenes::stream::views_ready() const
+{
+	bool any = false;
+	for (size_t i = 0; i < decoder_count; ++i)
+	{
+		if (not is_view(i) or not decoders[i].decoder)
+			continue;
+		if (decoders[i].empty())
+			return false;
+		any = true;
+	}
+	return any;
+}
+
+// One decoded frame of the hybrid base layer, and the ONLY place the client sees one.
+//
+// The base layer is a hardware-HEVC picture of the whole eye pair that the NX Warp decoder
+// is meant to patch tiles out of: it is a source of pixels for another stream's atlas, not
+// a layer the compositor ever sees. That is why it is handled here, off to the side of the
+// display path, instead of going into the rolling frame buffer with the views -- a base
+// frame that reached common_frame() would be blitted, presented and counted as a view, and
+// on a stereo session it would be presented as the RIGHT EYE, because that is the slot it
+// occupies.
+//
+// TODO: hand the frame to the atlas instead of dropping it. The consumer is
+//
+//     nxvc_vk_atlas_write_tiles(dec, eye, first_tile, count, src, src_frame, flags)
+//
+// which is being built on another branch; `dec` is the nxwarp decoder of the stream this
+// one feeds, which the base stream NAMES through video_stream_description::serves_stream
+// (its own entry there is the index of the enhancement stream, 0xff where it does not
+// apply), so this function will look that index up in `decoders` and dynamic_cast its
+// decoder rather than assuming which stream it serves.
+//
+// Until then the frame is simply released: `handle` is the caller's shared_ptr to the
+// decoded image, this takes no reference of its own, and push_blit_handle drops the last
+// one when it returns -- which hands the image straight back to the decoder's pool, the
+// same as a view frame that is displaced from the buffer without ever being shown. The
+// caller still sends feedback for it afterwards, exactly as it does for every other
+// stream, because the server's pacing and bitrate control must see this stream arriving.
+//
+// Callers hold decoder_mutex (shared) and frames_mutex.
+void scenes::stream::handle_base_frame(uint8_t stream_index, const std::shared_ptr<shard_accumulator::blit_handle> & handle)
+{
+	(void)stream_index;
+	(void)handle;
+}
+
 void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_ptr<shard_accumulator::blit_handle> handle)
 {
 	assert(handle);
@@ -720,23 +780,40 @@ void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_p
 			// sampling all of them would just weight the same arrival three times.
 			// Taken before the swap below, while `handle` is still the frame that
 			// arrived rather than the one it displaces.
-			if (stream == 0)
+			//
+			// Stream 0 is the frame the buffer paces on, and it is a view in every
+			// session (the base layer takes the stream-1 slot, never this one); the
+			// role test is here so that a stream which is NOT a displayed picture can
+			// never end up pacing the display.
+			if (stream == 0 and is_view(stream))
 				dejitter.sample(handle->feedback.received_from_decoder, handle->view_info.display_time);
 
 			// One decoded frame on this stream, for the frame rate readout. Monotonic
 			// and never reset: the render thread differences it over a rolling window.
+			// Counted for every stream, base included: it is a decode that happened.
 			decoded_frames[stream].fetch_add(1, std::memory_order_relaxed);
 
-			std::swap(handle, decoders[stream].latest_frames[handle->feedback.frame_index % decoders[stream].latest_frames.size()]);
+			if (is_base(stream))
+			{
+				// The hybrid base layer. It is NOT put in the rolling buffer, which
+				// is what keeps it out of common_frame(), out of the reprojection
+				// pass and out of the "views ready" gate below -- see
+				// handle_base_frame() for what happens to it instead, and why
+				// nothing in the display path may ever see it.
+				handle_base_frame(stream, handle);
+			}
+			else
+			{
+				std::swap(handle, decoders[stream].latest_frames[handle->feedback.frame_index % decoders[stream].latest_frames.size()]);
+			}
 		}
 
-		// The scene is ready when every stream that will ever produce a frame has produced
+		// The scene is ready when every stream that will ever produce a VIEW has produced
 		// one. On a stereo stream item 1 never will -- the server sends it no datagrams at
 		// all -- so waiting on it here would leave the scene stuck short of state::streaming
 		// for the whole session, which among other things never arms the stall watchdog and
 		// never stops the connecting overlay. Stream 0's own frame covers both eyes.
-		if (state_ != state::streaming and
-		    not(decoders[0].empty() or (not eyes_in_one_stream() and decoders[1].empty())))
+		if (state_ != state::streaming and views_ready())
 		{
 			set_state(state::streaming);
 			spdlog::info("Stream scene ready at t={}", instance.now());
@@ -784,13 +861,23 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, scenes::stream::deco
 	// eyes came out of one decode of one stream, so they cannot disagree, and stream 1's
 	// permanently empty buffer would intersect the candidate list down to nothing on every
 	// refresh -- the "Failed to find a common frame" branch below, once per frame, forever.
-	const bool eyes_joined = eyes_in_one_stream();
-	for (size_t i = 0; i < view_count + alpha; ++i)
+	// That stream has no decoder either (its stream_size is zero), which is the test used
+	// below: a stream nothing is ever sent to is a stream nothing may wait for.
+	bool joined_any = false;
+	for (size_t i = 0; i < decoder_count; ++i)
 	{
-		if (eyes_joined and i == 1)
+		// The streams that are composited together, and only those: the views, plus the
+		// alpha plane when one is being sent. The quad is looked up on its own further
+		// down -- the eyes must never wait on it -- and a base layer stream takes no
+		// part in any of this: it is never presented, so making a refresh wait for one
+		// would pace the picture on frames nobody is going to see.
+		if (not(is_view(i) or (alpha and is_alpha(i))))
 			continue;
-		if (i == 0)
+		if (not decoders[i].decoder)
+			continue;
+		if (not joined_any)
 		{
+			joined_any = true;
 			for (const auto & h: decoders[i].latest_frames)
 				if (h)
 					common_frames.push_back(h.get());
@@ -826,7 +913,14 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, scenes::stream::deco
 		auto frame_index = (*min)->feedback.frame_index;
 		for (auto [i, decoder]: utils::enumerate(decoders))
 		{
-			if (alpha or i < view_count)
+			// The views always, the alpha plane when one is being sent. The quad
+			// is picked up separately just below (with the same lookup, so this
+			// is the identical result the index rule produced), and a base layer
+			// stream is deliberately left out of the array altogether: everything
+			// downstream of common_frame treats a non-null handle as a picture to
+			// blit, present, count and time -- which is exactly what a base frame
+			// must not be.
+			if (is_view(i) or (alpha and is_alpha(i)))
 				result[i] = decoder.frame(frame_index);
 		}
 
@@ -835,7 +929,7 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, scenes::stream::deco
 		// looked up by exact frame index and simply left out when it is not
 		// there. It never takes part in the join above: the eyes must never wait
 		// on it.
-		if (decoders[quad_stream_idx].decoder)
+		if (has_quad_stream() and decoders[quad_stream_idx].decoder)
 			result[quad_stream_idx] = decoders[quad_stream_idx].frame(frame_index);
 	}
 	else
@@ -858,7 +952,12 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, scenes::stream::deco
 
 		for (auto [i, decoder]: utils::enumerate(decoders))
 		{
-			if (alpha or i < view_count)
+			// The salvage path takes whatever each stream has nearest the target
+			// time rather than one agreed frame index, and it has always reached
+			// the quad as well once an alpha plane is in play. That is kept as it
+			// was; the one stream excluded is the base layer, for the same reason
+			// as above -- nothing downstream may be handed one.
+			if (is_view(i) or (alpha and not is_base(i)))
 			{
 				auto min = std::ranges::min_element(decoder.latest_frames,
 				                                    std::ranges::less{},
@@ -1077,6 +1176,12 @@ float scenes::stream::resolve_defoveate_scale(
 	bool have_any = false;
 	for (size_t i = 0; i < view_count; ++i)
 	{
+		// Only a stream that actually carries a view says anything about the size the
+		// pass should draw at. A stream in a view's slot that is not one -- the hybrid
+		// base layer takes slot 1 -- never has a handle here anyway, so this is a
+		// statement of intent rather than a live guard.
+		if (not is_view(i))
+			continue;
 		const auto & h = current_blit_handles[i];
 		if (not h or h->extent.width == 0 or h->extent.height == 0)
 			continue;
@@ -1255,11 +1360,13 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	// down the rest of this refresh so that every gate below answers the same question the
 	// same way even if the stream header lands mid-render.
 	const bool eyes_joined = eyes_in_one_stream();
-	// Nothing decoded yet on a stream that will decode something: there is no picture, and
-	// there is no picture to hold either. Stream 1 is only asked about when it is a stream
-	// of its own; on a stereo stream it is silent by design and requiring a frame from it
-	// would black the headset out for the whole session.
-	if (not frame_state.shouldRender or decoders[0].empty() or (not eyes_joined and decoders[1].empty()) or state_ == state::shutdown)
+	// Nothing decoded yet on a stream that will decode a VIEW: there is no picture, and
+	// there is no picture to hold either. Stream 1 is only asked about when it is a view
+	// stream of its own; on a stereo stream it is silent by design, and when the hybrid
+	// base layer has taken that slot it is not a view at all -- requiring a frame from it
+	// in either case would black the headset out for the whole session. views_ready()
+	// answers all three the same way.
+	if (not frame_state.shouldRender or not views_ready() or state_ == state::shutdown)
 	{
 		// Nothing is on screen, so frame smoothing has nothing to carry forward: forget
 		// the frame index, so a frame from before a gap is never blended into the first
@@ -1376,8 +1483,20 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	bool use_alpha = false;
 
 	std::array<stream_defoveator::input, view_count> images;
-	for (size_t i = 0; i < view_count + use_alpha; ++i)
+	// The streams that feed the reprojection pass, walked in index order. The order is
+	// load bearing rather than incidental: use_alpha is read out of a view's own handle
+	// inside this loop and is what admits the alpha plane, so the views must be visited
+	// before it. That is why this filters as it goes instead of collecting the streams it
+	// wants up front, and it is the same sequence the old `i < view_count + use_alpha`
+	// bound produced. A base layer stream matches neither test and is never visited --
+	// which is belt and braces, since common_frame never puts one in this array either.
+	for (size_t i = 0; i < decoder_count; ++i)
 	{
+		const bool is_view_stream = is_view(i);
+		const bool is_alpha_stream = is_alpha(i);
+		if (not is_view_stream and not(is_alpha_stream and use_alpha))
+			continue;
+
 		auto & blit_handle = current_blit_handles[i];
 		// On a stereo stream this is null at i == 1 and stays null: common_frame looked
 		// stream 1 up and found the empty buffer it will always have. The iteration is
@@ -1387,7 +1506,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		// the re-present gate.
 		if (not blit_handle)
 		{
-			if (i == view_count)
+			if (is_alpha_stream)
 				use_alpha = false;
 			continue;
 		}
@@ -1424,8 +1543,17 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			blit_handle->current_layout = vk::ImageLayout::eGeneral;
 		}
 
-		if (i < view_count)
+		if (is_view_stream)
 		{
+			// A view stream's index is also the index of the view it feeds, and the
+			// headset has exactly view_count of them. A description claiming more
+			// views than that is nonsense the client cannot render, and without this
+			// it would write past `pose`, `fov`, `foveation` and `images`; the old
+			// loop bound made that unreachable, so the guard replaces it rather than
+			// adding a new behaviour.
+			if (i >= view_count)
+				continue;
+
 			// Which views this one decoded picture feeds. One, as it always has, unless
 			// this is stream 0 of a stereo stream: then the picture is the eye pair side
 			// by side and it feeds both, told apart only by the source rectangle below.
@@ -1486,9 +1614,13 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	// the loop above: it takes no part in the eye join, and the frames it is missing
 	// from are the normal case, not a fault.
 	std::optional<wivrn::to_headset::video_stream_data_shard::view_info_t::quad_info_t> quad_info;
-	if (const auto & handle = current_blit_handles[quad_stream_idx];
-	    handle and handle->view_info.quad and decoders[quad_stream_idx].decoder)
+	// has_quad_stream() must be tested first: with no quad stream this session the index
+	// is the past-the-end sentinel and the two array lookups after it would be reads out
+	// of bounds, not merely null.
+	if (has_quad_stream() and current_blit_handles[quad_stream_idx] and
+	    current_blit_handles[quad_stream_idx]->view_info.quad and decoders[quad_stream_idx].decoder)
 	{
+		const auto & handle = current_blit_handles[quad_stream_idx];
 		handle->feedback.blitted = instance.now();
 		++handle->feedback.times_displayed;
 		handle->feedback.displayed = frame_state.predictedDisplayTime;
@@ -1754,8 +1886,12 @@ void scenes::stream::render(const XrFrameState & frame_state)
 					// and asking it would leave prev[1] null, which is not a
 					// stereo mismatch but simply the feature switched off for the
 					// whole session on the streams that need it most.
-					const auto eye_stream = [eyes_joined](size_t v) -> size_t {
-						return eyes_joined ? 0 : v;
+					// Stream 0 also when stream 1 is not a view at all this session:
+					// the hybrid base layer takes that slot, and it can only take it
+					// when the eyes are already coded together, so the answer is the
+					// same one for the same reason.
+					const auto eye_stream = [this, eyes_joined](size_t v) -> size_t {
+						return (eyes_joined or not is_view(v)) ? 0 : v;
 					};
 
 					std::array<std::shared_ptr<shard_accumulator::blit_handle>, view_count> prev;
@@ -1899,6 +2035,8 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		int quad_image_index = -1;
 		if (quad_info)
 		{
+			// quad_info is only ever set inside the has_quad_stream() branch above,
+			// so the index is known good here.
 			const auto & handle = current_blit_handles[quad_stream_idx];
 
 			// source is a signed rectangle straight off the wire: a negative offset
@@ -2206,6 +2344,21 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 	spdlog::info("Creating decoders, size {}x{}", description.width, description.height);
 	video_stream_description = description;
 
+	// The roles first, before anything reads them: the decoder loop below and every gate
+	// in render() ask what a stream IS rather than where it sits. A description that never
+	// touched `role` carries the historical positional rule as its default, so this is a
+	// no-op on a server that does not know about roles.
+	//
+	// The quad stream is found the same way. It is still index 3 in every session the
+	// server builds today; what changes is that the client no longer says so.
+	quad_stream_idx = decoder_count;
+	for (size_t i = 0; i < decoder_count; ++i)
+	{
+		stream_roles[i] = description.role_of(uint8_t(i));
+		if (stream_roles[i] == stream_role::quad and quad_stream_idx == decoder_count)
+			quad_stream_idx = i;
+	}
+
 	// New decoders mean new frame timings; whatever the window holds describes a stream that
 	// no longer exists (a different refresh rate, most of the time).
 	{
@@ -2215,15 +2368,24 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 
 	for (const auto & [stream_index, item]: utils::enumerate(decoders))
 	{
-		// The quad layer stream only exists when the server is actually promoting
-		// layers; it announces that by giving it a size. Nothing else in the
-		// client may assume the decoder is there.
+		// A stream exists this session exactly when it has a size, and stream_size()
+		// derives that from the role: the quad only exists when the server is
+		// promoting layers, stream 1 only when the eyes are coded apart. Nothing else
+		// in the client may assume a decoder is there. A base layer stream has a size
+		// like any other and gets a decoder like any other -- what makes it different
+		// is only what happens to the frames afterwards.
 		auto [width, height] = description.stream_size(stream_index);
 		if (width == 0 or height == 0)
 		{
 			item = accumulator_images{};
 			continue;
 		}
+
+		spdlog::info("  stream {}: role {}, {}x{}",
+		             stream_index,
+		             int(description.role_of(uint8_t(stream_index))),
+		             width,
+		             height);
 
 		item = accumulator_images{
 		        .decoder = std::make_unique<shard_accumulator>(device, physical_device, instance, queue_family_index, description, shared_from_this(), stream_index),

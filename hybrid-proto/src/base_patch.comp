@@ -1,0 +1,141 @@
+#version 450
+// Base patch import: rects of a MediaCodec-decoded HEVC picture into the
+// NX Warp atlas, in the coded sample domain (ADR-0029 Cheat 7, flags bit 2).
+//
+// THE CONVERSION IS THE IDENTITY, and that is a design result, not a shortcut:
+//
+//   * WiVRn's compositor writes BT.709 FULL-range YCbCr 4:2:0 into a
+//     G8_B8R8_2PLANE_420_UNORM image (server/compositor/shaders/foveation.comp
+//     rgb_to_ycbcr(): Y = 0.2126R + 0.7152G + 0.0722B, chroma + 0.5, with no
+//     16/235 or 16/240 scaling).
+//   * The nxwarp encoder codes that as-is: nxwarp_codec_vk.cpp sets
+//     ci.chroma = 0 (4:2:0), ci.bit_depth = 8 and leaves color_transform at
+//     NXVC_CT_NONE, so the nxvc coded sample domain IS BT.709 full-range
+//     YCbCr, not YCoCg-R.
+//   * So a full-range BT.709 HEVC base decodes to the atlas's own numbers and
+//     there is no colour matrix in this kernel at all.
+//
+// What is left is the two things that are actually easy to get wrong:
+//
+//   1. THE SWIZZLE. Measured on the Pico 4 (Adreno 650, externalFormat 506):
+//      the driver's samplerYcbcrConversionComponents is NOT identity -- the
+//      sampled .r/.g/.b come back as (Cr, Y, Cb). Assuming (Y, Cb, Cr) yields
+//      a plausible picture wrong in 99.8 % of samples. It is a push constant,
+//      so the host passes what the driver reported and this shader assumes
+//      nothing.
+//   2. THE ATLAS LAYOUT. nxvw_ring_layout(): planes side by side over the eye
+//      pair, eye e at column e*planeW[p], row stride (planeW*eyes + 1) & ~1
+//      u16 elements. The per-tile table is eye-MINOR:
+//      n = row*cols + eye*cols_per_eye + col (ATLAS-DECODER.md).
+//
+// Three storage variants compile from this one source, so the decoder agent's
+// open question ("the atlas image format ... needs pricing before it is
+// chosen") can be answered with numbers. All three write the SAME logical
+// layout, so their readbacks are byte-comparable:
+//
+//   STORE=0  SSBO of u16 packed two per uint -- today's reference ring
+//   STORE=1  R16_UINT storage image
+//   STORE=2  R8_UNORM storage image. Legal only because CT_NONE means 8-bit
+//            chroma; the open question rules UNORM out because "a 9-bit
+//            YCoCg-R chroma plane does not fit 8-bit UNORM", and under the
+//            colour configuration WiVRn actually uses there is no 9-bit plane.
+
+#ifndef STORE
+#define STORE 0
+#endif
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// One descriptor layout for every variant, so the harness builds three
+// pipelines and one set. The unused resources are bound and never touched.
+layout(set = 0, binding = 0) uniform sampler2D baseTex;          // the AHB
+layout(set = 0, binding = 1, std430) buffer Atlas { uint w[]; } atlas;
+layout(set = 0, binding = 2, r16ui) uniform uimage2D atlas16;
+layout(set = 0, binding = 3, r8)    uniform image2D  atlas8;
+layout(set = 0, binding = 4, std430) readonly buffer Patches {
+	ivec4 e[];   // .xy = base rect origin (luma), .z = linear tile index n, .w = eye
+} patches;
+layout(set = 0, binding = 5, std430) buffer Table { uint w[]; } tbl;
+
+layout(push_constant) uniform PC {
+	ivec2 baseSize;      // luma extent of the decoded base picture
+	int   nPatches;
+	int   srcFrame;      // the frame number F this base picture is
+
+	ivec4 planeOff;      // u16 offset of each plane within the atlas slot
+	ivec4 planeStride;   // u16 row stride of each plane
+	ivec4 planeW;        // PER-EYE width of each plane
+	ivec4 planeRowOff;   // first image row of each plane (image variants)
+
+	int   swz;           // bits 0-1 Y, 2-3 Cb, 4-5 Cr: which sampled channel
+	int   writeTable;    // 0 = pixels only, to isolate the store cost
+	int   pad0, pad1;
+} pc;
+
+float chan(vec3 v, int i) { return i == 0 ? v.r : (i == 1 ? v.g : v.b); }
+
+uint fetch(ivec2 p, int chIdx)
+{
+	vec3 s = texture(baseTex, (vec2(p) + 0.5) / vec2(pc.baseSize)).rgb;
+	return uint(chan(s, chIdx) * 255.0 + 0.5);
+}
+
+// Each invocation owns a horizontally adjacent PAIR of samples, so under
+// STORE=0 every uint of the atlas is written by exactly one thread and no two
+// workgroups contend for one -- the invariant nxvw_ring_stride() documents.
+void write_plane(int p, ivec2 org, ivec2 lp, int eye, int chIdx, int sub)
+{
+	const int ext = 64 >> sub;                 // this plane's tile extent
+	const ivec2 q = ivec2(lp.x * 2, lp.y);
+	if (q.x >= ext || q.y >= ext) return;
+
+	const ivec2 sp = ivec2(org.x + (q.x << sub), org.y + (q.y << sub));
+	const uint s0 = fetch(sp, chIdx);
+	const uint s1 = fetch(ivec2(sp.x + (1 << sub), sp.y), chIdx);
+
+	const int dx = eye * pc.planeW[p] + (org.x >> sub) + q.x;
+	const int dy = (org.y >> sub) + q.y;
+
+#if STORE == 0
+	atlas.w[uint((pc.planeOff[p] + dy * pc.planeStride[p] + dx) >> 1)] =
+	        (s1 << 16) | (s0 & 0xffffu);
+#elif STORE == 1
+	const int ry = pc.planeRowOff[p] + dy;
+	imageStore(atlas16, ivec2(dx, ry), uvec4(s0, 0, 0, 0));
+	imageStore(atlas16, ivec2(dx + 1, ry), uvec4(s1, 0, 0, 0));
+#else
+	const int ry = pc.planeRowOff[p] + dy;
+	imageStore(atlas8, ivec2(dx, ry), vec4(float(s0) * (1.0 / 255.0), 0, 0, 0));
+	imageStore(atlas8, ivec2(dx + 1, ry), vec4(float(s1) * (1.0 / 255.0), 0, 0, 0));
+#endif
+}
+
+void main()
+{
+	const int t = int(gl_WorkGroupID.z);
+	if (t >= pc.nPatches) return;
+	const ivec4 e = patches.e[t];
+	const ivec2 org = e.xy;
+	const ivec2 lp = ivec2(gl_LocalInvocationID.xy) + ivec2(gl_WorkGroupID.xy) * 16;
+
+	write_plane(0, org, lp, e.w, (pc.swz >> 0) & 3, 0);   // Y,  full extent
+	write_plane(1, org, lp, e.w, (pc.swz >> 2) & 3, 1);   // Cb, 4:2:0
+	write_plane(2, org, lp, e.w, (pc.swz >> 4) & 3, 1);   // Cr, 4:2:0
+
+	// The per-tile record, once per tile. ADR-0029 step 3: a coded tile writes
+	// C := I, src_frame := N, gen := 0, static := 0, valid := 1, res_level := 0
+	// -- plus flags bit 2 base_sourced, which is what makes it a base patch.
+	if (pc.writeTable != 0 && lp == ivec2(0, 0)) {
+		const uint o = uint(e.z) * 16u;
+		// C = identity; rows 0-1 are Q10.21, row 2 is Q2.29 (SYNTAX 3.1.1)
+		tbl.w[o + 0u] = uint(1 << 21); tbl.w[o + 1u] = 0u; tbl.w[o + 2u] = 0u;
+		tbl.w[o + 3u] = 0u; tbl.w[o + 4u] = uint(1 << 21); tbl.w[o + 5u] = 0u;
+		tbl.w[o + 6u] = 0u; tbl.w[o + 7u] = 0u; tbl.w[o + 8u] = uint(1 << 29);
+		tbl.w[o + 9u] = uint(pc.srcFrame);
+		// byte 40 gen:u16 = 0, byte 42 flags:u8 = valid|base_sourced = 0x05,
+		// byte 43 res_level:u8 = 0
+		tbl.w[o + 10u] = 0x00050000u;
+		tbl.w[o + 11u] = 0u; tbl.w[o + 12u] = 0u;   // 20 reserved bytes, zeroed
+		tbl.w[o + 13u] = 0u; tbl.w[o + 14u] = 0u; tbl.w[o + 15u] = 0u;
+	}
+}

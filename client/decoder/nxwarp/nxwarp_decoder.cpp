@@ -23,6 +23,32 @@
 
 // Shared by every NX Warp stream in the process (see the push site).
 static std::atomic<uint32_t> g_decode_stride{1};
+// Deepest selection this device is ever allowed to make. Eight was reachable and
+// unrecoverable; four is already "show one frame in four", which is a picture nobody
+// would keep, and past it the stride is not the answer -- the bitrate is.
+static constexpr uint32_t kMaxDecodeStride = 4;
+// When the stride last moved down, in steady_clock milliseconds. The decay is on a
+// TIMER and it is driven from the network thread, because the thing it has to undo is a
+// stride that stopped the worker producing samples: a decay that only runs when a frame
+// is decoded cannot lower a stride that is the reason no frame is being decoded.
+static std::atomic<int64_t> g_stride_decay_ms{0};
+
+// One step down, at most once per `period`, from whichever thread gets there first.
+static void decay_decode_stride(std::chrono::milliseconds period)
+{
+	uint32_t cur = g_decode_stride.load(std::memory_order_relaxed);
+	if (cur <= 1)
+		return;
+	const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+	                            std::chrono::steady_clock::now().time_since_epoch())
+	                            .count();
+	int64_t last = g_stride_decay_ms.load(std::memory_order_relaxed);
+	if (last != 0 and now - last < period.count())
+		return;
+	if (not g_stride_decay_ms.compare_exchange_strong(last, now, std::memory_order_relaxed))
+		return;
+	g_decode_stride.compare_exchange_strong(cur, cur - 1, std::memory_order_relaxed);
+}
 
 uint64_t wivrn::nxwarp_client_tools(const vk::PhysicalDeviceProperties & props)
 {
@@ -751,6 +777,14 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 			             stream_index, closed - net_frames_mark, std::chrono::duration<double>(now - net_since).count(), net_holes,
 			             net_out_of_order, net_late_completed, jobs_pending.load(), frames_decoded.load(), stragglers_dropped,
 			             last_hole.present, last_hole.expected, last_hole.first_missing == UINT32_MAX ? -1 : int(last_hole.first_missing), last_hole.short_chunk, chunk);
+			// Printed on the NETWORK thread on purpose: these are the numbers that
+			// explain a worker that has stopped reporting, so they must come from a
+			// thread that is still running.
+			spdlog::info("nxwarp[{}] sel: stride {}, arrival {:.1f} ms, dropped-late {}, withheld {}, decoded {}",
+			             stream_index, g_decode_stride.load(),
+			             arrival_period_ms.load(std::memory_order_relaxed),
+			             frames_dropped_late.load(), frames_withheld.load(std::memory_order_relaxed),
+			             frames_decoded.load());
 			if (receiver)
 			{
 				const auto & rs = receiver->stats;
@@ -802,6 +836,11 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 	}
 
 	host.on_frame_unit(f.frame_id, unit);
+
+	// One step off the stride every two seconds, on the thread that is still running
+	// when the worker is not. See decay_decode_stride(): the stride's whole failure
+	// mode was that it could only be lowered by the code path it had switched off.
+	decay_decode_stride(std::chrono::seconds(2));
 
 	// The interval between arriving frames, which is what the decode stride is
 	// measured against. Counted over every frame that arrives whole, including the
@@ -881,6 +920,7 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 
 void nxwarp_decoder::decode_unit(decode_job & job)
 {
+	const auto t_iter0 = std::chrono::steady_clock::now();
 	size_t consumed = 0;
 	VkSemaphore dec_sem = VK_NULL_HANDLE;
 	uint64_t dec_val = 0;
@@ -958,6 +998,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	// server paces to -- sees it as the decode cost it is pretending to be.
 	if (sim_decode_ms > 0)
 		std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(sim_decode_ms));
+	const auto t_submitted = std::chrono::steady_clock::now();
 
 	nxvc_vkd_images img{};
 	if (nxvc_vk_decoder_images(nxvc, &img) != NXVC_VKD_OK or img.count < 2)
@@ -974,6 +1015,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	}
 
 	auto item = get_free();
+	const auto t_got_free = std::chrono::steady_clock::now();
 	if (not item)
 	{
 		// Deliberately NOT reported as not held. The codec decoded this frame and its
@@ -989,6 +1031,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 
 	if (device.waitForFences(*fence, true, UINT64_MAX) != vk::Result::eSuccess)
 		spdlog::warn("nxwarp: waitForFences failed");
+	const auto t_fence_pre = std::chrono::steady_clock::now();
 
 	cmd.reset();
 	cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
@@ -1099,6 +1142,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		nxvc_vk_decoder_wait(nxvc, UINT64_MAX);
 	const bool signal_on_queue = *item->semaphore != VK_NULL_HANDLE;
 
+	const auto t_recorded = std::chrono::steady_clock::now();
 	device.resetFences(*fence);
 	host.with_queue([&](vk::Queue queue) {
 		const vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eTransfer;
@@ -1131,10 +1175,12 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	// The submit above is the one wait the binary semaphore gets. dec_val is passed
 	// alongside it and is ignored: a binary semaphore has no value.
 	bin_pending = false;
+	const auto t_qsubmit = std::chrono::steady_clock::now();
 	// No semaphore to hand the render thread: make the copy complete before it can see
 	// the frame. One frame of pipelining lost, on the driver that gives no other choice.
 	if (not signal_on_queue and device.waitForFences(*fence, true, UINT64_MAX) != vk::Result::eSuccess)
 		spdlog::warn("nxwarp: waitForFences failed");
+	const auto t_fence_post = std::chrono::steady_clock::now();
 
 	++frames_decoded;
 
@@ -1183,18 +1229,22 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	host.on_frame_decoded(job.frame_id);
 
 	if (not showable)
-	{
 		frames_withheld.fetch_add(1, std::memory_order_relaxed);
-		return;
-	}
-
-	host.publish(accumulator, std::move(handle));
+	else
+		host.publish(accumulator, std::move(handle));
+	const auto t_published = std::chrono::steady_clock::now();
 
 	// Where the time goes, once every two seconds per stream: the wait on the
 	// previous frame, the wall time of this one, nxvc's own pass timings, and
 	// the unit size. This is the number a live session on a headset is about.
+	//
+	// Accounted for EVERY frame the worker decoded, shown or withheld. It used to be
+	// accounted only for published ones, and that is not a reporting detail: the
+	// decode stride is derived here, so a stride that made frames non-contiguous --
+	// which is what a stride greater than one does -- withheld every frame, which
+	// stopped this block running, which stopped the stride ever decaying again.
 	{
-		const auto t_end = std::chrono::steady_clock::now();
+		const auto t_end = t_published;
 		const auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
 		nxvc_vkd_stats st{};
 		nxvc_vk_decoder_stats(nxvc, &st);
@@ -1205,14 +1255,38 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		prof.pass_b_ms += st.pass_b_ms;
 		prof.gpu_ms += st.gpu_ms;
 		prof.bytes += job.unit.size();
+		prof.gap_ms += have_last_iter ? ms(t_iter0 - last_iter_end) : 0.0;
+		prof.sub_ms += ms(t_submitted - t_decode0);
+		prof.free_ms += ms(t_got_free - t_submitted);
+		prof.fpre_ms += ms(t_fence_pre - t_got_free);
+		prof.rec_ms += ms(t_recorded - t_fence_pre);
+		prof.qsub_ms += ms(t_qsubmit - t_recorded);
+		prof.fpost_ms += ms(t_fence_post - t_qsubmit);
+		prof.pub_ms += ms(t_published - t_fence_post);
+		prof.withheld += showable ? 0 : 1;
+		prof.wall_max_ms = std::max(prof.wall_max_ms, ms(t_end - t_decode0));
+		last_iter_end = t_end;
+		have_last_iter = true;
 
 		// What this frame cost, published for the server. The same wall time the
 		// stride below is derived from, smoothed with a fifth-weight EWMA so a
 		// single slow frame moves it a little and a sustained change moves it
 		// within a handful of frames. Saturated at the 16-bit field's range.
 		{
-			const double wall_us = ms(t_end - t_decode0) * 1000.0;
+			double wall_us = ms(t_end - t_decode0) * 1000.0;
 			const double prev = double(decode_us_report.load(std::memory_order_relaxed));
+			// A sample four times the running figure is not this decoder getting
+			// four times slower, it is something else having taken the GPU: a
+			// 1.4-second "decode" was measured on this device with the compositor
+			// holding the queue. Clip it rather than drop it -- the server paces to
+			// this number, and a genuine sustained slowdown still walks the EWMA up
+			// there in a handful of frames, while one stall moves it by a fifth of
+			// three times itself and no further.
+			if (prev > 0 and wall_us > 4 * prev)
+			{
+				wall_us = 4 * prev;
+				prof.stalls++;
+			}
 			const double next = prev > 0 ? prev + 0.2 * (wall_us - prev) : wall_us;
 			decode_us_report.store(uint16_t(std::clamp(next, 0.0, 65535.0)),
 			                       std::memory_order_relaxed);
@@ -1226,6 +1300,14 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			             frames_dropped_holes.load(), frames_dropped_codec.load());
 			spdlog::info("nxwarp[{}]: {} frames dropped late (queue kept to {})",
 			             stream_index, frames_dropped_late.load(), kMaxQueuedFrames);
+			spdlog::info("nxwarp[{}] stage: gap {:.1f} | wait-prev {:.1f} | submit {:.1f} | get_free {:.1f} | fence-pre {:.1f} | record {:.1f} | qsubmit {:.1f} | fence-post {:.1f} | publish {:.1f} ms; withheld {}, stride {}, arrival {:.1f} ms",
+			             stream_index, prof.gap_ms / n, prof.wait_ms / n, prof.sub_ms / n,
+			             prof.free_ms / n, prof.fpre_ms / n, prof.rec_ms / n, prof.qsub_ms / n,
+			             prof.fpost_ms / n, prof.pub_ms / n, prof.withheld,
+			             g_decode_stride.load(), arrival_period_ms.load(std::memory_order_relaxed));
+			if (prof.stalls)
+				spdlog::info("nxwarp[{}]: {} of {} frames measured a stall not attributable to decoding (worst wall {:.1f} ms); clipped out of the reported decode cost and out of the stride",
+				             stream_index, prof.stalls, prof.n, prof.wall_max_ms);
 
 			// The same window, republished for stats(): the GUI shows these under the
 			// latency figure instead of anybody reading the lines above out of the log.
@@ -1243,14 +1325,41 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			// (from_headset::nxwarp_feedback::decode_us) would otherwise still have had
 			// two frames in three thrown away here. Falls back to the frame period the
 			// stream description gave when nothing has arrived yet.
+			//
+			// THREE THINGS THIS GETS RIGHT THAT THE CEILING DID NOT
+			//
+			// 1. The sample it is measured on excludes the window's single worst
+			//    frame. A stall that is not this decoder's fault -- the compositor
+			//    taking the GPU, a fence that came back a second late -- is one
+			//    sample, and under a mean it set the stride for good. Anything
+			//    sustained survives the trim by definition.
+			// 2. It raises on evidence that stride N-1 is not enough, with a margin,
+			//    rather than on ceil() of a ratio that sits exactly at 1.0. Measured
+			//    here: wall 25 ms against a 25-33 ms arrival period, so ceil() flipped
+			//    to 2 on ordinary jitter -- and a stride of 2 makes every decoded
+			//    frame non-contiguous, which withheld every frame, which stopped this
+			//    block running at all. That is how one jittery sample became a
+			//    permanent 4.
+			// 3. The measure is against the ARRIVAL period, so it can never ask for
+			//    more than the rate frames actually turn up at justifies: once the
+			//    server paces to what this device reports, the period grows to meet
+			//    the decode cost and the stride is 1 by construction.
+			//
+			// The decay is not here at all; see decay_decode_stride().
+			if (prof.n >= 4)
 			{
 				const double arrival = double(arrival_period_ms.load(std::memory_order_relaxed));
 				const double period_ms = arrival > 0.1 ? arrival : double(frame_period_us) / 1000.0;
-				const uint32_t want = std::clamp<uint32_t>(uint32_t(std::ceil((prof.wall_ms / n) / period_ms)), 1u, 8u);
+				// Mean of the window with its worst frame removed.
+				const double trimmed = (prof.wall_ms - prof.wall_max_ms) / (n - 1);
+				constexpr double kRaiseMargin = 1.15;
+				uint32_t want = 1;
+				while (want < kMaxDecodeStride and trimmed > double(want) * period_ms * kRaiseMargin)
+					++want;
 				uint32_t cur = g_decode_stride.load();
-				const uint32_t next = want > cur ? want : (cur > 1 ? cur - 1 : 1);
-				if (next != cur)
-					g_decode_stride.store(next);
+				// Raising only. A stride that is too high is undone by the timer.
+				while (want > cur and not g_decode_stride.compare_exchange_weak(cur, want))
+					;
 			}
 			prof = {};
 			prof.since = t_end;

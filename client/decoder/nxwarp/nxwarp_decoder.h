@@ -95,7 +95,35 @@ class nxwarp_decoder : public decoder
 		uint64_t n = 0;
 		double wait_ms = 0, wall_ms = 0, pass_a_ms = 0, pass_b_ms = 0, gpu_ms = 0;
 		uint64_t bytes = 0;
+		// --- where the wall time actually goes, stage by stage.
+		//
+		// "wall" alone said 11 ms while the worker produced two frames in 2.6 s, which
+		// is not a contradiction the mean of one number can explain: the frames the
+		// worker never even started are not in it, and neither is the time between one
+		// iteration ending and the next beginning. Every stage below is measured, and
+		// gap_ms is the one that is not a stage at all -- the idle between iterations,
+		// i.e. how long the worker sat in jobs.pop().
+		double gap_ms = 0;   // previous iteration's end -> this one's start
+		double sub_ms = 0;   // nxvc_vk_decode_frame_ex (+ simulated cost)
+		double free_ms = 0;  // get_free(): waiting for the presenter to release an image
+		double fpre_ms = 0;  // waitForFences on the PREVIOUS copy, before recording
+		double rec_ms = 0;   // command buffer recording
+		double qsub_ms = 0;  // queue.submit of the copy
+		double fpost_ms = 0; // host fence wait on THIS copy (host_sync path only)
+		double pub_ms = 0;   // host.publish()
+		// The window's worst single wall time, so the stride can be derived from the
+		// window with it removed. One frame that waited on something other than this
+		// decoder must not be able to set the selection.
+		double wall_max_ms = 0;
+		// Frames whose measured cost was so far above the running EWMA that they were
+		// clipped rather than believed (see decode_us_report).
+		uint64_t stalls = 0;
+		// Frames that reached the worker and were decoded but withheld (see showable).
+		uint64_t withheld = 0;
 	} prof;
+	// End of the previous worker iteration, for prof.gap_ms.
+	std::chrono::steady_clock::time_point last_iter_end{};
+	bool have_last_iter = false;
 	// What one frame of this stream currently costs this device to decode, in
 	// microseconds, published for the network thread to put on every feedback packet
 	// (from_headset::nxwarp_feedback::decode_us). Written by the worker after every

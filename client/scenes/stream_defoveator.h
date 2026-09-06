@@ -21,17 +21,38 @@
 
 #include "motion_field.h"
 #include "vk/allocation.h"
+#include "scenes/stream_grid.h"
 #include "wivrn_packets.h"
 #include <vulkan/vulkan_raii.hpp>
 #include <openxr/openxr.h>
 
 class stream_defoveator
 {
-	struct vertex;
 	static const uint32_t view_count = 2;
 	// Vertex buffer
 	buffer_allocation buffer;
 	size_t vertices_size = 0;
+	// Vertices actually emitted per view this frame. Not a constant any more: with a
+	// lens mask the grid leaves cells out, so the draw count is whatever the emitter
+	// wrote rather than what the foveation implies.
+	std::array<size_t, 2> drawn_vertices{};
+	// Cells the optics can never show, per view. Empty means "draw everything", which
+	// is the behaviour without the feature and the result of every failure path.
+	std::array<wivrn::stream_grid::cell_mask, 2> lens_masks{};
+
+public:
+	// The grid vertex. Public only so stream_grid.h's layout can be static_asserted
+	// against it; nothing outside this class constructs one.
+	struct vertex;
+
+	// Set once per frame, before defoveate(). Passing empty masks (the default) draws
+	// the whole grid.
+	void set_lens_masks(const std::array<wivrn::stream_grid::cell_mask, 2> & m)
+	{
+		lens_masks = m;
+	}
+
+private:
 
 	vk::raii::Device & device;
 	vk::raii::PhysicalDevice & physical_device;

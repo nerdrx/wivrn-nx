@@ -141,3 +141,50 @@ asymmetry, not its size.
 g++ -std=c++23 -O2 -I. -o lens_mask_test tests/lens_mask_test.cpp && ./lens_mask_test
 python3 tools/render_lens_mask.py ./lens_mask_test dec30.png
 ```
+
+---
+
+## Lens mask — the display pass's own grid
+
+The server's lens mask stops *encoding* tiles the optics cannot show. This is the other
+half: the headset's reprojection pass stops *drawing* them.
+
+It matters because that pass is the second largest consumer of the Pico 4's GPU after the
+decode — 6.37 ms an iteration, 278 ms/s, on a ring the decode is already using 643 ms/s of
+(`docs/CLIENT-DECODE-WALL.md`). The corners of a rendered eye image are outside a round
+lens, and drawing them costs GPU that the decode is queueing for.
+
+The grid here is the pass's own vertex grid, one cell per pair of foveation runs — not the
+codec's 64-pixel tiles. Blue is the visible region; **red** cells are left out of the
+triangle strip entirely; **amber** cells would be left out, and are drawn anyway.
+
+| no overscan | 5 % overscan |
+|---|---|
+| ![Display grid mask at a symmetric 100 degree FOV](assets/display-grid-100deg.png) | ![The same mask with 5 percent overscan, showing the ring that is kept](assets/display-grid-overscan.png) |
+| 24 of 225 cells skipped (10.7 %) | 20 of 225 skipped (8.9 %) — the 4 amber cells are the difference |
+
+The amber cells are the whole point of the right-hand picture. The overscan ring is off the
+panel at the pose the frame was rendered for and on it a few milliseconds later at the pose
+it is displayed at — that is what edge bleed encodes it for — so a mask that treated
+"outside the visible region" as "never seen" would delete exactly the pixels edge bleed
+exists to provide, and the black edge would come back with the overscan setting still
+reading 5 %. Passing the session's margin into `visible_region()` grows the ellipse, and the
+ring becomes undeletable by construction rather than by anyone remembering to check.
+
+Everything else about the geometry errs the same way: a cell that merely touches the region
+is drawn, a mask whose shape does not match the grid is ignored, and a degenerate field of
+view masks nothing. `tests/stream_grid_test.cpp` proves the property that matters — with no
+mask, the emitted strip is **identical, vertex for vertex,** to the one the pass drew before
+any of this existed.
+
+```sh
+g++ -std=c++23 -O2 -Iclient -o stream_grid_test tests/stream_grid_test.cpp
+./stream_grid_test                                  # 15 checks, including the identity one
+./stream_grid_test --dump 100 100 15 15 0.05        # the mask, as text
+python3 tools/render_display_grid.py ./stream_grid_test
+```
+
+The setting is **off by default** (`lens_mask_display`, "Skip what the lenses hide"). The
+geometry is conservative everywhere it can be, but the failure it would produce is a
+cropped picture, and that is not something a build machine can rule out — it needs someone
+to look through the headset. `debug.wivrn.lensmask` flips it for an A/B without reinstalling.

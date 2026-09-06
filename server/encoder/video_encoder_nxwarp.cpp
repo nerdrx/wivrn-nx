@@ -352,6 +352,10 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	        .eyes = stereo_eyes,
 	        .base_qp = current_qp,
 	        .inter = option_bool(settings.options, "inter", false),
+	        // "stereo-compose": "layers" (the default) or "blit". See
+	        // nxwarp_codec_config::eye_layers -- identical bitstream either way,
+	        // and "layers" is a full-frame device blit per frame cheaper.
+	        .eye_layers = option_string(settings.options, "stereo-compose", "layers") != "blit",
 	        .intra_period = option_u32(settings.options, "intra-period", 180),
 	        .coded_vectors = nxwarp_coded_vectors_from(
 	                option_string(settings.options, "coded-vectors", "default")),
@@ -1444,6 +1448,21 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	const XrPosef & pose = view_info.pose[std::min<size_t>(eye, view_info.pose.size() - 1)];
 	if (stereo_eyes == 2)
 	{
+		// The eye layers must be ADJACENT for the encoder to read the pair
+		// straight out of the compositor's image, and WiVRn's compositor makes
+		// them so -- `arrayLayers = 3, // left, right then alpha` in
+		// compositor.cpp, with encoder_settings handing out src_layer 0 and
+		// src_layer_right 1. Checked once rather than trusted, because the
+		// consequence of it silently ceasing to be true is that the encoder
+		// reads the alpha plane as the right eye and the picture is wrong in a
+		// way no assertion downstream would name.
+		if (src_layer_right != src_layer + 1 and not warned_layer_gap)
+		{
+			warned_layer_gap = true;
+			U_LOG_W("nxwarp: eye layers %u and %u are not adjacent; falling back to the compose blit",
+			        unsigned(src_layer),
+			        unsigned(src_layer_right));
+		}
 		// Eye order, eye 0 first: this stream's own eye and then the right one,
 		// which are src_layer and src_layer_right and therefore views 0 and 1.
 		const nxwarp_codec_view views[2] = {view_at(0), view_at(1)};

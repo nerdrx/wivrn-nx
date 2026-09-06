@@ -67,6 +67,19 @@ struct nxwarp_codec_config
 	// ring. Off makes every frame all-intra, which is the safe default for a
 	// first end-to-end bring-up because it needs no client reference state.
 	bool inter = false;
+	// How a paired stream's two eyes reach E0. "layers" (the default) points the
+	// encoder at the two ARRAY LAYERS the compositor already keeps them in,
+	// which is what NXVC_VKE_IMAGE_EYE_LAYERS is for; "blit" copies them into
+	// one side-by-side picture first, which is what this did before the flag
+	// existed. The library pins that the two shapes produce the identical
+	// bitstream, so this is a cost switch and not a quality one -- "layers"
+	// removes a full-frame device blit per frame.
+	//
+	// The blit is kept, and kept reachable by configuration, for the case the
+	// flag cannot serve: eye layers that are not adjacent. Nothing produces that
+	// today, which is why the adjacency is checked at the call rather than
+	// trusted.
+	bool eye_layers = true;
 	// Rolling intra refresh period in frames. 1 forces every tile every frame.
 	uint32_t intra_period = 180;
 	// Which coded-vector mode the inter decision may choose on top of

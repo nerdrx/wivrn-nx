@@ -1087,6 +1087,7 @@ int main(int argc, char ** argv)
 	uint32_t intra_period = 180;
 	// "default" (STATIC when inter is on), "none", or "static".
 	std::string coded_vectors = "default";
+	std::string stereo_compose = "layers";
 	// "auto" honours the bitrate ceiling below; "fixed" pins --qp for the run.
 	// Default "fixed" here and not in the server: a test whose bytes per frame
 	// drift is not a test whose byte-identity check means anything.
@@ -1221,6 +1222,8 @@ int main(int argc, char ** argv)
 		}
 		else if (a == "--intra-period")
 			intra_period = uint32_t(std::stoul(next()));
+		else if (a == "--stereo-compose")
+			stereo_compose = next();
 		else if (a == "--coded-vectors")
 			coded_vectors = next();
 		else if (a == "--client-tools")
@@ -1350,6 +1353,12 @@ int main(int argc, char ** argv)
 	settings.options["inter"] = inter;
 	settings.options["intra-period"] = std::to_string(intra_period);
 	settings.options["coded-vectors"] = coded_vectors;
+	// "layers" (the default) reads the eye pair straight out of two array layers;
+	// "blit" copies them into one side-by-side picture first. nxvc pins that the
+	// two produce the IDENTICAL bitstream, so --stereo-compose is here to let
+	// that be checked rather than believed: run --eyes 2 both ways and diff the
+	// .nxv files.
+	settings.options["stereo-compose"] = stereo_compose;
 	settings.options["entropy"] = entropy;
 	// The simulated headset mask. "all" is every bit set, which is a headset that can
 	// decode anything this encoder emits and is what keeps every existing run in this

@@ -828,13 +828,34 @@ Consequences, each of which is a real decision:
   precondition rather than a limitation: both features are pair-wide, both need
   the 64-multiple width, and the alternative (going to `num_streams = 6`) buys
   nothing that the vacated slot does not already give.
-* **One pair-compose, shared.** `nxwarp_codec_vk.cpp` already builds a scratch
-  image `eyes * width` wide and does one `vkCmdCopyImage` per eye per plane into
-  its half, timed and reported through `compose_ms()`. The base encoder wants
-  *exactly the same* side-by-side picture, so that scratch image and its copy
-  should be produced once per frame by the compositor and consumed by both
-  encoders, not built twice. This is the one piece of the server work that is a
-  refactor rather than an addition.
+* **One pair-compose — and the nxvc encoder no longer needs it.** nxvc gained
+  `NXVC_VKE_IMAGE_EYE_LAYERS`: E0 reads eye 0 from `array_layer` and eye 1 from
+  the layer after it, which is the layout WiVRn's compositor already has
+  (`arrayLayers = 3, // left, right then alpha` — the eyes are layers 0 and 1
+  and adjacent by construction, checked at the call rather than assumed). So
+  the nxwarp encoder's side-by-side blit is gone: **`stereo-frame` auto now
+  takes the layer path**, and `"stereo-compose": "blit"` forces the old one so
+  that the fallback stays reachable and testable, which an unexercised fallback
+  is not.
+
+  The blit survives because the base layer still needs it: no video encoder has
+  a notion of an eye pair, so the HEVC base is handed one side-by-side picture
+  by `wivrn::pair_compose` in `video_encoder::present_image`. What was going to
+  be a shared cost is therefore the base layer's own cost, and the enhancement
+  stream pays nothing for it.
+
+  **The two paths produce the identical bitstream, checked and not assumed.**
+  `wivrn-nxwarp-e2e --eyes 2 --stereo-compose layers|blit`, same fixture, same
+  QP: at 256² per eye both give `first 3 7449 B, last 3 5735 B`, 6602 B/frame,
+  84 datagrams; at 1088² per eye both give `first 3 414528 B, last 3 416438 B`,
+  415141 B/frame. (Diffing the harness's `.nxv` output does NOT check this —
+  that file is written from the units the decoder actually consumed, and that
+  count is machine-dependent by the harness's own admission. The encoder's byte
+  counts are the thing to compare.) The encode times overlap run to run and
+  show no difference, which is expected: the blit's cost is not inside the
+  number the harness prints, so the saving from dropping it is real but is not
+  evidenced by these runs.
+
 * **CTB 64 lands on the tile grid for both eyes.** The pairing already refuses a
   per-eye width that is not a multiple of 64, so the side-by-side seam is on a
   64-boundary; with `ctu=64` every CTB boundary in the pair picture coincides

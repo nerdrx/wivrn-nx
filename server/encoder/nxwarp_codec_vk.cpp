@@ -123,6 +123,11 @@ class nxwarp_codec_vk final : public wivrn::nxwarp_codec
 	VkQueue vk_queue = VK_NULL_HANDLE;
 	uint32_t vk_family = 0;
 	std::shared_ptr<wivrn::pair_compose> composer;
+	// "stereo-compose": "layers" (default) reads the eyes from two array
+	// layers; "blit" forces the side-by-side copy. The option exists so the
+	// blit path stays reachable and testable now that nothing takes it by
+	// default -- an unexercised fallback is not a fallback.
+	bool use_eye_layers = true;
 	bool compose_warned = false;
 
 	// Wall time of the last encode(), milliseconds, as the library measured it
@@ -243,6 +248,7 @@ public:
 		width = c.width;
 		height = c.height;
 		eyes = ci.eyes;
+		use_eye_layers = c.eye_layers;
 		pair_width = c.width * eyes;
 		nxvc_vk_encoder_tile_grid(enc, &cols, &rows);
 		device = nxvc_vk_encoder_device_name(enc);
@@ -429,6 +435,23 @@ public:
 		if (eyes != 2)
 			return encode_image(image, layer_left);
 
+		// THE BLIT IS NO LONGER THE DEFAULT. nxvc's E0 can read eye 1 from the
+		// array layer after eye 0 (NXVC_VKE_IMAGE_EYE_LAYERS), which is the
+		// layout WiVRn's compositor already has -- `arrayLayers = 3, // left,
+		// right then alpha`, so the eyes are layers 0 and 1 and are adjacent by
+		// construction. The library pins that both shapes produce the IDENTICAL
+		// bitstream, and E0's tile index is pair-wide either way, so taking this
+		// path removes a full-frame device blit per frame and changes nothing
+		// else.
+		//
+		// The blit survives for the two cases the flag cannot serve: layers that
+		// are not adjacent (nothing produces that today, which is exactly why it
+		// is asserted rather than assumed), and a consumer that genuinely needs
+		// one side-by-side picture -- which the hybrid base layer's HEVC encoder
+		// does, since no video encoder has a notion of an eye pair.
+		if (use_eye_layers and layer_right == layer_left + 1)
+			return encode_image_impl(image, layer_left, true);
+
 		if (not composer)
 			composer = wivrn::pair_compose::get(vk_phys, vk_dev, vk_queue, vk_family,
 			                                    width, height, eyes);
@@ -453,13 +476,24 @@ public:
 
 	std::span<const uint8_t> encode_image(VkImage image, uint32_t array_layer) override
 	{
+		return encode_image_impl(image, array_layer, false);
+	}
+
+	// `eye_layers` picks between the two shapes nxvc_vke_image can take, and
+	// `width` means a different thing in each: without the flag the picture in
+	// ONE LAYER is the side-by-side pair, so `width` is pair-wide; with it each
+	// layer holds one eye, so `width` is one eye's. Getting that backwards
+	// produces a plausible half-picture rather than an error, which is why the
+	// two are chosen together here and not by the caller.
+	std::span<const uint8_t> encode_image_impl(VkImage image, uint32_t array_layer, bool eye_layers)
+	{
 		nxvc_vke_image img{
 		        .image = image,
 		        .layout = VK_IMAGE_LAYOUT_GENERAL,
 		        .array_layer = array_layer,
-		        .width = pair_width,
+		        .width = eye_layers ? width : pair_width,
 		        .height = height,
-		        .flags = 0,
+		        .flags = eye_layers ? NXVC_VKE_IMAGE_EYE_LAYERS : 0u,
 		};
 		const uint8_t * bytes = nullptr;
 		size_t len = 0;

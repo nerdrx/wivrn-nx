@@ -234,6 +234,24 @@ if (WIVRN_BUILD_SERVER)
 			xrt-interfaces
 			)
 
+		# What each video stream says it IS on the wire. check_stream_roles() and
+		# default_stream_role() are pure functions over the settings array, so this
+		# needs no GPU, session or encoder -- which is the point: the mislabelled
+		# alpha plane this covers was only ever visible as a headset that connects,
+		# decodes and renders while the stream scene never starts.
+		add_executable(wivrn-stream-roles-test
+			encoder/stream_roles_test.cpp
+			)
+		target_include_directories(wivrn-stream-roles-test PRIVATE .)
+		target_compile_features(wivrn-stream-roles-test PRIVATE cxx_std_23)
+		target_link_libraries(wivrn-stream-roles-test PRIVATE
+			wivrn-common
+			wivrn-common-server
+			aux_os
+			aux_util
+			xrt-interfaces
+			)
+
 		# The server path without a headset, a GPU or a socket: synthetic frames
 		# through the codec, the packetizer, the transport and back into the
 		# reference decoder. Links none of WiVRn.

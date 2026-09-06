@@ -75,6 +75,7 @@ struct nxwarp_stream_stat
 	Q_PROPERTY(QString dominantReasonText READ dominantReasonText CONSTANT)
 	Q_PROPERTY(double dominantReasonCount READ dominantReasonCount CONSTANT)
 
+	Q_PROPERTY(int effort READ effort CONSTANT)
 	Q_PROPERTY(QString entropy READ entropy CONSTANT)
 	Q_PROPERTY(bool entropyWasAuto READ entropyWasAuto CONSTANT)
 	Q_PROPERTY(QString toolsText READ toolsText CONSTANT)
@@ -209,6 +210,10 @@ public:
 	double dominantReasonCount() const
 	{
 		return double(s.dominant_reason_count);
+	}
+	int effort() const
+	{
+		return int(s.effort);
 	}
 	QString entropy() const
 	{

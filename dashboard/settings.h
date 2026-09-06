@@ -133,6 +133,7 @@ public:
 	Q_PROPERTY(nxwarp_stereo nxwarpStereoFrame READ nxwarpStereoFrame WRITE set_nxwarpStereoFrame NOTIFY nxwarpStereoFrameChanged)
 	Q_PROPERTY(nxwarp_tile_map nxwarpTileMap READ nxwarpTileMap WRITE set_nxwarpTileMap NOTIFY nxwarpTileMapChanged)
 	Q_PROPERTY(nxwarp_coded_vectors nxwarpCodedVectors READ nxwarpCodedVectors WRITE set_nxwarpCodedVectors NOTIFY nxwarpCodedVectorsChanged)
+	Q_PROPERTY(bool nxwarpEffort READ nxwarpEffort WRITE set_nxwarpEffort NOTIFY nxwarpEffortChanged)
 	Q_PROPERTY(bool nxwarpInter READ nxwarpInter WRITE set_nxwarpInter NOTIFY nxwarpInterChanged)
 	Q_PROPERTY(int nxwarpIntraPeriod READ nxwarpIntraPeriod WRITE set_nxwarpIntraPeriod NOTIFY nxwarpIntraPeriodChanged)
 
@@ -178,6 +179,7 @@ public:
 	SETTER_GETTER_NOTIFY(nxwarp_stereo, nxwarpStereoFrame)
 	SETTER_GETTER_NOTIFY(nxwarp_tile_map, nxwarpTileMap)
 	SETTER_GETTER_NOTIFY(nxwarp_coded_vectors, nxwarpCodedVectors)
+	SETTER_GETTER_NOTIFY(bool, nxwarpEffort)
 	SETTER_GETTER_NOTIFY(bool, nxwarpInter)
 	SETTER_GETTER_NOTIFY(int, nxwarpIntraPeriod)
 

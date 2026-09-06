@@ -196,6 +196,10 @@ static const QList<control> controls{
         {"nxwarpCodedVectors", QVariant::fromValue(int(Settings::VectorsStatic))},
         {"nxwarpInter", true},
         {"nxwarpIntraPeriod", 240},
+        // The effort level is a checkbox for a two-valued option whose default is ON, so the
+        // interesting value to round-trip is false -- the one that has to be WRITTEN, where
+        // every other control here writes when it moves away from an off-by-default value.
+        {"nxwarpEffort", false},
 };
 
 static void part_b()
@@ -274,11 +278,21 @@ static void part_b()
 		d.load_json(live_config());
 		d.setProperty("nxwarpEntropy", int(Settings::EntropyAuto));
 		d.setProperty("nxwarpInter", false);
+		d.setProperty("nxwarpEffort", true);
 		const json out = d.configuration();
 		check(nxd::nxwarp_option(out, "entropy") == std::nullopt,
 		      "entropy set to Auto is erased, not written");
 		check(nxd::nxwarp_option(out, "inter") == std::nullopt,
 		      "inter set to its default is erased, not written");
+		// The default here is ON, so it is the checked box that erases the key and the
+		// UNCHECKED one that writes "0". A default written out would be harmless; a
+		// default written as the WRONG value would quietly turn the level off for
+		// everyone who opened the settings page once.
+		check(nxd::nxwarp_option(out, "effort") == std::nullopt,
+		      "effort left on is erased, not written");
+		d.setProperty("nxwarpEffort", false);
+		check(nxd::nxwarp_option(d.configuration(), "effort") == std::string("0"),
+		      "effort turned off is written as \"0\"");
 	}
 
 	// --- stereo pairing ------------------------------------------------------------------
@@ -606,6 +620,7 @@ static void part_d(const char * qml_path)
 	        {"nxwarp_coded_vectors", true},
 	        {"nxwarp_inter", true},
 	        {"nxwarp_intra_period", true},
+	        {"nxwarp_effort", true},
 	};
 
 	for (const auto & [id, in_save]: ids)

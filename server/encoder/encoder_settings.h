@@ -21,6 +21,9 @@
 
 #include "wivrn_packets.h"
 
+#include <array>
+#include <format>
+#include <ranges>
 #include <map>
 #include <optional>
 #include <string>
@@ -59,11 +62,26 @@ struct encoder_settings
 	uint32_t eyes = 1;
 	// The second eye's array layer, read only when `eyes` is 2.
 	uint32_t src_layer_right = 1;
-	// What this stream IS, and what the client is told on the wire. The default is
-	// the historical positional rule; only the hybrid base layer changes it, taking
-	// stream 1's slot when the eye pairing vacates it. See
-	// docs/NXWARP-HYBRID.md §10 and wivrn_packets.h's `stream_role`.
-	stream_role role = stream_role::view;
+	// What this stream IS, and what the client is told on the wire. Set from
+	// default_stream_role() for every stream in get_encoder_settings(); only the
+	// hybrid base layer changes it afterwards, taking stream 1's slot when the eye
+	// pairing vacates it. See docs/NXWARP-HYBRID.md §10 and wivrn_packets.h's
+	// `stream_role`.
+	//
+	// This member deliberately has NO default initialiser that is a real role. It
+	// used to default to `view`, and because get_encoder_settings() never assigned
+	// it, every stream went on the wire labelled `view` -- including the alpha
+	// plane, which the server enables but never sends a frame for. The client's
+	// views_ready() gate then waited forever for a picture on a stream that is not
+	// a picture, never reached state::streaming, and the lobby never pushed the
+	// stream scene: a connected, decoding, feedback-sending session that renders
+	// the lobby at 90 fps and calls scenes::stream::render() exactly never.
+	//
+	// `unset` makes that failure impossible to repeat quietly: it is not a valid
+	// wire value, check_stream_roles() rejects it, and anything that forgets to
+	// assign a role is caught at the point the description is built rather than by
+	// a headset that will not start.
+	stream_role role = stream_role::unset;
 	// For a `base` stream, the index of the stream whose atlas it fills. 0xff
 	// elsewhere. The base names its enhancement stream rather than the client
 	// inferring the pairing from the indices.
@@ -112,6 +130,99 @@ struct encoder_settings
 inline constexpr size_t num_streams = 4;
 // Stream carrying the promoted quad layer
 inline constexpr uint8_t quad_stream_idx = 3;
+
+// THE positional convention, in one place. Streams 0 and 1 are the eyes, 2 is the
+// passthrough alpha plane, 3 is the promoted quad layer. Everything that needs to know
+// what a stream slot means by default reads it from here, so the server's idea of a
+// stream's role and the packet's cannot drift apart -- which is precisely what happened
+// when the settings defaulted every slot to `view` while the packet defaulted them
+// positionally, and the settings won.
+constexpr stream_role default_stream_role(size_t stream_index)
+{
+	switch (stream_index)
+	{
+		case 0:
+		case 1:
+			return stream_role::view;
+		case 2:
+			return stream_role::alpha;
+		case quad_stream_idx:
+			return stream_role::quad;
+		default:
+			return stream_role::view;
+	}
+}
+
+// The two definitions agree, checked by the compiler rather than by a session that fails
+// to start. to_headset::video_stream_description::role is the wire's own default array;
+// if either side is reordered or extended without the other, this stops the build.
+static_assert(num_streams == std::tuple_size_v<decltype(to_headset::video_stream_description{}.role)>);
+static_assert([] {
+	to_headset::video_stream_description d{};
+	for (size_t i = 0; i < num_streams; ++i)
+		if (d.role[i] != default_stream_role(i))
+			return false;
+	return true;
+}(),
+              "encoder_settings' positional roles and the wire description's default roles disagree");
+
+// The role's name, for messages. Not magic_enum: this header is included by a test that
+// links nothing, and a mislabelled stream is exactly the situation where the reader needs
+// a word rather than an integer.
+constexpr const char * role_name(stream_role r)
+{
+	switch (r)
+	{
+		case stream_role::view:
+			return "view";
+		case stream_role::alpha:
+			return "alpha";
+		case stream_role::quad:
+			return "quad";
+		case stream_role::base:
+			return "base";
+		case stream_role::unset:
+			return "unset";
+	}
+	return "unknown";
+}
+
+// Every enabled stream carries a role that the client can route on, and it is either the
+// positional default or a documented override. Returns an empty string when the settings
+// are consistent, and otherwise says which stream is wrong -- the caller logs it.
+//
+// The one legitimate override is the hybrid base layer on the stream-1 slot, which the
+// eye pairing vacates (docs/NXWARP-HYBRID.md §10).
+inline std::string check_stream_roles(const std::array<encoder_settings, num_streams> & encoders)
+{
+	for (auto [i, e]: std::ranges::enumerate_view(encoders))
+	{
+		// A disabled stream is never advertised: the compositor skips it and the
+		// packet keeps its own positional default, so its role does not matter.
+		if (not e.enabled)
+			continue;
+
+		const size_t idx = size_t(i);
+		if (e.role == stream_role::unset)
+			return std::format("stream {} is enabled but no role was assigned to it", idx);
+
+		if (e.role == default_stream_role(idx))
+			continue;
+
+		// The one documented override: the hybrid base layer moves into the
+		// stream-1 slot after the eye pairing vacates it, and names the stream
+		// whose atlas it fills.
+		if (idx == 1 and e.role == stream_role::base and e.serves_stream == 0)
+			continue;
+
+		return std::format("stream {} is labelled '{}' but that slot is the '{}' stream, and this is not the base-layer override",
+		                   idx,
+		                   role_name(e.role),
+		                   role_name(default_stream_role(idx)));
+	}
+	return {};
+}
+
 
 std::array<encoder_settings, num_streams> get_encoder_settings(wivrn::vk_bundle &, wivrn_session &);
 

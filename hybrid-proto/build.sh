@@ -27,3 +27,19 @@ for t in "${@:-nxhevcbench nxahbvk}"; do
   adb shell chmod 755 "/data/local/tmp/$t"
 done
 echo "pushed."
+
+# --- host-side components and their tests (no device needed)
+if [ "${1:-}" = "host" ] || [ $# -eq 0 ]; then
+  VKINC=/run/media/nerdrx/Lex/claude/tools/vulkan-headers-src/include
+  echo "== shaders"
+  for s in 0 1 2; do
+    glslc -fshader-stage=comp -O -DSTORE=$s src/base_patch.comp -o "build/base_patch_s$s.spv"
+  done
+  echo "== test_base_patch (RADV/lavapipe)"
+  "${NICE[@]}" gcc -O2 -Wall -Wextra -Wno-unused-parameter -I"$VKINC" \
+    -o build/test_base_patch src/test_base_patch.c -lvulkan
+  echo "== test_base_shadow (libavcodec)"
+  "${NICE[@]}" g++ -O2 -std=c++20 -Wall \
+    -o build/test_base_shadow src/test_base_shadow.cpp \
+    $(pkg-config --cflags --libs libavcodec libavutil)
+fi

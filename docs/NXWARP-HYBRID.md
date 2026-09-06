@@ -354,16 +354,23 @@ integer conversion → atlas — is bit-exact.** ADR-0029 Option B is empiricall
 supported on this device, and Option A (drift-tolerant `base_sourced` patches)
 is not needed here.
 
-**One finding that must go into the normative clause.** The driver's
-`samplerYcbcrConversionComponents` is **not identity** on this device: the
-sampled `.r/.g/.b` come back as **`(Cr, Y, Cb)`** (`externalFormat = 506`,
-`suggestedYcbcrModel = 2`, `suggestedYcbcrRange = 1`, chroma offsets
-`(1,1)` = midpoint). Assuming `(Y, Cb, Cr)` produced a *plausible-looking* image
-that was wrong in 99.8 % of samples with a max delta of 176 — it did not crash,
-it did not look obviously broken, it was simply wrong. A normative conversion
-clause **must** consume the reported swizzle rather than assume identity, and
-the conformance vectors must include a device whose swizzle is non-identity.
-This is the single most likely way to ship a silently broken hybrid decoder.
+**One finding that must go into the normative clause.** A `RGB_IDENTITY`
+sampler over this buffer returns `.r/.g/.b` = **`(Cr, Y, Cb)`**, not
+`(Y, Cb, Cr)` (`externalFormat = 506`, `suggestedYcbcrModel = 2`,
+`suggestedYcbcrRange = 1`, chroma offsets `(1,1)` = midpoint). Assuming
+`(Y, Cb, Cr)` produced a *plausible-looking* image that was wrong in 99.8 % of
+samples with a max delta of 176 — it did not crash, it did not look obviously
+broken, it was simply wrong.
+
+Part II corrects the *reason*, which changes how the clause should be written.
+This was first read here as a vendor quirk of the Adreno driver. It is not: the
+same `(Cr, Y, Cb)` order was afterwards measured on **RADV** (Part II §12.1),
+and it follows from the format itself — `G8_B8R8_2PLANE_420_UNORM` carries luma
+in **G**, Cb in **B** and Cr in **R**, so a channel-identity sampler returns
+them in that order on any conforming implementation. The rule is therefore not
+"query the driver and hope"; it is **normative and knowable in advance**, and an
+implementation that hardcodes `(Y, Cb, Cr)` is wrong everywhere rather than
+wrong on some devices. The conformance vector still wants it pinned.
 
 ---
 
@@ -571,8 +578,8 @@ discovered the hard way:
    NEAREST`. Anything else puts a float colour conversion inside the normative
    path, which is exactly what `HYBRID.md` §2.1 warns is not bit-exact across
    vendors.
-2. **The driver-reported `samplerYcbcrConversionComponents` swizzle is
-   consumed, not assumed.** Measured non-identity on the Pico 4.
+2. **The channel order is `(Cr, Y, Cb)`, from the format, not assumed
+   identity.** Measured on the Pico 4 and on RADV; see Part II §9.2.
 3. Chroma siting is taken from `suggestedXChromaOffset`/`suggestedYChromaOffset`
    (measured: midpoint/midpoint) and the 4:2:0 → tile-grid upsample is
    specified. The base is 4:2:0 and the atlas is not.
@@ -705,3 +712,363 @@ Files:
 | `hybrid-proto/src/atlas_patch.comp` | the integer NV12 → YCoCg-R atlas conversion |
 | `hybrid-proto/build.sh`, `run-bench.sh` | build/push, sweep |
 | `hybrid-proto/results/` | raw JSON and the dumped planes |
+
+---
+
+# Part II — Design: the base layer in atlas v1
+
+Written after the gate passed ([`NXWARP-HYBRID-GATE.md`](NXWARP-HYBRID-GATE.md))
+and the ADR owner took `base_sourced` into ADR-0029 / SYNTAX 13.12. This part
+is the design; §12 says what is implemented on this branch and what is not.
+
+Two documents are load-bearing here and neither is mine:
+`nx-warp` `docs/adr/0029-atlas-reference.md` @ `0b162e5` (branch `atlas`) is
+normative, and `docs/ATLAS-DECODER.md` @ `cf1df26` (branch `passw-bypass`) is
+the decoder agent's. Where they leave something open I have priced it rather
+than chosen it — see §11.
+
+## 9. The finding that shapes everything: the conversion is the identity
+
+Part I built the base→atlas kernel around an integer YCbCr→R'G'B'→YCoCg-R
+transform, on the assumption that the atlas holds YCoCg-R because ADR-0012 and
+ADR-0029 §1 say "the coded sample domain". **For a WiVRn NX stream that
+assumption is wrong, and the real answer is much better.**
+
+Reading the two ends of the actual pipeline:
+
+* `server/compositor/shaders/foveation.comp:45-54` writes **BT.709 full-range**
+  YCbCr — `Y = 0.2126R + 0.7152G + 0.0722B`, chroma biased by `+0.5`, with no
+  16/235 or 16/240 scaling — into the `eG8B8R82Plane420Unorm` compositor image
+  (`compositor.cpp:209`).
+* `server/encoder/nxwarp_codec_vk.cpp:137-139` configures nxvc with
+  `ci.chroma = 0` (4:2:0), `ci.bit_depth = 8`, and **leaves `color_transform`
+  at its default `NXVC_CT_NONE`** — "planes are coded as given (YUV in, YUV
+  out)", `nxvc.h:96`. `nxvc.h:101-103` says so explicitly: *"A YCbCr source
+  (WiVRn's Linux capture path is already
+  VK_FORMAT_G8_B8R8_2PLANE_420_UNORM) is coded as-is with NXVC_CT_NONE."*
+
+So **the nxvc coded sample domain, for the streams this fork actually produces,
+is BT.709 full-range YCbCr 4:2:0 at 8 bits** — not YCoCg-R. YCoCg-R appears
+only when the input is RGB (`NXVC_CS_RGB` requires `NXVC_CT_YCOCGR`), which
+WiVRn never sends.
+
+Three consequences, in increasing order of importance:
+
+1. **The base patch kernel has no colour matrix.** If the HEVC base is encoded
+   full-range BT.709, its decoded samples *are* the atlas's numbers. The kernel
+   is a swizzle, an 8→16-bit widen, and a store. Part I §3.2's 1.9 µs/tile was
+   measuring a harder kernel than the one that is needed.
+2. **The normative conversion clause shrinks to a swizzle clause.** ADR-0029
+   Cheat 7 Option B says the residual risk "is not the HEVC decode but the
+   NV12-to-atlas conversion, which we therefore define as a normative integer
+   transform". With `CT_NONE` that transform is the identity, and the only
+   thing left to specify normatively is the channel order:
+   `G8_B8R8_2PLANE_420_UNORM` carries luma in **G**, Cb in **B** and Cr in
+   **R**, so a channel-identity sampler yields `.r/.g/.b` = `(Cr, Y, Cb)`.
+   Measured identically on the Pico 4's Adreno 650 through an AHardwareBuffer
+   external format and on RADV through the plain format (§12.1), so it is a
+   property of the format and not of any driver. Assuming `(Y, Cb, Cr)` gives a
+   plausible, wholly wrong picture. **The channel order is the whole clause.**
+3. **It reopens the decoder agent's atlas-format question in our favour.**
+   `ATLAS-DECODER.md`'s open question rules out an 8-bit UNORM atlas because
+   "a 9-bit YCoCg-R chroma plane does not fit 8-bit UNORM". Under `CT_NONE`
+   **there is no 9-bit plane** — chroma is 8-bit YCbCr — so R8_UNORM is
+   available, and `bench/README.md`'s measurement that an integer storage image
+   costs ~3× a UNORM one on this part is then a reason to take it. §11 prices
+   all three.
+
+**Requirement this places on the base encoder:** the HEVC base must be
+full-range BT.709 (`video_full_range_flag = 1`, `colour_primaries = 1`,
+`matrix_coeffs = 1`). WiVRn's Vulkan H.265 encoder already sets
+`video_full_range_flag = 1` (`video_encoder_vulkan_h265.cpp:73`); x265 needs
+`--range full --colorprim bt709 --colormatrix bt709`, and FFmpeg's VAAPI
+encoder needs `-color_range pc`. If that is got wrong the base is 16/235 and
+every base-sourced patch is washed out by a fixed offset — a failure that looks
+like a gamma bug and is not one.
+
+## 10. Stream and role layout
+
+### 10.1 The constraint
+
+This fork has no rect partition. `num_streams = 4` and the four slots are
+`left, right, alpha, quad` (`encoder_settings.h:87-90`), geometry is derived
+from the slot index, and `stream_idx` is the only demux key on the wire and the
+only routing key on the client. Part I §1.3 has the detail.
+
+### 10.2 The opening `nx-warp-stereo` creates
+
+Branch `nx-warp-stereo` (`ca1e29c1`, merged into this branch) codes **both eyes
+as one nxvc stereo frame on stream 0**: `res[0].eyes = 2`, `src_layer = 0`,
+`src_layer_right = 1`, and **`res[1].enabled = false`** — "the right-eye stream
+keeps its entry in the description; what it loses is its encoder".
+
+**Stream 1's encoder slot is therefore already vacant whenever NX Warp is
+running paired.** That is where the base layer goes.
+
+### 10.3 The layout
+
+| stream | when NX Warp is paired | `eyes` | `src_layer` |
+|---|---|---|---|
+| 0 | nxvc enhancement, both eyes, one stereo frame | 2 | 0 (+1 right) |
+| **1** | **HEVC base, both eyes, one side-by-side picture** | **2** | **0 (+1 right)** |
+| 2 | alpha, unchanged | 1 | 2 |
+| 3 | quad, unchanged | 1 | own image |
+
+This is deliberately *not* the "nxwarp on 0/1, base on 2/3" the task sketched:
+2 and 3 are alpha and quad and taking them would break both. Putting the base
+on 1 needs **no new stream index, no `num_streams` change, and no protocol
+version bump for the stream count** — the description entry for stream 1 already
+exists, and what changes is what it says about itself.
+
+Consequences, each of which is a real decision:
+
+* **The base layer requires the stereo pairing.** If the pair is not paired —
+  a mixed pair, or a per-eye width that is not a multiple of 64 — stream 1 has
+  the right eye's encoder and there is no slot. That is an acceptable
+  precondition rather than a limitation: both features are pair-wide, both need
+  the 64-multiple width, and the alternative (going to `num_streams = 6`) buys
+  nothing that the vacated slot does not already give.
+* **One pair-compose, shared.** `nxwarp_codec_vk.cpp` already builds a scratch
+  image `eyes * width` wide and does one `vkCmdCopyImage` per eye per plane into
+  its half, timed and reported through `compose_ms()`. The base encoder wants
+  *exactly the same* side-by-side picture, so that scratch image and its copy
+  should be produced once per frame by the compositor and consumed by both
+  encoders, not built twice. This is the one piece of the server work that is a
+  refactor rather than an addition.
+* **CTB 64 lands on the tile grid for both eyes.** The pairing already refuses a
+  per-eye width that is not a multiple of 64, so the side-by-side seam is on a
+  64-boundary; with `ctu=64` every CTB boundary in the pair picture coincides
+  with an nxvc tile boundary, in both eyes, with no per-eye offset correction.
+* **`split_bitrate()` must be told.** It weights by `width*height`
+  (`encoder_settings.cpp:59-97`), which would hand the pair-wide base an equal
+  share with the pair-wide enhancement stream. The gate measured the base
+  saturating at 3–5 Mbit/s per eye for head-rotation content and 10–15 Mbit/s
+  for dense static UI, so the base's share is a policy number in that range,
+  expressed as a `bitrate_multiplier` and not derived from area.
+
+### 10.4 Making the client's role mapping data-driven
+
+Today the client maps stream index to compositing role by position
+(`stream.cpp`, `decoder_count = view_count + 2`). Stream 1 becoming a base layer
+breaks that, and papering over it with a second positional rule would make the
+next change worse. The change is to say the role on the wire:
+
+```cpp
+// common/wivrn_packets.h, in video_stream_description::item
+enum class stream_role : uint8_t {
+    view  = 0,   // a view's picture; `eyes` says how many it carries
+    alpha = 1,
+    quad  = 2,
+    base  = 3,   // an atlas patch source; not composited on its own
+};
+stream_role role  = stream_role::view;
+uint8_t     eyes  = 1;   // views carried by this ONE stream
+uint8_t     serves_stream = 0xff;  // for `base`: whose atlas it fills
+```
+
+The client then routes by `role`, not by index: `view` streams go to the
+defoveator as today, `base` streams go to the nxwarp decoder's atlas as patch
+sources and are never presented on their own. `serves_stream` is what lets a
+base stream name the enhancement stream whose atlas it fills, so the pairing is
+explicit rather than "stream 1 fills stream 0 because it is stream 1".
+
+This is a protocol change and it needs the `protocol_version` hash to move.
+It is also the change that makes the *next* stream-shaped feature cheap, which
+is worth the one-time cost.
+
+### 10.5 Sync and loss, concretely
+
+Frame identity is the existing `frame_id16`. A base picture carries the frame
+number it was composed from; a base-sourced patch sets `src_frame` to it, and
+the atlas's `C` advance (ADR-0029 step 1) then carries that tile forward from
+that pose like any other. There is no second clock.
+
+Because the atlas is persistent storage and ADR-0029 Cheat 1 removes the
+whole-frame requirement, a late base picture is applied late rather than
+dropped, and a lost one simply produces no patches that frame. The escalation
+ladder is Part I §4.6 and it is unchanged by this layout.
+
+## 11. The base patch import component
+
+### 11.1 What is pinned and what is not
+
+Pinned by `ATLAS-DECODER.md`, and what this component is written against:
+
+* **Atlas pixels** follow `nxvw_ring_layout()`
+  (`vk/decoder/inter/inter_layout.h:257`) for ONE slot: per plane, row stride
+  `(planeW * eyes + 1) & ~1` u16 elements, planes concatenated, and **eye `e`
+  begins at column `e * planeW[p]`**.
+* **The per-tile table** is 64 B per entry, and its index is **eye-minor**:
+  `n = row*cols + eye*cols_per_eye + col`. The doc flags this as
+  "two eye conventions in the same feature, which is the kind of thing that gets
+  confused once and then stays confused" — pixels are per-eye sub-pictures,
+  the table is interleaved. This component addresses pixels by `(eye, x, y)` and
+  the table by `n`, and takes both from the caller rather than deriving one from
+  the other.
+* **Table semantics** on a write-back (ADR-0029 step 3): `C := I`,
+  `src_frame := N`, `gen := 0`, `static := 0`, `valid := 1`, `res_level := 0`,
+  and here additionally **flags bit 2 `base_sourced`**. `C`'s rows 0–1 are
+  Q10.21 and row 2 is Q2.29, so identity is `{1<<21,0,0, 0,1<<21,0, 0,0,1<<29}`.
+
+**Not pinned:** the atlas image format. `ATLAS-DECODER.md`'s open questions say
+it "needs pricing before it is chosen". The component therefore compiles three
+storage variants from one source and the choice is a parameter, not a
+commitment:
+
+| variant | storage | note |
+|---|---|---|
+| `STORE=0` | SSBO, u16 packed two per uint | today's reference ring, byte-for-byte |
+| `STORE=1` | `R16_UINT` storage image | sampleable by the client's display pass |
+| `STORE=2` | `R8_UNORM` storage image | **available only because `CT_NONE` means 8-bit chroma** (§9.3) |
+
+All three write the same logical layout, so their readbacks are byte-comparable
+and the format decision can be made on cost alone.
+
+### 12. Status: what is implemented on this branch
+
+| item | state |
+|---|---|
+| §9 colour finding | read out of both ends of the pipeline; the kernel is written to it |
+| `base_patch.comp`, three storage variants | **written**, one source, `-DSTORE=0/1/2` |
+| `base_patch_layout.h`: layout math + CPU model | **written** |
+| Host byte-exactness test (RADV) | **written and PASSING**, §12.1 |
+| Encoder-side FFmpeg shadow decode + test | **written and PASSING**, §12.2 |
+| Device leg (Adreno) + atlas format pricing | **blocked**: the Pico dropped off USB mid-task |
+| §10.3 stream layout in `encoder_settings` | designed; not implemented |
+| §10.4 `stream_role` on the wire | designed; not implemented (protocol bump) |
+| Shared pair-compose refactor | designed; not implemented |
+| §13 corpus capture | route identified; **needs a live-session slot** |
+
+### 12.1 The host byte-exactness test
+
+`hybrid-proto/src/test_base_patch.c`, against the CPU model in
+`base_patch_layout.h`. The base picture is a real
+`VK_FORMAT_G8_B8R8_2PLANE_420_UNORM` image — the compositor's own format —
+sampled through the same `RGB_IDENTITY` / `NEAREST` / full-range conversion the
+Android path uses on the imported AHardwareBuffer. So everything except the AHB
+import itself is exercised, on any desktop GPU, with no headset.
+
+```
+device: AMD Radeon RX 7900 XTX (RADV NAVI31)
+atlas: 147456 u16 (3 planes), image 512x384, grid 4x3 per eye, cols 8
+  STORE=0  pixels ok (0/147456 differ)   table ok
+  STORE=1  pixels ok (0/147456 differ)   table ok
+  STORE=2  pixels ok (0/147456 differ)   table ok
+  swizzle is consumed: ok
+PASS
+```
+
+Four checks, and the last two are the ones that catch real bugs: all three
+variants reproduce the model bit for bit; all three agree with each other,
+which is what makes the atlas format a free choice; the per-tile table matches
+across **all 64 bytes**, including the 20 reserved bytes a v1 decoder must zero
+and conformance still compares; and a deliberately permuted channel order must
+change the output, so a kernel that ignored it could not pass. That last check
+is what found the correction in §9.2 — the first run failed with 146880 of
+147456 samples differing and `got 90 want 0`, which is Cr where Y belonged.
+
+### 12.2 The shadow decode test
+
+`hybrid-proto/src/test_base_shadow.cpp` feeds the same access units the device
+harness fed the Pico and compares against FFmpeg's own decode:
+
+```
+== full-range base (correct configuration) ==
+shadow decode: 24 frames, 0 mismatched, 0 out of order
+colour check : ok (full range, BT.709, yuv420p)
+PASS
+== limited-range base (the mistake the guard exists for) ==
+shadow decode: 24 frames, 0 mismatched, 0 out of order
+colour check : range is not full (pc/JPEG);
+PASS
+```
+
+Two properties beyond "the pixels match". **Order**: the decoder is opened
+`thread_count = 1` with `AV_CODEC_FLAG_LOW_DELAY`, because a frame-threaded
+decoder buffers several pictures before emitting the first, and that reordering
+would put the shadow behind the encoder's own reference tracking. The test
+asserts one-in-one-out on every AU. **Colour**: `check_colour()` is the guard
+for §9's requirement, and the run above shows it firing on a limited-range base
+— the failure that otherwise looks like a gamma bug and is not one.
+
+## 13. The corpus: materialising real captures
+
+The gate ([`NXWARP-HYBRID-GATE.md`](NXWARP-HYBRID-GATE.md) §6.1) named this as
+the follow-up that could still move its answer off 100 %, so it is worth being
+precise about the route.
+
+### 13.1 The mirror is the wrong tool
+
+`docs/configuration.md` §`mirror` publishes the headset view as a PipeWire
+`Video/Source` node, and it is tempting because it needs no code. It is not
+usable for corpus material, for four independent reasons:
+
+* **Left eye only.** `mirror.comp` resamples *one* eye
+  (`pipewire_mirror.cpp`, `src_extent` from a single view).
+* **Pre-foveation, and resampled.** The docs say so explicitly: frames are
+  taken "after the layers have been composited but before foveation and before
+  encoding", then scaled by `scale` (default 0.5). `corpus/README.md` requires
+  the *opposite* — a specific configuration in which the foveation pass
+  degenerates to an identity, so that what is recorded is what the encoder sees.
+* **Wrong colour and format.** It publishes `SPA_VIDEO_FORMAT_RGBx` from an
+  `eR8G8B8A8Unorm` image; the corpus wants `yuv420p`/`yuv444p` in the coded
+  domain. Converting back would introduce a rounding step that is exactly what
+  §9 spends its effort removing.
+* **No pose.** Every `wivrn-capture` entry declares a `pose_log`, and the
+  mirror node carries no head pose at all. Nothing downstream of it could
+  reconstruct one.
+
+### 13.2 The route that already exists
+
+`corpus/README.md` and `tools/quality/README.md` §1c already specify it, and
+this fork already has both halves:
+
+* `WIVRN_DUMP_VIDEO` is implemented at `server/encoder/video_encoder.cpp:299`
+  and writes one file per stream, `<prefix>-<stream_idx>.<ext>`;
+* the `raw` encoder (`server/encoder/video_encoder_raw.cpp`) makes that `.yuv`
+  — the encoder's actual input, post-foveation and post-colour-conversion;
+* `tools/quality/capture/wivrn_capture.py` has `convert` (to the corpus's
+  pixel formats) and `poses` (from `timings.csv` + `head.csv`).
+
+So the work is a session, not code:
+
+```sh
+WIVRN_DUMP_VIDEO=/path/dump wivrn-server        # with encoder: raw
+python3 tools/quality/capture/wivrn_capture.py convert --in dump-0.yuv \
+    --w 1440 --h 1440 --out $NXW_CORPUS --name wivrn-vrchat-1440 --pix yuv420p,yuv444p
+python3 tools/quality/capture/wivrn_capture.py poses --timings timings.csv \
+    --head head.csv --out $NXW_CORPUS/wivrn-vrchat-1440.poses.json
+python3 corpus/fetch.py --record --only wivrn-vrchat-1440
+```
+
+**Three cautions specific to this branch**, none of which is in the existing
+docs because they predate the stereo pairing:
+
+1. **Capture with `stereo-frame` off.** With the pairing on, stream 0 is the
+   eye *pair* and a `raw` dump of it is `2*width x height` side by side, not the
+   `1440x1440` per-eye picture the manifest declares. Either turn the pairing
+   off for the capture or split the dump; turning it off is safer, because the
+   manifest's `resolution` field is what every downstream tool trusts.
+2. **The identity-foveation configuration is mandatory**, and it is easy to get
+   silently wrong: stream extent ≥ render extent, `render_scale` 1.0,
+   `foveation_strength` 0, adaptive foveation off, FSR1 off, motion smoothing
+   off. `corpus/README.md` is blunt that frames captured without it "are not
+   comparable with anything".
+3. **`raw` needs the bitrate for it.** An uncompressed 1440² 4:2:0 stream at
+   90 fps is ~280 MB/s; this is a local-loopback or short-run exercise, not
+   something to attempt over Wi-Fi.
+
+These are private recordings of someone's session: never committed, never
+published, never attached to a bug report.
+
+### 13.3 What is needed
+
+**A live-session slot.** Recording is a headset session with a specific
+configuration, which is the coordinator's to schedule. The three sequences
+`corpus/MANIFEST.json` declares with `"frames": 0` are `wivrn-vrchat-1440`
+(social VR, the bitrate floor), `wivrn-beatsaber-1440` (sustained fast head
+motion, the best case for pose warp) and `wivrn-alyx-1440` (near-field hands at
+large parallax). For re-running the patch-source gate, **`wivrn-vrchat-1440` is
+the one that matters**: it is the content class expected to set the bitrate
+floor, and therefore the one most likely to push a base tile below the 35 dB
+gate boundary the gate found.

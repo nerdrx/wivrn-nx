@@ -46,8 +46,19 @@ namespace wivrn
 // headers on the include path.
 struct nxwarp_codec_config
 {
-	uint32_t width = 0;  // luma samples, per eye
+	uint32_t width = 0;  // luma samples, PER EYE
 	uint32_t height = 0;
+	// Eyes coded as ONE nxvc frame: 1, or 2 for a side-by-side stereo frame whose
+	// source image is `eyes * width` samples wide, eye 0 on the left ([SYN] 3.3 --
+	// a picture is one eye, and a stereo frame carries two pictures rather than one
+	// of double width). At 2 the tile grid the transport sees spans the pair:
+	// `cols = eyes * cols_per_eye`, `rows = ceil(height / 64)`.
+	//
+	// This is the eye PAIRING, not the STEREO tool: the cross-eye predictor (tool
+	// bit 12, mode 4) stays OFF and the stream carries that bit clear. The two are
+	// independent -- the syntax only requires STEREO => eyes == 2, never the
+	// converse -- so pairing the eyes costs nothing that the atlas work forbids.
+	uint32_t eyes = 1;
 	// The quantiser, 0..63, every tile of a frame is coded at, until
 	// nxwarp_codec::set_qp says otherwise. With "rc": "auto" this is only the
 	// starting point the controller in video_encoder_nxwarp moves from.
@@ -198,6 +209,29 @@ public:
 	// tiles() describes the frame it just produced. The call submits and waits,
 	// so the image is free again when it returns — and must not be written
 	// before that.
+	// Encode BOTH eyes of a frame as one nxvc stereo frame, taking them from two
+	// ARRAY LAYERS of the compositor's image. Only meaningful when the codec was
+	// created with `eyes == 2`; at 1 it is encode_image(image, layer_left) and the
+	// right layer is ignored, so a caller need not branch.
+	//
+	// The split exists because the two sides disagree about where an eye lives:
+	// WiVRn keeps them in layers, nxvc's image entry point wants one side-by-side
+	// picture and uses `array_layer` to pick a layer of an array image, not an
+	// eye. The backend brings them together; see nxwarp_codec_vk.cpp.
+	virtual std::span<const uint8_t> encode_image_pair(VkImage image,
+	                                                   uint32_t layer_left,
+	                                                   uint32_t)
+	{
+		return encode_image(image, layer_left);
+	}
+
+	// Milliseconds the GPU spent bringing the two eyes together, as the device
+	// timed it. 0 on the mono path, and on a device with no timestamp support.
+	virtual double compose_ms() const
+	{
+		return 0;
+	}
+
 	virtual std::span<const uint8_t> encode_image(VkImage, uint32_t array_layer)
 	{
 		return {};

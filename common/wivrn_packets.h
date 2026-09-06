@@ -1335,6 +1335,22 @@ struct video_stream_description
 	uint16_t quad_width = 0;
 	uint16_t quad_height = 0;
 
+	// Eyes carried by stream 0. 2 when the NX Warp encoder codes both eyes of a
+	// frame as ONE nxvc stereo frame, in which case stream 1 has no encoder and
+	// never receives a datagram -- so stream_size() reports it as zero and the
+	// headset does not build a decoder for it, the same way quad_width does for
+	// the quad stream. Without this the client allocates a full second decoder
+	// (about 35 MB, its own images and reassembly window) that nothing ever
+	// feeds.
+	//
+	// It has to be here rather than inferred from the codec's own stream header,
+	// which also carries the eye count: the decoders are created when this packet
+	// arrives, and the .nxv header does not turn up until the first frame.
+	//
+	// Stream 1 keeps its `codec` entry so the view-to-stream mapping is unchanged;
+	// what it loses is its size, and therefore its decoder.
+	uint8_t paired_eyes = 1;
+
 	bool operator==(const video_stream_description &) const = default;
 
 	// Encoded size of one stream, the size the decoder for it must be created with.
@@ -1342,6 +1358,9 @@ struct video_stream_description
 	{
 		switch (stream_index)
 		{
+			case 1: // right eye -- absent when stream 0 carries both
+				return paired_eyes > 1 ? std::pair<uint16_t, uint16_t>{0, 0}
+				                       : std::pair<uint16_t, uint16_t>{width, height};
 			case 2: // alpha, half height
 				return {width, uint16_t(height / 2)};
 			case 3:

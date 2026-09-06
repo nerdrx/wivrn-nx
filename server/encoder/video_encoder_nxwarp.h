@@ -120,6 +120,10 @@ class video_encoder_nxwarp : public video_encoder
 	// class puts them on WiVRn's stream socket.
 	std::unique_ptr<nxt::Aead> aead;
 	std::unique_ptr<nxt::Sender> sender;
+	// Eyes this stream codes as one nxvc frame: 1, or 2 when the eyes are paired
+	// (encoder_settings::eyes). At 2 the encode reads both array layers.
+	uint32_t stereo_eyes = 1;
+	uint32_t src_layer_right = 1;
 	nxt::StreamConfig stream_cfg;
 	// The AEAD key material, kept because reset_stream() builds a new Sender with it.
 	nxt::Key session_key{}, session_salt{};
@@ -480,6 +484,9 @@ class video_encoder_nxwarp : public video_encoder
 	std::chrono::steady_clock::time_point prof_since = std::chrono::steady_clock::now();
 	uint64_t prof_n = 0;
 	double prof_ms = 0, prof_max_ms = 0;
+	// The stereo compose's share of the above, as the device timed it. Always 0 at
+	// one eye, where there is nothing to compose.
+	double prof_compose_ms = 0, prof_compose_max_ms = 0;
 	uint64_t prof_bytes = 0;
 	// The quantiser over that interval: the sum for a mean, and the extremes,
 	// which is what says whether the controller settled or is hunting.

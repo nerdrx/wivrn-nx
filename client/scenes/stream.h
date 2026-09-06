@@ -99,6 +99,20 @@ private:
 
 	wifi_lock::wifi wifi;
 
+	// True when stream item 0 carries BOTH eyes in one picture and stream item 1 will
+	// therefore never produce a frame. Only an NX Warp (nxvc) stream can be like that,
+	// and it says so in its own .nxv stream header rather than anywhere on the WiVRn
+	// wire -- see nxwarp_decoder::eye_count().
+	//
+	// The header arrives on the network thread some time after the decoders are built,
+	// so this answers false first and true later, and every gate that consults it must
+	// be correct in that order: false means "the two eye streams are independent", which
+	// is what the client has always assumed and is exactly right for the window before
+	// the header, because stream 0 has produced nothing yet either.
+	//
+	// Callers must hold decoder_mutex.
+	bool eyes_in_one_stream() const;
+
 	// for frames inside accumulator images
 	std::mutex frames_mutex;
 	std::array<std::shared_ptr<wivrn::shard_accumulator::blit_handle>, decoder_count> common_frame(XrTime display_time);

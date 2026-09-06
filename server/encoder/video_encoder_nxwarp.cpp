@@ -339,9 +339,17 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 		current_qp = std::clamp(base_qp, rc_min_qp, rc_max_qp);
 	rc_fps = settings.fps;
 
+	// `extent` is ONE eye. With the eyes paired this encoder still describes a
+	// per-eye picture to the codec -- nxvc's width/height are per eye by
+	// definition ([SYN] 3.3) -- and it is `eyes` that makes the coded frame the
+	// pair.
+	stereo_eyes = settings.eyes ? settings.eyes : 1;
+	src_layer_right = settings.src_layer_right;
+
 	nxwarp_codec_config codec_cfg{
 	        .width = extent.width,
 	        .height = extent.height,
+	        .eyes = stereo_eyes,
 	        .base_qp = current_qp,
 	        .inter = option_bool(settings.options, "inter", false),
 	        .intra_period = option_u32(settings.options, "intra-period", 180),
@@ -1458,8 +1466,13 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	if (codec_uses_vk_queue)
 	{
 		std::unique_lock lock(vk.queue.mutex);
+		// With the eyes paired the codec takes BOTH array layers and brings
+		// them together itself; at one eye this is encode_image(image,
+		// src_layer) exactly as before.
 		bitstream = codec_reads_image
-		                    ? codec->encode_image(in[slot].image, src_layer)
+		                    ? (stereo_eyes == 2
+		                               ? codec->encode_image_pair(in[slot].image, src_layer, src_layer_right)
+		                               : codec->encode_image(in[slot].image, src_layer))
 		                    : codec->encode(y, extent.width, cb_plane.data(), cr_plane.data(), cw);
 	}
 	else
@@ -1527,6 +1540,16 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		prof_n++;
 		prof_ms += ms;
 		prof_max_ms = std::max(prof_max_ms, ms);
+		// The stereo compose, as the DEVICE timed it (a timestamp pair around the
+		// two layer copies), not as the host saw the call. It is already inside
+		// `ms` -- encode_image_pair() composes and then encodes -- so this is the
+		// share of the encode that pairing the eyes costs, and the number to weigh
+		// against what pairing buys. 0 on the mono path.
+		{
+			const double c = codec->compose_ms();
+			prof_compose_ms += c;
+			prof_compose_max_ms = std::max(prof_compose_max_ms, c);
+		}
 		prof_bytes += bitstream.size();
 		if (t_enc1 - prof_since > std::chrono::seconds(2))
 		{
@@ -1555,6 +1578,14 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				                       : std::string("client decode not reported yet")),
 				        (unsigned long long)prof_paced_out);
 			}
+			if (stereo_eyes == 2 and prof_n)
+				U_LOG_I("nxwarp: stream %d stereo compose %.3f ms/frame (max %.3f), "
+				        "%.1f%% of the %.1f ms encode",
+				        int(stream_idx),
+				        prof_compose_ms / prof_n,
+				        prof_compose_max_ms,
+				        100.0 * prof_compose_ms / (prof_ms > 0 ? prof_ms : 1),
+				        prof_ms / prof_n);
 			if (rc_auto and rc_target_bytes > 0)
 				U_LOG_I("nxwarp: stream %d encoded %llu frames in %.1f s: %.1f ms/frame (max %.1f), "
 				        "%.0f B/frame vs %.0f target (%+.0f%%), QP %.1f [%u..%u], "
@@ -1707,6 +1738,8 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 			prof_n = 0;
 			prof_ms = 0;
 			prof_max_ms = 0;
+			prof_compose_ms = 0;
+			prof_compose_max_ms = 0;
 			prof_bytes = 0;
 			prof_qp_sum = 0;
 			prof_qp_lo = 63;

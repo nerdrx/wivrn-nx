@@ -674,6 +674,20 @@ scenes::stream::~stream()
 		network_thread.join();
 }
 
+// Whether the two eyes arrive as one stream item or as two.
+//
+// The SERVER's answer, from the stream description, not the codec's from its own stream
+// header. Both carry the eye count and they cannot disagree -- the encoder that sets one
+// sets the other -- but only this one is known in time. The description arrives before any
+// decoder is built, which is what lets setup() skip stream 1 entirely (its stream_size is
+// zero, the same signal the quad stream uses); the .nxv header does not turn up until the
+// first frame, so a gate that waited for it would have a window, on every connection, in
+// which the scene answered "two streams" and blocked on a decoder that was never created.
+bool scenes::stream::eyes_in_one_stream() const
+{
+	return video_stream_description and video_stream_description->paired_eyes > 1;
+}
+
 void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_ptr<shard_accumulator::blit_handle> handle)
 {
 	assert(handle);
@@ -712,7 +726,13 @@ void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_p
 			std::swap(handle, decoders[stream].latest_frames[handle->feedback.frame_index % decoders[stream].latest_frames.size()]);
 		}
 
-		if (state_ != state::streaming and not(decoders[0].empty() or decoders[1].empty()))
+		// The scene is ready when every stream that will ever produce a frame has produced
+		// one. On a stereo stream item 1 never will -- the server sends it no datagrams at
+		// all -- so waiting on it here would leave the scene stuck short of state::streaming
+		// for the whole session, which among other things never arms the stall watchdog and
+		// never stops the connecting overlay. Stream 0's own frame covers both eyes.
+		if (state_ != state::streaming and
+		    not(decoders[0].empty() or (not eyes_in_one_stream() and decoders[1].empty())))
 		{
 			set_state(state::streaming);
 			spdlog::info("Stream scene ready at t={}", instance.now());
@@ -755,8 +775,16 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, scenes::stream::deco
 
 	inplace_vector<shard_accumulator::blit_handle *, decoder_count> common_frames;
 	const bool alpha = decoders[0].latest_frames[0] and decoders[0].latest_frames[0]->view_info.alpha;
+	// The join below intersects the frame indices every eye stream holds, so that the eyes
+	// are never shown one frame apart. A stereo stream has nothing to intersect with: both
+	// eyes came out of one decode of one stream, so they cannot disagree, and stream 1's
+	// permanently empty buffer would intersect the candidate list down to nothing on every
+	// refresh -- the "Failed to find a common frame" branch below, once per frame, forever.
+	const bool eyes_joined = eyes_in_one_stream();
 	for (size_t i = 0; i < view_count + alpha; ++i)
 	{
+		if (eyes_joined and i == 1)
+			continue;
 		if (i == 0)
 		{
 			for (const auto & h: decoders[i].latest_frames)
@@ -1040,7 +1068,15 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		gui_status_last_change = frame_state.predictedDisplayTime;
 
 	std::shared_lock lock(decoder_mutex);
-	if (not frame_state.shouldRender or decoders[0].empty() or decoders[1].empty() or state_ == state::shutdown)
+	// One stream carrying both eyes, or two carrying one each. Taken once here and passed
+	// down the rest of this refresh so that every gate below answers the same question the
+	// same way even if the stream header lands mid-render.
+	const bool eyes_joined = eyes_in_one_stream();
+	// Nothing decoded yet on a stream that will decode something: there is no picture, and
+	// there is no picture to hold either. Stream 1 is only asked about when it is a stream
+	// of its own; on a stereo stream it is silent by design and requiring a frame from it
+	// would black the headset out for the whole session.
+	if (not frame_state.shouldRender or decoders[0].empty() or (not eyes_joined and decoders[1].empty()) or state_ == state::shutdown)
 	{
 		// Nothing is on screen, so frame smoothing has nothing to carry forward: forget
 		// the frame index, so a frame from before a gap is never blended into the first
@@ -1141,6 +1177,12 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	for (size_t i = 0; i < view_count + use_alpha; ++i)
 	{
 		auto & blit_handle = current_blit_handles[i];
+		// On a stereo stream this is null at i == 1 and stays null: common_frame looked
+		// stream 1 up and found the empty buffer it will always have. The iteration is
+		// skipped here and view 1 is filled in below, out of view 0's picture, which also
+		// keeps the once-per-frame bookkeeping just above once per frame -- counting a
+		// display twice for one handle would make times_displayed lie to the server and to
+		// the re-present gate.
 		if (not blit_handle)
 		{
 			if (i == view_count)
@@ -1182,18 +1224,39 @@ void scenes::stream::render(const XrFrameState & frame_state)
 
 		if (i < view_count)
 		{
-			foveation[i] = blit_handle->view_info.foveation[i];
-			pose[i] = blit_handle->view_info.pose[i];
-			fov[i] = blit_handle->view_info.fov[i];
-			// colour image
-			images[i] = {
-			        .rgb = blit_handle->image_view,
-			        .sampler_rgb = decoders[i].decoder->sampler(),
-			        .rect_rgb = {
-			                .extent = blit_handle->extent,
-			        },
-			        .layout_rgb = blit_handle->current_layout,
-			};
+			// Which views this one decoded picture feeds. One, as it always has, unless
+			// this is stream 0 of a stereo stream: then the picture is the eye pair side
+			// by side and it feeds both, told apart only by the source rectangle below.
+			// view_info already carries a pose, a fov and a foveation run per eye, so
+			// there is nothing view 1 needs that this handle does not have.
+			const size_t last_view = (eyes_joined and i == 0) ? view_count : i + 1;
+			for (size_t v = i; v < last_view; ++v)
+			{
+				foveation[v] = blit_handle->view_info.foveation[v];
+				pose[v] = blit_handle->view_info.pose[v];
+				fov[v] = blit_handle->view_info.fov[v];
+				// colour image
+				//
+				// rect_rgb is the sub-rectangle of the decoded image this view is to
+				// be sampled from, in the units the alpha plane below already uses:
+				// the offset is where the view starts and the extent is the WHOLE
+				// image, because reprojection.glsl divides by the extent to normalise
+				// ((uv + rgb_rect.xy) / rgb_rect.zw). At one eye per stream that is
+				// offset zero over the eye's own image, which is what it has always
+				// been. At two, the decoder made the pool image eyes*width wide, so
+				// eye v begins at v * the per-eye width the stream description gives.
+				images[v] = {
+				        .rgb = blit_handle->image_view,
+				        .sampler_rgb = decoders[i].decoder->sampler(),
+				        .rect_rgb = {
+				                .offset = {
+				                        .x = eyes_joined ? int32_t(v * video_stream_description->width) : 0,
+				                },
+				                .extent = blit_handle->extent,
+				        },
+				        .layout_rgb = blit_handle->current_layout,
+				};
+			}
 		}
 		else
 		{
@@ -1474,11 +1537,21 @@ void scenes::stream::render(const XrFrameState & frame_state)
 					// frame this does not blend with, which is what keeps the
 					// decoder's image pool exactly as free as it was without the
 					// feature.
+					//
+					// Where view v's pictures come from. On a stereo stream both
+					// come from stream 0's rolling buffer -- stream 1 has none,
+					// and asking it would leave prev[1] null, which is not a
+					// stereo mismatch but simply the feature switched off for the
+					// whole session on the streams that need it most.
+					const auto eye_stream = [eyes_joined](size_t v) -> size_t {
+						return eyes_joined ? 0 : v;
+					};
+
 					std::array<std::shared_ptr<shard_accumulator::blit_handle>, view_count> prev;
 					{
 						std::unique_lock frame_lock(frames_mutex);
 						for (size_t v = 0; v < view_count; ++v)
-							prev[v] = decoders[v].previous_frame(idx);
+							prev[v] = decoders[eye_stream(v)].previous_frame(idx);
 					}
 
 					// Both eyes, same decoded geometry (the pass reuses this
@@ -1487,8 +1560,8 @@ void scenes::stream::render(const XrFrameState & frame_state)
 					// put on screen is still in the undefined layout.
 					bool usable = true;
 					for (size_t v = 0; v < view_count; ++v)
-						usable = usable and prev[v] and current_blit_handles[v] and
-						         prev[v]->extent == current_blit_handles[v]->extent and
+						usable = usable and prev[v] and current_blit_handles[eye_stream(v)] and
+						         prev[v]->extent == current_blit_handles[eye_stream(v)]->extent and
 						         prev[v]->current_layout != vk::ImageLayout::eUndefined;
 
 					// And the same frame in both eyes. The two streams are kept in
@@ -1517,7 +1590,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 							for (size_t v = 0; v < view_count; ++v)
 							{
 								const XrPosef & a = prev[v]->view_info.pose[v];
-								const XrPosef & b = current_blit_handles[v]->view_info.pose[v];
+								const XrPosef & b = current_blit_handles[eye_stream(v)]->view_info.pose[v];
 								f = std::min(f, fade_out(pose_angle(a.orientation, b.orientation),
 								                         constants::stream::frame_smoothing_full_angle,
 								                         constants::stream::frame_smoothing_zero_angle));

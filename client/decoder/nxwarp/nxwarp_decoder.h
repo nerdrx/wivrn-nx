@@ -400,6 +400,25 @@ public:
 		return receiver ? &receiver->stats : nullptr;
 	}
 
+	// How many eyes one decoded picture of this stream holds: 1 for the ordinary
+	// per-eye stream, 2 for an nxvc stereo stream whose single picture is the eye pair
+	// side by side, eye 0 first.
+	//
+	// This is the only thing that tells the client a stereo stream apart from a mono
+	// one -- there is no wire field for it and protocol_version does not move. It comes
+	// out of the .nxv stream header, which arrives on the network thread at an
+	// unpredictable moment after the decoder is built, so every reader must cope with
+	// getting 1 first and 2 later. It is never the other way round and it never changes
+	// again: one stream header is parsed per stream, ever (on_stream_header returns
+	// early once nxvc exists), so a reader that has once seen 2 will keep seeing 2 for
+	// the life of the decoder.
+	//
+	// Readable from any thread.
+	uint32_t eye_count() const
+	{
+		return hdr_eyes.load(std::memory_order_acquire);
+	}
+
 	// What the GUI is allowed to see. Monotonic counters plus the last completed
 	// two-second profile window, all read through atomics: the readout differences
 	// the counters itself rather than parsing the log lines decode_unit prints.
@@ -461,6 +480,11 @@ public:
 
 private:
 	image * get_free();
+	// Build (or rebuild) the pool of images the worker copies decoded pictures into, at
+	// the current `extent`. Called from the constructor, and a second time only when the
+	// stream header turns out to describe a stereo stream and the pool built from the
+	// stream description is therefore half the width the picture needs.
+	void build_image_pool();
 	bool on_stream_header(std::span<const uint8_t> header);
 	void decode_unit(decode_job & job);
 	void fire_bands_through(inflight_frame & f, uint8_t last_band);
@@ -613,6 +637,14 @@ private:
 	// What the stream header said, published once for live_stats above.
 	std::atomic<uint32_t> hdr_width = 0, hdr_height = 0;
 	std::atomic<uint64_t> hdr_tools = 0;
+	// nxvc_vkd_stream_info::eyes -- how many eyes ONE decoded picture of this stream
+	// holds. See eye_count() for what the rest of the client does with it.
+	//
+	// It starts at 1 rather than 0 so that the answer before any header has arrived is
+	// the answer for an ordinary stream: every gate that consults it then behaves as it
+	// did before stereo existed, which is what keeps the window between "the decoder
+	// exists" and "the header has been parsed" from being a special case.
+	std::atomic<uint32_t> hdr_eyes = 1;
 	bool warned_view_info = false;
 };
 

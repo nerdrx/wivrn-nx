@@ -1088,6 +1088,13 @@ void on_headset_info_packet(const wivrn::from_headset::headset_info_packet & inf
 	g_variant_builder_unref(builder);
 	wivrn_server_set_field_of_view(dbus_server, value_field_of_view);
 
+	// The per-eye size the headset asked to have encoded, before the server's "stream_scale"
+	// caps it. The dashboard needs it to show what that setting will actually produce.
+	wivrn_server_set_stream_eye_size(dbus_server,
+	                                 g_variant_new("(uu)",
+	                                               uint32_t(info.stream_eye_width),
+	                                               uint32_t(info.stream_eye_height)));
+
 	wivrn_server_set_hand_tracking(dbus_server, info.hand_tracking);
 	wivrn_server_set_eye_gaze(dbus_server, info.eye_gaze);
 	wivrn_server_set_face_tracking(dbus_server, info.face_tracking != wivrn::from_headset::face_type::none);

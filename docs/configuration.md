@@ -428,6 +428,8 @@ Per-stream `options` (all optional):
 | `preset` | `1` | nxvc effort preset: `0` medium, `1` fast, `2` slow. Encoder-side only |
 | `threads` | `0` | encoder worker threads for the tile pool: `0` uses every core (capped at 16), `1` is the serial path. Byte-identical either way |
 | `pace` | `auto` | send pacing: `auto` follows the rate the headset reports it can decode at, `off` sends every composited frame, a number is a fixed frame rate. See below |
+| `entropy` | `auto` | entropy coder: `rans` spends headset decode time to make the stream smaller, `lite` spends bitrate to make it cheaper to decode, `auto` picks from the tools the headset advertises. An unrecognised value is an error, not a fallback |
+| `coded-vectors` | `default` | whether motion vectors are coded into the stream (`default`), left for the decoder to re-derive (`none`), or fixed (`static`). An unrecognised value is an error, not a fallback |
 | `band-rows` | `6` | tile rows per transport band, which is the unit of pacing and of feedback |
 | `mtu` | `1280` | transport MTU. Leaves room for WiVRn's own packet envelope inside a 1400-byte datagram |
 
@@ -523,6 +525,20 @@ composited frames were not sent.
 	]
 }
 ```
+
+### In the dashboard
+
+None of this needs a text editor. Selecting **NX Warp** in the encoder drop-down on the
+dashboard's settings page reveals an **NX Warp encoder** section carrying the settings above that
+are worth changing: [`stream_scale`](#stream_scale) (with the per-eye size and tile count it will
+produce, from the size the last connected headset asked for), `entropy`, `pace` with its fixed
+frame rate, `rc` with its `min-qp`/`max-qp` band, `coded-vectors`, and `inter` with
+`intra-period`. Each carries a one-line note on what it trades away.
+
+The remaining options — `backend`, `qp`, `intra-dir`, `preset`, `threads`, `band-rows`, `mtu` —
+are bring-up and debugging controls rather than things to tune, and stay in the file. The
+dashboard leaves any option it does not show exactly as it found it, and writes an option out only
+when it differs from the default above, so a configuration edited by hand keeps its shape.
 
 `wivrn-nxwarp-loopback`, built alongside the server, runs the whole encoder path — codec,
 packetizer, transport, receiver, reference decoder — on synthetic frames with no headset, no GPU

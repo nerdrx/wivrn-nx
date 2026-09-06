@@ -22,6 +22,7 @@
 #include <QList>
 #include <QObject>
 #include <QPointF>
+#include <QSize>
 #include <QSizeF>
 #include <nlohmann/json.hpp>
 #include <qqmlintegration.h>
@@ -48,6 +49,7 @@ public:
 		Vaapi,
 		X264,
 		Vulkan,
+		Nxwarp,
 	};
 	Q_ENUM(encoder_name)
 
@@ -57,8 +59,36 @@ public:
 		H264,
 		H265,
 		Av1,
+		CodecNxwarp,
 	};
 	Q_ENUM(video_codec)
+
+	// "entropy": which entropy coder the NX Warp bitstream uses.
+	enum nxwarp_entropy
+	{
+		EntropyAuto,
+		EntropyRans,
+		EntropyLite,
+	};
+	Q_ENUM(nxwarp_entropy)
+
+	// "pace": how often the encoder sends. A fixed rate carries a frame rate alongside.
+	enum nxwarp_pace
+	{
+		PaceAuto,
+		PaceOff,
+		PaceFixed,
+	};
+	Q_ENUM(nxwarp_pace)
+
+	// "coded-vectors": whether motion vectors are coded into the stream.
+	enum nxwarp_coded_vectors
+	{
+		VectorsDefault,
+		VectorsNone,
+		VectorsStatic,
+	};
+	Q_ENUM(nxwarp_coded_vectors)
 
 	Q_PROPERTY(bool simpleConfig READ simpleConfig NOTIFY simpleConfigChanged)
 	Q_PROPERTY(encoder_name encoder READ encoder WRITE set_encoder NOTIFY encoderChanged)
@@ -68,6 +98,21 @@ public:
 	Q_PROPERTY(bool tenbit READ tenbit WRITE set_tenbit NOTIFY tenbitChanged)
 	Q_PROPERTY(bool bitrateAuto READ bitrateAuto WRITE set_bitrateAuto NOTIFY bitrateAutoChanged)
 	Q_PROPERTY(bool mirror READ mirror WRITE set_mirror NOTIFY mirrorChanged)
+
+	// NX Warp encoder controls. Every one of these is a server configuration key that had no
+	// GUI: the whole section is gated on nxwarpSelected, because none of them mean anything
+	// for an H.264/HEVC/AV1 encoder.
+	Q_PROPERTY(bool nxwarpSelected READ nxwarpSelected NOTIFY encoderChanged)
+	Q_PROPERTY(float streamScale READ streamScale WRITE set_streamScale NOTIFY streamScaleChanged)
+	Q_PROPERTY(nxwarp_entropy nxwarpEntropy READ nxwarpEntropy WRITE set_nxwarpEntropy NOTIFY nxwarpEntropyChanged)
+	Q_PROPERTY(nxwarp_pace nxwarpPace READ nxwarpPace WRITE set_nxwarpPace NOTIFY nxwarpPaceChanged)
+	Q_PROPERTY(int nxwarpPaceFps READ nxwarpPaceFps WRITE set_nxwarpPaceFps NOTIFY nxwarpPaceFpsChanged)
+	Q_PROPERTY(bool nxwarpRcAuto READ nxwarpRcAuto WRITE set_nxwarpRcAuto NOTIFY nxwarpRcAutoChanged)
+	Q_PROPERTY(int nxwarpMinQp READ nxwarpMinQp WRITE set_nxwarpMinQp NOTIFY nxwarpMinQpChanged)
+	Q_PROPERTY(int nxwarpMaxQp READ nxwarpMaxQp WRITE set_nxwarpMaxQp NOTIFY nxwarpMaxQpChanged)
+	Q_PROPERTY(nxwarp_coded_vectors nxwarpCodedVectors READ nxwarpCodedVectors WRITE set_nxwarpCodedVectors NOTIFY nxwarpCodedVectorsChanged)
+	Q_PROPERTY(bool nxwarpInter READ nxwarpInter WRITE set_nxwarpInter NOTIFY nxwarpInterChanged)
+	Q_PROPERTY(int nxwarpIntraPeriod READ nxwarpIntraPeriod WRITE set_nxwarpIntraPeriod NOTIFY nxwarpIntraPeriodChanged)
 
 	Q_PROPERTY(bool tcpOnly READ tcpOnly WRITE set_tcpOnly NOTIFY tcpOnlyChanged)
 	Q_PROPERTY(int port READ port WRITE set_port NOTIFY portChanged)
@@ -101,6 +146,30 @@ public:
 	SETTER_GETTER_NOTIFY(int, port)
 	SETTER_GETTER_NOTIFY(QString, hostname)
 	SETTER_GETTER_NOTIFY(QString, openvr)
+	SETTER_GETTER_NOTIFY(float, streamScale)
+	SETTER_GETTER_NOTIFY(nxwarp_entropy, nxwarpEntropy)
+	SETTER_GETTER_NOTIFY(nxwarp_pace, nxwarpPace)
+	SETTER_GETTER_NOTIFY(int, nxwarpPaceFps)
+	SETTER_GETTER_NOTIFY(bool, nxwarpRcAuto)
+	SETTER_GETTER_NOTIFY(int, nxwarpMinQp)
+	SETTER_GETTER_NOTIFY(int, nxwarpMaxQp)
+	SETTER_GETTER_NOTIFY(nxwarp_coded_vectors, nxwarpCodedVectors)
+	SETTER_GETTER_NOTIFY(bool, nxwarpInter)
+	SETTER_GETTER_NOTIFY(int, nxwarpIntraPeriod)
+
+public:
+	bool nxwarpSelected() const;
+
+	// The per-eye size the encoder will actually produce for a headset asking for
+	// `headsetWidth` x `headsetHeight`, at the streamScale currently set: the same
+	// derivation the server does in get_encoder_settings, so the settings page can show the
+	// result of the slider before anything is saved. Returns a zero size when the headset
+	// size is not known yet.
+	Q_INVOKABLE QSize encodedEyeSize(int headsetWidth, int headsetHeight) const;
+	// Tiles per eye at that size: the NX Warp decoder's per-frame work, which is the whole
+	// reason the slider exists.
+	Q_INVOKABLE int encodedTiles(int headsetWidth, int headsetHeight) const;
+
 private:
 	nlohmann::json m_jsonSettings = nlohmann::json::object();
 	nlohmann::json m_originalSettings;
@@ -113,6 +182,15 @@ public:
 	Q_INVOKABLE void load(const wivrn_server * server);
 	Q_INVOKABLE void save(wivrn_server * server);
 	Q_INVOKABLE void restore_defaults();
+
+	// The configuration document itself: what load() parsed and what save() will hand the
+	// server, verbatim. Split out of load()/save() so the settings document can be read and
+	// replaced without a live server on the bus — which is how the round-trip test drives it.
+	const nlohmann::json & configuration() const
+	{
+		return m_jsonSettings;
+	}
+	void load_json(nlohmann::json settings);
 
 	QList<video_codec> allowedCodecs() const;
 	bool can10bit() const;

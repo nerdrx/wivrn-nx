@@ -18,14 +18,18 @@
 
 #include "settings.h"
 
+#include "encoder/stream_scale.h"
 #include "escape_string.h"
 #include "gui_config.h"
+#include "nxwarp_settings.h"
 #include "utils/flatpak.h"
 #include "wivrn_config.h"
 #include "wivrn_server.h"
 #include <QList>
 #include <QObject>
+#include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <fcntl.h>
 #include <nlohmann/json.hpp>
 #include <qqmlintegration.h>
@@ -38,6 +42,7 @@ const std::vector<std::pair<Settings::encoder_name, std::string>> encoder_ids{
         {Settings::encoder_name::Vaapi, "vaapi"},
         {Settings::encoder_name::X264, "x264"},
         {Settings::encoder_name::Vulkan, "vulkan"},
+        {Settings::encoder_name::Nxwarp, "nxwarp"},
 };
 
 const std::vector<std::tuple<Settings::video_codec, std::string>> codec_ids{
@@ -47,6 +52,7 @@ const std::vector<std::tuple<Settings::video_codec, std::string>> codec_ids{
         {Settings::video_codec::H265, "hevc"},
         {Settings::video_codec::Av1, "av1"},
         {Settings::video_codec::Av1, "AV1"},
+        {Settings::video_codec::CodecNxwarp, "nxwarp"},
 };
 
 bool can10bit(Settings::video_codec c)
@@ -55,6 +61,10 @@ bool can10bit(Settings::video_codec c)
 	{
 		case Settings::CodecAuto:
 		case Settings::H264:
+			return false;
+		// NX Warp v1 is an 8-bit bitstream; get_encoder_settings forces bit_depth 8 for
+		// it whatever the configuration says.
+		case Settings::CodecNxwarp:
 			return false;
 		case Settings::H265:
 		case Settings::Av1:
@@ -127,6 +137,16 @@ void Settings::emitAllChanged()
 	hidForwardingChanged();
 	portChanged();
 	hostnameChanged();
+	streamScaleChanged();
+	nxwarpEntropyChanged();
+	nxwarpPaceChanged();
+	nxwarpPaceFpsChanged();
+	nxwarpRcAutoChanged();
+	nxwarpMinQpChanged();
+	nxwarpMaxQpChanged();
+	nxwarpCodedVectorsChanged();
+	nxwarpInterChanged();
+	nxwarpIntraPeriodChanged();
 }
 
 void Settings::load(const wivrn_server * server)
@@ -135,11 +155,7 @@ void Settings::load(const wivrn_server * server)
 	try
 	{
 		auto conf = server->jsonConfiguration();
-		m_jsonSettings = nlohmann::json::parse(conf.toUtf8());
-		m_originalSettings = m_jsonSettings;
-		if (not m_jsonSettings.is_object())
-			m_jsonSettings = nlohmann::json::object();
-		emitAllChanged();
+		load_json(nlohmann::json::parse(conf.toUtf8()));
 	}
 	catch (std::exception & e)
 	{
@@ -148,6 +164,15 @@ void Settings::load(const wivrn_server * server)
 		emitAllChanged();
 		return;
 	}
+}
+
+void Settings::load_json(nlohmann::json settings)
+{
+	m_jsonSettings = std::move(settings);
+	if (not m_jsonSettings.is_object())
+		m_jsonSettings = nlohmann::json::object();
+	m_originalSettings = m_jsonSettings;
+	emitAllChanged();
 }
 
 static Settings::encoder_name encoder_for_item(const nlohmann::json & item)
@@ -234,6 +259,14 @@ void Settings::set_encoder(const encoder_name & value)
 		case X264:
 		case Vulkan:
 			m_jsonSettings["encoder"] = encoder_from_id(value);
+			break;
+		// NX Warp needs the codec spelled out as well: "nxwarp" alone would be read as an
+		// encoder name with an automatic codec, and the codec is not negotiable.
+		case Nxwarp:
+			m_jsonSettings["encoder"] = nlohmann::json::object({
+			        {"encoder", std::string(wivrn::dashboard::nxwarp_name)},
+			        {"codec", std::string(wivrn::dashboard::nxwarp_name)},
+			});
 	}
 	encoderChanged();
 	if (not can10bit())
@@ -329,7 +362,9 @@ bool Settings::tenbit() const
 void Settings::set_tenbit(const bool & value)
 {
 	auto old = tenbit();
-	if (codec() == CodecAuto)
+	// NX Warp is an 8-bit bitstream with no setting at all -- get_encoder_settings forces
+	// bit_depth 8 for it -- so writing one out would suggest a choice that does not exist.
+	if (codec() == CodecAuto or codec() == CodecNxwarp)
 		m_jsonSettings.erase("bit-depth");
 	else
 		m_jsonSettings["bit-depth"] = value ? 10 : 8;
@@ -593,6 +628,11 @@ QList<Settings::video_codec> Settings::allowedCodecs() const
 			return {
 			        video_codec::H264,
 			};
+		// NX Warp is its own codec: the encoder and the bitstream are the same thing.
+		case encoder_name::Nxwarp:
+			return {
+			        video_codec::CodecNxwarp,
+			};
 	}
 	return {video_codec::CodecAuto};
 }
@@ -600,6 +640,240 @@ QList<Settings::video_codec> Settings::allowedCodecs() const
 bool Settings::can10bit() const
 {
 	return ::can10bit(codec());
+}
+
+// ---------------------------------------------------------------------------------------------
+// NX Warp encoder controls
+//
+// Everything below is a thin wrapper over nxwarp_settings.h, which does the JSON and is what the
+// round-trip test drives. The rule these all share: setting a control to the encoder's own default
+// erases the key rather than writing it, so config.json keeps only what the user actually chose.
+// ---------------------------------------------------------------------------------------------
+
+namespace nxd = wivrn::dashboard;
+
+bool Settings::nxwarpSelected() const
+{
+	return nxd::has_nxwarp(m_jsonSettings);
+}
+
+float Settings::streamScale() const
+{
+	// Top level, not an encoder option: it is the compositor's encode size, not a codec
+	// parameter. Out-of-range values are what the server would refuse, so they read as the
+	// default and the slider shows what will actually run.
+	auto it = m_jsonSettings.find("stream_scale");
+	if (it == m_jsonSettings.end())
+		it = m_jsonSettings.find("stream-scale");
+	if (it != m_jsonSettings.end() and it->is_number())
+	{
+		const double v = it->get<double>();
+		if (v > 0 and v <= 1)
+			return float(v);
+	}
+	return 1.0f;
+}
+
+void Settings::set_streamScale(const float & value)
+{
+	const auto old = streamScale();
+	// Snapped to the slider's own step so a float that reads back a hair off does not make
+	// every save look like a change.
+	// Rounded in double, not float: a float 0.8 widened to double is 0.800000011920929, and
+	// that is what would land in the user's config.json.
+	const double clamped = std::clamp(std::round(double(value) * 100.0) / 100.0, 0.5, 1.0);
+	// The dashed spelling is accepted on read; normalise to the documented one on write so a
+	// config never carries both.
+	m_jsonSettings.erase("stream-scale");
+	if (clamped >= 1.0)
+		m_jsonSettings.erase("stream_scale");
+	else
+		m_jsonSettings["stream_scale"] = clamped;
+	if (old != streamScale())
+		streamScaleChanged();
+}
+
+QSize Settings::encodedEyeSize(int headsetWidth, int headsetHeight) const
+{
+	if (headsetWidth <= 0 or headsetHeight <= 0)
+		return {};
+	// The server's own derivation, shared rather than reimplemented: get_encoder_settings
+	// calls the same function. The client scale is passed as 1 because the dashboard is
+	// showing the effect of THIS slider — the headset's own reduced-resolution setting is not
+	// on the wire until it connects, and when it asks for less than the slider it wins (the
+	// two compose as a minimum), so this is an upper bound.
+	const auto r = wivrn::stream_encode_size(uint16_t(std::min(headsetWidth, 0xffff)),
+	                                         uint16_t(std::min(headsetHeight, 0xffff)),
+	                                         1.0f,
+	                                         streamScale());
+	return QSize(r.width, r.height);
+}
+
+int Settings::encodedTiles(int headsetWidth, int headsetHeight) const
+{
+	const auto size = encodedEyeSize(headsetWidth, headsetHeight);
+	if (size.isEmpty())
+		return 0;
+	return (size.width() / wivrn::encode_alignment) * (size.height() / wivrn::encode_alignment);
+}
+
+Settings::nxwarp_entropy Settings::nxwarpEntropy() const
+{
+	const auto v = nxd::nxwarp_option(m_jsonSettings, "entropy").value_or(std::string(nxd::nxwarp_default_entropy));
+	if (v == "rans")
+		return EntropyRans;
+	if (v == "lite")
+		return EntropyLite;
+	return EntropyAuto;
+}
+
+void Settings::set_nxwarpEntropy(const nxwarp_entropy & value)
+{
+	const auto old = nxwarpEntropy();
+	const char * v = value == EntropyRans ? "rans" : value == EntropyLite ? "lite"
+	                                                                      : "auto";
+	nxd::set_nxwarp_option_or_default(m_jsonSettings, "entropy", v, nxd::nxwarp_default_entropy);
+	if (old != nxwarpEntropy())
+		nxwarpEntropyChanged();
+}
+
+Settings::nxwarp_pace Settings::nxwarpPace() const
+{
+	switch (nxd::nxwarp_pace_mode(m_jsonSettings))
+	{
+		case nxd::pace_mode::off:
+			return PaceOff;
+		case nxd::pace_mode::fixed:
+			return PaceFixed;
+		case nxd::pace_mode::automatic:
+			break;
+	}
+	return PaceAuto;
+}
+
+void Settings::set_nxwarpPace(const nxwarp_pace & value)
+{
+	const auto old = nxwarpPace();
+	const auto mode = value == PaceOff ? nxd::pace_mode::off : value == PaceFixed ? nxd::pace_mode::fixed
+	                                                                              : nxd::pace_mode::automatic;
+	nxd::set_nxwarp_pace(m_jsonSettings, mode, uint32_t(nxwarpPaceFps()));
+	if (old != nxwarpPace())
+		nxwarpPaceChanged();
+}
+
+int Settings::nxwarpPaceFps() const
+{
+	// 72 is the rate the fixed mode is nearly always reached for: the floor of the refresh
+	// rates the supported headsets run at.
+	return int(nxd::nxwarp_pace_fps(m_jsonSettings, 72));
+}
+
+void Settings::set_nxwarpPaceFps(const int & value)
+{
+	const auto old = nxwarpPaceFps();
+	// Only meaningful in the fixed mode; in the other two there is no number to write and the
+	// spin box is disabled.
+	if (nxwarpPace() == PaceFixed)
+		nxd::set_nxwarp_pace(m_jsonSettings, nxd::pace_mode::fixed, uint32_t(std::clamp(value, 1, 1000)));
+	if (old != nxwarpPaceFps())
+		nxwarpPaceFpsChanged();
+}
+
+bool Settings::nxwarpRcAuto() const
+{
+	return nxd::nxwarp_option(m_jsonSettings, "rc").value_or(std::string(nxd::nxwarp_default_rc)) != "fixed";
+}
+
+void Settings::set_nxwarpRcAuto(const bool & value)
+{
+	const auto old = nxwarpRcAuto();
+	nxd::set_nxwarp_option_or_default(m_jsonSettings, "rc", value ? "auto" : "fixed", nxd::nxwarp_default_rc);
+	if (old != nxwarpRcAuto())
+		nxwarpRcAutoChanged();
+}
+
+int Settings::nxwarpMinQp() const
+{
+	return int(nxd::nxwarp_option_u32(m_jsonSettings, "min-qp", nxd::nxwarp_default_min_qp));
+}
+
+void Settings::set_nxwarpMinQp(const int & value)
+{
+	const auto old = nxwarpMinQp();
+	// The server clamps to 63 and refuses min above max; keep the GUI inside both so a saved
+	// configuration can never fail to start a session.
+	const uint32_t v = uint32_t(std::clamp(value, 0, 63));
+	nxd::set_nxwarp_option_u32(m_jsonSettings, "min-qp", v, nxd::nxwarp_default_min_qp);
+	if (int(v) > nxwarpMaxQp())
+		set_nxwarpMaxQp(int(v));
+	if (old != nxwarpMinQp())
+		nxwarpMinQpChanged();
+}
+
+int Settings::nxwarpMaxQp() const
+{
+	return int(nxd::nxwarp_option_u32(m_jsonSettings, "max-qp", nxd::nxwarp_default_max_qp));
+}
+
+void Settings::set_nxwarpMaxQp(const int & value)
+{
+	const auto old = nxwarpMaxQp();
+	const uint32_t v = uint32_t(std::clamp(value, 0, 63));
+	nxd::set_nxwarp_option_u32(m_jsonSettings, "max-qp", v, nxd::nxwarp_default_max_qp);
+	if (int(v) < nxwarpMinQp())
+		set_nxwarpMinQp(int(v));
+	if (old != nxwarpMaxQp())
+		nxwarpMaxQpChanged();
+}
+
+Settings::nxwarp_coded_vectors Settings::nxwarpCodedVectors() const
+{
+	const auto v = nxd::nxwarp_option(m_jsonSettings, "coded-vectors")
+	                       .value_or(std::string(nxd::nxwarp_default_coded_vectors));
+	if (v == "none")
+		return VectorsNone;
+	if (v == "static")
+		return VectorsStatic;
+	return VectorsDefault;
+}
+
+void Settings::set_nxwarpCodedVectors(const nxwarp_coded_vectors & value)
+{
+	const auto old = nxwarpCodedVectors();
+	const char * v = value == VectorsNone ? "none" : value == VectorsStatic ? "static"
+	                                                                        : "default";
+	nxd::set_nxwarp_option_or_default(m_jsonSettings, "coded-vectors", v, nxd::nxwarp_default_coded_vectors);
+	if (old != nxwarpCodedVectors())
+		nxwarpCodedVectorsChanged();
+}
+
+bool Settings::nxwarpInter() const
+{
+	return nxd::nxwarp_option_bool(m_jsonSettings, "inter", nxd::nxwarp_default_inter);
+}
+
+void Settings::set_nxwarpInter(const bool & value)
+{
+	const auto old = nxwarpInter();
+	nxd::set_nxwarp_option_bool(m_jsonSettings, "inter", value, nxd::nxwarp_default_inter);
+	if (old != nxwarpInter())
+		nxwarpInterChanged();
+}
+
+int Settings::nxwarpIntraPeriod() const
+{
+	return int(nxd::nxwarp_option_u32(m_jsonSettings, "intra-period", nxd::nxwarp_default_intra_period));
+}
+
+void Settings::set_nxwarpIntraPeriod(const int & value)
+{
+	const auto old = nxwarpIntraPeriod();
+	nxd::set_nxwarp_option_u32(m_jsonSettings,
+	                           "intra-period",
+	                           uint32_t(std::clamp(value, 1, 100000)),
+	                           nxd::nxwarp_default_intra_period);
+	if (old != nxwarpIntraPeriod())
+		nxwarpIntraPeriodChanged();
 }
 
 void Settings::save(wivrn_server * server)
@@ -622,6 +896,9 @@ void Settings::restore_defaults()
 	m_jsonSettings.erase("application");
 	m_jsonSettings.erase("port");
 	m_jsonSettings.erase("hostname");
+	// The NX Warp options live inside "encoder", which is erased above, so they go with it.
+	// "stream_scale" is top level and has to be named.
+	m_jsonSettings.erase("stream_scale");
 	emitAllChanged();
 }
 

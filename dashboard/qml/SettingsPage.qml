@@ -67,6 +67,10 @@ Kirigami.ScrollablePage {
                         {
                             label: i18n("x264 (software encoding)"),
                             encoder: Settings.X264
+                        },
+                        {
+                            label: i18n("NX Warp (experimental, headset GPU decode)"),
+                            encoder: Settings.Nxwarp
                         }
                     ]
                     onCurrentIndexChanged: if (settings.allowUpdates) {Settings.encoder = model[currentIndex].encoder}
@@ -93,6 +97,216 @@ Kirigami.ScrollablePage {
                 }
                 Kirigami.ContextualHelpButton {
                     toolTipText: i18n("Adapt the bitrate to the wireless link quality while streaming. The bitrate configured on the headset is the maximum. On a sudden lag spike the bitrate drops sharply to let the connection recover, then climbs back. Applies from the next connection.")
+                }
+            }
+
+            // ---------------------------------------------------------------------
+            // NX Warp encoder. Every control here is a server configuration key that
+            // previously had no GUI. The whole section is hidden unless NX Warp is the
+            // selected encoder, because none of these mean anything for H.264/HEVC/AV1.
+            // ---------------------------------------------------------------------
+            Kirigami.Separator {
+                Kirigami.FormData.isSection: true
+                visible: Settings.nxwarpSelected
+            }
+
+            Kirigami.Heading {
+                text: i18n("NX Warp encoder")
+                level: 1
+                type: Kirigami.Heading.Type.Primary
+                visible: Settings.nxwarpSelected
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: i18n("Stream scale:")
+                visible: Settings.nxwarpSelected
+                Layout.fillWidth: true
+                Controls.Slider {
+                    id: stream_scale
+                    Layout.fillWidth: true
+                    from: 0.5
+                    to: 1.0
+                    stepSize: 0.05
+                    snapMode: Controls.Slider.SnapAlways
+                    value: Settings.streamScale
+                    // The size readout has to follow the handle, not the saved value.
+                    onValueChanged: if (settings.allowUpdates) { Settings.streamScale = value }
+                }
+                Controls.Label {
+                    text: stream_scale.value.toFixed(2)
+                    Layout.preferredWidth: 35
+                    Layout.alignment: Qt.AlignRight
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("Fewer pixels per eye, proportionally less decode time on the headset, softer image. Caps what the headset asks for; if it already asks for less, its own setting wins. Applies from the next connection.")
+                }
+            }
+
+            // What the slider actually produces, live. The size comes from the headset that
+            // last connected, so before any connection there is nothing honest to show.
+            Controls.Label {
+                visible: Settings.nxwarpSelected
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                opacity: 0.75
+                text: {
+                    let s = WivrnServer.streamEyeSize;
+                    if (!s || s.width <= 0 || s.height <= 0)
+                        return i18n("Connect a headset once to see the resulting encode size.");
+                    let e = Settings.encodedEyeSize(s.width, s.height);
+                    let tiles = Settings.encodedTiles(s.width, s.height);
+                    return i18n("Encodes %1x%2 per eye (%3x%4 = %5 tiles), from the %6x%7 the headset asks for.",
+                                e.width, e.height,
+                                e.width / 64, e.height / 64, tiles,
+                                s.width, s.height);
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: i18n("Entropy coder:")
+                visible: Settings.nxwarpSelected
+                Controls.ComboBox {
+                    id: nxwarp_entropy
+                    model: [
+                        {
+                            label: i18nc("automatic entropy coder", "Auto"),
+                            value: Settings.EntropyAuto
+                        },
+                        {
+                            label: i18n("rANS (smaller stream)"),
+                            value: Settings.EntropyRans
+                        },
+                        {
+                            label: i18n("Lite (cheaper to decode)"),
+                            value: Settings.EntropyLite
+                        }
+                    ]
+                    textRole: "label"
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("rANS spends headset decode time to make the stream smaller; Lite spends bitrate to make it cheaper to decode. Auto picks from what the headset says it supports.")
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: i18n("Send pacing:")
+                visible: Settings.nxwarpSelected
+                Controls.ComboBox {
+                    id: nxwarp_pace
+                    model: [
+                        {
+                            label: i18nc("automatic send pacing", "Auto"),
+                            value: Settings.PaceAuto
+                        },
+                        {
+                            label: i18n("Off (send every frame)"),
+                            value: Settings.PaceOff
+                        },
+                        {
+                            label: i18n("Fixed rate"),
+                            value: Settings.PaceFixed
+                        }
+                    ]
+                    textRole: "label"
+                }
+                Controls.SpinBox {
+                    id: nxwarp_pace_fps
+                    from: 1
+                    to: 1000
+                    enabled: nxwarp_pace.model[nxwarp_pace.currentIndex].value === Settings.PaceFixed
+                    visible: enabled
+                }
+                Controls.Label {
+                    text: i18nc("frames per second", "fps")
+                    visible: nxwarp_pace_fps.visible
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("Auto sends at the rate the headset reports it can decode at; Off sends every composited frame, which wastes bitrate the headset cannot keep up with; a fixed rate is held exactly whatever the headset reports.")
+                }
+            }
+
+            RowLayout {
+                visible: Settings.nxwarpSelected
+                Controls.CheckBox {
+                    id: nxwarp_rc_auto
+                    text: i18n("Automatic quantiser")
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("Maps the bitrate the session allows to a quantiser every frame; turning it off holds one fixed quality and lets the bitrate go where it likes.")
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: i18n("Quantiser range:")
+                visible: Settings.nxwarpSelected && nxwarp_rc_auto.checked
+                Controls.SpinBox {
+                    id: nxwarp_min_qp
+                    from: 0
+                    to: 63
+                }
+                Controls.Label {
+                    text: i18nc("range separator between minimum and maximum quantiser", "to")
+                }
+                Controls.SpinBox {
+                    id: nxwarp_max_qp
+                    from: 0
+                    to: 63
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("The band the automatic quantiser may move in. A lower minimum buys sharpness on an idle link, a lower maximum refuses to degrade quality and drops frames instead.")
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: i18n("Coded motion vectors:")
+                visible: Settings.nxwarpSelected
+                Controls.ComboBox {
+                    id: nxwarp_coded_vectors
+                    model: [
+                        {
+                            label: i18nc("default coded vectors mode", "Default"),
+                            value: Settings.VectorsDefault
+                        },
+                        {
+                            label: i18n("None"),
+                            value: Settings.VectorsNone
+                        },
+                        {
+                            label: i18n("Static"),
+                            value: Settings.VectorsStatic
+                        }
+                    ]
+                    textRole: "label"
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("Coding motion vectors into the stream costs bitrate and encoder time but spares the headset from re-deriving them; None leaves that work to the decoder.")
+                }
+            }
+
+            RowLayout {
+                visible: Settings.nxwarpSelected
+                Controls.CheckBox {
+                    id: nxwarp_inter
+                    text: i18n("Inter prediction")
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("Predict each frame from the one before: far less bitrate for the same quality, at the cost of a lost frame damaging the ones that follow until the next intra frame.")
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: i18n("Intra period:")
+                visible: Settings.nxwarpSelected && nxwarp_inter.checked
+                Controls.SpinBox {
+                    id: nxwarp_intra_period
+                    from: 1
+                    to: 100000
+                }
+                Controls.Label {
+                    text: i18nc("unit for the intra period setting", "frames")
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("How often a frame is coded without prediction. Shorter recovers from loss sooner and costs bitrate; longer is cheaper and leaves damage on screen for longer.")
                 }
             }
 
@@ -354,6 +568,24 @@ Kirigami.ScrollablePage {
         DashboardSettings.nx_theme = nx_look.checked;
 
         Settings.bitrateAuto = bitrate_auto.checked;
+
+        // NX Warp. streamScale is already written live by the slider so its size readout can
+        // follow the handle; the rest are written here, on OK, like every other control.
+        if (Settings.nxwarpSelected) {
+            Settings.nxwarpEntropy = nxwarp_entropy.model[nxwarp_entropy.currentIndex].value;
+            // The pace mode has to be set before the rate: the rate is only stored in the
+            // fixed mode, and the setter reads the mode to decide.
+            Settings.nxwarpPace = nxwarp_pace.model[nxwarp_pace.currentIndex].value;
+            Settings.nxwarpPaceFps = nxwarp_pace_fps.value;
+            Settings.nxwarpRcAuto = nxwarp_rc_auto.checked;
+            // Minimum first: each setter pushes the other bound out of the way rather than
+            // letting an inverted range reach the server, which would refuse the session.
+            Settings.nxwarpMinQp = nxwarp_min_qp.value;
+            Settings.nxwarpMaxQp = nxwarp_max_qp.value;
+            Settings.nxwarpCodedVectors = nxwarp_coded_vectors.model[nxwarp_coded_vectors.currentIndex].value;
+            Settings.nxwarpInter = nxwarp_inter.checked;
+            Settings.nxwarpIntraPeriod = nxwarp_intra_period.value;
+        }
         Settings.mirror = desktop_mirror.checked;
         Settings.debugGui = debug_gui.checked;
         Settings.steamVrLh = steamvr_lh.checked;
@@ -367,6 +599,17 @@ Kirigami.ScrollablePage {
     function load() {
         select_game.load();
         bitrate_auto.checked = Settings.bitrateAuto;
+
+        stream_scale.value = Settings.streamScale;
+        nxwarp_entropy.currentIndex = nxwarp_entropy.model.findIndex(i => i.value === Settings.nxwarpEntropy);
+        nxwarp_pace.currentIndex = nxwarp_pace.model.findIndex(i => i.value === Settings.nxwarpPace);
+        nxwarp_pace_fps.value = Settings.nxwarpPaceFps;
+        nxwarp_rc_auto.checked = Settings.nxwarpRcAuto;
+        nxwarp_min_qp.value = Settings.nxwarpMinQp;
+        nxwarp_max_qp.value = Settings.nxwarpMaxQp;
+        nxwarp_coded_vectors.currentIndex = nxwarp_coded_vectors.model.findIndex(i => i.value === Settings.nxwarpCodedVectors);
+        nxwarp_inter.checked = Settings.nxwarpInter;
+        nxwarp_intra_period.value = Settings.nxwarpIntraPeriod;
         desktop_mirror.checked = Settings.mirror;
         debug_gui.checked = Settings.debugGui;
         steamvr_lh.checked = Settings.steamVrLh;

@@ -74,6 +74,10 @@ qt_add_qml_module(wivrn-dashboard
         qml/Github.svg
 )
 
+# stream_scale.h: the settings page shows the per-eye encode size the server will derive from
+# "stream_scale", using the server's own function rather than a second copy of the rounding rule.
+target_include_directories(wivrn-dashboard PRIVATE ${CMAKE_SOURCE_DIR}/server)
+
 configure_file(gui_config.h.in gui_config.h)
 configure_file(io.github.wivrn.wivrn.desktop.in io.github.wivrn.wivrn.nx.desktop)
 
@@ -94,6 +98,7 @@ target_link_libraries(wivrn-dashboard
     QCoro::Core
     QCoro::Network
     QCoro::Qml
+    QCoro::Qml
     wivrn-common-base
     wivrn-common-server
     wivrn-external
@@ -111,6 +116,45 @@ if (TARGET KF6::ColorScheme AND TARGET KF6::ConfigCore)
     target_link_libraries(wivrn-dashboard PRIVATE KF6::ColorScheme KF6::ConfigCore)
     target_compile_definitions(wivrn-dashboard PRIVATE WIVRN_HAVE_KCOLORSCHEME)
 endif()
+
+# GUI-in, config.json-out round trip for the NX Warp encoder controls. It links the real Settings
+# object and drives it through the Qt metaobject by the same property names the QML uses, which is
+# the one thing qmllint cannot check here (the singleton is accessed unqualified, so it never
+# resolves the type). Qt Core and DBus only -- no display needed, so it runs anywhere.
+# Settings' load()/save() take a wivrn_server, so its metaobject and the generated D-Bus
+# interface come along even though the test never touches the bus.
+add_executable(wivrn-dashboard-settings-test
+    ${CMAKE_CURRENT_SOURCE_DIR}/../tests/dashboard_nxwarp_settings_test.cpp
+    settings.cpp
+    escape_string.cpp
+    wivrn_server.cpp
+    wivrn_qdbus_types.cpp
+    dashboard_utils.cpp
+    adb.cpp
+    ${DBUS_INTERFACE_SRC}
+)
+target_include_directories(wivrn-dashboard-settings-test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}
+    ${CMAKE_SOURCE_DIR}/server
+)
+target_compile_features(wivrn-dashboard-settings-test PRIVATE cxx_std_23)
+target_link_libraries(wivrn-dashboard-settings-test PRIVATE
+    Qt6::Core
+    Qt6::DBus
+    Qt6::Qml
+    Qt6::Network
+    Qt6::Widgets
+    Qt6::Gui
+    KF6::CoreAddons
+    KF6::I18n
+    QCoro::Core
+    QCoro::Network
+    QCoro::Qml
+    wivrn-common-base
+    wivrn-common-server
+    wivrn-external
+)
 
 install(TARGETS wivrn-dashboard ${KDE_INSTALL_TARGETS_DEFAULT_ARGS})
 

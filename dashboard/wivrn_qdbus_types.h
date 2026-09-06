@@ -1,7 +1,16 @@
 #pragma once
 
+#include <QDBusArgument>
 #include <QObject>
 #include <QQmlEngine>
+#include <QSize>
+
+// The Server interface carries StreamEyeSize as a (uu) struct, mapped to QSize by the
+// QtTypeName annotation in the interface XML. Qt has no D-Bus marshalling for QSize of its own,
+// so qdbusxml2cpp's generated property needs these two.
+QDBusArgument & operator<<(QDBusArgument & arg, const QSize & size);
+const QDBusArgument & operator>>(const QDBusArgument & arg, QSize & size);
+Q_DECLARE_METATYPE(QSize)
 
 // Same as XrFovf
 struct field_of_view

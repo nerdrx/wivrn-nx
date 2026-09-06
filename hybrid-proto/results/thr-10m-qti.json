@@ -1,0 +1,1 @@
+{"name":"thr-10m-qti","mode":1,"stream":"base_1088_10m.hevc","codec":"OMX.qcom.video.decoder.hevc","w":1088,"h":1088,"low_latency":0,"qti_low_latency":1,"frames":200,"n":199,"mean":1.3492,"p50":1.1158,"p95":3.5970,"p99":6.9408,"min":0.0295,"max":7.4402,"fps":707.375,"mean_interval":1.3492,"err":0,"color_format":2141391878,"stride":1152,"slice_height":1088,"dumped":0}

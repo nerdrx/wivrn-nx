@@ -484,6 +484,9 @@ class video_encoder_nxwarp : public video_encoder
 	std::chrono::steady_clock::time_point prof_since = std::chrono::steady_clock::now();
 	uint64_t prof_n = 0;
 	double prof_ms = 0, prof_max_ms = 0;
+	// The stereo compose's share of the above, as the device timed it. Always 0 at
+	// one eye, where there is nothing to compose.
+	double prof_compose_ms = 0, prof_compose_max_ms = 0;
 	uint64_t prof_bytes = 0;
 	// The quantiser over that interval: the sum for a mean, and the extremes,
 	// which is what says whether the controller settled or is hunting.

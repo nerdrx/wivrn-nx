@@ -950,6 +950,17 @@ int main(int argc, char ** argv)
 	// twelve minutes into a 90 fps session, and the point at which one went dark.
 	// --start-frame-id is the same option under its other name.
 	uint64_t first_frame = 0;
+	// The headset's nxvc decoder tool mask, as headset_info_packet::nxvc_tools would
+	// carry it. There is no headset in this process, so it is simulated: this is the
+	// only way to exercise the negotiation without two devices and a network.
+	//
+	// The default is every bit the encoder can emit, which is what a headset running
+	// this same nx-warp build reports and what keeps every existing run unchanged.
+	// --client-tools 0 is the old client that reports nothing; a number with bit 30
+	// clear is a headset whose decoder has no ENTROPY_LITE.
+	std::string client_tools = "all";
+	// "auto" (the server default), "rans" or "lite".
+	std::string entropy = "auto";
 
 	for (int i = 1; i < argc; ++i)
 	{
@@ -991,6 +1002,10 @@ int main(int argc, char ** argv)
 			intra_period = uint32_t(std::stoul(next()));
 		else if (a == "--coded-vectors")
 			coded_vectors = next();
+		else if (a == "--client-tools")
+			client_tools = next();
+		else if (a == "--entropy")
+			entropy = next();
 		else if (a == "--qp")
 			qp = uint32_t(std::stoul(next()));
 		else if (a == "--reconnect-at")
@@ -1066,6 +1081,22 @@ int main(int argc, char ** argv)
 	settings.options["inter"] = inter;
 	settings.options["intra-period"] = std::to_string(intra_period);
 	settings.options["coded-vectors"] = coded_vectors;
+	settings.options["entropy"] = entropy;
+	// The simulated headset mask. "all" is every bit set, which is a headset that can
+	// decode anything this encoder emits and is what keeps every existing run in this
+	// harness unchanged. It is spelled ~0 rather than read from nxvc because this file,
+	// like the rest of the server encoder layer, carries no nxvc type -- see the header
+	// comment of nxwarp_codec.h. A specific mask goes in as a number.
+	if (client_tools == "all")
+		settings.nxvc_tools = ~0ull;
+	else if (client_tools == "none")
+		settings.nxvc_tools = 0;
+	else
+		settings.nxvc_tools = std::stoull(client_tools, nullptr, 0);
+	std::fprintf(stderr,
+	             "[e2e] simulated headset nxvc_tools = 0x%llx (entropy request \"%s\")\n",
+	             (unsigned long long)settings.nxvc_tools,
+	             entropy.c_str());
 	// Rate control off by default. The byte-identity check below compares this
 	// run's bitstream against nxv-dec's decode of it, which a moving quantiser
 	// does not disturb -- but the frame sizes and the loss pattern would stop

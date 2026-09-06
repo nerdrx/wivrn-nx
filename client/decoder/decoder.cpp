@@ -114,3 +114,15 @@ const std::vector<wivrn::video_codec> & wivrn::decoder::supported_codecs()
 	static std::vector<wivrn::video_codec> res = supported_codecs_();
 	return res;
 }
+
+uint64_t wivrn::decoder::nxvc_tools(const vk::PhysicalDeviceProperties & props)
+{
+#if WIVRN_USE_NXWARP
+	// The derivation lives beside the decoder that has to agree with it; this is the
+	// name the rest of the client uses. See nxwarp_client_tools().
+	return nxwarp_client_tools(props);
+#else
+	(void)props;
+	return 0;
+#endif
+}

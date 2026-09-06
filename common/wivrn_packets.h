@@ -603,6 +603,22 @@ struct headset_info_packet
 	// htc body only
 	uint32_t num_generic_trackers;
 	std::vector<video_codec> supported_codecs; // from preferred to least preferred
+	// The nxvc tool bits this headset's decoder will accept (docs/SYNTAX.md 2.3), for
+	// video_codec::nxwarp only. Zero means "this headset did not report one" -- an old
+	// client, or a build with no NX Warp decoder in it -- and the server must read that
+	// as "no information", never as "supports nothing", or every stream would be refused.
+	//
+	// It is the PER-DEVICE mask (nxvc_vk_decoder_tools) and not the build-wide superset
+	// (nxvc_vk_decoder_tools_supported), because those differ and the difference is the
+	// point: a decoder on an Adreno 650 clears XFORM_LARGE (bit 27), which it decodes
+	// wrong and, on the 4:4:4 32x32 vector, wedges on. A capability handshake that sent
+	// the superset would invite exactly the stream that kills the session.
+	//
+	// What it buys: ENTROPY_LITE (bit 30) is a NEGOTIATED tool -- it spends bytes to buy
+	// the headset's Pass A time, so only the decoder can say whether it is worth it, and
+	// only this field lets the server find out. Before it the server had to be told by
+	// hand and a wrong answer was a black screen.
+	uint64_t nxvc_tools = 0;
 	std::optional<uint8_t> bit_depth;
 	std::string system_name;
 

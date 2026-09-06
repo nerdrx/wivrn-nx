@@ -71,6 +71,11 @@ struct encoder_settings
 	// per-frame reference control and keep to the rungs above.
 	bool ref_invalidation = true;
 	std::optional<std::string> device;
+	// The nxvc tool bits the headset's decoder advertised (headset_info_packet), for
+	// video_codec::nxwarp only. Zero means the headset reported none, which is "no
+	// information" and not "supports nothing": the NX Warp encoder then keeps to the
+	// tools every decoder has and negotiates nothing. See video_encoder_nxwarp.cpp.
+	uint64_t nxvc_tools = 0;
 };
 
 // Number of video streams: left, right, alpha, quad

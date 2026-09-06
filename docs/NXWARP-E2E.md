@@ -761,7 +761,7 @@ not a reason to refuse to start.
 Things the hardware does that no specification made us expect, each of which cost real
 time before it was understood. Written down so the next one is a grep.
 
-### The Adreno 650 refuses a 208-byte push-constant block
+### The Adreno 650 reports a 128-byte push-constant limit, and means it eventually
 
 The reprojection pass's push constants grew from **176 to 208 bytes** and the Pico 4's
 Adreno 650 began failing `vkCreateGraphicsPipelines` on the first streamed frame. The
@@ -769,21 +769,43 @@ client exited; from the server the client had simply vanished, which reads as a 
 fault. It was variously blamed on the encoder, the link and the merge before it was
 blamed on the pipeline.
 
-`maxPushConstantsSize` on this device is **256 bytes** and the Vulkan guaranteed minimum
-is 128, so 208 is legal by every number anyone would look up. It is still refused in this
-pipeline. 176 works.
-
-The client now logs the limit at startup, next to the driver version:
+`maxPushConstantsSize` on this device is **128 bytes** -- the Vulkan guaranteed minimum,
+not the 256 that was assumed here before anyone measured it. The client logs it at
+startup, next to the driver version:
 
 ```
-    maxPushConstantsSize: 256 bytes
+    maxPushConstantsSize: 128 bytes
 ```
 
-which is worth having precisely because the number does not predict the failure -- what it
-gives you is the one line to compare against the block size when a pipeline creation
-fails for no reason the validation layers explain. The block itself has a `static_assert`
-tripwire so growing it past what has been proven on hardware stops the build instead of
-the session.
+So the honest statement of what is known, which is less tidy than "208 is too big":
+
+| block | outcome on this device |
+|---|---|
+| 176 B | **tolerated** -- streamed for a whole session at e2e `32316591` |
+| 208 B | **refused** -- `vkCreateGraphicsPipelines: ErrorUnknown` on the first streamed frame |
+| 176 B again | **refused** at e2e `63166fdf`, after edge bleed, with the same 176 that worked before |
+
+Every one of those is over the reported 128, so the pipeline layout has been invalid usage
+the whole time and the driver simply tolerated it until it did not. **176 is not a safe
+size; it is a size that happened to work.** Reverting 208 to 176 was therefore not a fix,
+and the last row is the proof: the same 176 that streamed at `32316591` refuses at
+`63166fdf`. Something edge bleed changed in the reprojection pipeline is implicated
+alongside the size, and the size alone does not discriminate.
+
+The GLSL side was checked and is not the mismatch: `layout(push_constant) uniform pc` is
+11 x `vec4` = 176 B, matching `vert_pc` and its `static_assert`.
+
+What the log line buys is not prediction -- 128 would not have predicted that 176 works.
+It is the one number to compare the block against when a pipeline creation fails for no
+reason the validation layers explain, and it is why the failure above is now a grep rather
+than a bisect.
+
+The tripwire on `vert_pc` should assert **at or under 128**, not `== 176`: an assertion
+that pins the block to a size known to be over the limit records the accident rather than
+the requirement. Getting there needs 48 bytes out of the block; the three atlas-prototype
+vectors (`atlas_size`, `atlas_geom`, `atlas_range`) are exactly that and are dead whenever
+`atlas_mode == 0`, which is every session run so far. That is a hypothesis, not a
+measurement -- it has not been tried on hardware.
 
 ### The timeline semaphore that is advertised and cannot be created
 

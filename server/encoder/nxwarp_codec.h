@@ -140,6 +140,18 @@ struct nxwarp_codec_view
 struct nxwarp_tile_desc
 {
 	uint32_t index = 0; // raster order within the frame
+	// Where this tile's bytes are in the frame bitstream. Only meaningful when the
+	// codec reports spans (nxwarp_codec::reports_tile_spans); zero otherwise.
+	//
+	// With them the transport can put a tile's OWN bytes at its own tile index, so a
+	// lost datagram costs the tiles it carried instead of the whole frame. Without
+	// them the frame is cut into fixed chunks and a tile is a slice of the byte
+	// stream -- see nxwarp_packetize.h, which explains what that costs.
+	//
+	// `length` is 0 for a tile the frame did not code (a skipped tile puts nothing in
+	// the bitstream), which is not the same as "no spans reported": ask the codec.
+	uint32_t offset = 0;
+	uint32_t length = 0;
 	uint8_t qp = 0;
 	uint8_t mode = 0;       // nxvc_tile_mode / nxt::TileMode, same numbering
 	uint8_t res_level = 0;  // per-tile resolution level, 0..2
@@ -239,6 +251,17 @@ public:
 
 	// Per-tile records of the frame encode() just produced.
 	virtual std::span<const nxwarp_tile_desc> tiles() const = 0;
+
+	// Whether tiles() fills `offset` and `length`.
+	//
+	// The Vulkan encoder does: nxvc_vke_tile carries both, because E5 computes the
+	// frame's layout and reporting it is a read of that. The reference codec's C ABI
+	// cannot -- nxvc_tile_info has a length but no offset -- so it says false and the
+	// transport keeps the chunk mapping for it.
+	virtual bool reports_tile_spans() const
+	{
+		return false;
+	}
 
 	// Which tiles of the frame just encoded the client actually holds, from the
 	// transport's feedback. The codec replays the client's concealment on its own

@@ -753,14 +753,14 @@ public:
 		tile_descs.resize(count);
 		for (uint32_t i = 0; i < count; ++i)
 		{
-			// nxvc_vke_tile also carries the tile's byte offset and length,
-			// which the reference's ABI cannot report. nxwarp_tile_desc has
-			// nowhere to put them yet, so the transport still uses the chunk
-			// mapping; making it the identity mapping is a change to
-			// nxwarp_packetize and to the client's reassembly, not to this
-			// file. See docs/NXWARP-E2E.md section 5.
+			// The byte span too, which the reference's ABI cannot report:
+			// E5 computes the frame's layout, so this is a read of it. It is
+			// what lets the transport put a tile's own bytes at its own tile
+			// index instead of cutting the frame into fixed chunks.
 			tile_descs[i] = {
 			        .index = ti[i].index,
+			        .offset = ti[i].offset,
+			        .length = ti[i].length,
 			        .qp = ti[i].qp,
 			        .mode = ti[i].mode,
 			        .res_level = ti[i].res_level,
@@ -772,6 +772,11 @@ public:
 	std::span<const wivrn::nxwarp_tile_desc> tiles() const override
 	{
 		return tile_descs;
+	}
+
+	bool reports_tile_spans() const override
+	{
+		return true;
 	}
 
 	std::string description() const override

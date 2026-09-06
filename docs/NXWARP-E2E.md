@@ -198,6 +198,17 @@ wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 40 --loss 0.05 
 wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 40 --reorder 0.05 --seed 7
 wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 40 --first-frame 65500
 
+# the per-tile span mapping, and what one lost datagram costs under it
+wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 12 --backend vk --qp 32
+wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 12 --backend vk --qp 32 \
+    --drop-datagram 20
+
+# the arrival-order atlas model, against the frame-complete one
+wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 12 --backend vk --qp 32 \
+    --tile-stream
+wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 40 --backend vk --qp 32 \
+    --tile-stream --reorder 0.3 --reorder-depth 8 --seed 7
+
 # the same runs on the GPU encoder
 wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 12 --backend vk
 wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 40 --loss 0.05 --seed 7 --backend vk
@@ -511,19 +522,114 @@ Does **not** work yet, and none of it is a bug to be filed:
   the whole quality control; the bitrate controller's number is logged and ignored. A
   scene that gets busier gets bigger frames, not worse ones — and if a frame outgrows the
   tile grid the server logs "raise QP" and drops it.
-* **Chunk mapping, not one tile per tile — still.** The frame bitstream is cut into
-  MTU-sized chunks laid on the tile grid in raster order, so a chunk that never arrives
-  costs the whole frame rather than one tile. This is why the 5 % loss run drops frames
-  instead of blurring tiles.
+* ~~Chunk mapping, not one tile per tile.~~ **Done on the GPU backend, per frame.** A
+  codec tile's own bytes now go at its own transport tile index whenever the codec
+  reports byte spans (`nxwarp_codec::reports_tile_spans`) *and* every tile fits a
+  transport slot (`nxwarp_spans_fit`); the fixed-chunk mapping is the fallback for
+  everything else, which today means the whole of the reference backend — its C ABI
+  (`nxvc_tile_info`) has a length but no offset and cannot report one.
 
-  This was expected to fix itself when the Vulkan encoder landed, and it did not, though
-  the blocker has moved. `nxvc_vke_tile` **does** report each tile's byte offset and
-  length — that half is solved, and `nxwarp_codec_vk` has the numbers in hand. What is
-  left is above the codec: `nxwarp_tile_desc` has nowhere to put them, `nxwarp_send_frame`
-  slices by `t * chunk_bytes`, and the client's `nxwarp_reassemble` actively *rejects* a
-  frame with a hole and requires every non-last chunk to be exactly `chunk_bytes`. Making
-  it the identity mapping is a change to the packetizer and to the client's reassembly,
-  and the client does change, contrary to what `nxwarp_packetize.h` promises.
+  It is decided **per frame**, not per session, because it is a property of the frame's
+  tiles. A frame with one tile larger than the ~1162-byte slot takes the fallback whole
+  rather than half. That is not a corner case: `testsrc2` at 320x240 QP 26 takes it on 7
+  frames of 12, and at 960x544 QP 26 on all 20; at QP 32 both run entirely on spans.
+  The run prints which:
+
+  ```
+  tile mapping: 20 frame(s) sent with per-tile spans (2700 coded tiles), 0 with the fixed-chunk fallback
+    ok   every coded tile got exactly one transport slot (2700 on the wire, 2700 coded)
+  ```
+
+  That second line is the identity claim itself and is asserted whenever a run took one
+  mapping throughout: as many transport slots on the wire as the codec coded tiles, one
+  each, at its own index.
+
+  The client's `nxwarp_reassemble` changed with it, and had to. Its two loss tests — no
+  hole in the index run from 0, no short tile but the last — were the chunk mapping's way
+  of noticing a loss, and under real spans both are *wrong*: a tile the frame did not code
+  carries nothing and is indistinguishable, from the tile list alone, from one that was
+  lost, and a coded tile is as long as its own content. The length prefix notices the same
+  loss by better evidence — bytes that did not arrive make the total fall short of what the
+  frame declared itself to be — and that test is exact under both mappings, which is why
+  nothing on the wire says which mapping produced a frame. The prefix now rides the
+  **lowest tile that carries bytes** rather than tile 0, since a frame that did not code
+  tile 0 puts its leading bytes on the first tile it did.
+
+  **What one lost datagram costs, measured.** `--drop-datagram N[:K]` takes the Nth *data*
+  datagram off the link, together with the parity of whatever FEC group it was in — the
+  parity goes not to make the loss worse (a parity datagram carries no tile) but to make it
+  real, since class-A parity rebuilds a single lost datagram outright and the question here
+  is what a loss the FEC did *not* cover costs. The claim is then checked as a **set**,
+  against the headset's own receipt map as the encoder's `nxt::ClientShadow` holds it, per
+  tile:
+
+  | 20 frames, 960x544, QP 32 | spans (`vk`) | chunks (`ref`) |
+  |---|---|---|
+  | transport tiles offered | 2700 (135/frame) | 262 (13/frame) |
+  | tiles the dropped datagram carried | 8 | 1 |
+  | tiles placed | 2692 | 261 |
+  | receipts lost outside that datagram | 0 | 0 |
+  | tiles of that datagram reported held | 0 | 0 |
+
+  Both halves are asserted and neither alone is the claim. "Nothing else" fails under a
+  mapping where a datagram is a slice of the byte stream and the loss spreads; "exactly its
+  tiles" fails on a run where the FEC quietly repaired everything. Under spans the eight
+  tiles are 6 % of that frame's 135; under chunks the one "tile" is a thirteenth of the
+  frame's *bytes* and the tile index it sits at names no codec tile at all, which is the
+  difference the table cannot show and the receipt map exists to make usable.
+
+  What has **not** changed is the client: it still waits for a whole frame, so both runs
+  above lose one frame of twenty. Applying tiles as they arrive is step 4 of
+  `docs/NXWARP-TILESTREAM.md` and waits on the decoder API.
+
+* **The arrival-order model, and what it proves.** `--tile-stream` runs the atlas
+  bookkeeping of SYNTAX 13.12 — `src_frame`, `gen`, and `C` as the ordered sequence of `H`
+  steps folded into it — beside the real decode, over the tile runs the link actually
+  delivered, twice: once applied **in arrival order** with the lazy advance and the
+  `src_frame` monotonicity rule of `docs/NXWARP-TILESTREAM.md` section 2, and once applied
+  **in frame order** with the eager advance, which is what a whole-frame decode call does.
+  The proof obligation is that the two end in the same state, and that is what is asserted.
+
+  It observes only. Every other figure a `--tile-stream` run prints is the figure the same
+  run without it prints, including the byte-identity against `nxv-dec`.
+
+  The interesting direction needs reordering deep enough to cross a frame at the *same tile
+  position*, which the historical `--reorder` depth of three datagram slots never reaches —
+  at six or seven datagrams a frame, a datagram has to fall a whole frame behind.
+  `--reorder-depth D` is that, and 8 reaches it:
+
+  | 40 frames, 320x240 | runs delivered | applied | superseded | atlases agree |
+  |---|---|---|---|---|
+  | `vk` QP 32, clean | 71 | 71 runs / 240 tiles | 0 | yes |
+  | `vk` QP 32, `--reorder 0.3 --reorder-depth 8` | 237 | 221 runs / 764 tiles | 16 runs / 36 tiles | yes |
+  | `vk` QP 32, same, across the 16-bit wrap | 237 | 226 runs / 772 tiles | 11 runs / 28 tiles | yes |
+  | `ref`, same | 213 | 197 runs / 197 tiles | 16 runs / 16 tiles | yes |
+
+  The superseded count is not reported, it is **asserted**: a run of frame `N` is superseded
+  exactly when every position it covers has already had a tile of some frame `> N`
+  delivered, which is computable from the link's own delivery order, and the model's count
+  must equal it. The wrap row is what pins the unwrapping of the 16-bit frame id — compared
+  as a raw `uint16_t`, every frame after the wrap looks older than the atlas and every tile
+  is reported superseded.
+
+  That the two paths agree *even where tiles were superseded* is the content of the proof
+  rather than an exception to it: applying frame `N` then `N+1` at a position, and applying
+  `N+1` and dropping `N`, both leave `src_frame = N+1` and `C = I` there, because a coded
+  tile resets `C`. A superseded tile is not a loss, and this is why.
+
+  What the model is fed is what the link handed the decoder, so tiles the FEC rebuilt
+  inside the receiver do not appear in it. It is a statement about ORDER, and both paths see
+  the same set.
+
+  **Found by the deeper reordering, and left as it stands:** at `--reorder-depth 8` on a
+  clean link the `ref` backend publishes three frames of forty with a default pose. This is
+  the failure the note under *What `--reorder` found* describes for loss — `view_info` rides
+  the WiVRn packet around the frame's first datagram and nothing else carries it — reached
+  by a second input: a first datagram held back past its own frame's close is, to the
+  reassembler, exactly as absent as one that was dropped. The run says so in a note, and
+  the "no default pose on a clean link" assertion is gated on the reorder depth rather than
+  quietly weakened.
+
 * **No per-tile pose warp.** Every tile of a frame is reprojected from the frame's pose, as
   with every other codec. The per-tile warp of nx-warp PAPER 4.3 is the point of the codec
   and it is not connected.

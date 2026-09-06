@@ -1825,6 +1825,14 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	const uint64_t encode_end_ns = uint64_t(os_monotonic_get_ns());
 	const uint32_t now_us = uint32_t(encode_end_ns / 1000);
 
+	// Real per-tile spans when the codec reports them AND every tile fits a transport
+	// slot; the chunk mapping otherwise. Decided per frame because it is a property of
+	// the frame's tiles, not of the session: the same stream takes spans on an inter
+	// frame of tens of small coded tiles and the fallback on the intra frame that opens
+	// it.
+	const bool spans = codec->reports_tile_spans() and
+	                   nxwarp_spans_fit(descs, stream_cfg.max_tile_bytes());
+
 	std::vector<nxt::Datagram> datagrams;
 	{
 		std::lock_guard lock(sender_mutex);
@@ -1837,7 +1845,8 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		                              chunk_bytes,
 		                              coded_qp,
 		                              now_us,
-		                              uint16_t(std::min<uint64_t>(65535, (uint64_t(os_monotonic_get_ns()) - encode_end_ns) / 1000)));
+		                              uint16_t(std::min<uint64_t>(65535, (uint64_t(os_monotonic_get_ns()) - encode_end_ns) / 1000)),
+		                              spans);
 	}
 
 	frame_timing->send_begin = headset_clock().to_headset(os_monotonic_get_ns());
@@ -1847,6 +1856,33 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// the only thing outside it, and the pacing that matters happens before this
 	// loop, not inside it.
 	frame_timing->send_end = frame_timing->send_begin;
+	// Counted here rather than at the decision, so that the tally is of frames that
+	// actually went on the wire: a frame that produced no datagrams took neither
+	// mapping anywhere.
+	if (not datagrams.empty())
+	{
+		if (spans)
+		{
+			++prof_span_frames;
+			for (const auto & d: descs)
+				prof_span_tiles += d.length ? 1 : 0;
+		}
+		else
+			++prof_chunk_frames;
+	}
+	// A frame that produced no datagrams was not sent, so it must not spend a wire
+	// frame id or advance the receipt bookkeeping -- the headset will never see it and
+	// the next frame it does see must be the next id. The oversize path above already
+	// returns before this point for the same reason; the span mapping gave the empty
+	// list a second route here, and without this the wire ids and the frames the
+	// client publishes drift apart by one at every occurrence.
+	if (datagrams.empty())
+	{
+		in[slot].have_view_info = false;
+		run_rate_control(bitstream.size(), resync_this_frame);
+		return {};
+	}
+
 	for (size_t i = 0; i < datagrams.size(); ++i)
 	{
 		const bool last = i + 1 == datagrams.size();

@@ -109,15 +109,28 @@ It has landed, and the information is already computed and then dropped on the f
 `qp`, `mode`, `res_level` and `ref_delta` — but not `offset`. So the server-side prerequisite is
 small and additive:
 
-* **P1a.** `nxwarp_tile_desc` gains `offset` (and keeps `length`, which it also lacks); the vk
-  backend fills both from `nxvc_vke_tile`. The reference backend cannot — `nxvc_tile_info` has no
-  offset — so it reports none and keeps the chunk mapping.
-* **P1b.** `nxwarp_send_frame` places a tile's real byte span at its own tile index when the codec
-  reported spans, and falls back to chunking when it did not. That is what makes a lost datagram
-  cost its own tiles rather than the frame, which is the property Cheat 1 needs and which the
-  transport was designed for all along.
+* **P1a.** ~~`nxwarp_tile_desc` gains `offset`~~ **done.** It carries `offset` and `length`, the
+  vk backend fills both from `nxvc_vke_tile`, and `nxwarp_codec::reports_tile_spans()` is how a
+  backend says whether it can. The reference backend cannot — `nxvc_tile_info` has no offset — so
+  it answers false and keeps the chunk mapping.
+* **P1b.** ~~`nxwarp_send_frame` places a tile's real byte span at its own tile index~~ **done,
+  per frame.** Spans are used when the codec reports them *and* `nxwarp_spans_fit` says every
+  coded tile fits a transport slot, since a tile bigger than a slot cannot be carried this way and
+  the frame falls back whole rather than half. The client's `nxwarp_reassemble` changed with it:
+  its per-tile hole and short-chunk tests were the chunk mapping's way of noticing a loss and are
+  *wrong* under spans, where a skipped tile carries nothing and a coded tile is as long as its
+  content. The length prefix is the test that is exact under both, so nothing on the wire says
+  which mapping produced a frame.
 
-Until P1 lands, tile streaming can be *modelled* (section 6) but not run against a real encoder.
+  Measured, 20 frames at 960x544 QP 32 with one datagram and its group's parity taken off the
+  link: 2700 coded tiles, 2700 transport slots, one each; the dropped datagram carried 8 of that
+  frame's 135 tiles, and the headset's receipt map reports those 8 not held and **no others**.
+  Under the chunk mapping the same run offers 262 slots for the same 20 frames and the one lost
+  slot is a thirteenth of a frame's bytes at a tile index that names no codec tile.
+  `docs/NXWARP-E2E.md` has the runbook and the table.
+
+Both halves of P1 have landed. Tile streaming can now be *modelled* against a real encoder
+(section 6, `--tile-stream`); the client itself still waits on section 4.
 
 ## 4. What the nxvc decoder API needs — OPEN, for the decoder agent
 
@@ -219,6 +232,20 @@ behaviour, the atlas after the last frame is byte-identical between the frame-co
 tile-streaming path.** Where the link is clean the two must agree trivially; where it loses, they
 must agree because the *set of tiles applied* is the same, only the order differs.
 
+**Landed**, as `--tile-stream`, over the tile runs the link actually delivered. `C` is modelled as
+the ordered sequence of `H` steps folded into it, which is exactly the property 13.12.2's
+one-step-at-a-time right-multiplication has and the only one the comparison needs: two paths agree
+on `C` if and only if they took the same steps in the same order. Both paths are flushed to the
+last frame before the comparison — advancing forward is always legal, it is un-advancing that
+section 2 shows is not bit-exact, and neither path ever does it.
+
+One thing the design did not anticipate: the harness's `--reorder` held a datagram back by one to
+three slots, which reorders *within* a frame and therefore never reaches the rule at all. A tile of
+frame `N` has to arrive after a tile of frame `N+1` **at the same position**, and at six or seven
+datagrams a frame that means falling a whole frame behind. `--reorder-depth` is that knob; at 8 the
+rule fires on 36 tiles of 800 and the two atlases still agree, which is the assertion doing work
+rather than passing vacuously. `docs/NXWARP-E2E.md` has the table.
+
 ## 7. What pacing means when there are no frame-sized decodes
 
 Send pacing today answers "how often may I send a frame, given the headset decodes one in `d` ms".
@@ -242,11 +269,18 @@ no working configuration to compare against.
 
 ## 8. Order of work
 
-1. **P1** (server): per-tile spans on the wire. Small, additive, testable on its own — a lost
-   datagram should cost its own tiles instead of the frame, which is assertable in the harness today
-   with no atlas at all.
-2. **The decoder API** (section 4): A or B, decided with the decoder agent.
-3. **The harness model** (section 6), behind `--tile-stream`, with the shadow-atlas comparison.
-4. **The client** (sections 2 and 5), behind a flag, frame-complete remaining the default.
+1. ~~**P1** (server): per-tile spans on the wire.~~ **Done.** See section 3.
+2. **The decoder API** (section 4): A or B — decided as **A**, `nxvc_vk_decode_tiles(first_tile,
+   count)` with the lazy advance inside the decoder; being built on nx-warp's `atlas-decoder`.
+3. ~~**The harness model** (section 6), behind `--tile-stream`~~ **Done**, with the atlas
+   comparison. What is deferred with the API is only the comparison against the *real* decoder's
+   atlas; the order-independence claim itself is asserted today, and `--reorder-depth` is what
+   makes the monotonicity rule fire at all.
+4. **The client** (sections 2 and 5), behind a flag, frame-complete remaining the default. Still
+   blocked on 2, and it is the only thing that is.
 
-1 and 3 are independent of the API question and can start now. 4 cannot.
+The receipts of section 5 remain to be moved to tile runs on the wire: the harness checks the
+positive acknowledgement per tile today (it reads `nxt::ClientShadow`, which has always been per
+tile), but `from_headset::nxwarp_frame_not_held` is still one report per frame, and `superseded`
+is not yet a reason it can carry. That is part of 4, since nothing can report a superseded tile
+until something applies tiles out of order.

@@ -8,6 +8,8 @@
  */
 
 #pragma once
+
+#include <cstdint>
 #include <chrono>
 
 // decoder_nxwarp: the NX Warp (nxvc) codec inside the WiVRn NX client.
@@ -76,6 +78,16 @@ namespace wivrn
 // eyes share one). Declared here so the in-view statistics overlay can read it without reaching
 // into the decoder, and without the stride becoming a per-decoder member it is not.
 uint32_t nxwarp_decode_stride();
+
+// Harness hook, the same shape as set_simulated_decode_ms(): pin the stride at 1 and stop the
+// adaptation from ever raising it.
+//
+// The stride is derived from measured decode wall time against the measured arrival period --
+// two wall clocks -- so on a desktop GPU it is whatever the machine's mood was that second.
+// That is correct on a headset and fatal to a byte-identity test, because a stride above 1
+// throws frames away and the .nxv the harness writes is built from the frames the decoder
+// actually consumed. wivrn-nxwarp-e2e --deterministic sets this; nothing else does.
+void nxwarp_pin_decode_stride(bool on);
 
 class nxwarp_decoder : public decoder
 {
@@ -255,6 +267,9 @@ class nxwarp_decoder : public decoder
 	// discarded in favour of the newest one. Two lets one frame decode while the
 	// next waits; anything more is latency.
 	static constexpr int64_t kMaxQueuedFrames = 1;
+	// kMaxQueuedFrames, unless set_unbounded_queue() lifted it. A member and not the
+	// constant itself so the shipping default is stated in one place.
+	int64_t max_queued_frames = kMaxQueuedFrames;
 	std::atomic<uint64_t> frames_dropped_late = 0;
 
 	// One frame's work, complete in itself: by the time the worker runs, the tile slots
@@ -417,6 +432,25 @@ public:
 	void set_simulated_decode_ms(double ms)
 	{
 		sim_decode_ms = ms;
+	}
+
+	// Harness hook: stop the worker's bounded backlog from discarding anything, so every
+	// unit that closes is decoded. For wivrn-nxwarp-e2e --deterministic; must be set
+	// before the first frame.
+	//
+	// The bound is one frame deep on purpose -- a queued frame is latency, and a headset
+	// wants the newest picture rather than a complete one. But whether a frame arrives
+	// while the previous is still on the GPU is a race between the network thread and
+	// the worker, and it decides which frames end up in the .nxv the harness writes. It
+	// is the single largest source of that file's run-to-run variance and the reason
+	// this hook exists.
+	//
+	// The trade is real and belongs in the caller's face rather than in a footnote: a
+	// run with this set does not exercise the backlog drop at all. Ordinary runs still
+	// do, which is where that path is meant to be tested.
+	void set_unbounded_queue(bool on)
+	{
+		max_queued_frames = on ? INT64_MAX : kMaxQueuedFrames;
 	}
 
 	// The shard path is not used: NX Warp has its own datagram type.

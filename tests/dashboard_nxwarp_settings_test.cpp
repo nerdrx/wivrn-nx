@@ -192,9 +192,14 @@ static const QList<control> controls{
         {"nxwarpMinQp", 18},
         {"nxwarpMaxQp", 51},
         {"nxwarpStereoFrame", QVariant::fromValue(int(Settings::StereoOff))},
+        {"nxwarpTileMap", QVariant::fromValue(int(Settings::TileChunks))},
         {"nxwarpCodedVectors", QVariant::fromValue(int(Settings::VectorsStatic))},
         {"nxwarpInter", true},
         {"nxwarpIntraPeriod", 240},
+        // The effort level is a checkbox for a two-valued option whose default is ON, so the
+        // interesting value to round-trip is false -- the one that has to be WRITTEN, where
+        // every other control here writes when it moves away from an off-by-default value.
+        {"nxwarpEffort", false},
 };
 
 static void part_b()
@@ -273,11 +278,21 @@ static void part_b()
 		d.load_json(live_config());
 		d.setProperty("nxwarpEntropy", int(Settings::EntropyAuto));
 		d.setProperty("nxwarpInter", false);
+		d.setProperty("nxwarpEffort", true);
 		const json out = d.configuration();
 		check(nxd::nxwarp_option(out, "entropy") == std::nullopt,
 		      "entropy set to Auto is erased, not written");
 		check(nxd::nxwarp_option(out, "inter") == std::nullopt,
 		      "inter set to its default is erased, not written");
+		// The default here is ON, so it is the checked box that erases the key and the
+		// UNCHECKED one that writes "0". A default written out would be harmless; a
+		// default written as the WRONG value would quietly turn the level off for
+		// everyone who opened the settings page once.
+		check(nxd::nxwarp_option(out, "effort") == std::nullopt,
+		      "effort left on is erased, not written");
+		d.setProperty("nxwarpEffort", false);
+		check(nxd::nxwarp_option(d.configuration(), "effort") == std::string("0"),
+		      "effort turned off is written as \"0\"");
 	}
 
 	// --- stereo pairing ------------------------------------------------------------------
@@ -314,6 +329,44 @@ static void part_b()
 		d.setProperty("nxwarpStereoFrame", int(Settings::StereoAuto));
 		check(nxd::nxwarp_option(d.configuration(), "stereo-frame") == std::nullopt,
 		      "auto is erased, not written");
+	}
+	// --- tile mapping --------------------------------------------------------------------
+	//
+	// Three values where two behave the same. That is deliberate (see nxwarp_settings.h) and
+	// it is the kind of thing a later tidy-up removes, so it is pinned: "spans" must survive
+	// a round trip as itself and must NOT be erased as if it were the default.
+	{
+		Settings d;
+		d.load_json(live_config());
+		check(d.property("nxwarpTileMap").toInt() == int(Settings::TileAuto),
+		      "the live config leaves tile-map at auto");
+		check(nxd::nxwarp_option(d.configuration(), "tile-map") == std::nullopt,
+		      "and writes no key for it");
+
+		d.setProperty("nxwarpTileMap", int(Settings::TileChunks));
+		check(nxd::nxwarp_option(d.configuration(), "tile-map").value_or("") == "chunks",
+		      "chunks is written out");
+		check(d.property("nxwarpTileMap").toInt() == int(Settings::TileChunks),
+		      "and reads back as chunks");
+
+		d.setProperty("nxwarpTileMap", int(Settings::TileSpans));
+		check(nxd::nxwarp_option(d.configuration(), "tile-map").value_or("") == "spans",
+		      "spans is written out rather than erased as a synonym for auto");
+
+		d.setProperty("nxwarpTileMap", int(Settings::TileAuto));
+		check(nxd::nxwarp_option(d.configuration(), "tile-map") == std::nullopt,
+		      "auto is erased, not written");
+
+		// A value the server would refuse reads back as the default, like "pace" and
+		// "stereo-frame" -- not as a fourth state the user cannot see or clear.
+		nlohmann::json bad = live_config();
+		Settings e;
+		e.load_json(bad);
+		e.setProperty("nxwarpTileMap", int(Settings::TileChunks));
+		auto cfg = e.configuration();
+		nxd::set_nxwarp_option(cfg, "tile-map", "sideways");
+		check(nxd::nxwarp_tile_map_mode(cfg) == nxd::tile_map_mode::automatic,
+		      "an unknown tile-map reads back as auto");
 	}
 	{
 		// Without NX Warp there is nothing to pair, whatever the mode says. This is the
@@ -563,9 +616,11 @@ static void part_d(const char * qml_path)
 	        {"nxwarp_min_qp", true},
 	        {"nxwarp_max_qp", true},
 	        {"nxwarp_stereo", true},
+	        {"nxwarp_tile_map", true},
 	        {"nxwarp_coded_vectors", true},
 	        {"nxwarp_inter", true},
 	        {"nxwarp_intra_period", true},
+	        {"nxwarp_effort", true},
 	};
 
 	for (const auto & [id, in_save]: ids)

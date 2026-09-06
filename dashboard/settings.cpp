@@ -145,6 +145,7 @@ void Settings::emitAllChanged()
 	nxwarpMinQpChanged();
 	nxwarpMaxQpChanged();
 	nxwarpStereoFrameChanged();
+	nxwarpTileMapChanged();
 	nxwarpCodedVectorsChanged();
 	nxwarpInterChanged();
 	nxwarpIntraPeriodChanged();
@@ -852,6 +853,31 @@ void Settings::set_nxwarpStereoFrame(const nxwarp_stereo & value)
 		nxwarpStereoFrameChanged();
 }
 
+Settings::nxwarp_tile_map Settings::nxwarpTileMap() const
+{
+	switch (nxd::nxwarp_tile_map_mode(m_jsonSettings))
+	{
+		case nxd::tile_map_mode::spans:
+			return TileSpans;
+		case nxd::tile_map_mode::chunks:
+			return TileChunks;
+		case nxd::tile_map_mode::automatic:
+			break;
+	}
+	return TileAuto;
+}
+
+void Settings::set_nxwarpTileMap(const nxwarp_tile_map & value)
+{
+	const auto old = nxwarpTileMap();
+	const auto mode = value == TileSpans ? nxd::tile_map_mode::spans
+	                                     : (value == TileChunks ? nxd::tile_map_mode::chunks
+	                                                            : nxd::tile_map_mode::automatic);
+	nxd::set_nxwarp_tile_map(m_jsonSettings, mode);
+	if (old != nxwarpTileMap())
+		nxwarpTileMapChanged();
+}
+
 bool Settings::willPairEyes() const
 {
 	// The same gate get_encoder_settings applies, in the same order. "auto" and "on"
@@ -922,6 +948,23 @@ void Settings::set_nxwarpCodedVectors(const nxwarp_coded_vectors & value)
 	nxd::set_nxwarp_option_or_default(m_jsonSettings, "coded-vectors", v, nxd::nxwarp_default_coded_vectors);
 	if (old != nxwarpCodedVectors())
 		nxwarpCodedVectorsChanged();
+}
+
+// "effort" is 0 or 1 on the server and a checkbox here: there is no level 2 --
+// nxvc refuses one, and the measurements that say why are in its
+// vk/encoder/README.md -- so a two-valued knob is the whole of it rather than a
+// simplification of a range.
+bool Settings::nxwarpEffort() const
+{
+	return nxd::nxwarp_option_u32(m_jsonSettings, "effort", nxd::nxwarp_default_effort) >= 1;
+}
+
+void Settings::set_nxwarpEffort(const bool & value)
+{
+	const auto old = nxwarpEffort();
+	nxd::set_nxwarp_option_u32(m_jsonSettings, "effort", value ? 1u : 0u, nxd::nxwarp_default_effort);
+	if (old != nxwarpEffort())
+		nxwarpEffortChanged();
 }
 
 bool Settings::nxwarpInter() const

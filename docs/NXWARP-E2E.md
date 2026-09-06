@@ -217,6 +217,83 @@ wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 40 --loss 0.05 
 wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 12 --backend vk --loss 3
 ```
 
+**Run each harness invocation in its own directory.** It writes `e2e.nxv` and
+`e2e.ref.yuv` under those fixed names into the working directory, so two runs sharing one
+directory overwrite each other's capture and the byte-identity check then compares a
+picture against somebody else's stream — which shows up as a nonsense count like
+"decoded every unit this decoder consumed (400/6)" rather than as a plain failure.
+
+**`--tile-map auto|spans|chunks`** forces the encoder's mapping of frame bytes onto the
+tile grid, which is the A/B for anything the per-tile span mapping is suspected of
+costing: same clip, same QP, same frames, two mappings. Without it the mapping can only be
+moved by moving the quantiser, and then the frames are not the same frames.
+
+### What the span mapping cost the client, and where it was not
+
+The first live stereo session on the Pico after spans went live showed the client's stage
+line move from `submit 0.6–0.8` to `submit 7.0` ms, and the decode figure the server paces
+to from 14.6 to 23.7 ms — with the GPU unchanged (`fence-post 12.9 = gpu 12.3 + copy 0.3 +
+queue 0.1`). So ~7 ms of *host* time per frame.
+
+`submit` is now split, because the two halves fail for opposite reasons and their sum
+cannot tell them apart:
+
+```
+stage: ... | submit 0.6 (qlock 0.5 + codec 0.1) | ...
+```
+
+* `codec` is the time inside `nxvc_vk_decode_frame_ex`;
+* `qlock` is the wait for the one Vulkan queue every submitter in the process shares.
+
+Measured at 2176x1088 — a 34x17 grid of 578 tiles, the geometry of the Pico's stereo pair
+— `codec` is **0.1 ms under both mappings**. The codec is not slower. A queue lock is not
+a cost in itself either; it is a symptom of a thread not being scheduled, and the thread
+in front of it is the network one.
+
+Two lines were added there too, since it had no numbers of its own:
+
+```
+net: 0.011 ms per datagram over 7943 datagrams (44.24 ms of every second)
+reassembly (network thread): 0.01 ms/frame over 125 frames, buffer 51 kB held for 51 kB of unit (1.0x)
+```
+
+That last ratio is what the span mapping actually broke. 200 frames, 2176x1088, QP 34:
+
+| | chunks | spans, before | spans, after |
+|---|---|---|---|
+| transport tiles per frame | 45 | 578 | 578 |
+| unit buffer reserved | 51 kB | **658 kB** | 51 kB |
+| unit bytes held | 51 kB | 51 kB | 51 kB |
+| ratio | 1.0x | **12.9x** | 1.0x |
+
+The reassembler reserved `(highest + 1) * chunk_bytes` — the whole grid at one full
+transport slot each. Under the chunk mapping a frame *was* a prefix of the grid, so that
+was the frame's own size to within a slot; under spans the same 51 kB frame spans all 578
+tiles. 658 kB allocated and freed per frame at the headset's frame rate is, on a
+phone-class allocator, an mmap and an munmap per frame — and the cost of an munmap does
+not land on the thread that paid it, it lands wherever the TLB shootdown catches.
+
+Three other things there were O(grid) work that a 45-tile prefix had hidden:
+
+* "are this frame's bytes whole" walked the grid on **every datagram, for every entry of
+  the window** — 578 x 3 x every datagram. It is now a comparison of two running totals
+  maintained where tiles are placed. Not measurable on a desktop (0.011 against 0.012 ms
+  per datagram, inside the noise); it is 87k vector probes per frame the headset's little
+  cores no longer make.
+* three grid walks became one — `is_complete` scanned twice and `reassemble` called it and
+  then scanned a third time before concatenating;
+* the four-byte length prefix is skipped as the frame is copied rather than erased
+  afterwards, which was a memmove of the whole unit, every frame.
+
+None of it changes what comes out: byte-identical to `nxv-dec` over every published frame,
+on both mappings, at 320x240, 960x544 and 2176x1088.
+
+**What this does not claim.** The 7 ms is a Pico number and the desktop reproduces the
+*shape* (a 12.9x buffer, an O(grid) walk per datagram) but not the magnitude — a 7900 XTX
+with a fast allocator absorbs both. Whether the fix returns `submit` to under a
+millisecond is for the live pair to say, and the `qlock`/`codec` split is what will make
+that answerable in one line either way.
+
 `--loss 3` is not a typo and not a probability that got away: the draw is
 `uniform(0,1) < loss`, so anything at or above 1 drops **every** datagram. It is a case
 worth a line of its own, because the server must survive a client that hears nothing —
@@ -292,6 +369,35 @@ covered everything the run says so in a note, rather than passing silently.
 It drives the control law directly against two simulated eye decoders and separates the
 two changes that had to be made — the frame numbering and the loss report — so each can
 be shown to matter on its own. Build and run it the way its header comment says.
+
+### Encoder effort
+
+`--effort 0|1` is the encoder's `"effort"` option, and the harness defaults to **1** as the
+server does: a harness that ran a configuration nobody ships would be measuring something
+else. Level 1 is the integer requantiser — a coefficient quantised to ±1 whose squared error
+is worth less than the bits it saves is dropped — and `--effort 0` is how a run reaches the
+pre-effort bitstream, which is what makes the two comparable in one binary.
+
+| run (320x240, `--backend vk --qp 32`, 12 frames) | B/frame | PSNR | decoder check |
+| --- | --- | --- | --- |
+| `--effort 0` | 5198 | 32.26 dB | byte-identical to `nxv-dec` on every published frame |
+| `--effort 1` | **4804** (−7.6 %) | 31.35 dB | byte-identical to `nxv-dec` on every published frame |
+| `--entropy lite --client-tools all --effort 0` | 6054 | 32.20 dB | byte-identical |
+| `--entropy lite --client-tools all --effort 1` | **5386** (−11.0 %) | 31.34 dB | byte-identical |
+
+Read the byte column, not the size of the `.nxv` the run writes: that file holds the units
+the GPU decoder actually consumed, and the bounded worker queue decides how many those are.
+
+**Both levels are the same bitstream.** The two streams above carry the identical tool mask
+(`0x0000000006600045` from `nxv-info`), because the level leaves no tool bit — it changes
+which levels are coded and nothing about how they decode. That is why nothing on the client
+had to change for this and why the headset's `nxvc_tools` handshake advertises nothing new.
+
+`"effort": "2"` is refused at startup rather than clamped, as nxvc refuses it: a wider motion
+search measures −0.05 % BD-rate for +12 % encoder time, and the reference's own trellis RDOQ
+cannot run on a GPU at all. On `--backend ref` the level reaches the non-directional path
+only — the scope nxvc pins byte-identical against the GPU encoder — so with `intra-dir` on,
+that backend's default, it changes nothing and the encoder logs a warning saying so.
 
 ### Send pacing, and a slow client
 

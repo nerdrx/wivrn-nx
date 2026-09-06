@@ -122,6 +122,23 @@ class nxwarp_decoder : public decoder
 		// i.e. how long the worker sat in jobs.pop().
 		double gap_ms = 0;   // previous iteration's end -> this one's start
 		double sub_ms = 0;   // nxvc_vk_decode_frame_ex (+ simulated cost)
+		// The two halves of sub_ms, because they fail for opposite reasons and the
+		// sum cannot tell them apart. "submit" grew from 0.7 ms to 7 ms on the Pico
+		// when the per-tile span mapping went live, and the first question -- is the
+		// codec slower, or is it waiting for the one queue every submitter in the
+		// process shares -- had no number to answer it.
+		double qlock_ms = 0; // waiting for host.with_queue's lock
+		double codec_ms = 0; // inside nxvc_vk_decode_frame_ex itself
+		// The NETWORK thread's per-frame cost, carried here so it appears on the same
+		// line as everything else. Not a stage of the worker at all: it is what
+		// close_frame() spent turning a window entry into the unit the worker then
+		// picks up, and under the span mapping there are an order of magnitude more
+		// tile slots to walk.
+		double reasm_ms = 0;
+		uint64_t reasm_n = 0;
+		// Bytes the reassembled unit's buffer was made to hold, against the bytes it
+		// ended up holding. The two used to differ by more than ten times.
+		uint64_t reasm_alloc = 0, reasm_used = 0;
 		double free_ms = 0;  // get_free(): waiting for the presenter to release an image
 		double fpre_ms = 0;  // waitForFences on the PREVIOUS copy, before recording
 		double rec_ms = 0;   // command buffer recording
@@ -205,6 +222,17 @@ class nxwarp_decoder : public decoder
 	uint64_t net_tiles_placed_at = 0, net_tiles_late_at = 0;
 	// Value of net_frames when the current two-second window opened.
 	uint64_t net_frames_mark = 0;
+	// What handling one stream datagram costs the network thread, over the window. The
+	// stage line reports the worker; this thread had no number at all, and it is the one
+	// that grew when the per-tile span mapping multiplied the tiles in a frame by ten.
+	// It matters to the worker too: they share the headset's cores, and the worker's
+	// "submit" is almost entirely the wait for a queue lock it gets to only when it is
+	// scheduled.
+	double net_dg_ms = 0;
+	uint64_t net_dg_n = 0;
+	// Scratch for Receiver::on_datagram, kept across datagrams for its capacity. Network
+	// thread only, like everything else it is next to.
+	std::vector<nxt::TileOutput> rx_tiles;
 	nxwarp_wire::reassemble_report last_hole;
 	// --- how fast frames actually arrive -------------------------------------
 	//
@@ -348,6 +376,27 @@ class nxwarp_decoder : public decoder
 		// deadlines are measured from.
 		uint64_t first_us = 0;
 		std::vector<std::vector<uint8_t>> slots; // one per tile index
+		// The frame's extent over `slots`, maintained as tiles are placed rather than
+		// rediscovered by walking the grid.
+		//
+		// "Has this frame's last run arrived AND are its bytes whole" is asked on EVERY
+		// datagram, for every entry of the window. Walking the grid to answer it was
+		// free while the grid was a 45-entry prefix under the chunk mapping; under the
+		// per-tile span mapping the same frame spans all 578 tiles of a stereo grid,
+		// and the walk became 578 x 3 entries x every datagram of every frame -- on the
+		// network thread, on a headset, at 90 Hz. The answer is a comparison of two
+		// running totals, and every input to it is known at the moment a tile is placed.
+		//
+		// `declared` is the frame's own length off the four-byte prefix, which rides the
+		// LOWEST tile carrying bytes -- not always tile 0, since a frame that did not
+		// code tile 0 puts its leading bytes on the first tile it did. So it is
+		// recomputed whenever `lowest` moves down, which happens at most once per tile.
+		uint32_t tiles_present = 0;
+		size_t bytes_present = 0;
+		uint32_t lowest = 0, highest = 0;
+		bool any_tile = false;
+		uint32_t declared = 0;
+		bool have_declared = false;
 		std::vector<uint8_t> band_fired;
 		from_headset::feedback fb{};
 		// view_info off the frame's first datagram (nxwarp_datagram::view_info).
@@ -488,6 +537,14 @@ public:
 		uint32_t encoded_width = 0;
 		uint32_t encoded_height = 0;
 		uint64_t stream_tools = 0;
+		// Transport tiles the last closed frame actually carried, out of the grid's
+		// total. This is how the CLIENT can tell which mapping the server is using
+		// without being told: under the fixed-chunk mapping a frame is a prefix of the
+		// grid and carries as many tiles as it has MTU-sized pieces (45 of 578 on a
+		// 2176x1088 stereo pair), and under per-tile spans it carries every tile it
+		// coded. Zero until a frame has closed.
+		uint32_t frame_tiles = 0;
+		uint32_t grid_tiles = 0;
 	};
 
 	live_stats stats() const
@@ -509,6 +566,8 @@ public:
 		        .encoded_width = hdr_width.load(std::memory_order_relaxed),
 		        .encoded_height = hdr_height.load(std::memory_order_relaxed),
 		        .stream_tools = hdr_tools.load(std::memory_order_relaxed),
+		        .frame_tiles = last_frame_tiles.load(std::memory_order_relaxed),
+		        .grid_tiles = uint32_t(cfg.tiles_per_frame()),
 		};
 	}
 
@@ -664,6 +723,8 @@ private:
 	// Frames the reassembler closed, decoded or not: the rate the server is actually
 	// putting on the wire, as seen from here.
 	std::atomic<uint64_t> net_frames = 0;
+	// Transport tiles the last closed frame carried; see live_stats::frame_tiles.
+	std::atomic<uint32_t> last_frame_tiles = 0;
 	// Last completed two-second profile window, republished for stats() below.
 	std::atomic<float> prof_wall_ms = 0, prof_gpu_ms = 0, prof_bytes = 0;
 	// The pass split of the same window, for live_stats above.

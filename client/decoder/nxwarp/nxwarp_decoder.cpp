@@ -644,8 +644,14 @@ void nxwarp_decoder::push_datagram(to_headset::nxwarp_datagram && dg)
 		f->have_view_info = true;
 	}
 
+	const auto t_net0 = std::chrono::steady_clock::now();
 	const uint64_t arrival_us = now_us();
-	std::vector<nxt::TileOutput> tiles;
+	// A member, not a local: the receiver clears and refills it, so keeping it across
+	// datagrams keeps its capacity too. As a local it was a heap allocation per datagram,
+	// which the chunk mapping hid -- one tile per datagram makes for a very small vector
+	// -- and the span mapping does not, since a datagram now carries a dozen.
+	auto & tiles = rx_tiles;
+	tiles.clear();
 	receiver->on_datagram(std::span<const uint8_t>(dg.payload.data(), dg.payload.size()),
 	                      dg.path_id, arrival_us, &tiles);
 
@@ -676,7 +682,40 @@ void nxwarp_decoder::push_datagram(to_headset::nxwarp_datagram && dg)
 			continue;
 		// The receiver's spans point into scratch it reuses on the next call, so the
 		// bytes have to be taken now.
-		target->slots[idx].assign(t.bytes.begin(), t.bytes.end());
+		auto & slot = target->slots[idx];
+		const size_t was = slot.size();
+		slot.assign(t.bytes.begin(), t.bytes.end());
+		// And the running extent with it, so that the completeness test below is a
+		// comparison rather than a walk of the grid. A duplicate delivery replaces the
+		// slot rather than adding to it, so the byte count is adjusted by the
+		// difference and the tile is counted once.
+		target->bytes_present += slot.size() - was;
+		if (was == 0 and not slot.empty())
+		{
+			++target->tiles_present;
+			if (not target->any_tile)
+			{
+				target->any_tile = true;
+				target->lowest = idx;
+				target->highest = idx;
+			}
+			else
+			{
+				target->lowest = std::min(target->lowest, idx);
+				target->highest = std::max(target->highest, idx);
+			}
+		}
+		// The prefix rides the lowest tile carrying bytes, and that tile can change --
+		// downwards only, and at most once per tile placed.
+		if (target->any_tile)
+		{
+			const auto & lead = target->slots[target->lowest];
+			target->have_declared = lead.size() >= nxwarp_wire::kFrameLenBytes;
+			target->declared = target->have_declared
+			                           ? (uint32_t(lead[0]) | (uint32_t(lead[1]) << 8) |
+			                              (uint32_t(lead[2]) << 16) | (uint32_t(lead[3]) << 24))
+			                           : 0;
+		}
 	}
 
 	f->fb.received_last_packet = host.now();
@@ -709,14 +748,25 @@ void nxwarp_decoder::push_datagram(to_headset::nxwarp_datagram && dg)
 	// datagram repairs the frame it belongs to, which need not be this one.
 	for (auto & w: window)
 	{
-		if (w.used and w.have_last_run and not w.complete and
-		    nxwarp_wire::is_complete(cfg, w.slots, chunk))
+		// The same question nxwarp_wire::is_complete answers, asked of the running
+		// totals: enough bytes arrived to cover the length the frame declared itself
+		// to be. close_frame() still calls the real reassembler, which recomputes all
+		// of this from the slots and is the only thing that builds a unit, so the two
+		// cannot disagree about a frame that is actually handed on.
+		if (w.used and w.have_last_run and not w.complete and w.any_tile and
+		    w.have_declared and
+		    w.bytes_present >= size_t(nxwarp_wire::kFrameLenBytes) + w.declared)
 			w.complete = true;
 	}
 
 	// A complete frame goes to the worker as soon as every older frame has been closed,
 	// so the worker sees frames in frame order.
 	close_complete_prefix();
+
+	net_dg_ms += std::chrono::duration<double, std::milli>(
+	                     std::chrono::steady_clock::now() - t_net0)
+	                     .count();
+	++net_dg_n;
 }
 
 // End of stream. Closes everything still in the window, oldest first, so a frame whose
@@ -776,6 +826,13 @@ nxwarp_decoder::inflight_frame * nxwarp_decoder::frame_slot(uint16_t frame_id, u
 
 	for (auto & slot: free_slot->slots)
 		slot.clear();
+	free_slot->tiles_present = 0;
+	free_slot->bytes_present = 0;
+	free_slot->lowest = 0;
+	free_slot->highest = 0;
+	free_slot->any_tile = false;
+	free_slot->declared = 0;
+	free_slot->have_declared = false;
 	std::fill(free_slot->band_fired.begin(), free_slot->band_fired.end(), 0);
 	free_slot->used = true;
 	free_slot->frame_id = frame_id;
@@ -970,7 +1027,21 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 		any_retired = true;
 	}
 
+	last_frame_tiles.store(f.tiles_present, std::memory_order_relaxed);
+	const auto t_reasm0 = std::chrono::steady_clock::now();
 	auto unit = nxwarp_wire::reassemble(cfg, f.slots, chunk);
+	{
+		// The network thread's own cost, folded into the worker's report. It is a
+		// different thread, but it is the same frame and the same two-second window,
+		// and keeping it on a separate line would have hidden exactly the thing that
+		// mattered: the worker's "submit" grew because it was WAITING, and what it was
+		// waiting behind was here.
+		const auto d = std::chrono::steady_clock::now() - t_reasm0;
+		prof.reasm_ms += std::chrono::duration<double, std::milli>(d).count();
+		prof.reasm_n++;
+		prof.reasm_alloc += unit.capacity();
+		prof.reasm_used += unit.size();
+	}
 	// The network side of the two-second report: what arrived, what had a hole,
 	// and how deep the worker's queue is. Printed here because a stalled worker
 	// prints nothing at all, which is exactly the case this line exists for.
@@ -995,6 +1066,12 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 			             stream_index, closed - net_frames_mark, std::chrono::duration<double>(now - net_since).count(), net_holes,
 			             net_out_of_order, net_late_completed, jobs_pending.load(), frames_decoded.load(), stragglers_dropped,
 			             last_hole.present, last_hole.expected, last_hole.first_missing == UINT32_MAX ? -1 : int(last_hole.first_missing), last_hole.short_chunk, chunk);
+			if (net_dg_n)
+				spdlog::info("nxwarp[{}] net: {:.3f} ms per datagram over {} datagrams ({:.2f} ms of every second)",
+				             stream_index, net_dg_ms / double(net_dg_n), net_dg_n,
+				             net_dg_ms / std::chrono::duration<double>(now - net_since).count());
+			net_dg_ms = 0;
+			net_dg_n = 0;
 			// Printed on the NETWORK thread on purpose: these are the numbers that
 			// explain a worker that has stopped reporting, so they must come from a
 			// thread that is still running.
@@ -1190,7 +1267,11 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	const auto t_wait0 = std::chrono::steady_clock::now();
 	nxvc_vk_decoder_wait(nxvc, UINT64_MAX);
 	const auto t_decode0 = std::chrono::steady_clock::now();
+	auto t_qlocked = t_decode0;
 	host.with_queue(stream_index, [&](vk::Queue) {
+		// Inside the lambda, so it is after the lock was taken: everything before it
+		// is the wait for the one queue this whole process submits on.
+		t_qlocked = std::chrono::steady_clock::now();
 		const uint32_t submit_flags =
 		        NXVC_VKD_SUBMIT_ASYNC |
 		        (use_bin_sem ? uint32_t(NXVC_VKD_SUBMIT_SIGNAL_BINARY) : 0u);
@@ -1558,6 +1639,8 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		prof.bytes += job.unit.size();
 		prof.gap_ms += have_last_iter ? ms(t_iter0 - last_iter_end) : 0.0;
 		prof.sub_ms += ms(t_submitted - t_decode0);
+		prof.qlock_ms += ms(t_qlocked - t_decode0);
+		prof.codec_ms += ms(t_submitted - t_qlocked);
 		prof.free_ms += ms(t_got_free - t_submitted);
 		prof.fpre_ms += ms(t_fence_pre - t_got_free);
 		prof.rec_ms += ms(t_recorded - t_fence_pre);
@@ -1615,11 +1698,19 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			             frames_dropped_holes.load(), frames_dropped_codec.load());
 			spdlog::info("nxwarp[{}]: {} frames dropped late (queue kept to {})",
 			             stream_index, frames_dropped_late.load(), max_queued_frames);
-			spdlog::info("nxwarp[{}] stage: gap {:.1f} | wait-prev {:.1f} | submit {:.1f} | get_free {:.1f} | fence-pre {:.1f} | record {:.1f} | qsubmit {:.1f} | fence-post {:.1f} | publish {:.1f} ms; withheld {}, stride {}, arrival {:.1f} ms",
+			spdlog::info("nxwarp[{}] stage: gap {:.1f} | wait-prev {:.1f} | submit {:.1f} (qlock {:.1f} + codec {:.1f}) | get_free {:.1f} | fence-pre {:.1f} | record {:.1f} | qsubmit {:.1f} | fence-post {:.1f} | publish {:.1f} ms; withheld {}, stride {}, arrival {:.1f} ms",
 			             stream_index, prof.gap_ms / n, prof.wait_ms / n, prof.sub_ms / n,
+			             prof.qlock_ms / n, prof.codec_ms / n,
 			             prof.free_ms / n, prof.fpre_ms / n, prof.rec_ms / n, prof.qsub_ms / n,
 			             prof.fpost_ms / n, prof.pub_ms / n, prof.withheld,
 			             g_decode_stride.load(), arrival_period_ms.load(std::memory_order_relaxed));
+			if (prof.reasm_n)
+				spdlog::info("nxwarp[{}] reassembly (network thread): {:.2f} ms/frame over {} frames, "
+				             "buffer {:.0f} kB held for {:.0f} kB of unit ({:.1f}x)",
+				             stream_index, prof.reasm_ms / double(prof.reasm_n), prof.reasm_n,
+				             double(prof.reasm_alloc) / double(prof.reasm_n) / 1024.0,
+				             double(prof.reasm_used) / double(prof.reasm_n) / 1024.0,
+				             prof.reasm_used ? double(prof.reasm_alloc) / double(prof.reasm_used) : 0.0);
 			if (prof.ts_n)
 				spdlog::info("nxwarp[{}] fence-post {:.1f} ms = nxvc gpu {:.1f} + copy gpu {:.2f} + queue {:.1f} (over {} frames with timestamps)",
 				             stream_index, (prof.fpost_ms + prof.qsub_ms) / n, prof.gpu_ms / n,

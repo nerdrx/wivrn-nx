@@ -139,6 +139,12 @@ struct nxwarp_stream_stats
 	bool entropy_was_auto = true;
 	// The nxvc tool mask the headset advertised.
 	uint64_t negotiated_tools = 0;
+	// The encoder effort level in use: 0 the plain dead-zone quantiser, 1 the integer
+	// requantiser as well.  It is the one negotiated fact that CANNOT be read off the
+	// wire -- the level leaves no tool bit, by design, because it changes which levels
+	// are coded and nothing about how they decode -- so the encoder reporting it here is
+	// the only way anything downstream can say which one produced a stream.
+	uint32_t effort = 1;
 
 	// --- the encode size -----------------------------------------------------
 	// Per eye, whether or not the eyes are paired: the stereo frame on the wire is twice
@@ -152,6 +158,16 @@ struct nxwarp_stream_stats
 	// min(headset render_scale, the server's "stream_scale"): the linear factor the size
 	// above was derived at.
 	float encode_scale = 1;
+
+	// --- how this window's frames were laid on the transport's tile grid -----
+	//
+	// Reported rather than derived from the configuration, because the choice is made per
+	// FRAME and not per session: a frame with any tile too big for a transport slot falls
+	// back on its own, so "tile-map": "auto" can produce all spans, all chunks or a mix,
+	// and only the encoder knows which. A reader wanting the setting has the
+	// configuration; these two are what actually happened.
+	uint64_t span_frames = 0;
+	uint64_t chunk_frames = 0;
 
 	// --- the latency budget, one stage per field, milliseconds ---------------
 	//
@@ -249,6 +265,7 @@ inline void to_json(nlohmann::json & j, const nxwarp_stream_stats & s)
 	        {"not_reconstructed_costly", s.not_reconstructed_costly},
 	        {"dominant_reason", uint8_t(s.dominant_reason)},
 	        {"dominant_reason_count", s.dominant_reason_count},
+	        {"effort", s.effort},
 	        {"entropy", s.entropy},
 	        {"entropy_was_auto", s.entropy_was_auto},
 	        {"negotiated_tools", s.negotiated_tools},
@@ -256,6 +273,8 @@ inline void to_json(nlohmann::json & j, const nxwarp_stream_stats & s)
 	        {"encoded_height", s.encoded_height},
 	        {"paired_eyes", s.paired_eyes},
 	        {"encode_scale", r(s.encode_scale)},
+	        {"span_frames", s.span_frames},
+	        {"chunk_frames", s.chunk_frames},
 	        {"latency_encode_ms", r(s.latency_encode_ms)},
 	        {"latency_wait_send_ms", r(s.latency_wait_send_ms)},
 	        {"latency_send_ms", r(s.latency_send_ms)},
@@ -303,6 +322,7 @@ inline void from_json(const nlohmann::json & j, nxwarp_stream_stats & s)
 	get("not_reconstructed", s.not_reconstructed);
 	get("not_reconstructed_costly", s.not_reconstructed_costly);
 	get("dominant_reason_count", s.dominant_reason_count);
+	get("effort", s.effort);
 	get("entropy", s.entropy);
 	get("entropy_was_auto", s.entropy_was_auto);
 	get("negotiated_tools", s.negotiated_tools);
@@ -310,6 +330,8 @@ inline void from_json(const nlohmann::json & j, nxwarp_stream_stats & s)
 	get("encoded_height", s.encoded_height);
 	get("paired_eyes", s.paired_eyes);
 	get("encode_scale", s.encode_scale);
+	get("span_frames", s.span_frames);
+	get("chunk_frames", s.chunk_frames);
 	get("latency_encode_ms", s.latency_encode_ms);
 	get("latency_wait_send_ms", s.latency_wait_send_ms);
 	get("latency_send_ms", s.latency_send_ms);

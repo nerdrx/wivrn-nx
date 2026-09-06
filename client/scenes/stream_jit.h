@@ -68,6 +68,23 @@ namespace wivrn
 //   skipped     the runtime's predicted display time advanced by more than one period,
 //               which means a refresh went by with nothing new submitted
 //
+// The cap is AIMD, and it took four passes on a real device to learn why it has to be.
+// It began monotone -- decrease only, never back up -- on the reasoning that a schedule
+// which only ever becomes safer cannot be the thing that drops a frame. That is true and
+// it is useless: a cap that only falls converges on the worst transient the session ever
+// had, not on the steady state. Measured, every time: the opening seconds of a stream
+// scene sleep too optimistically because the cost estimate has not seen an expensive
+// frame yet, four attributable misses follow, the cap steps 45 -> 34 -> 23 -> 12 -> 0.6 ms,
+// and then the estimate settles at a 20 ms pass with 51 ms of slack -- 30 ms of sleep
+// there is room for and the cap will not allow, for the rest of the session, with zero
+// misses reported in every window after.
+//
+// So the cap falls a whole refresh period on a miss and climbs one back after a long
+// clean run. The margin is what the guard constrains, and the margin is still
+// widen-only: it never narrows, on any path. Decrease stays immediate and increase stays
+// slow, which is the same shape as the server's own bitrate controller and for the same
+// reason -- a mistake costs one frame, a recovery costs seconds.
+//
 // `skipped` is the one that needs a second control, and it is the reason `sleep_cap_ns`
 // exists next to the margin. A runtime paces xrWaitFrame against the frames it still has
 // in flight, and the depth of that pipeline is not something the client is told. Sleeping
@@ -115,12 +132,31 @@ struct jit_scheduler
 	// ten seconds to walk back from a 12 ms spike to a 3 ms steady state at 90 Hz.
 	int64_t cost_decay_ns_per_frame = 10'000;
 
+	// Ceiling on the cost the peak hold will remember, in multiples of the refresh
+	// period. Measured on the device: the first iterations of a stream scene cost 60-70
+	// ms (swapchain creation, pipeline warm-up, the first decode), and at the decay rate
+	// above that single outlier keeps the budget over the whole available slack for
+	// more than a minute -- so the schedule sleeps zero for the first minute of every
+	// session, which is most of a short one.
+	//
+	// Remembering it precisely buys nothing. Once the budget exceeds the slack the
+	// runtime hands over, the sleep is zero whatever the number is; the only thing a
+	// larger value changes is how long recovery takes. So the hold saturates here.
+	int64_t cost_ceiling_periods = 4;
+
 	// --- measured state ----------------------------------------------------------
 	int64_t cost_peak_ns = 0;
 	uint64_t frames_seen = 0;
 	int64_t margin_ns = 0;
-	// The ratchet described above. Starts permissive and only ever shrinks.
+	// The cap on the sleep. Multiplicative-decrease on a miss the sleep caused,
+	// additive-increase after a long clean run -- see the AIMD note above.
 	int64_t sleep_cap_ns = 45'000'000;
+	// Consecutive accounted frames with no attributable miss. Resets to zero on one.
+	uint64_t clean_run = 0;
+	// How long that run must be before the cap probes upward by one refresh period.
+	// 256 frames is about three seconds at 90 Hz and six at the ~45 this device
+	// actually turns, so a recovery costs seconds and a mistake costs one frame.
+	uint64_t clean_run_to_probe = 256;
 
 	// Counters, for the report line. Reset with reset_counters(), which leaves the
 	// LEARNT state (the cost window and the margin) alone: a two-second report window
@@ -186,7 +222,26 @@ struct jit_scheduler
 	//                sleep cap ratchets down by
 	void account(int64_t cost, int64_t budget, int64_t slept_ns, int64_t lead, bool period_jump, int64_t period)
 	{
-		cost_peak_ns = std::max(cost, cost_peak_ns - cost_decay_ns_per_frame);
+		const int64_t ceiling = period > 0 ? period * cost_ceiling_periods : 0;
+		// Two-speed decay, and the threshold is where it is for a reason that the
+		// harness found the hard way. Coverage of a REPEATING spike is arithmetic: the
+		// hold must not fall further than the margin between one spike and the next,
+		// or every spike overruns. At 10 us a frame and a 200-frame interval that is
+		// 2 ms, which the margin reaches; a proportional decay applied everywhere made
+		// it 9 ms, which it does not, and case [3] went from one late frame to six.
+		//
+		// So the flat rate stays wherever the schedule is still doing its job, and the
+		// fast rate applies only ABOVE two refresh periods -- a region where the budget
+		// already exceeds anything the slack can hide, the sleep is zero regardless,
+		// and holding the value precisely buys nothing but a slower recovery. That is
+		// the region a 67 ms scene start lands in, and the only one it needs.
+		const int64_t fast_above = period > 0 ? period * 2 : 0;
+		const int64_t decay = (fast_above > 0 and cost_peak_ns > fast_above)
+		                              ? std::max(cost_decay_ns_per_frame, cost_peak_ns / 256)
+		                              : cost_decay_ns_per_frame;
+		cost_peak_ns = std::max(cost, cost_peak_ns - decay);
+		if (ceiling > 0)
+			cost_peak_ns = std::min(cost_peak_ns, ceiling);
 		++frames_seen;
 
 		sleep_total_ns += slept_ns;
@@ -199,11 +254,46 @@ struct jit_scheduler
 		lead_min_ns = lead_n == 0 ? lead : std::min(lead_min_ns, lead);
 		++lead_n;
 
-		// Only ever widens, and only on a frame that actually slept: a loop that is
-		// already late for reasons of its own (a stall, a swapchain rebuild, the
-		// first frames of a session) would otherwise ratchet the margin to its cap
-		// before the schedule has done anything at all.
-		if (slept_ns > 0)
+		// Only ever widens, and only on a frame whose sleep could plausibly BE the
+		// cause. `slept_ns > 0` was the first attempt at that and it is far too weak:
+		// measured on the device, the opening seconds of a stream scene skip refreshes
+		// for their own reasons while the schedule is sleeping a fraction of a
+		// millisecond out of fifty of slack, and charging those to the sleep ratcheted
+		// the cap to zero within one report window -- switching the feature off for the
+		// rest of the session before it had ever slept a meaningful amount.
+		//
+		// A sleep shorter than one refresh period cannot have pushed a submission
+		// across a refresh boundary it would otherwise have made: the submission moved
+		// by less than the distance between boundaries. So that is the bar. It keeps
+		// every miss the schedule can actually cause, and drops the ones it cannot.
+		//
+		// The second half of the same question, and the one the device asked next: a
+		// loop whose PASS costs more than a refresh period cannot hold the display
+		// rate no matter when it starts. Measured on server69, the display pass costs
+		// 22-33 ms against an 11.1 ms period -- it blocks on the fence for the previous
+		// submission, which is coupled to a decode costing 16-30 ms of GPU. The
+		// runtime's predicted display time then advances two or three periods every
+		// single iteration, `period_jump` is true on all of them, and the ratchet
+		// walked the cap from 45 ms to 0.5 ms attributing to the sleep a skip that the
+		// pass had already made inevitable.
+		//
+		// So a skipped refresh is only the schedule's to answer for when the pass could
+		// have made that refresh in the first place.
+		const int64_t attributable = period > 0 ? period : margin_skip_step_ns;
+		const bool pass_could_have_kept_up = period <= 0 or cost < period;
+
+		// And the same question a third time, for lateness. `lead` is what was left
+		// between the submission and the refresh it was for, so `lead + slept_ns` is
+		// what would have been left had the schedule not slept at all. When that is
+		// still negative the pass alone had already overrun the interval and the sleep
+		// changed nothing -- charging it is how the cap reached 0.6 ms on server70
+		// while the pass cost 20 ms against 50 ms of slack, giving up 29 ms of sleep
+		// there was room for.
+		const bool would_have_made_it_unslept = lead + slept_ns > 0;
+
+		bool missed_here = false;
+		bool period_jump_charged = false;
+		if (slept_ns >= attributable)
 		{
 			int64_t widen = 0;
 			// A pass that outran its budget is a costing error: the margin is the
@@ -216,7 +306,7 @@ struct jit_scheduler
 			// Handed over after it was due. Both controls: the margin because the
 			// budget was too small, the cap because submitting this late is what
 			// left no room.
-			if (lead < 0)
+			if (lead < 0 and would_have_made_it_unslept)
 			{
 				++missed_late;
 				widen = std::max(widen, margin_step_ns);
@@ -226,13 +316,35 @@ struct jit_scheduler
 			// is one frame too deep, so this only moves the cap -- by a whole
 			// refresh period, so a wrong guess about the depth is corrected in as
 			// many frames as the guess was periods out.
-			if (period_jump)
+			if (period_jump and pass_could_have_kept_up)
 			{
 				++missed_skipped;
+				period_jump_charged = true;
 				ratchet(period);
 			}
 			if (widen > 0)
 				margin_ns = std::min(max_margin_ns, margin_ns + widen);
+
+			missed_here = widen > 0 or period_jump_charged;
+		}
+
+		// Additive increase. A frame that could have been charged for a miss and was
+		// not is evidence the cap has room; enough of them in a row and it takes one
+		// refresh period back. Only frames that actually slept count, so a session
+		// sitting at cap zero still probes (its sleep is below the attribution bar, so
+		// it cannot be blamed for anything either) but one that never sleeps because
+		// the budget already exceeds the slack does not climb on evidence it has not
+		// gathered.
+		if (missed_here)
+			clean_run = 0;
+		else if (slept_ns > 0 or sleep_cap_ns < max_sleep_ns)
+			++clean_run;
+
+		if (clean_run >= clean_run_to_probe and sleep_cap_ns < max_sleep_ns)
+		{
+			clean_run = 0;
+			const int64_t step = period > 0 ? period : margin_skip_step_ns;
+			sleep_cap_ns = std::min(max_sleep_ns, sleep_cap_ns + step);
 		}
 	}
 
@@ -240,6 +352,7 @@ struct jit_scheduler
 	// free-running again, which is the behaviour this replaces and so is always safe).
 	void ratchet(int64_t period)
 	{
+		clean_run = 0;
 		const int64_t step = period > 0 ? period : margin_skip_step_ns;
 		sleep_cap_ns = std::max<int64_t>(0, sleep_cap_ns - step);
 	}

@@ -155,6 +155,73 @@ std::vector<nxt::Datagram> wivrn::nxwarp_send_frame(nxt::Sender & sender,
 	if (not tile_spans and chunks > cfg.tiles_per_frame())
 		return out;
 
+	// THE POSE-HEADER DEAD ZONE, refused here rather than discovered halfway
+	// through a frame.
+	//
+	// nxt::Packetizer builds each band's first run with the pose header in it,
+	// so that first run's budget is kPoseHeaderBytes smaller than every other
+	// run's. Its oversize test does not know that: max_tile_bytes() is
+	// run_payload_budget() - kDirEntryBytes, with no allowance for the pose. A
+	// tile sized in between --
+	//
+	//     budget - kPoseHeaderBytes - kDirEntryBytes  <  len  <=  max_tile
+	//
+	// -- is therefore NOT oversize, and still cannot start a band. The
+	// packetizer's run comes back empty, its own oversize branch declines it
+	// because the tile fits max_tile, and it returns kBadInput; Sender::send_band
+	// then returns no datagrams at all and the WHOLE BAND is gone. Measured on
+	// inter_pan8 at 1088x1088: budget 1196, max_tile 1192, pose header 26, and
+	// one frame in twelve opened a band with a 1174-byte tile -- 1204 bytes with
+	// the pose and the directory entry, eight over. That frame lost its first
+	// 102 tiles, all six rows of band 0, while bands 1 and 2 went out normally:
+	// 3366 tiles on the wire against 3468 coded, and a frame that could never
+	// reassemble.
+	//
+	// The dead zone is only kPoseHeaderBytes wide, which is why it reads as an
+	// occasional unexplained incomplete frame rather than as a size limit.
+	//
+	// The real repair belongs in the packetizer -- reserve the pose in
+	// max_tile_bytes(), or let a band's first run defer the pose to the next
+	// datagram -- and until it lands this refuses the frame INSTEAD of sending
+	// one whose head the transport has silently thrown away. That is worth doing
+	// on its own account: the alternative is not a degraded frame but a
+	// guaranteed-incomplete one, which costs the wire bytes of every band that
+	// did go out, a hole at the client, and the all-intra resync that follows.
+	// Refusing costs the same frame and none of that, and it puts the frame in
+	// front of the rate controller, which is what actually makes the next one
+	// fit.
+	//
+	// Checked for EVERY band, not just the first: pose_placed is local to
+	// packetize_band, so every band opens with a pose header of its own.
+	if (tile_spans)
+	{
+		const size_t budget = cfg.run_payload_budget();
+		const size_t opener = nxt::kDirEntryBytes +
+		                      ((cfg.caps & nxt::kCapPoseHdr) ? nxt::kPoseHeaderBytes : 0);
+		const uint8_t nb = cfg.bands();
+		for (uint8_t band = 0; band < nb; ++band)
+		{
+			const uint16_t r0 = cfg.first_row_of_band(band);
+			const uint16_t r1 = uint16_t(r0 + cfg.rows_in_band(band));
+			bool found = false;
+			for (uint16_t row = r0; row < r1 and not found; ++row)
+			{
+				for (uint16_t col = 0; col < cfg.cols; ++col)
+				{
+					const uint32_t t = cfg.tile_index(row, col);
+					if (t >= range.size() or range[t].second == 0)
+						continue;
+					// The band's opening tile: the one that has to carry the
+					// pose header.
+					if (range[t].second + opener > budget)
+						return out;
+					found = true;
+					break;
+				}
+			}
+		}
+	}
+
 	sender.begin_frame(frame_id, pose, now_us, 0);
 
 	const uint8_t nbands = cfg.bands();

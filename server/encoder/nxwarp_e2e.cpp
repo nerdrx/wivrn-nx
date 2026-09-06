@@ -87,7 +87,7 @@
 //                    [--intra-period N] [--coded-vectors default|none|static]
 //                    [--reconnect-at N] [--start-frame-id F]
 //                    [--pace auto|off|FPS] [--client-decode-ms N] [--present-hz N]
-//                    [--feedback-delay N]
+//                    [--feedback-delay N] [--effort 0|1]
 //
 //   --eyes             1 (the default, and every run that predates this flag) or 2, which
 //                      is encoder_settings::eyes: ONE stream carrying BOTH eyes as a
@@ -146,6 +146,10 @@
 //                      slots. Default 3, which reorders within a frame; past a frame's
 //                      worth of datagrams it reorders ACROSS frames at the same tile
 //                      position, which is what makes a tile superseded rather than late.
+//   --tile-map M       "auto" (default), "spans" or "chunks": how a frame's bytes are laid
+//                      on the transport's tile grid. The A/B for anything the per-tile
+//                      span mapping is suspected of costing -- same clip, same QP, same
+//                      frames, two mappings.
 //   --tile-stream      run the arrival-order atlas model of docs/NXWARP-TILESTREAM.md
 //                      section 6 beside the real decode and assert it ends in the same
 //                      state as the frame-complete one over the same delivered tiles.
@@ -1563,6 +1567,11 @@ int main(int argc, char ** argv)
 	// decoder saw and asserts on it, so every other figure a --tile-stream run prints is
 	// the figure the same run without it prints.
 	bool tile_stream = false;
+	// The encoder's "tile-map" option, straight through. It is what makes the cost of the
+	// per-tile span mapping measurable at all: the same clip, the same QP, the same
+	// frames, laid on the grid two different ways. Without it a comparison has to move
+	// the quantiser to move the mapping, and then the frames are not the same frames.
+	std::string tile_map = "auto";
 	// Where the frame counter starts. video_encoder_nxwarp puts uint16_t(frame_id) on
 	// the wire, so starting near 65536 walks the stream through the 16-bit wrap -- about
 	// twelve minutes into a 90 fps session, and the point at which one went dark.
@@ -1583,6 +1592,11 @@ int main(int argc, char ** argv)
 	std::string client_tools = "none";
 	// "auto" (the server default), "rans" or "lite".
 	std::string entropy = "auto";
+	// The encoder effort level, "0" or "1". The server's default is 1 and so is this
+	// one: the harness runs the configuration the server runs, or it is measuring
+	// something nobody ships. `--effort 0` is how a run reaches the pre-effort
+	// bitstream, which is what makes the two comparable in one binary.
+	std::string effort = "1";
 
 	for (int i = 1; i < argc; ++i)
 	{
@@ -1634,6 +1648,8 @@ int main(int argc, char ** argv)
 			client_tools = next();
 		else if (a == "--entropy")
 			entropy = next();
+		else if (a == "--effort")
+			effort = next();
 		else if (a == "--qp")
 			qp = uint32_t(std::stoul(next()));
 		else if (a == "--reconnect-at")
@@ -1656,6 +1672,8 @@ int main(int argc, char ** argv)
 		}
 		else if (a == "--tile-stream")
 			tile_stream = true;
+		else if (a == "--tile-map")
+			tile_map = next();
 		else if (a == "--idr-at")
 			idr_at = uint32_t(std::stoul(next()));
 		else if (a == "--rc")
@@ -1826,6 +1844,7 @@ int main(int argc, char ** argv)
 	// .nxv files.
 	settings.options["stereo-compose"] = stereo_compose;
 	settings.options["entropy"] = entropy;
+	settings.options["effort"] = effort;
 	// The simulated headset mask. "all" is every bit set, which is a headset that can
 	// decode anything this encoder emits and is what keeps every existing run in this
 	// harness unchanged. It is spelled ~0 rather than read from nxvc because this file,
@@ -1853,6 +1872,7 @@ int main(int argc, char ** argv)
 	// the frame count depend on how fast this machine encodes. The server's own default
 	// is "auto"; --pace auto is how that is exercised.
 	settings.options["pace"] = pace;
+	settings.options["tile-map"] = tile_map;
 	settings.options["min-qp"] = std::to_string(min_qp);
 	settings.options["max-qp"] = std::to_string(max_qp);
 

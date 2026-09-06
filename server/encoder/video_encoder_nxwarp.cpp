@@ -245,6 +245,23 @@ std::string option_string(const std::map<std::string, std::string> & options,
 	return it == options.end() ? std::string(fallback) : it->second;
 }
 
+// "effort": "0" | "1".  How hard the encoder looks for the cheapest way to say
+// the frame; see nxwarp_codec_config::effort for what each level is and what it
+// was measured to be worth.  Out of range is an error rather than a clamp, for
+// the reason "coded-vectors" is: nxvc itself refuses a level it does not have,
+// and a caller asking for a search that does not exist would otherwise be
+// handed the stream it was trying to beat with nothing to say so.
+uint32_t nxwarp_effort_from(const std::map<std::string, std::string> & options)
+{
+	const std::string v = option_string(options, "effort", "1");
+	if (v == "0")
+		return 0;
+	if (v == "1")
+		return 1;
+	throw std::runtime_error(
+	        std::format("nxwarp: \"effort\": \"{}\" is not one of 0, 1", v));
+}
+
 int16_t q15(float v)
 {
 	return int16_t(std::clamp(v, -1.f, 1.f) * 32767.f);
@@ -327,6 +344,34 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 			pace_interval = 1.0 / fps;
 		}
 	}
+	// "tile-map": how a frame's bytes are laid on the transport's tile grid.
+	//
+	//   "auto"   (default) per-tile spans when the codec reports them and every coded
+	//            tile fits a transport slot; the fixed-chunk mapping otherwise, decided
+	//            per frame.
+	//   "spans"  the same, minus the per-frame fit test -- a frame whose tiles do not
+	//            fit still falls back, because it physically cannot be carried, but
+	//            nothing else does. For measurement, not for a session.
+	//   "chunks" never spans. The mapping this encoder had before P1, kept because it
+	//            is the A/B against which any cost of the new one is measured, and
+	//            because a live session that regresses needs somewhere to stand.
+	//
+	// An unknown value is an error rather than a fallback, for the same reason
+	// "backend", "rc" and "pace" are.
+	{
+		const std::string tm = option_string(settings.options, "tile-map", "auto");
+		if (tm == "auto")
+			tile_map = tile_map_t::automatic;
+		else if (tm == "spans")
+			tile_map = tile_map_t::spans;
+		else if (tm == "chunks")
+			tile_map = tile_map_t::chunks;
+		else
+			throw std::runtime_error(std::format(
+			        "unknown NX Warp \"tile-map\" \"{}\"; expected \"auto\", "
+			        "\"spans\" or \"chunks\"",
+			        tm));
+	}
 	rc_min_qp = std::min(63u, option_u32(settings.options, "min-qp", 20));
 	rc_max_qp = std::min(63u, option_u32(settings.options, "max-qp", 44));
 	if (rc_min_qp > rc_max_qp)
@@ -361,6 +406,7 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	                option_string(settings.options, "coded-vectors", "default")),
 	        // Resolved just below, once the headset's mask is in hand.
 	        .entropy = nxwarp_codec_config::entropy_t::rans,
+	        .effort = nxwarp_effort_from(settings.options),
 	        .intra_dir = option_bool(settings.options, "intra-dir", true),
 	        .preset = option_u32(settings.options, "preset", 1),
 	        .threads = option_u32(settings.options, "threads", 0),
@@ -433,6 +479,7 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 
 	// The same three facts the log states once, kept so every two-second report can carry
 	// them: a status page must not depend on having been open when the session started.
+	stats_effort = codec_cfg.effort;
 	stats_entropy_name = codec_cfg.entropy == nxwarp_codec_config::entropy_t::lite ? "lite" : "rans";
 	stats_entropy_was_auto = entropy_req == entropy_request::automatic;
 	stats_negotiated_tools = client_tools;
@@ -444,6 +491,19 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	const std::string backend = option_string(settings.options, "backend", "ref");
 	if (backend == "ref")
 	{
+		// The one configuration in which "effort" is asked for and cannot be
+		// given, said out loud rather than left to be discovered as two runs
+		// with the same byte count.  The reference encoder applies the integer
+		// requantiser in its non-directional path only -- the same scope nxvc
+		// pins byte-identical against the GPU encoder, which has no
+		// directional intra to pin -- so with "intra-dir" on, which is this
+		// backend's default, the level reaches nothing.
+		if (codec_cfg.effort >= 1 and codec_cfg.intra_dir)
+			U_LOG_W("nxwarp: \"effort\": \"1\" has no effect on the \"ref\" backend "
+			        "with \"intra-dir\": \"on\" -- the requantiser is implemented "
+			        "for the non-directional path, which is the one the GPU "
+			        "encoder codes.  Use \"backend\": \"vk\", or "
+			        "\"intra-dir\": \"off\"");
 		codec = nxwarp_codec::make_reference(codec_cfg);
 	}
 	else if (backend == "vk")
@@ -1671,6 +1731,37 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				        achieved,
 				        unsigned(current_qp),
 				        pace_note.c_str());
+			// How the frames of this window were laid on the tile grid. The
+			// harness has printed this since P1 landed and the SERVER never did,
+			// so a live session had no way to tell whether the mapping it was
+			// running was the new one -- which is the first question to ask of
+			// anything that changed with it. Logged unconditionally, including
+			// the all-chunks case, because "it took the fallback" is exactly the
+			// answer that was unobtainable.
+			// Taken once, before either reader: the log line below and the stats
+			// struct further down are two views of the SAME window, and a counter
+			// that each of them advanced would give the second one zero.
+			const uint64_t window_span_frames = prof_span_frames - prof_span_reported;
+			const uint64_t window_chunk_frames = prof_chunk_frames - prof_chunk_reported;
+			prof_span_reported = prof_span_frames;
+			prof_chunk_reported = prof_chunk_frames;
+			{
+				const uint64_t sf = window_span_frames;
+				const uint64_t cf = window_chunk_frames;
+				if (sf or cf)
+					U_LOG_I("nxwarp: stream %d tile mapping: %llu frame(s) with "
+					        "per-tile spans, %llu with the fixed-chunk fallback "
+					        "(\"tile-map\": \"%s\"%s)",
+					        int(stream_idx),
+					        (unsigned long long)sf,
+					        (unsigned long long)cf,
+					        tile_map == tile_map_t::chunks
+					                ? "chunks"
+					                : (tile_map == tile_map_t::spans ? "spans" : "auto"),
+					        (tile_map != tile_map_t::chunks and sf == 0)
+					                ? ", every frame too big for a transport slot"
+					                : "");
+			}
 			// What the headset threw away since the last report, and why. Not on
 			// the line above: it is usually zero, and when it is not it is the
 			// thing to look at rather than a field to scan past. Every one of
@@ -1756,6 +1847,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				}
 				st.dominant_reason_count = best;
 
+				st.effort = stats_effort;
 				st.entropy = stats_entropy_name;
 				st.entropy_was_auto = stats_entropy_was_auto;
 				st.negotiated_tools = stats_negotiated_tools;
@@ -1763,6 +1855,8 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				st.encoded_width = stats_width;
 				st.encoded_height = stats_height;
 				st.encode_scale = encode_scale_reported;
+				st.span_frames = window_span_frames;
+				st.chunk_frames = window_chunk_frames;
 
 				// The latency budget, from the feedback the headset returned over
 				// this window. Zero until a complete report arrives -- and it was
@@ -1878,7 +1972,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// the frame's tiles, not of the session: the same stream takes spans on an inter
 	// frame of tens of small coded tiles and the fallback on the intra frame that opens
 	// it.
-	const bool spans = codec->reports_tile_spans() and
+	const bool spans = tile_map != tile_map_t::chunks and codec->reports_tile_spans() and
 	                   nxwarp_spans_fit(descs, stream_cfg.max_tile_bytes());
 
 	std::vector<nxt::Datagram> datagrams;

@@ -239,6 +239,32 @@ Kirigami.ScrollablePage {
             }
 
             RowLayout {
+                Kirigami.FormData.label: i18n("Tile mapping:")
+                visible: Settings.nxwarpSelected
+                Controls.ComboBox {
+                    id: nxwarp_tile_map
+                    model: [
+                        {
+                            label: i18nc("automatic tile mapping", "Auto"),
+                            value: Settings.TileAuto
+                        },
+                        {
+                            label: i18n("Per-tile spans"),
+                            value: Settings.TileSpans
+                        },
+                        {
+                            label: i18n("Fixed chunks (fallback)"),
+                            value: Settings.TileChunks
+                        }
+                    ]
+                    textRole: "label"
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("Which bytes of a frame travel at which tile position. With per-tile spans a tile's own bytes travel at its own position, so one lost datagram costs the few tiles it was carrying instead of the whole frame. Auto uses them whenever the encoder can and every tile fits a packet, and falls back per frame when one does not — at a low quantiser, tiles outgrow a packet and the whole frame falls back. Fixed chunks never uses them: it is the older behaviour, and the one to pick if a session gets worse after an update. The server log says which was used. Applies from the next connection.")
+                }
+            }
+
+            RowLayout {
                 Kirigami.FormData.label: i18n("Entropy coder:")
                 visible: Settings.nxwarpSelected
                 Controls.ComboBox {
@@ -261,6 +287,17 @@ Kirigami.ScrollablePage {
                 }
                 Kirigami.ContextualHelpButton {
                     toolTipText: i18n("rANS spends headset decode time to make the stream smaller; Lite spends bitrate to make it cheaper to decode. Auto picks from what the headset says it supports.")
+                }
+            }
+
+            RowLayout {
+                visible: Settings.nxwarpSelected
+                Controls.CheckBox {
+                    id: nxwarp_effort
+                    text: i18n("Extra encoder effort")
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("Let the encoder work a little harder for a smaller stream: it drops a coefficient whose error is worth less than the bits it saves. Measured 1.5%% fewer bytes with rANS and 3.6%% with Lite, for no measurable encode time, and the picture is unchanged in every other way. On unless you are chasing a difference to the byte.")
                 }
             }
 
@@ -659,7 +696,9 @@ Kirigami.ScrollablePage {
             Settings.nxwarpMinQp = nxwarp_min_qp.value;
             Settings.nxwarpMaxQp = nxwarp_max_qp.value;
             Settings.nxwarpStereoFrame = nxwarp_stereo.model[nxwarp_stereo.currentIndex].value;
+            Settings.nxwarpTileMap = nxwarp_tile_map.model[nxwarp_tile_map.currentIndex].value;
             Settings.nxwarpCodedVectors = nxwarp_coded_vectors.model[nxwarp_coded_vectors.currentIndex].value;
+            Settings.nxwarpEffort = nxwarp_effort.checked;
             Settings.nxwarpInter = nxwarp_inter.checked;
             Settings.nxwarpIntraPeriod = nxwarp_intra_period.value;
         }
@@ -685,7 +724,9 @@ Kirigami.ScrollablePage {
         nxwarp_min_qp.value = Settings.nxwarpMinQp;
         nxwarp_max_qp.value = Settings.nxwarpMaxQp;
         nxwarp_stereo.currentIndex = nxwarp_stereo.model.findIndex(i => i.value === Settings.nxwarpStereoFrame);
+        nxwarp_tile_map.currentIndex = nxwarp_tile_map.model.findIndex(i => i.value === Settings.nxwarpTileMap);
         nxwarp_coded_vectors.currentIndex = nxwarp_coded_vectors.model.findIndex(i => i.value === Settings.nxwarpCodedVectors);
+        nxwarp_effort.checked = Settings.nxwarpEffort;
         nxwarp_inter.checked = Settings.nxwarpInter;
         nxwarp_intra_period.value = Settings.nxwarpIntraPeriod;
         desktop_mirror.checked = Settings.mirror;

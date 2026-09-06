@@ -425,13 +425,40 @@ Per-stream `options` (all optional):
 | `inter` | `off` | inter prediction — the pose warp, per-tile motion vectors and the reference ring. `off` is all-intra, which is the safe bring-up default |
 | `intra-period` | `180` | rolling intra refresh period in frames; `1` forces every tile every frame |
 | `intra-dir` | `on` | directional intra prediction (tool 17). It is most of the CPU encoder's time at headset resolutions; `off` codes the DC-plane predictor only, for more bits and a much faster encode |
+| `effort` | `1` | how hard the encoder looks for the cheapest way to say each frame. `1` adds the **integer requantiser**: a coefficient quantised to ±1 whose squared error is worth less than the bits it saves is dropped. Measured on RADV at 2 × 1088×1088, it is **−1.5 % BD-rate on rANS and −3.6 % on Lite for no measurable encode time** (9.12 → 9.18 ms a frame, inside the run-to-run spread). `0` is the plain dead-zone quantiser, which is what the encoder did before this option existed. It changes which levels are coded and nothing about how they decode — the stream carries no tool bit for it and no decoder can tell the levels apart — and both backends honour it. There is no level 2: nxvc refuses one, because a wider motion search measures −0.05 % for +12 % encode time and its own trellis RDOQ cannot run on a GPU. Out of range is an error, not a fallback |
 | `preset` | `1` | nxvc effort preset: `0` medium, `1` fast, `2` slow. Encoder-side only |
 | `threads` | `0` | encoder worker threads for the tile pool: `0` uses every core (capped at 16), `1` is the serial path. Byte-identical either way |
 | `pace` | `auto` | send pacing: `auto` follows the rate the headset reports it can decode at, `off` sends every composited frame, a number is a fixed frame rate. See below |
 | `entropy` | `auto` | entropy coder: `rans` spends headset decode time to make the stream smaller, `lite` spends bitrate to make it cheaper to decode, `auto` picks from the tools the headset advertises. An unrecognised value is an error, not a fallback |
 | `coded-vectors` | `default` | whether motion vectors are coded into the stream (`default`), left for the decoder to re-derive (`none`), or fixed (`static`). An unrecognised value is an error, not a fallback |
 | `band-rows` | `6` | tile rows per transport band, which is the unit of pacing and of feedback |
+| `tile-map` | `auto` | how a frame's bytes are laid on the transport's tile grid. `auto` uses per-tile spans when the codec reports them and every coded tile fits a transport slot, and the fixed-chunk mapping otherwise, decided per frame; `chunks` never uses spans; `spans` is `auto` under a different name, kept so a measurement run can say which it meant. See below |
 | `mtu` | `1280` | transport MTU. Leaves room for WiVRn's own packet envelope inside a 1400-byte datagram |
+
+**`"tile-map"`, and when to move it.** With spans, a codec tile's own bytes travel at its
+own tile index, so a lost datagram costs the tiles it carried instead of the whole frame,
+and the per-tile receipt map the encoder predicts from finally names real tiles. It is the
+default and it is what you want. `chunks` exists for two reasons: it is the A/B for
+anything the new mapping is suspected of costing — same clip, same QP, same frames, two
+mappings — and it is somewhere to stand if a live session regresses. The server logs which
+one it used every two seconds:
+
+```
+nxwarp: stream 0 tile mapping: 178 frame(s) with per-tile spans, 0 with the fixed-chunk fallback ("tile-map": "auto")
+```
+
+A frame with any tile larger than a transport slot cannot be carried at one tile per slot
+and falls back whole, so an all-fallback line under `auto` means the quantiser is low
+enough that tiles are outgrowing the MTU — raise `qp`, or `mtu` if the link allows it.
+
+There is no need to read the log for it. **Settings → Tile mapping** sets it, and the
+dashboard's headset statistics page reports what actually happened over the last window
+("`128 frames on per-tile spans, 4 on fixed chunks`") — counts rather than the setting,
+because the choice is per frame and a mix is a normal answer. The in-headset HUD says it
+too, on the stream's geometry line, told from what arrived rather than from anything on
+the wire: under fixed chunks a frame carries one transport tile per MTU-sized piece of its
+bitstream and under spans it carries every tile it coded, which on a paired 1088x1088 is 45
+against 578.
 
 **`"backend": "vk"` is intra-only, and that is not free.** It implements the DC-plane
 intra half of the v1 bitstream and nothing else: no inter prediction (`"inter": "on"`
@@ -542,7 +569,7 @@ The dashboard renders it on the **Headset statistics** page, one card per stream
 the rate they are paced to, the headset's own decode time, frames the pacer held back, encode
 time, frame size against the controller's target, the quantiser and its band, the bitrate the
 controller allows, what the headset failed to reconstruct and the reason that accounts for most of
-it, the encoded size and tile count, and the negotiated entropy coder. Each line has a one-sentence
+it, the encoded size and tile count, the effort level and the negotiated entropy coder. Each line has a one-sentence
 note on what it means. Nothing there requires reading the log.
 
 ### In the dashboard
@@ -551,8 +578,8 @@ None of this needs a text editor. Selecting **NX Warp** in the encoder drop-down
 dashboard's settings page reveals an **NX Warp encoder** section carrying the settings above that
 are worth changing: [`stream_scale`](#stream_scale) (with the per-eye size and tile count it will
 produce, from the size the last connected headset asked for), `entropy`, `pace` with its fixed
-frame rate, `rc` with its `min-qp`/`max-qp` band, `coded-vectors`, and `inter` with
-`intra-period`. Each carries a one-line note on what it trades away.
+frame rate, `rc` with its `min-qp`/`max-qp` band, `coded-vectors`, `effort` (as **Extra encoder
+effort**, on by default), and `inter` with `intra-period`. Each carries a one-line note on what it trades away.
 
 The remaining options — `backend`, `qp`, `intra-dir`, `preset`, `threads`, `band-rows`, `mtu` —
 are bring-up and debugging controls rather than things to tune, and stay in the file. The

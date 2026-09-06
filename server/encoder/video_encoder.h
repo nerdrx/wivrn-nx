@@ -133,6 +133,71 @@ public:
 	// the one still running when the encoder thread is wedged inside a driver.
 	encoder_watchdog watchdog;
 
+protected:
+	// The server -> headset clock offset, refreshed at the top of every encode().
+	//
+	// Reachable by a subclass because a subclass can need it: the shard path fills the
+	// base class's `timing_info` and converts with this, and a codec that does not go
+	// through that path -- video_encoder_nxwarp carries its own on the last datagram of
+	// a frame -- has to fill the same four fields in the same clock. The alternative is
+	// a second copy of the conversion in the subclass, which is how two clocks drift.
+	const clock_offset & headset_clock() const
+	{
+		return clock;
+	}
+
+	// --- the per-frame latency budget, accumulated from the headset's feedback -----
+	//
+	// Contiguous stages that sum to the total, in the headset clock on both ends: the
+	// server converts its four stamps with clock_offset::to_headset() before they go on
+	// the wire, and the headset's six are already in it. So these are differences
+	// between numbers in one clock and need no offset of their own.
+	//
+	// Accumulated here rather than in a subclass because every field is generic -- the
+	// shard path fills them and so does anything that carries a timing_info -- and a
+	// subclass that wants to report them should not have to re-derive which subtraction
+	// means what.
+	struct latency_acc
+	{
+		double encode = 0, wait_send = 0, send = 0, net = 0;
+		double wire = 0, queue = 0, decode = 0, present = 0, total = 0;
+		uint64_t n = 0;
+
+		void reset()
+		{
+			*this = {};
+		}
+	};
+	latency_acc latency{};
+
+	// One frame's report, taken only when every stamp it needs is present: a frame that
+	// was never displayed has no `blitted`, and one whose feedback arrived before the
+	// decoder finished has no `received_from_decoder`. Counting a partial one would
+	// report a negative stage.
+	void account_latency(const from_headset::feedback & fb)
+	{
+		if (not fb.encode_begin or not fb.encode_end or not fb.send_begin or
+		    not fb.send_end or not fb.received_first_packet or
+		    not fb.received_last_packet or not fb.sent_to_decoder or
+		    not fb.received_from_decoder or not fb.blitted)
+			return;
+		// The headset reports a frame several times as it moves through the pipeline;
+		// only the copy that has reached `blitted` is complete, and that one is last.
+		auto ms = [](XrTime a, XrTime b) {
+			return double(b - a) * 1e-6;
+		};
+		latency.encode += ms(fb.encode_begin, fb.encode_end);
+		latency.wait_send += ms(fb.encode_end, fb.send_begin);
+		latency.send += ms(fb.send_begin, fb.send_end);
+		latency.net += ms(fb.send_begin, fb.received_first_packet);
+		latency.wire += ms(fb.received_first_packet, fb.received_last_packet);
+		latency.queue += ms(fb.received_last_packet, fb.sent_to_decoder);
+		latency.decode += ms(fb.sent_to_decoder, fb.received_from_decoder);
+		latency.present += ms(fb.received_from_decoder, fb.blitted);
+		latency.total += ms(fb.encode_begin, fb.blitted);
+		++latency.n;
+	}
+
 private:
 	using state_t = std::atomic_unsigned_lock_free::value_type;
 	static const state_t idle = 0;

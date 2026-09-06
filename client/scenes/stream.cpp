@@ -688,7 +688,14 @@ void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_p
 		{
 			if (decoder != decoders[stream].decoder.get())
 				return;
-			handle->feedback.received_from_decoder = instance.now();
+			// Only when the decoder did not already say. A decoder that knows when
+			// its own work finished is a better answer than the moment the handle
+			// reached this scene: nxwarp stamps the fence its GPU work signalled,
+			// and everything between that and here -- the ring swap, this lock --
+			// is display bookkeeping rather than decode. The codecs that leave it
+			// zero (the shard path hands the frame over exactly here) are unchanged.
+			if (not handle->feedback.received_from_decoder)
+				handle->feedback.received_from_decoder = instance.now();
 
 			// One de-jitter sample per frame, not per stream: the eyes are encoded from
 			// the same composited image and stamped with the same display time, so

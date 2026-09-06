@@ -44,6 +44,7 @@ namespace wivrn
 
 struct encoder_settings;
 struct vk_bundle;
+class pair_compose;
 class wivrn_session;
 
 inline const char * encoder_nvenc = "nvenc";
@@ -120,6 +121,16 @@ public:
 	// image of its own and reads layer 0.
 	const uint32_t src_layer;
 	const uint32_t target_queue;
+	// The hybrid base layer reads the EYE PAIR, brought together into one
+	// side-by-side picture by the shared wivrn::pair_compose. When these are set
+	// the present_image wrapper below substitutes that composed image for the
+	// compositor's array image before the subclass ever sees it, so every
+	// existing encoder implementation encodes the pair without knowing there is
+	// such a thing as an eye. `extent` is pair-wide for such a stream, which is
+	// why it is set from settings.width * eyes at construction.
+	std::shared_ptr<pair_compose> composer;
+	const uint32_t src_layer_right;
+	const bool composes_pair = false;
 	const bool need_transfer;
 	// Layout the encoder needs y_cbcr to arrive in. Set during construction
 	// or init() and read by the compositor on every layer_commit — must not

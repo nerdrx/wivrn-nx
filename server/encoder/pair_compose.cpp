@@ -270,7 +270,9 @@ void copy_layer(VkCommandBuffer cmd,
 VkImage pair_compose::compose(VkImage src,
                               uint32_t layer_left,
                               uint32_t layer_right,
-                              uint64_t frame_index)
+                              uint64_t frame_index,
+                              VkSemaphore wait_sem,
+                              uint64_t wait_value)
 {
 	std::lock_guard lock(mutex);
 
@@ -355,8 +357,21 @@ VkImage pair_compose::compose(VkImage src,
 	vkEndCommandBuffer(compose_cmd);
 
 	vkResetFences(vk_dev, 1, &compose_fence);
+	// The compositor is still drawing this frame when a present-time caller gets
+	// here, so the copy waits on its timeline value before reading a single
+	// texel. TRANSFER is the only stage that reads the source.
+	const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+	VkTimelineSemaphoreSubmitInfo tsi{
+	        .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+	        .waitSemaphoreValueCount = 1,
+	        .pWaitSemaphoreValues = &wait_value,
+	};
 	VkSubmitInfo si{
 	        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+	        .pNext = wait_sem ? &tsi : nullptr,
+	        .waitSemaphoreCount = wait_sem ? 1u : 0u,
+	        .pWaitSemaphores = wait_sem ? &wait_sem : nullptr,
+	        .pWaitDstStageMask = wait_sem ? &wait_stage : nullptr,
 	        .commandBufferCount = 1,
 	        .pCommandBuffers = &compose_cmd,
 	};

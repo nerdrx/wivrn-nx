@@ -83,10 +83,25 @@ public:
 	// caller does the copy and every later caller gets the same image back
 	// untouched. Callers must therefore pass the SAME frame index for the same
 	// compositor frame, and a strictly increasing one across frames.
+	//
+	// `wait_sem`/`wait_value` are the compositor's TIMELINE semaphore, and
+	// passing them is not optional for a caller that runs at present time. The
+	// compositor is still writing the eye image when present_image is called;
+	// every encoder waits on this semaphore in its own submit before touching
+	// the picture, and a compose that did not would read the frame while it was
+	// being drawn. A timeline semaphore admits any number of waiters, so this
+	// wait does not consume the one the encoder itself performs -- which it
+	// would if this were a binary semaphore, and which is why it is worth
+	// saying here.
+	//
+	// A caller that already runs after the compositor is done -- the nxvc codec
+	// does, at encode time under the queue mutex -- passes VK_NULL_HANDLE.
 	VkImage compose(VkImage src,
 	                uint32_t layer_left,
 	                uint32_t layer_right,
-	                uint64_t frame_index);
+	                uint64_t frame_index,
+	                VkSemaphore wait_sem = VK_NULL_HANDLE,
+	                uint64_t wait_value = 0);
 
 	// The composed image, valid only after a successful compose().
 	VkImage image() const

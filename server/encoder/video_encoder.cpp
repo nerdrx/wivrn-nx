@@ -23,6 +23,7 @@
 #include "video_encoder.h"
 
 #include "encoder_settings.h"
+#include "pair_compose.h"
 #include "os/os_time.h"
 #include "util/u_logging.h"
 #include "utils/wivrn_trace.h"
@@ -296,6 +297,24 @@ std::unique_ptr<video_encoder> video_encoder::create(
 	if (not res)
 		throw std::runtime_error("Failed to create encoder " + settings.encoder_name);
 
+	// The eye pair's side-by-side picture, shared with whoever else wants the
+	// same one. Built here rather than in the constructor because it needs the
+	// device handles, and because a failure to build it must not stop the
+	// encoder existing -- present_image drops the frame and says so instead.
+	if (res->composes_pair)
+	{
+		res->composer = pair_compose::get(*wivrn_vk.physical_device,
+		                                  *wivrn_vk.device,
+		                                  *wivrn_vk.queue.queue,
+		                                  wivrn_vk.queue.family_index,
+		                                  settings.width,
+		                                  settings.height,
+		                                  settings.eyes);
+		if (not res->composer)
+			U_LOG_W("stream %d encodes an eye pair but the compose could not be built",
+			        int(stream_idx));
+	}
+
 	auto wivrn_dump_video = std::getenv("WIVRN_DUMP_VIDEO");
 	if (wivrn_dump_video)
 	{
@@ -333,12 +352,23 @@ video_encoder::video_encoder(vk_bundle & vk,
         stream_idx(stream_idx),
         src_layer(settings.src_layer),
         target_queue(target_queue),
+        src_layer_right(settings.src_layer_right),
+        // Only the base layer takes this path. The NX Warp encoder is also a
+        // paired stream, but it composes inside its own codec at encode time --
+        // after the compositor semaphore has already been waited on -- so
+        // hoisting it here would move that work earlier for no gain.
+        composes_pair(settings.role == stream_role::base and settings.eyes > 1),
         need_transfer(not vk.optimal_transfer(vk.queue.family_index, target_queue)),
         bitrate_multiplier(settings.bitrate_multiplier),
         shared_sender(async_send ? sender::get() : nullptr),
         idr(std::move(idr)),
         extent{
-                .width = settings.width,
+                // Pair-wide for a stream that encodes both eyes as one picture.
+                // settings.width is PER EYE everywhere, as it is in nxvc.
+                .width = uint16_t(settings.width *
+                                  (settings.role == stream_role::base and settings.eyes > 1
+                                           ? settings.eyes
+                                           : 1)),
                 .height = settings.height,
         }
 {
@@ -616,6 +646,27 @@ void video_encoder::present_image(vk::Image y_cbcr,
 	}
 	state[present_slot] = busy;
 	++pending_presents;
+
+	// The eye pair, brought together before the subclass sees it. The compose
+	// waits on the compositor's timeline semaphore itself -- it reads the eye
+	// image while the compositor may still be drawing it, and every encoder
+	// below waits on the same timeline value in its own submit, which a timeline
+	// semaphore permits any number of times.
+	//
+	// A compose that could not be set up is not a reason to encode the left eye
+	// alone and send half a picture: the frame is dropped and the slot released.
+	if (composes_pair and composer)
+	{
+		VkImage pair = composer->compose(VkImage(y_cbcr), src_layer, src_layer_right,
+		                                 frame_index, VkSemaphore(info.semaphore), info.value);
+		if (pair == VK_NULL_HANDLE)
+		{
+			state[present_slot] = skip;
+			return;
+		}
+		y_cbcr = vk::Image(pair);
+	}
+
 	return present_image(y_cbcr, info, present_slot, frame_index, view_info);
 }
 

@@ -980,8 +980,18 @@ void application::initialize_vulkan()
 	        .pQueuePriorities = queuePriority,
 	};
 
+	// shaderInt16 and, below, storageBuffer16BitAccess: nxvc's decoder adopts THIS
+	// device and its Pass A shaders declare both SPIR-V capabilities -- the entropy pass
+	// decodes into int16 coefficients and writes them to a storage buffer. A module whose
+	// capabilities the device did not enable is undefined behaviour that happens to work
+	// on the drivers it was tried on; the validation layers call it
+	// VUID-VkShaderModuleCreateInfo-pCode-08740. Asked for only where the device offers
+	// it, so a headset without them still starts and simply cannot decode NX Warp.
+	const bool have_shader_int16 = bool(vk_physical_device.getFeatures().shaderInt16);
+
 	vk::PhysicalDeviceFeatures device_features{
 	        .shaderClipDistance = true,
+	        .shaderInt16 = have_shader_int16,
 	};
 
 	vk::StructureChain device_create_info{
@@ -999,7 +1009,12 @@ void application::initialize_vulkan()
 	        vk::PhysicalDeviceMultiviewFeaturesKHR{
 	                .multiview = true,
 	        },
-	        vk::PhysicalDeviceIndexTypeUint8FeaturesEXT{}};
+	        vk::PhysicalDeviceIndexTypeUint8FeaturesEXT{},
+	        // The other half of what nxvc's Pass A declares. The 1.1 struct rather than
+	        // VkPhysicalDeviceVulkan11Features, which needs a 1.2 device: this one is
+	        // core in 1.1 and available as VK_KHR_16bit_storage below that, and the
+	        // headset's Vulkan version is whatever the OpenXR runtime asked for.
+	        vk::PhysicalDevice16BitStorageFeatures{}};
 
 	auto check_feature_flag = [&](auto feature_flag, const char * extension_name) -> bool {
 		using FeatureStruct = class_from_member_t<decltype(feature_flag)>;
@@ -1019,6 +1034,25 @@ void application::initialize_vulkan()
 
 	check_feature_flag(&vk::PhysicalDeviceTimelineSemaphoreFeaturesKHR::timelineSemaphore, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
 	check_feature_flag(&vk::PhysicalDeviceIndexTypeUint8FeaturesEXT::indexTypeUint8, VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME);
+
+	// Not through check_feature_flag: that helper requires the feature's extension to be
+	// in the enabled list, and 16-bit storage is core since Vulkan 1.1, so on every
+	// device this client actually runs on the extension name is absent and the helper
+	// would unlink the struct on a device that supports the feature perfectly well.
+	const bool have_16bit_storage =
+	        bool(vk_physical_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDevice16BitStorageFeatures>()
+	                     .get<vk::PhysicalDevice16BitStorageFeatures>()
+	                     .storageBuffer16BitAccess);
+	if (have_16bit_storage)
+		device_create_info.get<vk::PhysicalDevice16BitStorageFeatures>().storageBuffer16BitAccess = true;
+	else
+		device_create_info.unlink<vk::PhysicalDevice16BitStorageFeatures>();
+
+	if (not(have_shader_int16 and have_16bit_storage))
+		spdlog::warn("this GPU has no shaderInt16 ({}) / storageBuffer16BitAccess ({}); "
+		             "the NX Warp decoder's shaders need both",
+		             have_shader_int16,
+		             have_16bit_storage);
 
 	vk_device = xr_system_id.create_device(vk_physical_device, device_create_info.get());
 	*vk_queue.lock() = vk_device.getQueue(vk_queue_family_index, 0);

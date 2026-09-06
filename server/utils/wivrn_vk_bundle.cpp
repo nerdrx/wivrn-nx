@@ -321,7 +321,7 @@ wivrn::vk_bundle::vk_bundle() :
 #endif
 
 		// Enable features
-		auto [phys_feat, phys_feat12, phys_feat13] = physical_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan12Features, vk::PhysicalDeviceVulkan13Features>();
+		auto [phys_feat, phys_feat11, phys_feat12, phys_feat13] = physical_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan11Features, vk::PhysicalDeviceVulkan12Features, vk::PhysicalDeviceVulkan13Features>();
 
 		std::get<vk::PhysicalDeviceVulkan12Features>(feat).descriptorBindingPartiallyBound = phys_feat12.descriptorBindingPartiallyBound;
 		std::get<vk::PhysicalDeviceVulkan12Features>(feat).timelineSemaphore = phys_feat12.timelineSemaphore;
@@ -331,6 +331,40 @@ wivrn::vk_bundle::vk_bundle() :
 			throw std::runtime_error("GPU does not support Vulkan synchronization2 feature");
 		if (not phys_feat12.timelineSemaphore)
 			throw std::runtime_error("GPU does not support Vulkan timeline semaphores");
+
+		// --- what the NX Warp decoder needs from the device it adopts -----------------
+		//
+		// nxvc's Vulkan decoder does not create a device: it runs on the one it is
+		// handed, here and on the headset alike (client/application.cpp does the same
+		// three lines for the same reason). Its Pass A shaders declare the SPIR-V
+		// capabilities Int16 and StorageBuffer16BitAccess -- the entropy pass decodes
+		// into int16 coefficients and writes them to a storage buffer, which is the
+		// whole shape of the pass -- and a shader module whose capabilities the device
+		// did not enable is undefined behaviour that happens to work on the drivers it
+		// was tried on. The validation layers name it at vkCreateShaderModule
+		// (VUID-VkShaderModuleCreateInfo-pCode-08740 and
+		// VUID-RuntimeSpirv-storageBuffer16BitAccess-11161).
+		//
+		// samplerYcbcrConversion is the client decoder's: its image pool is
+		// G8_B8R8_2PLANE_420_UNORM and every view of one carries a conversion object.
+		// The headset's device enables it already; this bundle's did not, so the
+		// harness -- which runs that same decoder against this device -- tripped
+		// VUID-vkCreateSamplerYcbcrConversion-None-01648 on the first pool it built.
+		//
+		// Asked for rather than assumed, and reported rather than silently dropped: a
+		// device without these can still run every other encoder, so this is a reason
+		// to refuse NX Warp and not a reason to refuse to start.
+		auto & feat11 = std::get<vk::PhysicalDeviceVulkan11Features>(feat);
+		feat11.storageBuffer16BitAccess = phys_feat11.storageBuffer16BitAccess;
+		feat11.samplerYcbcrConversion = phys_feat11.samplerYcbcrConversion;
+		std::get<vk::PhysicalDeviceFeatures2>(feat).features.shaderInt16 = phys_feat.features.shaderInt16;
+		nxwarp_decoder_features =
+		        phys_feat11.storageBuffer16BitAccess and
+		        phys_feat11.samplerYcbcrConversion and
+		        phys_feat.features.shaderInt16;
+		if (not nxwarp_decoder_features)
+			U_LOG_W("GPU does not support shaderInt16 / storageBuffer16BitAccess / "
+			        "samplerYcbcrConversion; the NX Warp decoder cannot run on it");
 
 #ifdef VK_KHR_video_encode_intra_refresh
 		if (has_device_ext(VK_KHR_VIDEO_ENCODE_INTRA_REFRESH_EXTENSION_NAME))

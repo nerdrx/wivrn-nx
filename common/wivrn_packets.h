@@ -1444,6 +1444,27 @@ struct video_stream_description
 	// because it is stream 1".
 	std::array<uint8_t, 4> serves_stream = {0xff, 0xff, 0xff, 0xff};
 
+	// Edge bleed. Sent once with the rest of the stream geometry because it is decided
+	// once, at connection, in the same place: the overscan is baked into the FOVs the
+	// application is already rendering by the time the first frame is encoded, so a
+	// mid-session change would mean a mismatched frame in flight for nothing.
+	//
+	// `edge_bleed_overscan` is what the SERVER did -- the fraction of each side's tangent
+	// the rendered FOV was widened by, 0 for none. The headset does not need it to draw
+	// (the widened FOV arrives per frame in view_info like any other), it needs it to know
+	// whether the margin is already real pixels, in which case it invents nothing.
+	//
+	// `edge_bleed_fallback` and `edge_bleed_extension` are what the headset should do when
+	// it is not: widen its own projection layer by the fallback margin and fill the
+	// invented ring by stretching the image edge over it, fading toward that edge's own
+	// colour past `edge_bleed_fade` of the ring. Extension 0 is none, 1 clamp, 2 fade;
+	// it is view_geometry::edge_extension, sent as its underlying type so the packet does
+	// not depend on the header.
+	float edge_bleed_overscan = 0;
+	float edge_bleed_fallback = 0;
+	float edge_bleed_fade = 0;
+	uint8_t edge_bleed_extension = 0;
+
 	bool operator==(const video_stream_description &) const = default;
 
 	constexpr stream_role role_of(uint8_t stream_index) const

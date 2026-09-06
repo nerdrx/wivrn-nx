@@ -30,6 +30,8 @@
 
 #include "stream.h"
 
+#include "utils/view_geometry.h"
+
 #include "application.h"
 #include "audio/audio.h"
 #include "boost/pfr/core.hpp"
@@ -1892,6 +1894,12 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		                                   ? float(std::clamp(config.low_poly_levels, 2, 32))
 		                                   : 0.f,
 		        .low_poly_full = lowpoly_on and config.low_poly_full_kernel,
+		        // Edge bleed. The server decides this, not the headset: it is the half
+		        // of one setting the server could not do itself, and it is already
+		        // zero here unless the server declined to overscan.
+		        .bleed_margin = bleed_margin,
+		        .bleed_extension = bleed_extension,
+		        .bleed_fade_distance = bleed_fade_distance,
 		};
 
 		// Whether this refresh can re-present the image already in the swapchain
@@ -2073,6 +2081,13 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			state.low_poly = post.low_poly;
 			state.low_poly_levels = post.low_poly_levels;
 			state.low_poly_full = post.low_poly_full;
+			// The ring is part of the picture the swapchain holds, so a change to it
+			// has to invalidate the re-present cache like every other pass input --
+			// otherwise turning it on shows the previous, unringed frame until
+			// something else happens to move.
+			state.bleed_margin = post.bleed_margin;
+			state.bleed_extension = post.bleed_extension;
+			state.bleed_fade = post.bleed_fade_distance;
 			state.motion_on = motion.field != nullptr and motion.step > 0;
 			state.motion_step = motion.step;
 			state.motion_frame = motion.field ? motion.field->frame_idx : uint64_t(-1);
@@ -2233,11 +2248,32 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		std::array<XrCompositionLayerProjectionView, view_count> layer_view;
 		for (uint32_t view = 0; view < view_count; view++)
 		{
+			// Edge bleed, the client's half. The pass drew a ring outside the picture;
+			// this is what puts that ring OUTSIDE the field of view the runtime thinks
+			// the layer covers, rather than eating into it. Without the widening the
+			// image would simply be squashed and the ring would cover real content.
+			//
+			// Zero, and therefore an exact no-op, whenever the server overscanned:
+			// `fov[view]` is then already the widened one it rendered with, arrived in
+			// view_info, and widening it again would invent a margin on top of a real
+			// one. Exactly one of the two ever applies.
+			XrFovf layer_fov = fov[view];
+			if (bleed_margin > 0)
+			{
+				namespace vg = wivrn::view_geometry;
+				layer_fov = {
+				        .angleLeft = vg::overscan_angle(layer_fov.angleLeft, bleed_margin),
+				        .angleRight = vg::overscan_angle(layer_fov.angleRight, bleed_margin),
+				        .angleUp = vg::overscan_angle(layer_fov.angleUp, bleed_margin),
+				        .angleDown = vg::overscan_angle(layer_fov.angleDown, bleed_margin),
+				};
+			}
+
 			layer_view[view] =
 			        {
 			                .type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW,
 			                .pose = pose[view],
-			                .fov = fov[view],
+			                .fov = layer_fov,
 
 			                .subImage = {
 			                        .swapchain = swapchain,
@@ -2454,6 +2490,25 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 		stream_roles[i] = description.role_of(uint8_t(i));
 		if (stream_roles[i] == stream_role::quad and quad_stream_idx == decoder_count)
 			quad_stream_idx = i;
+	}
+
+	// Edge bleed. Two independent halves arrive in one packet and only one of them ever
+	// runs: if the server overscanned, the margin is real decoded pixels that arrive
+	// inside the picture and the client invents nothing, so the ring is off whatever the
+	// extension mode says. If it did not, the client widens its own projection layer by
+	// the fallback margin and fills the ring out of the picture's edge.
+	{
+		namespace vg = wivrn::view_geometry;
+		server_overscan = vg::clamp_overscan(description.edge_bleed_overscan);
+		bleed_extension = float(description.edge_bleed_extension);
+		bleed_fade_distance = vg::clamp_fade_distance(description.edge_bleed_fade);
+		bleed_margin = (server_overscan > 0 or description.edge_bleed_extension == uint8_t(vg::edge_extension::none))
+		                       ? 0.f
+		                       : vg::clamp_overscan(description.edge_bleed_fallback);
+		spdlog::info("edge bleed: server overscan {:.1f}%, client ring {:.1f}% ({})",
+		             server_overscan * 100,
+		             bleed_margin * 100,
+		             vg::name(vg::edge_extension(description.edge_bleed_extension)));
 	}
 
 	// New decoders mean new frame timings; whatever the window holds describes a stream that

@@ -174,6 +174,23 @@ public:
 		// Dense 5x5 kernel instead of the default 17-fetch one. Only meaningful with
 		// low_poly above non-zero.
 		bool low_poly_full = false;
+
+		// Edge bleed, the client's invented margin. Width of the ring drawn outside
+		// the picture, as a fraction of the half image; 0 disables the whole thing and
+		// the pass is then byte identical to not having the feature (the vertex shader
+		// leaves every position where it was and the fragment shader's branch is
+		// never taken).
+		//
+		// Non-zero only when the SERVER did not overscan. When it did, the margin is
+		// real decoded pixels arriving inside the picture and there is nothing for
+		// this to invent -- see docs/NXWARP-E2E.md section 11.
+		float bleed_margin = 0;
+		// 0 none, 1 clamp, 2 fade. view_geometry::edge_extension, as a float because
+		// that is what a push constant carries.
+		float bleed_extension = 0;
+		// Fraction of the ring the stretch survives before the fade to the edge's own
+		// colour starts. `fade` only.
+		float bleed_fade_distance = 0;
 	};
 
 	// Motion smoothing. Neutral by default: with a null field, or a zero step, the

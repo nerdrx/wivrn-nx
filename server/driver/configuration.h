@@ -20,6 +20,7 @@
 #pragma once
 
 #include "bitrate_controller.h"
+#include "client/utils/view_geometry.h"
 #include "hostname.h"
 #include "wivrn_config.h"
 #include <array>
@@ -131,6 +132,51 @@ struct configuration
 	// the foveated size is derived, in get_encoder_settings, so it takes effect on
 	// connection. Valid range is ]0, 1]; the aligned result is floored at one 64x64 tile.
 	float stream_scale = 1.0f;
+
+	// Edge bleed. At low frame rates the headset's compositor reprojects a late frame to
+	// a newer pose, and where the frame runs out it has nothing to show: a black band
+	// sweeps in at the edge of the view, wider the later the frame and the faster the
+	// head. Both halves of the fix are here; `docs/NXWARP-E2E.md` section 11 is the
+	// reference.
+	struct edge_bleed_config
+	{
+		// Overscan: how much wider than the headset's own field of view the
+		// application renders, as a fraction of the projection plane's half extent
+		// on each side (0.05 = 5 % more picture beyond every edge). Those are REAL
+		// pixels, so a reprojection has content to move into and nothing has to be
+		// invented.
+		//
+		// The encoded size does not change, so the same pixels now cover a wider
+		// angle: at 5 % the picture is about 4.5 % less sharp, and about 9 % of the
+		// encoded area is spent outside the panel. That is the trade, and it is the
+		// reason this is a setting rather than a constant.
+		//
+		// Applied where the runtime asks the driver for the view FOVs
+		// (wivrn_hmd::get_view_poses), so it reaches the application, the encoder
+		// and the headset's projection layer from one place. Takes effect on the
+		// next frame; 0 disables it. See client/utils/view_geometry.h.
+		float overscan = wivrn::view_geometry::default_overscan;
+
+		// What the HEADSET does over the margin when the server did not overscan --
+		// the fallback that keeps "never black" true with `overscan` at 0. The
+		// client then widens its own projection layer by `overscan_fallback` and
+		// fills the invented ring by stretching the image edge outward (clamp) and,
+		// past `fade_distance` into the ring, blending it toward that edge's own
+		// averaged colour (fade). Nothing is decoded for the ring; it is a smear,
+		// which is still the correct answer when the alternative is black.
+		wivrn::view_geometry::edge_extension extension =
+		        wivrn::view_geometry::default_edge_extension;
+
+		// Width of the ring the client invents when it is doing the work, in the
+		// same units as `overscan`. Only read when `overscan` is 0 and `extension`
+		// is not `none`.
+		float overscan_fallback = wivrn::view_geometry::default_overscan;
+
+		// How far into the invented ring the stretch survives before the fade takes
+		// over, as a fraction of the ring. `fade` only.
+		float fade_distance = wivrn::view_geometry::default_fade_distance;
+	};
+	edge_bleed_config edge_bleed;
 	std::optional<uint8_t> bit_depth;
 	std::optional<std::array<float, 3>> grip_surface;
 	std::vector<std::string> application;

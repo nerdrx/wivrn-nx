@@ -440,6 +440,56 @@ configuration::configuration()
 			U_LOG_W("Ignoring invalid \"stream_scale\" configuration: %s", e.what());
 		}
 
+		// "edge_bleed": { "overscan": 0.05, "extension": "fade",
+		//                 "overscan_fallback": 0.05, "fade_distance": 0.25 }
+		//
+		// An object rather than four top level keys: they are one feature with one
+		// story, and a person turning it off wants to delete one line. Every member is
+		// optional and every out-of-range value is clamped rather than refused -- the
+		// whole object is cosmetic, and a session that starts with a silly margin is a
+		// better outcome than one that does not start.
+		try
+		{
+			auto it = json.find("edge_bleed");
+			if (it == json.end())
+				it = json.find("edge-bleed");
+			if (it != json.end())
+			{
+				if (not it->is_object())
+					throw std::runtime_error("expected an object");
+
+				const auto number = [&](const char * key, float & out, float (*clamp)(float)) {
+					auto j = it->find(key);
+					if (j == it->end())
+						return;
+					if (not j->is_number())
+						throw std::runtime_error(std::string(key) + ": expected a number");
+					out = clamp(float(j->get<double>()));
+				};
+
+				number("overscan", edge_bleed.overscan, &wivrn::view_geometry::clamp_overscan);
+				number("overscan_fallback", edge_bleed.overscan_fallback, &wivrn::view_geometry::clamp_overscan);
+				number("fade_distance", edge_bleed.fade_distance, &wivrn::view_geometry::clamp_fade_distance);
+
+				if (auto j = it->find("extension"); j != it->end())
+				{
+					if (not j->is_string())
+						throw std::runtime_error("extension: expected a string");
+					const auto name = j->get<std::string>();
+					// parse_edge_extension() falls back to `fade` for anything it does
+					// not know, which is right for a hand-edited file but would hide a
+					// typo here, so an unrecognised spelling is named in the log.
+					if (name != "none" and name != "off" and name != "clamp" and name != "fade")
+						throw std::runtime_error("extension: expected none, clamp or fade, got " + name);
+					edge_bleed.extension = wivrn::view_geometry::parse_edge_extension(name);
+				}
+			}
+		}
+		catch (const std::exception & e)
+		{
+			U_LOG_W("Ignoring invalid \"edge_bleed\" configuration: %s", e.what());
+		}
+
 		if (auto it = json.find("bit-depth"); it != json.end())
 			bit_depth = *it;
 

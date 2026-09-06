@@ -75,6 +75,10 @@ else()
     target_link_libraries(wivrn-common PUBLIC Vulkan::Headers)
 endif()
 
-target_include_directories(wivrn-common-base PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
+# The repository root, so the one shared view-geometry header can be spelled the same way
+# from the client, the server, the dashboard and the tests. client/utils/view_geometry.h is
+# pure header maths with no client dependencies; nothing else under client/ is reachable
+# from the server this way, because nothing else under client/ is a header-only leaf.
+target_include_directories(wivrn-common-base PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_SOURCE_DIR})
 target_link_libraries(wivrn-common PUBLIC Boost::pfr OpenSSL::Crypto wivrn-external wivrn-common-base)
 target_compile_definitions(wivrn-common PUBLIC VULKAN_HPP_NO_STRUCT_CONSTRUCTORS)

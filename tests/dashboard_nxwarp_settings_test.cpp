@@ -32,6 +32,8 @@
 #include "nxwarp_settings.h"
 #include "settings.h"
 
+#include "client/utils/view_geometry.h"
+
 #include <QFile>
 #include <QMetaEnum>
 #include <QMetaObject>
@@ -185,6 +187,11 @@ struct control
 
 static const QList<control> controls{
         {"streamScale", 0.8},
+        // Edge bleed. Both are top level and neither is gated on the encoder, so they are
+        // the only entries here that must survive with NX Warp deselected -- checked
+        // separately below rather than by this table, which sets everything at once.
+        {"edgeBleedOverscan", 0.10},
+        {"edgeBleedExtension", QVariant::fromValue(int(Settings::ExtensionClamp))},
         {"nxwarpEntropy", QVariant::fromValue(int(Settings::EntropyLite))},
         {"nxwarpPace", QVariant::fromValue(int(Settings::PaceFixed))},
         {"nxwarpPaceFps", 90},
@@ -236,6 +243,12 @@ static void part_b()
 	      "an option with no GUI control is untouched");
 	check(written.contains("stream_scale"), "stream_scale is written at the top level");
 	check(written["stream_scale"].get<double>() == 0.8, "stream_scale is written as a number");
+	check(written.contains("edge_bleed") and written["edge_bleed"].is_object(),
+	      "edge_bleed is written at the top level, as an object");
+	check(written["edge_bleed"].value("overscan", -1.0) == 0.10,
+	      "edge_bleed.overscan is written as a number");
+	check(written["edge_bleed"].value("extension", std::string()) == "clamp",
+	      "edge_bleed.extension is written as the server's spelling");
 	check(nxd::nxwarp_option(written, "entropy").value_or("") == "lite", "entropy=lite");
 	check(nxd::nxwarp_option(written, "pace").value_or("") == "90", "pace=90");
 	check(nxd::nxwarp_option(written, "rc").value_or("") == "fixed", "rc=fixed");
@@ -444,6 +457,63 @@ static void part_b()
 		      "1.0 erases both spellings");
 	}
 
+	// Edge bleed. The defaults are the values the SERVER applies for an absent key, so both
+	// controls at their defaults must leave no "edge_bleed" behind at all -- otherwise every
+	// config.json the dashboard ever touched would grow a key that changes nothing, and
+	// deleting it would look like a change.
+	{
+		Settings d;
+		d.load_json(json::parse(R"({"edge-bleed": {"overscan": 0.12, "extension": "none"}})"));
+		check(std::abs(d.property("edgeBleedOverscan").toDouble() - 0.12) < 1e-6,
+		      "the dashed edge bleed spelling is read");
+		check(d.property("edgeBleedExtension").toInt() == int(Settings::ExtensionNone),
+		      "the extension mode is read");
+
+		d.setProperty("edgeBleedOverscan", double(wivrn::view_geometry::default_overscan));
+		d.setProperty("edgeBleedExtension", int(Settings::ExtensionFade));
+		check(not d.configuration().contains("edge_bleed") and
+		              not d.configuration().contains("edge-bleed"),
+		      "both defaults erase both spellings");
+	}
+
+	// One control at its default and the other not leaves the object, holding only the one
+	// that moved: a partial object is what the server's parser is written for.
+	{
+		Settings d;
+		d.load_json(json::parse("{}"));
+		d.setProperty("edgeBleedExtension", int(Settings::ExtensionClamp));
+		const auto c = d.configuration();
+		check(c.contains("edge_bleed") and c["edge_bleed"].size() == 1 and
+		              c["edge_bleed"].value("extension", std::string()) == "clamp",
+		      "only the control that moved is written");
+
+		// 0 is a real choice -- it is how the overscan is turned OFF -- so it must be
+		// written out, not mistaken for "unset" and erased.
+		d.setProperty("edgeBleedOverscan", 0.0);
+		check(d.configuration()["edge_bleed"].value("overscan", -1.0) == 0.0,
+		      "an overscan of 0 is written, not erased");
+	}
+
+	// The edge bleed is not an NX Warp control, and the section is not gated on the encoder.
+	// A configuration with no NX Warp entry at all must still round trip both of them.
+	{
+		Settings d;
+		d.load_json(json::parse(R"({"encoder": {"encoder": "vaapi", "codec": "h265"}})"));
+		check(not d.property("nxwarpSelected").toBool(), "NX Warp is not the encoder here");
+		d.setProperty("edgeBleedOverscan", 0.03);
+		d.setProperty("edgeBleedExtension", int(Settings::ExtensionNone));
+		const auto c = d.configuration();
+		check(c["edge_bleed"].value("overscan", -1.0) == 0.03 and
+		              c["edge_bleed"].value("extension", std::string()) == "none",
+		      "edge bleed round trips with a hardware encoder selected");
+
+		Settings back;
+		back.load_json(c);
+		check(std::abs(back.property("edgeBleedOverscan").toDouble() - 0.03) < 1e-6 and
+		              back.property("edgeBleedExtension").toInt() == int(Settings::ExtensionNone),
+		      "and reads back out of the document it wrote");
+	}
+
 	// An inverted quantiser range would make the server refuse the session, so the GUI cannot
 	// produce one.
 	{
@@ -609,6 +679,10 @@ static void part_d(const char * qml_path)
 	// handle; it is still expected in load()).
 	const QList<QPair<QString, bool>> ids{
 	        {"stream_scale", false},
+	        // Written live by its slider so the percentage readout follows the handle,
+	        // hence false; the mode beside it is written on OK like every other combo.
+	        {"edge_bleed_overscan", false},
+	        {"edge_bleed_extension", true},
 	        {"nxwarp_entropy", true},
 	        {"nxwarp_pace", true},
 	        {"nxwarp_pace_fps", true},

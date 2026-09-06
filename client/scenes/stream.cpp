@@ -45,6 +45,7 @@
 #include "utils/ranges.h"
 #include "wivrn_packets.h"
 #include <algorithm>
+#include <cstdlib>
 #include <mutex>
 #include <ranges>
 #include <thread>
@@ -653,9 +654,23 @@ void scenes::stream::on_focused()
 		        XR_PERF_SETTINGS_DOMAIN_CPU_EXT,
 		        xr::resolve_performance_level(cfg.perf_level_cpu, cfg.high_power_mode,
 		                                      false));
+		// debug.wivrn.perfgpu overrides the GPU domain alone, for measurement:
+		// 0 leaves the configured policy, 1 pins sustained_high, 2 pins boost. The
+		// GPU sits at 490 MHz and 97-99% utilisation on this device with the decode
+		// and the display pass sharing one ring, so whether asking for boost moves
+		// the clock at all is a question the log cannot currently answer.
+		uint32_t perf_gpu = cfg.perf_level_gpu;
+#ifdef __ANDROID__
+		{
+			char value[PROP_VALUE_MAX] = {};
+			if (const int len = __system_property_get("debug.wivrn.perfgpu", value); len > 0)
+				perf_gpu = uint32_t(std::max(0, atoi(value)));
+		}
+#endif
+		spdlog::info("nxwarp: GPU performance level setting {}", perf_gpu);
 		session.set_performance_level(
 		        XR_PERF_SETTINGS_DOMAIN_GPU_EXT,
-		        xr::resolve_performance_level(cfg.perf_level_gpu, cfg.high_power_mode,
+		        xr::resolve_performance_level(perf_gpu, cfg.high_power_mode,
 		                                      false));
 	}
 }

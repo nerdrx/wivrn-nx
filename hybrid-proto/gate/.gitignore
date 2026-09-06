@@ -1,0 +1,8 @@
+# Generated fixtures, streams and decodes (tens of GB). Reproduce with
+# mkfixture.py / mkbase2.sh / final.sh.
+*.yuv
+*.hevc
+*.nxv
+*.sizes
+*.map
+*.png

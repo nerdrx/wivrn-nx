@@ -210,6 +210,26 @@ enum video_codec
 	nxwarp,
 };
 
+// What a stream IS, said on the wire instead of inferred from its index.
+//
+// The client used to map index to compositing role by position: 0 and 1 are the
+// views, 2 is alpha, 3 is the quad. That rule survived exactly as long as every
+// stream was one of those three things. The hybrid base layer is not -- it is an
+// atlas patch source, it is never composited on its own, and it lives on the
+// stream-1 slot the eye pairing vacates -- so the positional rule would have to
+// grow a second special case, and the next stream-shaped feature a third.
+//
+// Saying the role on the wire costs one byte per stream and one protocol hash
+// (the hash is derived from the type, so adding this field moves it on its own),
+// and it is what makes the NEXT such feature free.
+enum class stream_role : uint8_t
+{
+	view = 0,  // a view's picture; `paired_eyes` says how many views it carries
+	alpha = 1, // the passthrough alpha plane
+	quad = 2,  // a promoted quad layer
+	base = 3,  // an atlas patch source; never presented on its own
+};
+
 enum class stream_tab : uint8_t
 {
 	hidden,
@@ -1351,22 +1371,53 @@ struct video_stream_description
 	// what it loses is its size, and therefore its decoder.
 	uint8_t paired_eyes = 1;
 
+	// What each stream is, by index. The default is the historical positional
+	// rule, so a description built without touching this behaves exactly as
+	// before; the server overwrites it from the encoder settings.
+	std::array<stream_role, 4> role = {
+	        stream_role::view,
+	        stream_role::view,
+	        stream_role::alpha,
+	        stream_role::quad,
+	};
+
+	// For a `base` stream: the index of the stream whose atlas it fills. 0xff
+	// where it does not apply. This is what lets a base stream NAME its
+	// enhancement stream, rather than the client knowing "stream 1 fills stream 0
+	// because it is stream 1".
+	std::array<uint8_t, 4> serves_stream = {0xff, 0xff, 0xff, 0xff};
+
 	bool operator==(const video_stream_description &) const = default;
 
+	constexpr stream_role role_of(uint8_t stream_index) const
+	{
+		return stream_index < role.size() ? role[stream_index] : stream_role::view;
+	}
+
 	// Encoded size of one stream, the size the decoder for it must be created with.
+	// Zero means "this stream does not exist this session" and no decoder is built.
 	constexpr std::pair<uint16_t, uint16_t> stream_size(uint8_t stream_index) const
 	{
-		switch (stream_index)
+		switch (role_of(stream_index))
 		{
-			case 1: // right eye -- absent when stream 0 carries both
-				return paired_eyes > 1 ? std::pair<uint16_t, uint16_t>{0, 0}
-				                       : std::pair<uint16_t, uint16_t>{width, height};
-			case 2: // alpha, half height
+			case stream_role::alpha: // half height
 				return {width, uint16_t(height / 2)};
-			case 3:
+			case stream_role::quad:
 				return {quad_width, quad_height};
+			case stream_role::base:
+				// The base is coded as ONE side-by-side picture over the eye
+				// pair, and unlike the nxvc stream it carries no header of its
+				// own that says so -- an HEVC SPS just states a width. So the
+				// size reported here is the CODED size, pair-wide, and not the
+				// per-eye size the view streams report.
+				return {uint16_t(width * (paired_eyes ? paired_eyes : 1)), height};
+			case stream_role::view:
 			default:
-				return {width, height};
+				// The right-eye view stream is absent when stream 0 carries both
+				// eyes; every other view stream reports one eye.
+				return (stream_index == 1 and paired_eyes > 1)
+				               ? std::pair<uint16_t, uint16_t>{0, 0}
+				               : std::pair<uint16_t, uint16_t>{width, height};
 		}
 	}
 };

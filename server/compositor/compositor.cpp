@@ -1543,6 +1543,19 @@ void compositor::send_video_stream_description()
 	// stream_size() then reports it as zero and the headset builds no decoder for
 	// a stream that will never receive a datagram.
 	desc.paired_eyes = uint8_t(settings[0].eyes ? settings[0].eyes : 1);
+	// What each stream IS, so the client routes by role instead of by index. The
+	// defaults in the packet are the old positional rule, and every stream except
+	// a hybrid base layer still carries exactly that, so this is a no-op for any
+	// session that has not enabled one. A disabled stream keeps its default role;
+	// its stream_size() is zero and the client builds no decoder for it either way.
+	static_assert(std::tuple_size_v<decltype(settings)> == std::tuple_size_v<decltype(desc.role)>);
+	for (auto [i, s]: std::ranges::enumerate_view(settings))
+	{
+		if (not s.enabled)
+			continue;
+		desc.role[i] = s.role;
+		desc.serves_stream[i] = s.serves_stream;
+	}
 	// Zero unless a quad layer stream exists, which is how the headset knows whether
 	// to create a decoder for it at all.
 	if (quad)

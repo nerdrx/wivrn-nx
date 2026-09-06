@@ -250,13 +250,17 @@ struct vert_pc
 	float atlas_size[4];
 	float atlas_geom[4];
 	float atlas_range[4];
-	float bleed[4];
-	// The sub-rectangle this eye's picture occupies in the colour image, half a texel in
-	// from each side: (x_lo, x_hi, y_lo, y_hi). Not (0, 1, 0, 1) whenever the encoder codes
-	// the eyes as one image.
-	float bleed_uv[4];
 };
-static_assert(sizeof(vert_pc) == 208);
+// 176 bytes, and the size is itself under test.
+//
+// The edge bleed used to append two vec4 here, taking the block to 208. That made
+// vkCreateGraphicsPipelines fail with ErrorUnknown on a Pico 4's Adreno 650 and killed
+// every session -- the display pipeline is built lazily on the first streamed frame, so the
+// decoder ran, four frames arrived, and only then did the client throw and exit. This
+// assert is the tripwire: the five edge bleed scalars live in the lanes the block already
+// had spare (glow.z, glow.w, motion.w, deband.w), and a future parameter goes in a free
+// lane or into a uniform buffer, never on the end.
+static_assert(sizeof(vert_pc) == 176);
 
 // The atlas table the fragment shader declares: vec4 e[4 * 289 * 2]. Nothing reads it here
 // (atlas_mode is 0, so the whole path compiles out) but the descriptor still has to point at
@@ -1101,8 +1105,13 @@ int main(int argc, char ** argv)
 		pc.atlas_size[0] = pc.atlas_size[1] = float(kSrc);
 		pc.atlas_geom[0] = pc.atlas_geom[1] = 8.0f;
 		pc.atlas_geom[2] = pc.atlas_geom[3] = 1.0f / 8.0f;
-		std::memcpy(pc.bleed, cfg.bleed, sizeof(pc.bleed));
-		std::memcpy(pc.bleed_uv, cfg.bleed_uv, sizeof(pc.bleed_uv));
+		// The edge bleed, packed into the free lanes the way the client packs it:
+		// glow.z is the ring width, glow.w is the mode plus the fade distance, and
+		// motion.w / deband.w are this eye's horizontal limits in the colour image.
+		pc.glow[2] = cfg.bleed[0];
+		pc.glow[3] = cfg.bleed[1] + cfg.bleed[2];
+		pc.motion[3] = cfg.bleed_uv[0];
+		pc.deband[3] = cfg.bleed_uv[1];
 
 		VkCommandBuffer cmd = begin_once(c);
 		VkClearValue clear{};

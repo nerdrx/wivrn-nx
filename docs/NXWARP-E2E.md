@@ -1081,6 +1081,57 @@ those differ by degrees), that `visible_rect()` agrees with a hand re-derivation
 angles, that an asymmetric field of view keeps asymmetric margins in pixels, and that the wire
 values of the extension enum are 0/1/2 and are not free to change.
 
+### The push constant ceiling, and how it was found
+
+The first live session with the edge bleed on a Pico 4 died like this:
+
+```
+[error] Caught exception in application_thread: "vkCreateGraphicsPipelines: ErrorUnknown"
+[info] Exiting application_thread
+F libc: Fatal signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x0 ... (exit+24)
+```
+
+The edge bleed had appended two `vec4` to `reprojection.glsl`'s push constant block, taking
+it from 176 bytes to 208. On that device's Adreno 650 the display pipeline then refuses to
+be created at all.
+
+Two things about the failure are worth remembering, because both of them cost time:
+
+**It is not visible from the server, and it does not look like a shader fault.** The
+display pipeline is built lazily on the first STREAMED frame. So the client connects,
+negotiates, builds its decoder, decodes several frames — the server logs a healthy
+session, with encode times and a bitrate — and only then does the reprojection pass throw,
+the application thread exit, and the process die. What the server sees is a client that
+connected and vanished, followed by `Primary control socket failed`. What the HUD shows is
+`render: 0`, because `scenes::stream::render()` never runs once.
+
+**No setting can bisect it.** The natural first move is to turn the feature off and see
+whether the fault goes with it — `edge_bleed.overscan` to 0, `extension` to `none`. That
+proves nothing here: the block's SIZE is fixed at pipeline creation and does not depend on
+what the values in it are, so the session fails identically with the feature switched off,
+which reads as "not the edge bleed" and is wrong. The bisect has to be over builds, not
+over configuration, whenever the suspect is pipeline creation.
+
+The block is back to 176 bytes and `static_assert(sizeof(vert_pc) == 176)` in
+`stream_defoveator.cpp` — and a second one in `tests/edge_bleed_test.cpp` — is the
+tripwire. The edge bleed's five scalars live in the lanes the block already had spare:
+
+| lane | carries |
+| --- | --- |
+| `glow.z` | ring width, as a fraction of the half image; 0 disables the ring |
+| `glow.w` | extension mode and fade distance as `mode + fade`; `floor()` and `fract()` |
+| `motion.w` | this eye's LEFT edge in the colour image, normalised, half a texel in |
+| `deband.w` | this eye's RIGHT edge |
+
+Only the horizontal limits are carried, because only those are ever interesting: the eyes
+are paired side by side, so that is the axis on which a stretch could walk into the eye
+next door. Vertically a picture always spans the image and the shader uses the half-texel
+inset it already computes.
+
+176 bytes is not a limit anybody has measured on this device — it is the largest size a
+pipeline has ever been successfully created with here. A new parameter goes in a free lane,
+or the block moves to a uniform buffer. It does not get appended to.
+
 ### A protocol break
 
 `to_headset::video_stream_description` grew four fields, so this is another change to the

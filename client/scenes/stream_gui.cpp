@@ -306,6 +306,10 @@ void scenes::stream::accumulate_fps(XrTime now)
 		// NXVC_TOOL_ENTROPY_LITE, bit 30. Named here rather than including nxvc.h for
 		// one constant in a file that otherwise does not need the codec's headers.
 		fps.nxwarp_entropy_lite = (tools & (uint64_t(1) << 30)) != 0;
+		// From the stream description rather than the codec's own header: the server
+		// states it when the decoders are built, where the .nxv header does not arrive
+		// until the first frame. See scenes::stream::eyes_in_one_stream().
+		fps.nxwarp_paired = eyes_in_one_stream();
 	}
 #endif
 	fps.nxwarp = nxwarp;
@@ -354,11 +358,21 @@ void scenes::stream::rebuild_fps_lines()
 	for (auto & line: fps_line_cache)
 		line.clear();
 
+	// One figure per stream that actually decodes. With the eyes paired there is only
+	// stream 0 -- stream 1 has no decoder and its counter never moves -- so listing it
+	// would print a permanent "/0" and read as a dead eye rather than an absent stream.
 	std::string decoded = fmt::format("{:.0f}", fps.decoded[0]);
-	for (size_t i = 1; i < view_count; ++i)
-		decoded += fmt::format("/{:.0f}", fps.decoded[i]);
+	if (not fps.nxwarp_paired)
+	{
+		for (size_t i = 1; i < view_count; ++i)
+			decoded += fmt::format("/{:.0f}", fps.decoded[i]);
+	}
 
-	fps_line_cache[0] = fmt::format(_F("Shown {:.0f} · decoded {} fps"), fps.displayed, decoded);
+	fps_line_cache[0] = fps.nxwarp_paired
+	                            ? fmt::format(_F("Shown {:.0f} · decoded {} fps, both eyes"),
+	                                          fps.displayed,
+	                                          decoded)
+	                            : fmt::format(_F("Shown {:.0f} · decoded {} fps"), fps.displayed, decoded);
 
 	if (not fps.nxwarp)
 		return;
@@ -394,13 +408,34 @@ void scenes::stream::rebuild_fps_lines()
 	                                fps.nxwarp_stride);
 
 	// What was negotiated, which does not change once the stream is up but is the first
-	// thing anyone asks when the numbers above look wrong.
+	// thing anyone asks when the numbers above look wrong. Paired, the size shown is the
+	// frame the decoder actually dispatches -- the eyes side by side -- because that is
+	// what the decode figures on the line above were measured on.
 	if (fps.nxwarp_width)
-		fps_line_cache[4] = fmt::format(_F("{}x{} · {} tiles · {}"),
-		                                fps.nxwarp_width,
-		                                fps.nxwarp_height,
-		                                (fps.nxwarp_width / 64) * (fps.nxwarp_height / 64),
-		                                fps.nxwarp_entropy_lite ? _S("entropy lite") : _S("entropy rANS"));
+	{
+		// The stream header reports the size PER EYE. Paired, the picture the decoder
+		// actually dispatches is the eyes side by side, so that is what is shown: it is
+		// the frame the GPU figures on the line above were measured on, and a "1088x1088"
+		// next to a 49 ms decode would invite exactly the wrong conclusion.
+		const uint32_t eyes = fps.nxwarp_paired ? 2u : 1u;
+		const uint32_t w = fps.nxwarp_width * eyes;
+		const uint32_t tiles = (w / 64) * (fps.nxwarp_height / 64);
+		// std::string, not const char *: _S is gettext(...).c_str() over a temporary
+		// std::string, so a pointer to it dangles the moment this statement ends. Inline
+		// inside the format call it would live long enough; hoisted, it does not.
+		const std::string entropy = fps.nxwarp_entropy_lite ? _("entropy lite") : _("entropy rANS");
+		fps_line_cache[4] = fps.nxwarp_paired
+		                            ? fmt::format(_F("{}x{} paired · {} tiles · {}"),
+		                                          w,
+		                                          fps.nxwarp_height,
+		                                          tiles,
+		                                          entropy)
+		                            : fmt::format(_F("{}x{} · {} tiles · {}"),
+		                                          w,
+		                                          fps.nxwarp_height,
+		                                          tiles,
+		                                          entropy);
+	}
 }
 
 // The cached block, drawn. Both views call this so they cannot drift apart.

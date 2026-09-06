@@ -141,8 +141,14 @@ struct nxwarp_stream_stats
 	uint64_t negotiated_tools = 0;
 
 	// --- the encode size -----------------------------------------------------
+	// Per eye, whether or not the eyes are paired: the stereo frame on the wire is twice
+	// this wide, which paired_frame_width() below gives.
 	uint16_t encoded_width = 0;
 	uint16_t encoded_height = 0;
+	// Eyes carried by this stream: 2 when both are coded as one nxvc stereo frame on
+	// stream 0 (see "stereo-frame"), 1 otherwise. A paired stream 0 means stream 1 has no
+	// encoder and will never report -- it is not a stream sitting at zero.
+	uint8_t paired_eyes = 1;
 	// min(headset render_scale, the server's "stream_scale"): the linear factor the size
 	// above was derived at.
 	float encode_scale = 1;
@@ -190,6 +196,23 @@ struct nxwarp_stream_stats
 		return uint32_t(encoded_width / 64) * uint32_t(encoded_height / 64);
 	}
 
+	bool paired() const
+	{
+		return paired_eyes > 1;
+	}
+
+	// The frame actually coded: the eyes side by side when paired, one eye otherwise.
+	uint32_t coded_frame_width() const
+	{
+		return uint32_t(encoded_width) * (paired() ? 2u : 1u);
+	}
+
+	// Tiles in that frame, which is what one decode dispatch actually costs.
+	uint32_t coded_frame_tiles() const
+	{
+		return tiles() * (paired() ? 2u : 1u);
+	}
+
 	float fps_sent() const
 	{
 		return window_seconds > 0 ? float(double(frames_encoded) / double(window_seconds)) : 0.f;
@@ -231,6 +254,7 @@ inline void to_json(nlohmann::json & j, const nxwarp_stream_stats & s)
 	        {"negotiated_tools", s.negotiated_tools},
 	        {"encoded_width", s.encoded_width},
 	        {"encoded_height", s.encoded_height},
+	        {"paired_eyes", s.paired_eyes},
 	        {"encode_scale", r(s.encode_scale)},
 	        {"latency_encode_ms", r(s.latency_encode_ms)},
 	        {"latency_wait_send_ms", r(s.latency_wait_send_ms)},
@@ -284,6 +308,7 @@ inline void from_json(const nlohmann::json & j, nxwarp_stream_stats & s)
 	get("negotiated_tools", s.negotiated_tools);
 	get("encoded_width", s.encoded_width);
 	get("encoded_height", s.encoded_height);
+	get("paired_eyes", s.paired_eyes);
 	get("encode_scale", s.encode_scale);
 	get("latency_encode_ms", s.latency_encode_ms);
 	get("latency_wait_send_ms", s.latency_wait_send_ms);

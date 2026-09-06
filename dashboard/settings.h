@@ -81,6 +81,15 @@ public:
 	};
 	Q_ENUM(nxwarp_pace)
 
+	// "stereo-frame": whether both eyes are coded as one nxvc stereo frame on stream 0.
+	enum nxwarp_stereo
+	{
+		StereoAuto,
+		StereoOn,
+		StereoOff,
+	};
+	Q_ENUM(nxwarp_stereo)
+
 	// "coded-vectors": whether motion vectors are coded into the stream.
 	enum nxwarp_coded_vectors
 	{
@@ -110,6 +119,7 @@ public:
 	Q_PROPERTY(bool nxwarpRcAuto READ nxwarpRcAuto WRITE set_nxwarpRcAuto NOTIFY nxwarpRcAutoChanged)
 	Q_PROPERTY(int nxwarpMinQp READ nxwarpMinQp WRITE set_nxwarpMinQp NOTIFY nxwarpMinQpChanged)
 	Q_PROPERTY(int nxwarpMaxQp READ nxwarpMaxQp WRITE set_nxwarpMaxQp NOTIFY nxwarpMaxQpChanged)
+	Q_PROPERTY(nxwarp_stereo nxwarpStereoFrame READ nxwarpStereoFrame WRITE set_nxwarpStereoFrame NOTIFY nxwarpStereoFrameChanged)
 	Q_PROPERTY(nxwarp_coded_vectors nxwarpCodedVectors READ nxwarpCodedVectors WRITE set_nxwarpCodedVectors NOTIFY nxwarpCodedVectorsChanged)
 	Q_PROPERTY(bool nxwarpInter READ nxwarpInter WRITE set_nxwarpInter NOTIFY nxwarpInterChanged)
 	Q_PROPERTY(int nxwarpIntraPeriod READ nxwarpIntraPeriod WRITE set_nxwarpIntraPeriod NOTIFY nxwarpIntraPeriodChanged)
@@ -153,6 +163,7 @@ public:
 	SETTER_GETTER_NOTIFY(bool, nxwarpRcAuto)
 	SETTER_GETTER_NOTIFY(int, nxwarpMinQp)
 	SETTER_GETTER_NOTIFY(int, nxwarpMaxQp)
+	SETTER_GETTER_NOTIFY(nxwarp_stereo, nxwarpStereoFrame)
 	SETTER_GETTER_NOTIFY(nxwarp_coded_vectors, nxwarpCodedVectors)
 	SETTER_GETTER_NOTIFY(bool, nxwarpInter)
 	SETTER_GETTER_NOTIFY(int, nxwarpIntraPeriod)
@@ -169,6 +180,21 @@ public:
 	// Tiles per eye at that size: the NX Warp decoder's per-frame work, which is the whole
 	// reason the slider exists.
 	Q_INVOKABLE int encodedTiles(int headsetWidth, int headsetHeight) const;
+	// Whether the eyes will actually be paired into one stereo frame at the current
+	// settings, and the size and tile count of the paired frame if so. The pairing gate
+	// lives in get_encoder_settings; this mirrors it so the slider can show the
+	// consequence before anything is saved.
+	Q_INVOKABLE bool willPairEyes() const;
+	Q_INVOKABLE QSize pairedFrameSize(int headsetWidth, int headsetHeight) const;
+	Q_INVOKABLE int pairedTiles(int headsetWidth, int headsetHeight) const;
+	// The server's own size gate on pairing, and "pairing was asked for and this size
+	// refuses it". Kept as two calls because the first is a pure fact about a width that
+	// the test can drive both ways, while the second is only reachable through
+	// encodedEyeSize -- which aligns to 64 and therefore never trips it today. That is
+	// the point: the warning is the guardrail for the day the alignment changes, and the
+	// test pins the claim that no reachable slider position needs it.
+	Q_INVOKABLE bool pairingWidthOk(int perEyeWidth) const;
+	Q_INVOKABLE bool pairingRefused(int headsetWidth, int headsetHeight) const;
 
 private:
 	nlohmann::json m_jsonSettings = nlohmann::json::object();

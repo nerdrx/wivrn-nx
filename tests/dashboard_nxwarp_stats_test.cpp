@@ -106,6 +106,7 @@ nxwarp_stream_stats sample()
 	s.encoded_width = 896;
 	s.encoded_height = 896;
 	s.encode_scale = 0.8f;
+	s.paired_eyes = 2;
 	return s;
 }
 
@@ -139,6 +140,7 @@ void check_same(const nxwarp_stream_stats & a, const nxwarp_stream_stats & b, co
 	check(a.encoded_width == b.encoded_width, h + ": encoded_width");
 	check(a.encoded_height == b.encoded_height, h + ": encoded_height");
 	check(near(a.encode_scale, b.encode_scale), h + ": encode_scale");
+	check(a.paired_eyes == b.paired_eyes, h + ": paired_eyes");
 }
 
 // The IPC socket hands the serializer's spans straight to sendmsg and rebuilds a
@@ -219,6 +221,11 @@ static void part_b()
 		check(near(s.encode_scale, 1.0), "a missing field keeps its default");
 		check(s.entropy.empty(), "a missing string keeps its default");
 		check(s.encoded_width == 896, "the fields that are present still arrive");
+		auto older2 = nlohmann::json(sample());
+		older2.erase("paired_eyes");
+		const auto s2 = older2.get<nxwarp_stream_stats>();
+		check(s2.paired_eyes == 1 and not s2.paired(),
+		      "a server with no stereo support reads as one eye, not zero eyes");
 	}
 	{
 		auto newer = nlohmann::json(sample());
@@ -286,6 +293,24 @@ static void part_c()
 	check(read("toolsText").toString() == "0x777a1fff", "toolsText is the headset's mask in hex");
 	check(read("entropy").toString() == "lite", "entropy");
 	check(read("rcUnreachable").toBool(), "rcUnreachable");
+
+	// Pairing: the card has to say "both eyes", and the frame it reports has to be the one
+	// the decoder actually dispatches -- the eyes side by side -- not one eye.
+	check(read("paired").toBool(), "paired is true at eyes = 2");
+	check(read("codedFrameWidth").toInt() == 1792, "the coded frame is two 896 eyes wide");
+	check(read("codedFrameTiles").toInt() == 392, "and 28x14 = 392 tiles, twice one eye's 196");
+	check(read("tiles").toInt() == 196, "while the per-eye tile count is unchanged");
+	{
+		nxwarp_stream_stats mono = sample();
+		mono.paired_eyes = 1;
+		const nxwarp_stream_stat gm{mono};
+		auto rm = [&](const char * name) {
+			return mo->property(mo->indexOfProperty(name)).readOnGadget(&gm);
+		};
+		check(not rm("paired").toBool(), "unpaired reports false");
+		check(rm("codedFrameWidth").toInt() == 896, "and the coded frame is one eye wide");
+		check(rm("codedFrameTiles").toInt() == 196, "and one eye's tiles");
+	}
 
 	// The states with nothing to show.
 	{
@@ -474,6 +499,10 @@ static void part_e()
 	check(read("entropyWasAuto").toBool(), "chosen by auto, as logged");
 	check(read("toolsText").toString() == "0x777a1fff", "the headset's tool mask, as logged");
 	check(read("tiles").toInt() == 289, "1088x1088 is 17x17 = 289 tiles");
+	// server50.log predates the stereo work, so this session was not paired. A report with
+	// no paired_eyes field at all must read as one eye rather than as a broken pair.
+	check(not read("paired").toBool(), "the replayed session is not paired");
+	check(read("codedFrameWidth").toInt() == 1088, "so the coded frame is one eye wide");
 }
 
 int main(int argc, char ** argv)

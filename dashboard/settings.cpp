@@ -144,6 +144,7 @@ void Settings::emitAllChanged()
 	nxwarpRcAutoChanged();
 	nxwarpMinQpChanged();
 	nxwarpMaxQpChanged();
+	nxwarpStereoFrameChanged();
 	nxwarpCodedVectorsChanged();
 	nxwarpInterChanged();
 	nxwarpIntraPeriodChanged();
@@ -824,6 +825,82 @@ void Settings::set_nxwarpMaxQp(const int & value)
 		set_nxwarpMinQp(int(v));
 	if (old != nxwarpMaxQp())
 		nxwarpMaxQpChanged();
+}
+
+Settings::nxwarp_stereo Settings::nxwarpStereoFrame() const
+{
+	switch (nxd::nxwarp_stereo_frame_mode(m_jsonSettings))
+	{
+		case nxd::stereo_frame_mode::on:
+			return StereoOn;
+		case nxd::stereo_frame_mode::off:
+			return StereoOff;
+		case nxd::stereo_frame_mode::automatic:
+			break;
+	}
+	return StereoAuto;
+}
+
+void Settings::set_nxwarpStereoFrame(const nxwarp_stereo & value)
+{
+	const auto old = nxwarpStereoFrame();
+	const auto mode = value == StereoOn ? nxd::stereo_frame_mode::on
+	                                    : (value == StereoOff ? nxd::stereo_frame_mode::off
+	                                                          : nxd::stereo_frame_mode::automatic);
+	nxd::set_nxwarp_stereo_frame(m_jsonSettings, mode);
+	if (old != nxwarpStereoFrame())
+		nxwarpStereoFrameChanged();
+}
+
+bool Settings::willPairEyes() const
+{
+	// The same gate get_encoder_settings applies, in the same order. "auto" and "on"
+	// both require the whole eye pair to be NX Warp -- pairing one eye with a hardware
+	// encoder removes nothing, because the win is that the headset stops running two
+	// decoders. The dashboard's simple configuration gives both eyes the same encoder,
+	// so "is NX Warp selected" answers "is the whole pair NX Warp".
+	if (nxwarpStereoFrame() == StereoOff)
+		return false;
+	return nxwarpSelected();
+}
+
+bool Settings::pairingWidthOk(int perEyeWidth) const
+{
+	// nxvc refuses eyes == 2 unless the per-eye width is a multiple of 64, so that the
+	// seam between the eyes falls on a tile boundary and each eye's sub-picture is
+	// addressable. get_encoder_settings tests exactly this and logs "not pairing the
+	// eyes" when it fails, having already decided to pair -- so it is a refusal after
+	// the fact, which is the thing the preview has to be able to say out loud.
+	return perEyeWidth > 0 and perEyeWidth % wivrn::encode_alignment == 0;
+}
+
+bool Settings::pairingRefused(int headsetWidth, int headsetHeight) const
+{
+	// Asked for, and then refused on the size. Not "will not pair": choosing off is not a
+	// refusal, and neither is a non-NX Warp encoder.
+	if (not willPairEyes())
+		return false;
+	const QSize eye = encodedEyeSize(headsetWidth, headsetHeight);
+	if (eye.isEmpty())
+		return false;
+	return not pairingWidthOk(eye.width());
+}
+
+QSize Settings::pairedFrameSize(int headsetWidth, int headsetHeight) const
+{
+	const QSize eye = encodedEyeSize(headsetWidth, headsetHeight);
+	if (eye.isEmpty() or not willPairEyes() or not pairingWidthOk(eye.width()))
+		return {};
+	// Side by side, eye 0 left: the pair is twice as wide and the same height.
+	return QSize(eye.width() * 2, eye.height());
+}
+
+int Settings::pairedTiles(int headsetWidth, int headsetHeight) const
+{
+	const QSize pair = pairedFrameSize(headsetWidth, headsetHeight);
+	if (pair.isEmpty())
+		return 0;
+	return (pair.width() / wivrn::encode_alignment) * (pair.height() / wivrn::encode_alignment);
 }
 
 Settings::nxwarp_coded_vectors Settings::nxwarpCodedVectors() const

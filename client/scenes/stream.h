@@ -428,6 +428,10 @@ private:
 		uint32_t nxwarp_width = 0;
 		uint32_t nxwarp_height = 0;
 		bool nxwarp_entropy_lite = false;
+		// Both eyes coded as one stereo frame on stream 0, from the stream description.
+		// Stream 1 then has no decoder and its counters never move, so the readout must
+		// not list it: a permanent "/0" reads as a dead eye, not an absent stream.
+		bool nxwarp_paired = false;
 	};
 	fps_readout fps;
 	// One snapshot of every counter the readout differences, with the time it was taken.

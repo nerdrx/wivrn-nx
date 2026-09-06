@@ -1612,7 +1612,27 @@ int main(int argc, char ** argv)
 	// ==== assertions ==========================================================
 	const bool clean = loss <= 0;
 
-	check(not host.frames.empty(), "frames decode");
+	// A THIRD regime, between "clean" and "lossy": the link delivered nothing at
+	// all. `--loss 1` (or anything above it, which is how `--loss 3` behaves --
+	// the draw is uniform(0,1) < loss) is a blackout, and it is a case worth
+	// running: the encoder must keep coding, the transport must place nothing,
+	// the decoder must publish nothing, and the process must end. What it is NOT
+	// is a lossy run with unlucky numbers, and every assertion below that starts
+	// "the frames that arrived..." is vacuous when none did.
+	//
+	// Six of them used to FAIL on this input, which is the worst answer a test can
+	// give: the code was right, the checks were asking a question the input had
+	// made meaningless, and a real regression would have been indistinguishable
+	// from the noise. They are conditional now, and the blackout has assertions of
+	// its own so the run still tests something.
+	const bool blackout = link.sent > 0 and link.dropped == link.sent;
+	if (blackout)
+		std::printf("\nblackout: the link delivered none of %llu datagrams; checking that "
+		            "nothing was invented rather than that anything arrived\n",
+		            (unsigned long long)link.sent);
+
+	if (not blackout)
+		check(not host.frames.empty(), "frames decode");
 
 	// Reassembly is judged on its own, separately from what the worker later does with
 	// the queue: a frame that reassembled whole and was then dropped as stale
@@ -1662,8 +1682,12 @@ int main(int argc, char ** argv)
 		            rs->tiles_placed ? 100.0 * double(rs->tiles_late) / double(rs->tiles_placed) : 0.0,
 		            (unsigned long long)rs->duplicates, (unsigned long long)rs->stale_frame,
 		            (unsigned long long)rs->replay, (unsigned long long)rs->auth_fail);
-		check(rs->tiles_placed > 0 and rs->tiles_late * 10 < rs->tiles_placed,
-		      "band deadlines leave the tiles that arrived counted as arrived (under 10% late)");
+		if (blackout)
+			check(rs->tiles_placed == 0 and rs->tiles_late == 0,
+			      "a blackout places no tiles and marks none late");
+		else
+			check(rs->tiles_placed > 0 and rs->tiles_late * 10 < rs->tiles_placed,
+			      "band deadlines leave the tiles that arrived counted as arrived (under 10% late)");
 		check(rs->stale_frame == 0 and rs->replay == 0 and rs->auth_fail == 0,
 		      "no datagram was refused by the transport as stale, replayed or unauthentic");
 	}
@@ -1680,12 +1704,45 @@ int main(int argc, char ** argv)
 		            "%zu discarded as stale by the bounded worker queue\n",
 		            frames, (unsigned long long)sent_frames, host.units.size(), host.frames.size(),
 		            host.units.size() - std::min(host.units.size(), host.frames.size()));
+	else if (blackout)
+	{
+		// The whole of what a blackout must be: the encoder tried, and nothing
+		// downstream made anything up. A decoder that published a frame here
+		// would be publishing a picture it never received.
+		std::printf("accounting: %u presented, %llu sent, %zu reassembled, %zu published "
+		            "(blackout)\n",
+		            frames, (unsigned long long)sent_frames, host.units.size(),
+		            host.frames.size());
+		check(sent_frames > 0, "the encoder keeps coding into a dead link");
+		check(host.units.empty(), "a blackout reassembles no frame");
+		check(host.frames.empty(), "a blackout publishes no frame");
+	}
 	else
 	{
 		check(arrived or not host.frames.empty(),
 		      "lossy run keeps publishing rather than stalling");
-		check(host.frames.size() < sent_frames,
-		      "lossy run drops the frames with holes rather than inventing them");
+
+		// "Drops the frames with holes" is a statement about frames that HAVE
+		// holes, and at a few percent loss the class-A parity often recovers
+		// every one of them -- which is the FEC succeeding, not the decoder
+		// failing. Asserting it unconditionally made the outcome a property of
+		// the seed: over twelve seeds of `--backend ref --frames 12 --inter on
+		// --loss 0.05`, two (3 and 5) lost 9 and 4 datagrams and still
+		// reassembled 12 of 12, and both were reported as failures.
+		//
+		// So the invariant that always holds is asserted always -- nothing is
+		// invented, at any loss rate -- and the stronger claim only when there
+		// is a hole for it to be about.
+		check(host.units.size() <= sent_frames and host.frames.size() <= host.units.size(),
+		      "a lossy run invents no frame: published <= reassembled <= sent");
+		const bool any_hole = host.units.size() < sent_frames;
+		if (any_hole)
+			check(host.frames.size() < sent_frames,
+			      "lossy run drops the frames with holes rather than inventing them");
+		else
+			std::printf("note: every frame sent reassembled whole -- the parity covered "
+			            "all %llu lost datagrams, so there was no hole to drop\n",
+			            (unsigned long long)link.dropped);
 	}
 
 	if (reconnected)
@@ -1767,7 +1824,12 @@ int main(int argc, char ** argv)
 		bool any_nonzero = false;
 		for (const auto & p: host.frames)
 			any_nonzero |= p.view_info.display_time != 0;
-		check(any_nonzero, "published view_info is a real pose, not a default-constructed one");
+		// Nothing published means no pose to be real, which is a statement about
+		// the input and not about the decoder. Under a blackout the assertion
+		// above -- that nothing was published at all -- is the one that matters.
+		if (not blackout)
+			check(any_nonzero,
+			      "published view_info is a real pose, not a default-constructed one");
 	}
 
 	// --- feedback reached the encoder shadow ------------------------------------
@@ -1778,14 +1840,28 @@ int main(int argc, char ** argv)
 	check(link.sent > 0, "encoder produced datagrams");
 	std::printf("feedback: %llu packets, %llu bytes returned to the encoder\n",
 	            (unsigned long long)feedback_packets, (unsigned long long)feedback_bytes);
-	check(feedback_packets > 0,
-	      "the decoder's band deadlines produced feedback (" +
-	              std::to_string(feedback_packets) + " packets)");
-	check(feedback_bytes > 0, "the feedback carried a payload");
+	if (blackout)
+	{
+		// A receiver that hears nothing has nothing to report ON: it has no frame
+		// id, no band structure and no tile map, so it cannot NACK. The encoder
+		// learns from the SILENCE -- no feedback and no not-held report is what a
+		// dead link looks like from the server, and it is why the pacing and
+		// resync paths must not require feedback to make progress.
+		check(feedback_packets == 0 and feedback_bytes == 0,
+		      "a blackout produces no feedback, because there is nothing to report on");
+	}
+	else
+	{
+		check(feedback_packets > 0,
+		      "the decoder's band deadlines produced feedback (" +
+		              std::to_string(feedback_packets) + " packets)");
+		check(feedback_bytes > 0, "the feedback carried a payload");
+	}
 	// on_nxwarp_feedback hands the bytes to nxt::Sender, which rejects a packet it
 	// cannot parse. Every packet was accepted, so the encoder's shadow took all of them.
-	check(feedback_packets >= host.frames.size() / 2,
-	      "feedback arrives at roughly frame rate, not once at the end");
+	if (not blackout)
+		check(feedback_packets >= host.frames.size() / 2,
+		      "feedback arrives at roughly frame rate, not once at the end");
 
 	// --- byte identity with the reference decoder --------------------------------
 	//

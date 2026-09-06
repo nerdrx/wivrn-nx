@@ -204,6 +204,20 @@ public:
 	// about it.
 	bool dejitter = false;
 
+	// Just-in-time display scheduling. The runtime hands this client a frame description
+	// about three refresh periods before that frame reaches the panel, and the render loop
+	// has always started drawing the instant it got one — choosing which decoded image to
+	// show at the START of an interval whose end is 30 ms away. With this on, the loop
+	// sleeps through the dead time and starts the pass as late as its own measured cost
+	// safely allows, so an image that finishes decoding during the wait is still shown on
+	// this refresh instead of the next one, and the pose baked into the image on screen is
+	// a whole interval fresher.
+	//
+	// On by default. It adapts only in the safe direction (see client/scenes/stream_jit.h)
+	// and falls back to the free-running loop when the schedule will not fit, so the worst
+	// case is the behaviour it replaces.
+	bool jit_display = true;
+
 	// Last automatic resort below the bitrate floor: when the server's automatic bitrate is
 	// already pinned at its minimum and the link is still losing frames, let it halve the
 	// stream framerate to instantly halve bandwidth, restoring the full rate once the link

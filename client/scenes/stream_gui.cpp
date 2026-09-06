@@ -246,6 +246,8 @@ void scenes::stream::accumulate_fps(XrTime now)
 	c.displayed = displayed_frames;
 	c.iterations = render_iterations;
 	c.period_ns = render_period_ns;
+	c.pose_age_ns = pose_age_ns;
+	c.pose_age_frames = pose_age_frames;
 	for (size_t i = 0; i < view_count; ++i)
 		c.decoded[i] = decoded_frames[i].load(std::memory_order_relaxed);
 
@@ -358,6 +360,8 @@ void scenes::stream::accumulate_fps(XrTime now)
 				fps.loop_rate = rate(c.iterations, p.iterations);
 				fps.display_period_ms = wivrn::client::mean_period_ms(
 				        c.period_ns, p.period_ns, c.iterations, p.iterations);
+				fps.pose_age_ms = wivrn::client::mean_period_ms(
+				        c.pose_age_ns, p.pose_age_ns, c.pose_age_frames, p.pose_age_frames);
 				break;
 			}
 		}
@@ -410,6 +414,13 @@ void scenes::stream::rebuild_fps_lines()
 		fps_line_cache[0] += fmt::format(_F(" · loop {:.0f}/s · period {:.1f} ms"),
 		                                 fps.loop_rate,
 		                                 fps.display_period_ms);
+
+	// How old the pose reaching the panel is. Beside the loop rate because the two are
+	// read together: the same loop rate with a smaller age is the schedule working, and
+	// a smaller age bought by a slower loop is not a win at all. Suppressed when no frame
+	// in the window carried one, for the same reason the period above is.
+	if (fps.pose_age_ms > 0)
+		fps_line_cache[0] += fmt::format(_F(" · pose age {:.1f} ms"), fps.pose_age_ms);
 
 	if (not fps.nxwarp)
 		return;

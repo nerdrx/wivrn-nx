@@ -340,6 +340,7 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("intra_refresh", &configuration::intra_refresh),
 	        scalar("ref_invalidation", &configuration::ref_invalidation),
 	        scalar("dejitter", &configuration::dejitter),
+	        scalar("jit_display", &configuration::jit_display),
 	        scalar("emergency_framerate", &configuration::emergency_framerate),
 	        scalar("standby_freeze", &configuration::standby_freeze),
 	        scalar("seamless_reconnect", &configuration::seamless_reconnect),

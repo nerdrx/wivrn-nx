@@ -134,6 +134,11 @@ std::vector<nxt::Datagram> nxwarp_send_frame(nxt::Sender & sender,
 // take the fallback and frames of the shape the atlas produces -- tens of coded tiles
 // of tens of bytes -- do not.
 bool nxwarp_spans_fit(std::span<const nxwarp_tile_desc> descs, size_t max_tile_bytes);
+// The ordering precondition alone -- ascending, disjoint, index order == byte order --
+// with no size test. Spans may be REQUESTED on this; nxwarp_send_frame then decides
+// per band whether each one can carry them, and falls that band back to chunks alone
+// if it cannot. See the per-band fallback in nxwarp_send_frame.
+bool nxwarp_spans_ordered(std::span<const nxwarp_tile_desc> descs);
 
 // The inverse. `tiles` are everything Receiver::on_datagram delivered for one
 // frame, in any order. Returns the frame's bytes with the length prefix already

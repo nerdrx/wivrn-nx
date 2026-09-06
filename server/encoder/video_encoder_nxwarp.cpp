@@ -2501,8 +2501,13 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// the frame's tiles, not of the session: the same stream takes spans on an inter
 	// frame of tens of small coded tiles and the fallback on the intra frame that opens
 	// it.
+	// Spans are requested on the ORDERING precondition alone. The size question --
+	// does every tile fit a transport slot -- used to be asked here, for the whole
+	// frame at once, and one oversized tile put every band on the chunk mapping. It is
+	// now asked per band inside nxwarp_send_frame, where a band that cannot carry
+	// spans falls back by itself and the others keep theirs.
 	const bool spans = tile_map != tile_map_t::chunks and codec->reports_tile_spans() and
-	                   nxwarp_spans_fit(descs, stream_cfg.max_tile_bytes());
+	                   nxwarp_spans_ordered(descs);
 
 	std::vector<nxt::Datagram> datagrams;
 	{

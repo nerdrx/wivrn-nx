@@ -47,6 +47,21 @@ nxt::FecPolicy wivrn::nxwarp_fec_policy()
 	return p;
 }
 
+// The ORDERING half of nxwarp_spans_fit, without the size test.
+//
+// The two used to be one function and one decision, which is what made the size
+// test all-or-nothing across the frame: one oversized tile anywhere and every band
+// took the chunk mapping. They are different KINDS of condition. Ordering is a
+// correctness precondition -- if index order and byte order disagree the client's
+// concatenation cannot reconstruct the frame at all, and no per-band cleverness
+// helps. Size is a local property of one tile, and nxwarp_send_frame now answers it
+// per band. So the call site asks for this, and lets the size question be answered
+// where it can be answered narrowly.
+bool wivrn::nxwarp_spans_ordered(std::span<const nxwarp_tile_desc> descs)
+{
+	return nxwarp_spans_fit(descs, SIZE_MAX);
+}
+
 bool wivrn::nxwarp_spans_fit(std::span<const nxwarp_tile_desc> descs, size_t max_tile_bytes)
 {
 	if (descs.empty() or max_tile_bytes == 0)
@@ -75,7 +90,7 @@ bool wivrn::nxwarp_spans_fit(std::span<const nxwarp_tile_desc> descs, size_t max
 		const size_t end = size_t(d.offset) + d.length;
 		if (end < prev_end)
 			return false; // spans must be ascending and disjoint
-		if (end - prev_end + kFrameLenBytes > max_tile_bytes)
+		if (max_tile_bytes != SIZE_MAX and end - prev_end + kFrameLenBytes > max_tile_bytes)
 			return false;
 		prev_end = end;
 		prev_index = int64_t(d.index);
@@ -193,32 +208,94 @@ std::vector<nxt::Datagram> wivrn::nxwarp_send_frame(nxt::Sender & sender,
 	//
 	// Checked for EVERY band, not just the first: pose_placed is local to
 	// packetize_band, so every band opens with a pose header of its own.
+	// PER-BAND FALLBACK. Both of the conditions above -- a tile too big for a
+	// transport slot, and a tile caught in the pose-header dead zone -- are
+	// properties of ONE BAND, and both used to cost the whole frame: the first
+	// through nxwarp_spans_fit() at the call site, which is all-or-nothing across
+	// every tile in the frame, and the second through the `return out` this block
+	// used to end in. On the worn Pico that was the difference between an
+	// occasional soft band and every frame in the session taking the chunk
+	// mapping.
+	//
+	// It costs no wire change, and that is not an accident of this codec: the
+	// client's contract (nxwarp_reassemble.h) is that the tiles that arrived,
+	// CONCATENATED IN TILE-INDEX ORDER, are the frame. Any assignment of bytes to
+	// indices that stays a contiguous ascending partition reassembles correctly,
+	// whatever rule produced it -- so bands may use different rules. Bands are row
+	// ranges and tile_index() is raster, so band 0 holds the lowest indices and the
+	// partition stays ordered across a mixed frame.
+	//
+	// A band that falls back keeps its OWN byte region and re-slices it across its
+	// own tile slots. The region boundaries do not move, so the bands on either
+	// side are untouched and stay on spans.
+	std::vector<uint8_t> band_chunked;
 	if (tile_spans)
 	{
 		const size_t budget = cfg.run_payload_budget();
 		const size_t opener = nxt::kDirEntryBytes +
 		                      ((cfg.caps & nxt::kCapPoseHdr) ? nxt::kPoseHeaderBytes : 0);
+		const size_t slot = budget > nxt::kDirEntryBytes ? budget - nxt::kDirEntryBytes : 0;
+		const size_t first_slot = budget > opener ? budget - opener : 0;
 		const uint8_t nb = cfg.bands();
+		band_chunked.assign(nb, 0);
 		for (uint8_t band = 0; band < nb; ++band)
 		{
 			const uint16_t r0 = cfg.first_row_of_band(band);
 			const uint16_t r1 = uint16_t(r0 + cfg.rows_in_band(band));
-			bool found = false;
-			for (uint16_t row = r0; row < r1 and not found; ++row)
-			{
+			// The band's tile slots, in index order, and its byte region.
+			std::vector<uint32_t> slots;
+			for (uint16_t row = r0; row < r1; ++row)
 				for (uint16_t col = 0; col < cfg.cols; ++col)
 				{
 					const uint32_t t = cfg.tile_index(row, col);
-					if (t >= range.size() or range[t].second == 0)
-						continue;
-					// The band's opening tile: the one that has to carry the
-					// pose header.
-					if (range[t].second + opener > budget)
-						return out;
-					found = true;
-					break;
+					if (t < range.size())
+						slots.push_back(t);
 				}
+			size_t lo = 0, hi = 0;
+			bool any = false, bad = false;
+			for (size_t k = 0; k < slots.size(); ++k)
+			{
+				const auto & r = range[slots[k]];
+				if (r.second == 0)
+					continue;
+				if (not any)
+				{
+					lo = r.first;
+					any = true;
+					// The opening tile is the one that carries the pose header,
+					// and the dead zone is exactly the gap between fitting a
+					// slot and fitting an OPENING slot.
+					if (r.second > first_slot)
+						bad = true;
+				}
+				else if (r.second > slot)
+					bad = true;
+				hi = r.first + r.second;
 			}
+			if (not any or not bad)
+				continue;
+
+			// Re-slice this band's region across this band's slots. Ascending and
+			// contiguous by construction, so the frame-wide partition survives.
+			const size_t region = hi - lo;
+			const size_t piece = std::min(slot, chunk_bytes);
+			if (piece == 0 or first_slot == 0)
+				return out;
+			// The first slot is smaller, because it carries the pose.
+			const size_t need = 1 + (region > first_slot
+			                                 ? (region - first_slot + piece - 1) / piece
+			                                 : 0);
+			if (need > slots.size())
+				return out; // more bytes than this band's grid can carry at all
+			size_t at = lo;
+			for (size_t k = 0; k < slots.size(); ++k)
+			{
+				const size_t cap = (k == 0) ? first_slot : piece;
+				const size_t take = std::min(cap, hi > at ? hi - at : size_t(0));
+				range[slots[k]] = {at, take};
+				at += take;
+			}
+			band_chunked[band] = 1;
 		}
 	}
 

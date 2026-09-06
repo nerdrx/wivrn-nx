@@ -257,6 +257,16 @@ struct jit_scheduler
 		// have made that refresh in the first place.
 		const int64_t attributable = period > 0 ? period : margin_skip_step_ns;
 		const bool pass_could_have_kept_up = period <= 0 or cost < period;
+
+		// And the same question a third time, for lateness. `lead` is what was left
+		// between the submission and the refresh it was for, so `lead + slept_ns` is
+		// what would have been left had the schedule not slept at all. When that is
+		// still negative the pass alone had already overrun the interval and the sleep
+		// changed nothing -- charging it is how the cap reached 0.6 ms on server70
+		// while the pass cost 20 ms against 50 ms of slack, giving up 29 ms of sleep
+		// there was room for.
+		const bool would_have_made_it_unslept = lead + slept_ns > 0;
+
 		if (slept_ns >= attributable)
 		{
 			int64_t widen = 0;
@@ -270,7 +280,7 @@ struct jit_scheduler
 			// Handed over after it was due. Both controls: the margin because the
 			// budget was too small, the cap because submitting this late is what
 			// left no room.
-			if (lead < 0)
+			if (lead < 0 and would_have_made_it_unslept)
 			{
 				++missed_late;
 				widen = std::max(widen, margin_step_ns);

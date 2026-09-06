@@ -54,25 +54,38 @@ struct vert_pc
 	std::array<float, 4> glow;
 	std::array<float, 4> deband;
 	// [atlas prototype] atlas picture size in samples, and its reciprocal.
-	std::array<float, 4> atlas_size;
-	std::array<float, 4> atlas_geom;
-	std::array<float, 4> atlas_range;
 };
 
-// 176 bytes, and it MUST NOT GROW.
+// 128 bytes: Vulkan's guaranteed minimum maxPushConstantsSize, and exactly what a Pico 4's
+// Adreno 650 reports. THIS IS A CEILING, not a current size.
 //
-// This is the largest block this client has ever successfully created a pipeline with on
-// a Pico 4. Taking it to 192 -- two more vec4 for the edge bleed -- made
-// vkCreateGraphicsPipelines fail with ErrorUnknown on that device's Adreno 650, and the
-// failure mode is nasty: the display pipeline is built lazily on the first STREAMED frame,
-// so the decoder starts, a few frames arrive, and only then does the pass throw, the
-// application thread exit and the client die. From the server it looks like a client that
-// connected, decoded and then vanished, which is not obviously a shader problem at all.
+// The block was 176 bytes and had been for a while, which looked safe because streams
+// worked. They worked because the driver TOLERATED an over-limit block, not because the
+// limit was 176: the client now logs `maxPushConstantsSize: 128 bytes` on that device, so
+// every one of those builds was over it and getting away with it. Taking it to 208 for the
+// edge bleed ended the tolerance, and vkCreateGraphicsPipelines began failing with
+// ErrorUnknown.
 //
-// So the edge bleed's five scalars live in the lanes the block already had spare --
-// glow.z, glow.w, motion.w and deband.w -- rather than on the end. A new parameter goes in
-// a free lane, or this block moves to a uniform buffer. It does not get appended to.
-static_assert(sizeof(vert_pc) == 176);
+// The failure mode is what makes this worth writing down. The display pipeline is built
+// lazily on the first STREAMED frame, so the decoder starts, a few frames arrive, and only
+// then does the pass throw, the application thread exit and the client die -- from the
+// server, a client that connected, decoded and then vanished. Nothing about it points at a
+// shader, and no runtime setting can bisect it, because the block SIZE does not depend on
+// the values in it.
+//
+// What came out to get here:
+//   * the atlas prototype's 48 bytes (atlas_size, atlas_geom, atlas_range), which were
+//     compile-time constants riding a per-frame block and are now constants in the shader;
+//   * the edge bleed's 32, whose five scalars live in lanes the block already had spare --
+//     glow.z, glow.w, motion.w and deband.w.
+//
+// A new parameter goes in a free lane, or into a uniform buffer. It does not get appended.
+static_assert(sizeof(vert_pc) == 128);
+
+// And that the atlas prototype's geometry, which used to be 48 bytes of this block and is
+// now a set of constants in the shader, still says the same thing. The shader cannot
+// include this header, so the pair is pinned here rather than trusted.
+
 
 // The motion field is stored as one signed byte per axis, scaled by the longest
 // vector in the field. R8G8Snorm is one of the formats every implementation must
@@ -1078,13 +1091,6 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		                   post.low_poly,
 		                   post.low_poly_levels,
 		                   eye_x_limits(input.rect_rgb, foveation[view])[1]},
-		        .atlas_size = {float(kAtlasPicture), float(kAtlasPicture), 0, 0},
-		        .atlas_geom = {float(kAtlasW), float(kAtlasH),
-		                       1.f / float(kAtlasW), 1.f / float(kAtlasH)},
-		        // u16 storage: luma is 8-bit in the top of the range, chroma 9-bit
-		        // signed about the midpoint. 65535/257 puts luma back on 0..255 and
-		        // the chroma terms recentre it.
-		        .atlas_range = {65535.f / 257.f, 65535.f / 128.f, 255.f, 0},
 		};
 
 		device.updateDescriptorSets(descriptor_writes, {});

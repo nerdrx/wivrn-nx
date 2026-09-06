@@ -82,6 +82,13 @@ class stream_defoveator
 	// two half-resolution chroma planes sit under it in one more band.
 	static constexpr uint32_t kAtlasW = kAtlasPicture * 2;
 	static constexpr uint32_t kAtlasH = kAtlasPicture + kAtlasPicture / 2;
+	// reprojection.glsl carries these three as literal constants (atlas_picture,
+	// atlas_image), because they are compile-time constants and used to be 48 bytes of a
+	// push constant block that had to come down to 128. The shader cannot include this
+	// header, so the pair is pinned here rather than trusted.
+	static_assert(kAtlasPicture == 1088 and kAtlasW == 2176 and kAtlasH == 1632,
+	              "reprojection.glsl's atlas_picture / atlas_image constants are written "
+	              "out as literals; change them there too");
 	// The synthetic atlas: Y at full extent, interleaved Co/Cg at half (4:2:0), one
 	// layer per eye, plus the 64-byte-per-tile table in a uniform buffer. None of it is
 	// allocated until the prototype is first asked for.

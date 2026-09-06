@@ -98,6 +98,42 @@ struct nxwarp_codec_config
 		statik = 2,
 	};
 	coded_vectors_t coded_vectors = coded_vectors_t::def;
+	// The ATLAS coding mode ([SYN] 13.12, tool bits 31 and 34).
+	//
+	// `off` is every frame coded against the previous decoded picture, which is what this
+	// encoder has always done and what every existing stream is.
+	//
+	// `automatic` turns on BOTH bits: the reference becomes the per-tile atlas (bit 31),
+	// and the encoder then chooses per frame between an ATLAS frame and a PICTURE frame
+	// (bit 34, ATLAS_REBASE) by the displacement trigger below. The pair is one codec at
+	// two operating points, not two codecs, and frame flags bit 5 carries which, so the
+	// decoder needs no policy of its own.
+	//
+	// There is deliberately no "atlas without the mode switch" setting. Leaving bit 34
+	// clear makes every frame an ATLAS frame, which is the configuration whose reference
+	// goes stale under fast head motion; the mode switch exists precisely to bound that,
+	// and shipping the unbounded form as a user-reachable choice would be offering a
+	// worse operating point with no way to tell from the outside that it was chosen.
+	//
+	// Default `off` until it is measured on a headset. The atlas removes the decoder's
+	// skip warp -- 8.8 ms an eye in the picture model -- but the bench caveat on the
+	// nx-warp side is a 1.57x figure that has not been reproduced on an Adreno, and a
+	// default that is faster on a desktop and slower on the target is worse than no
+	// default at all.
+	enum class atlas_t
+	{
+		off = 0,
+		automatic = 1,
+	};
+	atlas_t atlas = atlas_t::off;
+	// The mode trigger `D` ([SYN] 13.12.11.1), in LUMA SAMPLES: a PICTURE frame is coded
+	// when the worst corner displacement in the atlas, this frame's advance included,
+	// exceeds it. 0 asks nxvc for its own default, which is 8 -- the value ADR-0029's
+	// sweep settled on. Lower fires the picture model more often and pays its time more
+	// often; higher bounds the PICTURE rate at the price of a staler mosaic.
+	//
+	// Ignored unless `atlas` is on.
+	uint32_t atlas_picture_d = 0;
 	// The entropy tool the bitstream uses. `rans` is interleaved rANS, the
 	// default and the only thing every NX Warp decoder can read. `lite` is
 	// ENTROPY_LITE (stream tool bit 30), which trades bytes for the CLIENT's

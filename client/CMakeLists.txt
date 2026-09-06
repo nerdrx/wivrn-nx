@@ -186,6 +186,37 @@ if(EXISTS "${WIVRN_NXWARP_DIR}/CMakeLists.txt")
     )
     file(MAKE_DIRECTORY ${NXWARP_INSTALL}/include)
 
+    # What the atlas ABI in THIS nx-warp checkout offers.
+    #
+    # The server probes its nxvc by compiling against it (cmake/NxvcAtlasFeatures.cmake),
+    # which cannot work here: the client BUILDS nxvc, so at configure time
+    # ${NXWARP_INSTALL}/include is an empty directory that ExternalProject has not filled
+    # yet. What does exist at configure time is the source header that will be installed,
+    # so that is what is read. It is the same file, one copy earlier.
+    #
+    # Text matching rather than a compile: a struct field and a function declaration are
+    # neither of them things the preprocessor can see, and the alternative -- deferring the
+    # answer to build time through a generated header -- would make every guarded site
+    # depend on a generation step for a question whose answer is a grep.
+    set(_nxvc_hdr ${WIVRN_NXWARP_DIR}/include/nxvc/nxvc_vk.h)
+    set(WIVRN_NXVC_ATLAS_DECODE OFF)
+    set(WIVRN_NXVC_ATLAS_STATS OFF)
+    set(WIVRN_NXVC_TOOLS_FOR OFF)
+    if(EXISTS ${_nxvc_hdr})
+        file(READ ${_nxvc_hdr} _nxvc_hdr_text)
+        if(_nxvc_hdr_text MATCHES "nxvc_vk_decoder_set_atlas_view")
+            set(WIVRN_NXVC_ATLAS_DECODE ON)
+        endif()
+        if(_nxvc_hdr_text MATCHES "tiles_superseded")
+            set(WIVRN_NXVC_ATLAS_STATS ON)
+        endif()
+        if(_nxvc_hdr_text MATCHES "nxvc_vk_decoder_tools_for")
+            set(WIVRN_NXVC_TOOLS_FOR ON)
+        endif()
+        unset(_nxvc_hdr_text)
+    endif()
+    message(STATUS "NX Warp atlas (client): decoder ${WIVRN_NXVC_ATLAS_DECODE}, stats ${WIVRN_NXVC_ATLAS_STATS}, tools_for ${WIVRN_NXVC_TOOLS_FOR}")
+
     foreach(_lib nxvc_vk_decoder nxvc_vk_common nxvc_transport)
         add_library(${_lib} STATIC IMPORTED GLOBAL)
         set_target_properties(${_lib} PROPERTIES
@@ -239,6 +270,19 @@ target_link_libraries(wivrn
 
 if(WIVRN_HAVE_NXWARP)
     target_link_libraries(wivrn nxvc_vk_decoder nxvc_vk_common nxvc_transport)
+
+    # The atlas guards, from the header scan above. Absent, every atlas site compiles out
+    # and the client behaves exactly as it did before the mode existed -- which is the
+    # state a build against a pre-atlas nx-warp must still reach.
+    if(WIVRN_NXVC_ATLAS_DECODE)
+        target_compile_definitions(wivrn PRIVATE WIVRN_NXVC_ATLAS_DECODE)
+    endif()
+    if(WIVRN_NXVC_ATLAS_STATS)
+        target_compile_definitions(wivrn PRIVATE WIVRN_NXVC_ATLAS_STATS)
+    endif()
+    if(WIVRN_NXVC_TOOLS_FOR)
+        target_compile_definitions(wivrn PRIVATE WIVRN_NXVC_TOOLS_FOR)
+    endif()
 
     # The depacketize-and-reassemble path, exercisable without a headset. See the file
     # header for what it proves.

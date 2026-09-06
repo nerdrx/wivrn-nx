@@ -155,6 +155,12 @@ if (WIVRN_BUILD_SERVER)
         else()
             find_package(nxvc CONFIG REQUIRED)
         endif()
+
+        # The atlas coding mode arrived in two halves that land upstream separately, so
+        # every use of that ABI is guarded and the guards are decided here, once.
+        include(NxvcAtlasFeatures)
+        wivrn_probe_nxvc_atlas_features()
+        message(STATUS "NX Warp atlas: decoder ${WIVRN_NXVC_ATLAS_DECODE}, encoder ${WIVRN_NXVC_ATLAS_ENCODE}, stats ${WIVRN_NXVC_ATLAS_STATS}, tools_for ${WIVRN_NXVC_TOOLS_FOR}")
     endif()
 
     if (WIVRN_USE_PIPEWIRE)

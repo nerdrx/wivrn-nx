@@ -210,6 +210,33 @@ public:
 			}
 		}
 
+		// The ATLAS coding mode ([SYN] 13.12, tool bits 31 and 34).
+		//
+		// Guarded because the encoder half of the atlas lands upstream separately from
+		// the decoder half, and WiVRn is built against both during that rollout. Without
+		// the fields the option is not silently ignored -- that is the failure mode this
+		// whole guard exists to avoid -- it is refused, here, with a message naming what
+		// the build is missing.
+		if (c.atlas != wivrn::nxwarp_codec_config::atlas_t::off)
+		{
+#ifdef WIVRN_NXVC_ATLAS_ENCODE
+			// Both bits together, never bit 31 alone: see nxwarp_codec_config::atlas_t
+			// for why the unbounded form is not a reachable configuration.
+			ci.atlas = 1;
+			ci.atlas_mode = 1;
+			// 0 means "nxvc's own default", which is 8. Passed through rather than
+			// resolved here so the default lives in one place -- the library's --
+			// and a change to it does not need a matching edit in this tree.
+			ci.atlas_picture_d = c.atlas_picture_d;
+#else
+			throw std::runtime_error(
+			        "nxwarp: \"atlas\" was asked for, but this server was built against "
+			        "an nxvc whose encoder has no atlas mode (no nxvc_vke_create_info::atlas). "
+			        "Rebuild against an nxvc that carries the atlas encoder, or set "
+			        "\"atlas\": \"off\".");
+#endif
+		}
+
 		// How hard the encoder looks.  Encoder-side only and no tool bit: the
 		// stream is an ordinary stream at either level and the headset's
 		// decoder cannot tell which one produced it, which is why nothing on

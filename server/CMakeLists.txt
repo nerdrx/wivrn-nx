@@ -208,6 +208,14 @@ if (WIVRN_BUILD_SERVER)
 			target_sources(wivrn-server PRIVATE encoder/nxwarp_codec_vk.cpp encoder/pair_compose.cpp)
 			target_link_libraries(wivrn-server PRIVATE nxvc::vk_encoder nxvc::vk_common)
 			target_compile_definitions(wivrn-server PRIVATE WIVRN_NXWARP_VK_ENCODER)
+			# The atlas coding mode's encoder half. Probed in cmake/NxvcAtlasFeatures.cmake
+			# because nxvc ships no feature macro for it and a struct field is not
+			# something the preprocessor can see; without it the "atlas" option is still
+			# accepted and still refused with a message that says why, so a server built
+			# against an older nxvc explains itself instead of failing to configure.
+			if (WIVRN_NXVC_ATLAS_ENCODE)
+				target_compile_definitions(wivrn-server PRIVATE WIVRN_NXVC_ATLAS_ENCODE)
+			endif()
 			message(STATUS "\tNX Warp Vulkan encoder: ON")
 		else()
 			message(STATUS "\tNX Warp Vulkan encoder: OFF (nxvc has no vk_encoder)")

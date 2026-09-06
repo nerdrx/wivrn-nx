@@ -142,6 +142,27 @@ wivrn::nxwarp_codec_config::coded_vectors_t nxwarp_coded_vectors_from(const std:
 	                    v));
 }
 
+// "atlas": "off" | "auto".  An unknown value is an error rather than a fallback, for the
+// same reason "coded-vectors" is: a typo that silently gives a different stream shape is
+// worse than a refusal, and this one changes what the REFERENCE is.
+//
+// Only two values, and deliberately. "auto" turns on the atlas (tool bit 31) together with
+// the per-frame ATLAS/PICTURE mode switch (tool bit 34) and lets the displacement trigger
+// choose; there is no setting for "the atlas with the mode switch off", because that is
+// the configuration whose reference goes stale under fast head motion and the switch is
+// what bounds it. Offering it would be offering a worse operating point that nothing
+// outside the encoder could see had been chosen.
+wivrn::nxwarp_codec_config::atlas_t nxwarp_atlas_from(const std::string & v)
+{
+	using a = wivrn::nxwarp_codec_config::atlas_t;
+	if (v == "off")
+		return a::off;
+	if (v == "auto")
+		return a::automatic;
+	throw std::runtime_error(
+	        std::format("nxwarp: \"atlas\": \"{}\" is not one of off, auto", v));
+}
+
 // "entropy": "auto" | "rans" | "lite".  An unknown value is an error rather than
 // a fallback, for the same reason "coded-vectors" is.
 //
@@ -404,6 +425,10 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	        .intra_period = option_u32(settings.options, "intra-period", 180),
 	        .coded_vectors = nxwarp_coded_vectors_from(
 	                option_string(settings.options, "coded-vectors", "default")),
+	        .atlas = nxwarp_atlas_from(option_string(settings.options, "atlas", "off")),
+	        // "atlas-picture-threshold": the mode trigger `D` in LUMA SAMPLES. 0 asks
+	        // nxvc for its own default, which is 8.
+	        .atlas_picture_d = option_u32(settings.options, "atlas-picture-threshold", 0),
 	        // Resolved just below, once the headset's mask is in hand.
 	        .entropy = nxwarp_codec_config::entropy_t::rans,
 	        .effort = nxwarp_effort_from(settings.options),
@@ -411,6 +436,15 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	        .preset = option_u32(settings.options, "preset", 1),
 	        .threads = option_u32(settings.options, "threads", 0),
 	};
+	// The atlas replaces the reference, so there has to be one: nxvc refuses the pair at
+	// create() and the refusal there is a status code on a codec that has already been
+	// asked for. Caught here instead, where the message can name the two options the
+	// person actually wrote and say which one to change.
+	if (codec_cfg.atlas != nxwarp_codec_config::atlas_t::off and not codec_cfg.inter)
+		throw std::runtime_error(
+		        "nxwarp: \"atlas\": \"auto\" needs \"inter\": true -- the atlas IS the "
+		        "inter reference, so there is nothing for it to be with inter prediction off");
+
 	// NXWARP_FRAME_HELD=0 restores the answer this encoder gave before the headset's
 	// verdict on a frame was acted on at all: one all-intra frame per burst of not-held
 	// reports, and no confirmations. It is a kill switch rather than a tuning knob --

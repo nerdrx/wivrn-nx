@@ -395,6 +395,13 @@ private:
 	// per presented frame; decoded_frames by push_blit_handle, from the decoder threads.
 	uint64_t displayed_frames = 0;
 	std::array<std::atomic<uint64_t>, decoder_count> decoded_frames{};
+	// Bumped at the TOP of render(), before every gate: the count of times the loop
+	// entered this scene's frame, and the predicted display periods summed over them.
+	// displayed_frames counts the subset that reached a submission, so the two together
+	// separate "the loop is slow" from "the loop runs and submits nothing" -- which is a
+	// distinction the shown/decoded pair alone cannot make.
+	uint64_t render_iterations = 0;
+	uint64_t render_period_ns = 0;
 
 	// One second of rates, recomputed four times a second so the figures are readable
 	// rather than flickering. All render-thread state.
@@ -432,6 +439,19 @@ private:
 		// Stream 1 then has no decoder and its counters never move, so the readout must
 		// not list it: a permanent "/0" reads as a dead eye, not an absent stream.
 		bool nxwarp_paired = false;
+		// Not a codec figure at all: how often render() is entered, and the mean
+		// interval the runtime is predicting between displayed frames. These are the
+		// two numbers the "render: N iterations in ... display period ..." log line
+		// carries, and on this device they are the only source left for them -- the
+		// compositor's own PxrMetric output has gone silent.
+		//
+		// The pair is what makes a low frame rate readable: 33 shown out of a loop
+		// running 90 times a second is a submission problem, 33 shown out of a loop
+		// running 33 times is the loop itself being late, and those have nothing in
+		// common. loop_rate counts EVERY entry into render(), including the ones that
+		// return early with nothing decoded and the ones the repeat gate skips.
+		float loop_rate = 0;
+		float display_period_ms = 0;
 	};
 	fps_readout fps;
 	// One snapshot of every counter the readout differences, with the time it was taken.
@@ -442,6 +462,11 @@ private:
 		std::array<uint64_t, view_count> decoded{};
 		uint64_t nxwarp_closed = 0, nxwarp_decoded = 0, nxwarp_late = 0, nxwarp_holes = 0;
 		uint64_t nxwarp_withheld = 0;
+		// render() entries and the predicted display periods summed over them. The mean
+		// period is the difference of the sums over the difference of the counts, which
+		// is the same arithmetic the log line does over its own two-second window.
+		uint64_t iterations = 0;
+		uint64_t period_ns = 0;
 	};
 	// Snapshots taken every fps_sample_period; the rate is the difference between the
 	// newest and the one fps_window old, which is what makes the average roll rather

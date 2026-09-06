@@ -21,6 +21,8 @@
 
 #include "stream.h"
 
+#include "fps_window.h"
+
 #include "application.h"
 #include "configuration.h"
 #include "constants.h"
@@ -242,6 +244,8 @@ void scenes::stream::accumulate_fps(XrTime now)
 	fps_counters c;
 	c.t = now;
 	c.displayed = displayed_frames;
+	c.iterations = render_iterations;
+	c.period_ns = render_period_ns;
 	for (size_t i = 0; i < view_count; ++i)
 		c.decoded[i] = decoded_frames[i].load(std::memory_order_relaxed);
 
@@ -323,17 +327,39 @@ void scenes::stream::accumulate_fps(XrTime now)
 	{
 		const fps_counters & p = fps_ring[oldest];
 		const double dt = double(now - p.t) * 1e-9;
-		if (dt > 0.05)
+		// The window's own rules live in fps_window.h, next to the reasoning for them.
+		// The one that matters here: this sampler runs from the render loop, and the
+		// render loop stops entirely while the OpenXR session is not running, so a
+		// window can be left open across minutes of a headset sitting off the face.
+		switch (wivrn::client::judge_window(dt))
 		{
-			const auto rate = [dt](uint64_t a, uint64_t b) { return float(double(a - b) / dt); };
-			fps.displayed = rate(c.displayed, p.displayed);
-			for (size_t i = 0; i < view_count; ++i)
-				fps.decoded[i] = rate(c.decoded[i], p.decoded[i]);
-			fps.nxwarp_closed = rate(c.nxwarp_closed, p.nxwarp_closed);
-			fps.nxwarp_decoded = rate(c.nxwarp_decoded, p.nxwarp_decoded);
-			fps.nxwarp_late = rate(c.nxwarp_late, p.nxwarp_late);
-			fps.nxwarp_holes = rate(c.nxwarp_holes, p.nxwarp_holes);
-			fps.nxwarp_withheld = rate(c.nxwarp_withheld, p.nxwarp_withheld);
+			case wivrn::client::window_verdict::stale:
+				// Not a slow loop, a gap in the sampling. Nothing measured across
+				// it is worth showing, so the ring starts again from here.
+				fps_ring_count = 0;
+				fps_ring_head = 0;
+				break;
+
+			case wivrn::client::window_verdict::too_short:
+				break;
+
+			case wivrn::client::window_verdict::usable: {
+				const auto rate = [dt](uint64_t a, uint64_t b) {
+					return wivrn::client::rate_over(a, b, dt);
+				};
+				fps.displayed = rate(c.displayed, p.displayed);
+				for (size_t i = 0; i < view_count; ++i)
+					fps.decoded[i] = rate(c.decoded[i], p.decoded[i]);
+				fps.nxwarp_closed = rate(c.nxwarp_closed, p.nxwarp_closed);
+				fps.nxwarp_decoded = rate(c.nxwarp_decoded, p.nxwarp_decoded);
+				fps.nxwarp_late = rate(c.nxwarp_late, p.nxwarp_late);
+				fps.nxwarp_holes = rate(c.nxwarp_holes, p.nxwarp_holes);
+				fps.nxwarp_withheld = rate(c.nxwarp_withheld, p.nxwarp_withheld);
+				fps.loop_rate = rate(c.iterations, p.iterations);
+				fps.display_period_ms = wivrn::client::mean_period_ms(
+				        c.period_ns, p.period_ns, c.iterations, p.iterations);
+				break;
+			}
 		}
 	}
 
@@ -373,6 +399,17 @@ void scenes::stream::rebuild_fps_lines()
 	                                          fps.displayed,
 	                                          decoded)
 	                            : fmt::format(_F("Shown {:.0f} · decoded {} fps"), fps.displayed, decoded);
+
+	// The render loop itself, beside the frames it produced. "Shown" is the subset of
+	// these iterations that reached a submission, so the two sitting apart is the whole
+	// diagnosis: 33 shown out of 90 is a submission being skipped, 33 out of 33 is the
+	// loop arriving late, and the period says what the runtime was aiming for while it
+	// happened. Suppressed until the window has a period to report -- a "0.0 ms" panel
+	// would be read as a measurement rather than as the absence of one.
+	if (fps.display_period_ms > 0)
+		fps_line_cache[0] += fmt::format(_F(" · loop {:.0f}/s · period {:.1f} ms"),
+		                                 fps.loop_rate,
+		                                 fps.display_period_ms);
 
 	if (not fps.nxwarp)
 		return;

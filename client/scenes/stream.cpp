@@ -1000,9 +1000,20 @@ struct render_probe
 	uint64_t iters = 0, gated_out = 0, no_render = 0, cache_hits = 0;
 	double period_ms = 0, fence_ms = 0, query_ms = 0, submit_ms = 0, blit_ms = 0;
 	double app_gpu_ms = 0;
+	int32_t out_w = 0, out_h = 0;
+	float sharpness = 0, glow = 0, vignette = 0, deband = 0;
+	bool fsr = false, use_alpha = false, motion_on = false, blend_on = false, reduce_gpu_load = false;
 	double worst_fence_ms = 0;
 } g_rp;
 } // namespace
+
+// Clamped once here rather than at each of the three places that need it: the swapchain,
+// the layer rect and the pass's own viewport must agree exactly or the picture is cropped
+// instead of scaled.
+float scenes::stream::defoveate_scale() const
+{
+	return std::clamp(application::get_config().defoveate_scale, 0.4f, 1.0f);
+}
 
 void scenes::stream::render(const XrFrameState & frame_state)
 {
@@ -1297,7 +1308,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			int32_t max_height = 0;
 			for (size_t i = 0; i < view_count; ++i)
 			{
-				extents[i] = stream_defoveator::defoveated_size(foveation[i]);
+				extents[i] = stream_defoveator::defoveated_size(foveation[i], defoveate_scale());
 				max_width = std::max(max_width, extents[i].width);
 				max_height = std::max(max_height, extents[i].height);
 			}
@@ -1566,6 +1577,18 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			cache_hit = config.reduce_gpu_load and defoveate_cache_valid and
 			            not quad_info and state == defoveate_cache;
 
+			g_rp.cache_hits += cache_hit ? 1 : 0;
+			g_rp.out_w = extents[0].width;
+			g_rp.out_h = extents[0].height;
+			g_rp.sharpness = post.sharpness;
+			g_rp.fsr = fsr_on;
+			g_rp.use_alpha = use_alpha;
+			g_rp.motion_on = motion.field != nullptr and motion.step > 0;
+			g_rp.blend_on = blend.weight > 0;
+			g_rp.glow = post.glow;
+			g_rp.vignette = post.vignette;
+			g_rp.deband = post.deband;
+			g_rp.reduce_gpu_load = config.reduce_gpu_load;
 			if (not cache_hit)
 			{
 				// defoveate the image, apply scale/bias
@@ -1842,6 +1865,13 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		             g_rp.iters - g_rp.gated_out - g_rp.no_render, g_rp.no_render,
 		             g_rp.period_ms / n);
 		spdlog::info("render: this app's own GPU pass {:.1f} ms per iteration", g_rp.app_gpu_ms / n);
+		spdlog::info("render: defoveate {}x{} per eye x2 = {:.2f} Mpx/frame at scale {:.2f}; {} re-presented from the cache (reduce_gpu_load {})",
+		             g_rp.out_w, g_rp.out_h,
+		             2.0 * double(g_rp.out_w) * double(g_rp.out_h) / 1e6, defoveate_scale(),
+		             g_rp.cache_hits, g_rp.reduce_gpu_load ? "on" : "off");
+		spdlog::info("render: shader path sharpness {:.2f} fsr {} alpha {} motion {} blend {} glow {:.2f} vignette {:.2f} deband {:.2f}",
+		             g_rp.sharpness, g_rp.fsr, g_rp.use_alpha, g_rp.motion_on, g_rp.blend_on,
+		             g_rp.glow, g_rp.vignette, g_rp.deband);
 		spdlog::info("render: per iteration fence {:.1f} (worst {:.1f}) | queries {:.1f} | submit {:.1f} | whole render() {:.1f} ms",
 		             g_rp.fence_ms / n, g_rp.worst_fence_ms, g_rp.query_ms / n,
 		             g_rp.submit_ms / n, g_rp.blit_ms / n);
@@ -1966,6 +1996,9 @@ void scenes::stream::setup_reprojection_swapchain(uint32_t swapchain_width, uint
 	        swapchain.images(),
 	        extent,
 	        swapchain.format());
+	// The pass must lay its viewport out with the same scale the swapchain and the
+	// layer rect were sized with, or the picture is cropped rather than scaled.
+	defoveator->set_output_scale(defoveate_scale());
 }
 
 scene::meta & scenes::stream::get_meta_scene()

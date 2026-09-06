@@ -245,6 +245,8 @@ private:
 
 	static bool is_interactable(stream_tab);
 	bool is_gui_interactable() const;
+	// configuration::defoveate_scale, clamped. See that field.
+	float defoveate_scale() const;
 
 	// settings sub-page, client-only: the wire stream_tab stays settings
 	enum class settings_page

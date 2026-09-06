@@ -83,6 +83,7 @@ class stream_defoveator
 	std::vector<vk::raii::ImageView> output_image_views;
 	std::vector<vk::raii::Framebuffer> framebuffers;
 	vk::Extent2D output_extent;
+	float out_scale = 1.0f;
 
 	void ensure_vertices(size_t num_vertices);
 	vertex * get_vertices(size_t view);
@@ -169,5 +170,14 @@ public:
 	        bool cas_full_kernel = false,
 	        bool fsr = false);
 
-	static XrExtent2Di defoveated_size(const wivrn::to_headset::foveation_parameter &);
+	// `scale` < 1 renders the pass into fewer fragments and leaves the last upscale to
+	// the runtime's compositor, which resamples the layer during timewarp regardless.
+	static XrExtent2Di defoveated_size(const wivrn::to_headset::foveation_parameter &, float scale = 1.0f);
+
+	// The scale defoveate() itself lays its viewport out with. Must match what the
+	// caller sized the swapchain and the layer rect with, or the picture is cropped.
+	void set_output_scale(float s)
+	{
+		out_scale = s;
+	}
 };

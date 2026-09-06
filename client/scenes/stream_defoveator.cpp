@@ -17,6 +17,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <cmath>
 #include "stream_defoveator.h"
 #include "application.h"
 #include "utils/ranges.h"
@@ -522,7 +523,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 
 	for (size_t view = 0; view < view_count; ++view)
 	{
-		const auto out_size = defoveated_size(foveation[view]);
+		const auto out_size = defoveated_size(foveation[view], out_scale);
 		auto vertices = get_vertices(view);
 		const auto & [px, py] = foveation[view];
 		assert(px.size() % 2 == 1);
@@ -696,10 +697,30 @@ static uint16_t count_pixels(const std::vector<uint16_t> & param)
 	return res;
 }
 
-XrExtent2Di stream_defoveator::defoveated_size(const wivrn::to_headset::foveation_parameter & view)
+XrExtent2Di stream_defoveator::defoveated_size(const wivrn::to_headset::foveation_parameter & view, float scale)
 {
+	// `scale` shrinks the pass's OUTPUT only. The geometry is untouched: the vertex
+	// positions below are normalised by the same out_size they are laid out in
+	// (out_pixel_size = 2 / out_size), so the drawn picture is identical and only the
+	// number of fragments changes -- which is the whole cost of this pass.
+	//
+	// Measured on a Pico 4: the pass renders 2160x2160 PER EYE, invariant across
+	// stream_scale, because the defoveated size is what the panel wants and not what
+	// the stream carries. At stream_scale 0.7 that is a 768x768 source blown up to
+	// 2160x2160, 9.3 Mpixel a frame for 8.4 ms, 30-49% of the frame budget. The
+	// runtime's compositor resamples this image anyway when it timewarps it, so
+	// rendering fewer fragments and letting it do the last step is not a loss of a
+	// resampling, it is the removal of a duplicated one.
+	const auto apply = [scale](uint16_t v) -> int32_t {
+		if (scale >= 1.0f)
+			return v;
+		// Even, and never zero: the foveation grid is laid out in whole pixels and a
+		// zero-sized viewport is not a legal draw.
+		const int32_t r = int32_t(std::lround(double(v) * double(scale)));
+		return std::max<int32_t>(2, r & ~1);
+	};
 	return {
-	        count_pixels(view.x),
-	        count_pixels(view.y),
+	        apply(count_pixels(view.x)),
+	        apply(count_pixels(view.y)),
 	};
 }

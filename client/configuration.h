@@ -308,6 +308,29 @@ public:
 	// to a normal render on anything it does not recognise.
 	bool reduce_gpu_load = false;
 
+	// Share of the defoveated size the display pass actually renders, 0.4 to 1.0.
+	//
+	// 1.0 is what the client has always done: the pass outputs the full defoveated
+	// image, which on a Pico 4 is 2160x2160 PER EYE -- the panel's own resolution --
+	// whatever the stream carries. Measured there, that pass costs 8.3-8.5 ms of GPU a
+	// frame and is invariant across stream_scale, because the output size is fixed by
+	// the panel and not by the stream: 30-49% of the frame budget spent enlarging a
+	// 768x768 or 1080x1080 decoded image to 2160x2160.
+	//
+	// Below 1.0 the pass renders fewer fragments and the runtime's compositor does the
+	// last enlargement. That is not an extra resampling: the compositor already
+	// resamples this layer when it timewarps it, so the pass's own upscale was the
+	// duplicated one. Priced on a Pico 4, one client build, hello_xr, stream_scale 1.0:
+	//
+	//   1.00  2160x2160/eye  9.33 Mpx  pass 8.4 ms  loop 34/s  compositor 33-35/90
+	//   0.70  1512x1512/eye  4.57 Mpx  pass 4.5-5.0 loop 37/s  compositor 37-38/90
+	//   0.50  1080x1080/eye  2.33 Mpx  pass 2.7 ms  loop 73/s  compositor 72-73/90
+	//
+	// Left at 1.0 so nothing changes without being asked for: below 1.0 the compositor
+	// enlarges, which is a picture decision and belongs to whoever is wearing the
+	// headset.
+	float defoveate_scale = 1.0f;
+
 	bool passthrough_enabled = false;
 	bool mic_unprocessed_audio = false;
 

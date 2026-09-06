@@ -808,6 +808,28 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 			flip_y = layer.data.flip_y;
 			view_info.pose[view] = xrt_cast(data.pose);
 			view_info.fov[view] = xrt_cast(data.fov);
+
+			// --- geometry trace (once per session, per eye).
+			//
+			// The question this answers: is the FOV the pixels were RENDERED at the
+			// same FOV that goes on the wire, and therefore the same one the headset
+			// puts on its projection layer? With edge bleed the server widens what
+			// get_view_poses reports, the application renders that, and its layer
+			// carries it back here -- so all three should agree. If they do not, the
+			// picture is encoded at one field of view and displayed as another,
+			// which squashes it and leaves the compositor nothing past the edge.
+			{
+				static std::array<bool, 2> logged{};
+				if (not logged[view])
+				{
+					logged[view] = true;
+					const auto d = [](float a) { return double(a) * 180.0 / M_PI; };
+					U_LOG_I("geometry[eye %d]: layer fov (what the app rendered, and what goes on the wire) "
+					        "L%.2f R%.2f U%.2f D%.2f deg",
+					        view, d(data.fov.angle_left), d(data.fov.angle_right),
+					        d(data.fov.angle_up), d(data.fov.angle_down));
+				}
+			}
 		}
 	}
 	else

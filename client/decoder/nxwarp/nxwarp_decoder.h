@@ -120,6 +120,21 @@ class nxwarp_decoder : public decoder
 		uint64_t stalls = 0;
 		// Frames that reached the worker and were decoded but withheld (see showable).
 		uint64_t withheld = 0;
+		// --- the copy, measured on the DEVICE rather than on the host.
+		//
+		// fence-post is not "the copy": the copy waits on the semaphore nxvc's decode
+		// signals, so the host fence covers the decode's GPU work, the copy's, and
+		// whatever else the queue was already carrying. Two timestamps written inside
+		// the copy's own command buffer separate them, because the first of them
+		// executes only once the semaphore wait has passed.
+		double copy_gpu_ms = 0;
+		// fence-post minus the copy's own GPU time minus nxvc's: the queue.
+		double sched_ms = 0;
+		uint64_t ts_n = 0;
+		// How long after the OTHER eye's copy ended this one's copy began, and how
+		// often the two overlapped at all. See g_last_copy_end_ts.
+		double after_other_ms = 0;
+		uint64_t after_other_n = 0, overlapped_n = 0;
 	} prof;
 	// End of the previous worker iteration, for prof.gap_ms.
 	std::chrono::steady_clock::time_point last_iter_end{};
@@ -408,6 +423,11 @@ private:
 	vk::raii::CommandPool command_pool;
 	vk::CommandBuffer cmd;
 	vk::raii::Fence fence;
+	// Two timestamps around the copy, so its device cost can be told apart from the
+	// wait in front of it. Null where the device has no usable timestamps.
+	vk::raii::QueryPool ts_pool = nullptr;
+	double ts_period_ns = 0;
+	bool have_ts = false;
 
 	uint8_t stream_index;
 	vk::Extent2D extent;

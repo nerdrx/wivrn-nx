@@ -54,6 +54,14 @@ void nxwarp_application_host::with_queue(const std::function<void(vk::Queue)> & 
 	fn(**queue);
 }
 
+void nxwarp_application_host::with_queue(unsigned slot, const std::function<void(vk::Queue)> & fn)
+{
+	// One queue per eye where the family has three. The lock is still per queue, so
+	// the two eyes no longer serialise on the CPU either.
+	auto queue = application::get_decode_queue(slot).lock();
+	fn(**queue);
+}
+
 XrTime nxwarp_application_host::now()
 {
 	return application::get_xr_instance().now();

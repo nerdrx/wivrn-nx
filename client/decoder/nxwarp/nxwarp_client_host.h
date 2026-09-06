@@ -48,6 +48,7 @@ public:
 
 	vk::Instance instance() override;
 	void with_queue(const std::function<void(vk::Queue)> & fn) override;
+	void with_queue(unsigned slot, const std::function<void(vk::Queue)> & fn) override;
 	XrTime now() override;
 	void send_feedback(uint8_t stream_index, uint8_t path_id, std::vector<uint8_t> payload,
 	                   uint16_t decode_us) override;

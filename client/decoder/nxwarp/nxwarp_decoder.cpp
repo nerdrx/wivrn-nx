@@ -33,6 +33,18 @@ static constexpr uint32_t kMaxDecodeStride = 4;
 // is decoded cannot lower a stride that is the reason no frame is being decoded.
 static std::atomic<int64_t> g_stride_decay_ms{0};
 
+// --- are the two eyes sharing one queue, or running on it at the same time?
+//
+// Every NX Warp stream submits through the same host queue, so their copies' timestamps
+// are in ONE device clock and can be compared directly. These two hold the device
+// timestamp at which the last copy of any stream ended, and which stream it was; a
+// stream whose own copy STARTS after the other eye's ended, by about its own decode
+// time, is a stream that waited for the other eye. One that starts before it ended
+// overlapped with it. That difference is the whole of hypothesis (2) and neither the
+// host clock nor nxvc's own stats can see it.
+static std::atomic<uint64_t> g_last_copy_end_ts{0};
+static std::atomic<uint32_t> g_last_copy_stream{0xffffffffu};
+
 // One step down, at most once per `period`, from whichever thread gets there first.
 static void decay_decode_stride(std::chrono::milliseconds period)
 {
@@ -195,6 +207,25 @@ nxwarp_decoder::nxwarp_decoder(vk::raii::Device & device,
         host(host),
         accumulator(accumulator)
 {
+	// Timestamps around the copy. Two conditions, and both are real on some device:
+	// the physical device must report a non-zero period, and the QUEUE FAMILY must
+	// have timestamp bits -- a transfer-only family often has none.
+	{
+		const auto props = physical_device.getProperties();
+		const auto families = physical_device.getQueueFamilyProperties();
+		const bool family_ok = vk_queue_family_index < families.size() and
+		                       families[vk_queue_family_index].timestampValidBits > 0;
+		if (props.limits.timestampPeriod > 0 and family_ok)
+		{
+			ts_pool = vk::raii::QueryPool(device, vk::QueryPoolCreateInfo{
+			                                              .queryType = vk::QueryType::eTimestamp,
+			                                              .queryCount = 2,
+			                                      });
+			ts_period_ns = props.limits.timestampPeriod;
+			have_ts = true;
+		}
+	}
+
 	for (auto & item: image_pool)
 	{
 		item.image = image_allocation(
@@ -306,7 +337,7 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 	ci.instance = host.instance();
 	ci.physical_device = *physical_device;
 	ci.device = *device;
-	host.with_queue([&](vk::Queue q) { ci.queue = q; });
+	host.with_queue(stream_index, [&](vk::Queue q) { ci.queue = q; });
 	ci.queue_family = queue_family_index;
 	// Two-plane 4:2:0 passthrough: what the reprojection shader already samples, and half
 	// the reference-ring memory of an RGBA8 store.
@@ -945,7 +976,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			return;
 		bin_pending = false;
 		// An empty submit whose only job is to consume the signal.
-		host.with_queue([&](vk::Queue queue) {
+		host.with_queue(stream_index, [&](vk::Queue queue) {
 			const vk::PipelineStageFlags stage = vk::PipelineStageFlagBits::eTopOfPipe;
 			const vk::Semaphore sem{bin_sem};
 			queue.submit(vk::SubmitInfo{
@@ -966,7 +997,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	const auto t_wait0 = std::chrono::steady_clock::now();
 	nxvc_vk_decoder_wait(nxvc, UINT64_MAX);
 	const auto t_decode0 = std::chrono::steady_clock::now();
-	host.with_queue([&](vk::Queue) {
+	host.with_queue(stream_index, [&](vk::Queue) {
 		const uint32_t submit_flags =
 		        NXVC_VKD_SUBMIT_ASYNC |
 		        (use_bin_sem ? uint32_t(NXVC_VKD_SUBMIT_SIGNAL_BINARY) : 0u);
@@ -1035,6 +1066,14 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 
 	cmd.reset();
 	cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+	// Query 0 is written at the top of the pipe, which is AFTER the submit's semaphore
+	// wait has been satisfied: it is the moment the copy actually starts on the device,
+	// not the moment it was submitted. That is the whole point of measuring here.
+	if (have_ts)
+	{
+		cmd.resetQueryPool(*ts_pool, 0, 2);
+		cmd.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, *ts_pool, 0);
+	}
 
 	// nxvc leaves its output in GENERAL and overwrites it in place on the next frame; the
 	// copy below is what decouples the codec's own images from the pool of frames the
@@ -1095,6 +1134,8 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	item->current_layout = to_read.newLayout;
 	cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
 	                    vk::PipelineStageFlagBits::eFragmentShader, {}, {}, {}, to_read);
+	if (have_ts)
+		cmd.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *ts_pool, 1);
 	cmd.end();
 
 	// The pose, the fov and the foveation runs the reprojection pass needs come off the
@@ -1144,7 +1185,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 
 	const auto t_recorded = std::chrono::steady_clock::now();
 	device.resetFences(*fence);
-	host.with_queue([&](vk::Queue queue) {
+	host.with_queue(stream_index, [&](vk::Queue queue) {
 		const vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eTransfer;
 		const uint64_t signal_val = ++item->semaphore_val;
 		std::array<vk::Semaphore, 1> wait{wait_sem};
@@ -1181,6 +1222,35 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	if (not signal_on_queue and device.waitForFences(*fence, true, UINT64_MAX) != vk::Result::eSuccess)
 		spdlog::warn("nxwarp: waitForFences failed");
 	const auto t_fence_post = std::chrono::steady_clock::now();
+	// The copy's own device time. Only readable on the path that just waited on the
+	// fence; where the render thread is given a semaphore instead, the copy may still
+	// be running and the queries are not ready.
+	double copy_gpu_ms = -1;
+	double after_other_ms = 0;
+	bool overlapped_other = false, saw_other = false;
+	if (have_ts and not signal_on_queue)
+	{
+		std::array<uint64_t, 2> ts{};
+		auto r = (*device).getQueryPoolResults(*ts_pool, 0, 2, sizeof(ts), ts.data(),
+		                                       sizeof(uint64_t), vk::QueryResultFlagBits::e64,
+		                                       *device.getDispatcher());
+		if ((r == vk::Result::eSuccess or r == vk::Result::eNotReady) and ts[1] > ts[0])
+		{
+			copy_gpu_ms = double(ts[1] - ts[0]) * ts_period_ns / 1e6;
+			const uint64_t prev_end = g_last_copy_end_ts.load(std::memory_order_relaxed);
+			const uint32_t prev_stream = g_last_copy_stream.load(std::memory_order_relaxed);
+			if (prev_end and prev_stream != 0xffffffffu and prev_stream != stream_index)
+			{
+				saw_other = true;
+				if (ts[0] >= prev_end)
+					after_other_ms = double(ts[0] - prev_end) * ts_period_ns / 1e6;
+				else
+					overlapped_other = true;
+			}
+			g_last_copy_end_ts.store(ts[1], std::memory_order_relaxed);
+			g_last_copy_stream.store(stream_index, std::memory_order_relaxed);
+		}
+	}
 
 	++frames_decoded;
 
@@ -1265,6 +1335,20 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		prof.pub_ms += ms(t_published - t_fence_post);
 		prof.withheld += showable ? 0 : 1;
 		prof.wall_max_ms = std::max(prof.wall_max_ms, ms(t_end - t_decode0));
+		if (copy_gpu_ms >= 0)
+		{
+			prof.ts_n++;
+			prof.copy_gpu_ms += copy_gpu_ms;
+			// What the host fence waited for that was neither this copy's GPU
+			// time nor nxvc's own: the queue in front of both.
+			prof.sched_ms += ms(t_fence_post - t_qsubmit) - copy_gpu_ms - st.gpu_ms;
+			if (saw_other)
+			{
+				prof.after_other_n++;
+				prof.after_other_ms += after_other_ms;
+				prof.overlapped_n += overlapped_other ? 1 : 0;
+			}
+		}
 		last_iter_end = t_end;
 		have_last_iter = true;
 
@@ -1305,6 +1389,15 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			             prof.free_ms / n, prof.fpre_ms / n, prof.rec_ms / n, prof.qsub_ms / n,
 			             prof.fpost_ms / n, prof.pub_ms / n, prof.withheld,
 			             g_decode_stride.load(), arrival_period_ms.load(std::memory_order_relaxed));
+			if (prof.ts_n)
+				spdlog::info("nxwarp[{}] fence-post {:.1f} ms = nxvc gpu {:.1f} + copy gpu {:.2f} + queue {:.1f} (over {} frames with timestamps)",
+				             stream_index, (prof.fpost_ms + prof.qsub_ms) / n, prof.gpu_ms / n,
+				             prof.copy_gpu_ms / double(prof.ts_n), prof.sched_ms / double(prof.ts_n),
+				             prof.ts_n);
+			if (prof.after_other_n)
+				spdlog::info("nxwarp[{}] eyes: this copy began {:.1f} ms after the other eye's copy ended, over {} frames; {} overlapped it",
+				             stream_index, prof.after_other_ms / double(prof.after_other_n),
+				             prof.after_other_n, prof.overlapped_n);
 			if (prof.stalls)
 				spdlog::info("nxwarp[{}]: {} of {} frames measured a stall not attributable to decoding (worst wall {:.1f} ms); clipped out of the reported decode cost and out of the stride",
 				             stream_index, prof.stalls, prof.n, prof.wall_max_ms);

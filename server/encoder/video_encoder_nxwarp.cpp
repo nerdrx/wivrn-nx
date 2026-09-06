@@ -633,11 +633,61 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 void wivrn::video_encoder_nxwarp::run_rate_control(size_t last_frame_bytes)
 {
 	if (not rc_auto)
-		return;
+		return; // "fixed": the drop site logs the ceiling; nothing moves the QP
+
+	// ---- the transport ceiling, first, and independent of the bitrate.
+	//
+	// A frame over it is not sent at all, so this outranks every other input the
+	// controller has: there is no bitrate low enough to make an undeliverable
+	// frame acceptable, and no reason to wait for the bitrate controller to have
+	// said anything before escaping. The step is +2 and repeats every frame until
+	// the frames fit, which converges in a handful of frames from any starting
+	// point in the band.
+	const double ceiling = transport_ceiling_bytes();
+	const double actual_bytes = double(last_frame_bytes);
+	if (ceiling > 0.0)
+	{
+		if (actual_bytes > ceiling)
+		{
+			rc_ceiling_fit_run = 0;
+			const uint32_t want =
+			        uint32_t(std::min<int>(int(current_qp) + 2, int(rc_max_qp)));
+			if (want != current_qp and codec->set_qp(want))
+			{
+				current_qp = want;
+				// The floor the bitrate loop below may not undo. Without it a
+				// frame under the BITRATE target immediately steps back down to
+				// rc_min_qp and the next frame overflows again.
+				rc_ceiling_floor = current_qp;
+			}
+			else if (current_qp >= rc_max_qp)
+			{
+				// Out of band: the coarsest quantiser this stream is allowed to
+				// use still does not fit the grid. Only the operator can fix
+				// that, so say which of the three levers to reach for.
+				rc_ceiling_floor = current_qp;
+			}
+			return;
+		}
+		if (actual_bytes < ceiling * rc_ceiling_release_frac)
+		{
+			if (rc_ceiling_floor and ++rc_ceiling_fit_run >= rc_ceiling_release_frames)
+			{
+				rc_ceiling_floor = 0;
+				rc_ceiling_fit_run = 0;
+			}
+		}
+		else
+		{
+			// Under the ceiling but inside the hysteresis band: hold the floor
+			// where it is rather than release it into the frame that overflowed.
+			rc_ceiling_fit_run = 0;
+		}
+	}
 
 	rc_bitrate = pending_bitrate.load();
 	if (not rc_bitrate)
-		return; // no ceiling has been decided yet; stay where we are
+		return; // no bitrate has been decided yet; stay where we are
 
 	// The live compositor rate when the session has set one, else the rate the
 	// stream was configured at. A zero here would make the budget infinite.
@@ -647,8 +697,14 @@ void wivrn::video_encoder_nxwarp::run_rate_control(size_t last_frame_bytes)
 	if (not(fps > 0))
 		return;
 
+	// The byte target is the smaller of what the link will carry and what the
+	// tile grid will carry. Capped at 0.9 of the ceiling rather than at it, so
+	// the loop aims below the edge and normal frame-to-frame variation does not
+	// cross it.
 	rc_target_bytes = double(rc_bitrate) / 8.0 / double(fps);
-	const double actual = double(last_frame_bytes);
+	if (ceiling > 0.0)
+		rc_target_bytes = std::min(rc_target_bytes, ceiling * rc_ceiling_target_frac);
+	const double actual = actual_bytes;
 
 	// Is the ceiling reachable at all? The controller has run out of band when the
 	// quantiser is already at max_qp and the frame is still over budget: there is no
@@ -694,7 +750,11 @@ void wivrn::video_encoder_nxwarp::run_rate_control(size_t last_frame_bytes)
 	if (not step)
 		return;
 
-	const uint32_t want = uint32_t(std::clamp(int(current_qp) + step, int(rc_min_qp), int(rc_max_qp)));
+	// The floor is the operator's min-qp, or the one the transport ceiling
+	// imposed if that is higher: an undeliverable frame is not a quality
+	// setting, so while the escape's floor stands it wins.
+	const int floor_qp = int(std::max(rc_min_qp, rc_ceiling_floor));
+	const uint32_t want = uint32_t(std::clamp(int(current_qp) + step, floor_qp, int(rc_max_qp)));
 	if (want == current_qp)
 		return;
 
@@ -1398,17 +1458,33 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	const size_t chunks = (bitstream.size() + kFrameLenBytes + chunk_bytes - 1) / chunk_bytes;
 	if (chunks > tiles_per_frame)
 	{
-		if (not logged_oversize)
+		const auto now_os = std::chrono::steady_clock::now();
+		if (oversize_logged == std::chrono::steady_clock::time_point{} or
+		    now_os - oversize_logged >= oversize_repeat)
 		{
-			logged_oversize = true;
-			U_LOG_W("nxwarp: stream %d frame is %zu bytes, more than the %u tile slots x %zu bytes the grid can carry; raise QP",
+			oversize_logged = now_os;
+			const double ceiling = transport_ceiling_bytes();
+			U_LOG_W("nxwarp: stream %d frame is %zu bytes, %zu over the %.0f byte ceiling "
+			        "(%u tile slots x %zu bytes); the frame is DROPPED. %s",
 			        int(stream_idx),
 			        bitstream.size(),
+			        bitstream.size() - size_t(ceiling),
+			        ceiling,
 			        unsigned(tiles_per_frame),
-			        chunk_bytes);
+			        chunk_bytes,
+			        rc_auto ? "The controller is raising QP to fit."
+			                : "\"rc\": \"fixed\" does not move the QP -- raise \"qp\", "
+			                  "lower the resolution, or raise \"mtu\".");
 		}
 		if (resync_this_frame)
 			client_holds_nothing = true;
+		// The controller has to SEE this frame, and this is the only path on
+		// which it is the one that matters: an oversized frame is exactly the
+		// input the ceiling escape exists to react to, and returning without
+		// running it left the quantiser where it was and the next frame the
+		// same size. The stream then sent nothing at all, for as long as the
+		// picture stayed busy.
+		run_rate_control(bitstream.size());
 		return {};
 	}
 

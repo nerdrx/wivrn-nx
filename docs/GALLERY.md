@@ -93,3 +93,51 @@ The first is what the code did before `bleed_uv` was passed in: 12800 blue-domin
 the other eye smeared in from the right. The second is the fix: not one blue-dominant pixel
 anywhere. Both legs are asserted, so the check is a before/after and not an unfalsifiable
 "after".
+
+---
+
+## Lens mask — Pico 4 geometry, 1088x1088 per eye
+
+![Lens mask over a decoded frame at the Pico 4 geometry](assets/lensmask-pico4.png)
+
+**2026-09-06** · FOV 105° × 105° symmetric, no foveation · 1088x1088 encoded per eye, 17x17
+tiles · **12 of 289 tiles masked per eye** at the default one-tile margin (40 at margin 0).
+
+The background is a real decoded frame out of the NX Warp e2e harness, with the mask on:
+the grey squares in the corners are the flattened tiles as the headset's decoder actually
+reconstructed them. The overlay is drawn from the same `lens_tile_mask()` the server calls.
+Filled purple is masked; the pale ring is the tiles that fall outside the visible region but
+are kept coded by the margin; the white ellipse is `visible_region()`.
+
+```sh
+# the frame
+ffmpeg -f lavfi -i "mandelbrot=size=1088x1088:rate=30" -t 2 -pix_fmt yuv420p -f rawvideo mandel.yuv
+wivrn-nxwarp-e2e --yuv mandel.yuv --width 1088 --height 1088 --frames 40 \
+    --inter on --qp 30 --deterministic --static-view --lens-mask on --decoded-out dec.yuv
+ffmpeg -f rawvideo -pix_fmt yuv420p -s 1088x1088 -i dec.yuv -vf "select=eq(n\,30)" -vframes 1 dec30.png
+
+# the overlay
+g++ -std=c++23 -O2 -I. -o lens_mask_test tests/lens_mask_test.cpp
+./lens_mask_test --dump 105 105 1088 1088 1088 1088 1     # the mask, as text
+python3 tools/render_lens_mask.py ./lens_mask_test dec30.png
+```
+
+---
+
+## Lens mask — synthetic symmetric 100° FOV
+
+![Lens mask on a bare tile grid at a symmetric 100 degree FOV](assets/lensmask-synthetic-100deg.png)
+
+**2026-09-06** · FOV 100° × 100° symmetric, no foveation · 1088x1088, 17x17 tiles ·
+**12 of 289 tiles masked per eye**.
+
+The case `tests/lens_mask_test.cpp` asserts: the four corners are masked and the centre is
+not, and nothing on the centre row or column is masked at any margin. A symmetric FOV gives
+the same answer at every angle — the region is inscribed in the picture, so widening the FOV
+scales both together — which is why the interesting axes are the foveation curve and the FOV's
+asymmetry, not its size.
+
+```sh
+g++ -std=c++23 -O2 -I. -o lens_mask_test tests/lens_mask_test.cpp && ./lens_mask_test
+python3 tools/render_lens_mask.py ./lens_mask_test dec30.png
+```

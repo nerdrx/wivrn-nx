@@ -151,6 +151,8 @@ public:
 	Q_PROPERTY(nxwarp_coded_vectors nxwarpCodedVectors READ nxwarpCodedVectors WRITE set_nxwarpCodedVectors NOTIFY nxwarpCodedVectorsChanged)
 	Q_PROPERTY(bool nxwarpEffort READ nxwarpEffort WRITE set_nxwarpEffort NOTIFY nxwarpEffortChanged)
 	Q_PROPERTY(bool nxwarpInter READ nxwarpInter WRITE set_nxwarpInter NOTIFY nxwarpInterChanged)
+	// "Skip invisible tiles": the lens mask.
+	Q_PROPERTY(bool nxwarpLensMask READ nxwarpLensMask WRITE set_nxwarpLensMask NOTIFY nxwarpLensMaskChanged)
 	Q_PROPERTY(int nxwarpIntraPeriod READ nxwarpIntraPeriod WRITE set_nxwarpIntraPeriod NOTIFY nxwarpIntraPeriodChanged)
 
 	Q_PROPERTY(bool tcpOnly READ tcpOnly WRITE set_tcpOnly NOTIFY tcpOnlyChanged)
@@ -199,6 +201,7 @@ public:
 	SETTER_GETTER_NOTIFY(nxwarp_coded_vectors, nxwarpCodedVectors)
 	SETTER_GETTER_NOTIFY(bool, nxwarpEffort)
 	SETTER_GETTER_NOTIFY(bool, nxwarpInter)
+	SETTER_GETTER_NOTIFY(bool, nxwarpLensMask)
 	SETTER_GETTER_NOTIFY(int, nxwarpIntraPeriod)
 
 public:

@@ -236,6 +236,23 @@ public:
 		nxvc_encoder_set_received_tiles(enc, received.data(), uint32_t(received.size()));
 	}
 
+	// The lens mask reaches the reference encoder as nxvc's own skip map, so a masked
+	// tile is genuinely never coded rather than merely cheap. The library still
+	// overrides the request where correctness needs the tile -- rolling intra refresh,
+	// no eligible reference, an alpha plane -- which is why nothing here checks for
+	// those conditions.
+	bool supports_skip_map() const override
+	{
+		return true;
+	}
+
+	void set_skip_map(std::span<const uint8_t> skip) override
+	{
+		if (skip.size() != layout.tile_count)
+			return;
+		nxvc_encoder_set_skip_map(enc, skip.data(), uint32_t(skip.size()));
+	}
+
 	std::string description() const override
 	{
 		return std::format("nxvc_ref CPU reference encoder, {} ({}x{} tiles)",

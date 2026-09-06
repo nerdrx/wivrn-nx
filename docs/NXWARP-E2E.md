@@ -314,6 +314,91 @@ directory overwrite each other's capture and the byte-identity check then compar
 picture against somebody else's stream — which shows up as a nonsense count like
 "decoded every unit this decoder consumed (400/6)" rather than as a plain failure.
 
+### The lens mask
+
+`--lens-mask on|off`, `--lens-mask-margin N` and `--lens-mask-skip on|off` are the A/B for
+the tiles the optics cannot show (docs/configuration.md, `"lens-mask"`). The harness prints
+what the mask covered and what the frames coded:
+
+```
+lens mask: on (never coded: nxvc skip map) -- 6 of 289 tiles per eye masked, margin 1 tile
+coded tiles: 54.3 of 289.0 per frame (18.8%) over 40 frames
+```
+
+**`--static-view` is not optional for this measurement.** The harness varies the FOV and the
+foveation runs with the frame number on purpose -- it is how a stale or default-constructed
+`view_info` on the wire becomes visible. The lens mask is recomputed whenever those move, so
+runs that move every frame make the MASK move every frame, tiles cross in and out of it, and
+each crossing costs a coded tile. `--static-view` pins the view configuration and nothing
+else: the pose and the display time still move, so every check that identifies a frame by
+its `view_info` still can. A live session's foveation runs move when the gaze does and not
+otherwise.
+
+`--deterministic` is the second half. Without it the not-held reports and the all-intra
+resyncs they cause land at different frames in the two legs, and a single 21 kB resync frame
+is worth ~200 bytes/frame over a 40-frame run -- larger than the effect being measured.
+
+The leg, at the Pico 4's geometry:
+
+```sh
+ffmpeg -f lavfi -i "mandelbrot=size=1088x1088:rate=30" -t 2 \
+       -pix_fmt yuv420p -f rawvideo mandel.yuv
+
+# in two separate directories, because the harness writes e2e.nxv under a fixed name
+wivrn-nxwarp-e2e --yuv ../mandel.yuv --width 1088 --height 1088 --frames 40 \
+    --inter on --qp 30 --deterministic --static-view --lens-mask off
+wivrn-nxwarp-e2e --yuv ../mandel.yuv --width 1088 --height 1088 --frames 40 \
+    --inter on --qp 30 --deterministic --static-view --lens-mask on
+```
+
+measured 2026-09-06 on the rebased branch, both legs PASSED and both legs are byte-exactly
+repeatable across three runs:
+
+| 1088x1088, QP 30 | mask off | mask on | |
+|---|---|---|---|
+| inter, mandelbrot, 40 frames | 12105 B/frame | **12091** | −0.12 % |
+| all intra, mandelbrot, 12 frames | 43952 B/frame | **43806** | −0.33 % |
+| all intra, uniform detail, 12 frames | 47161 B/frame | **47038** | −0.26 % |
+
+6 of 289 tiles per eye are masked, which is 2.1 % of the tiles — and the byte saving is an
+order of magnitude smaller than that. **That gap is the finding, and it is not noise.**
+`nxv-info --tiles` on the uniform-detail pair says exactly where it goes:
+
+```
+mask off:  tile 0 e0 INTRA ... 52 B     tile 16 e0 INTRA ... 50 B
+mask on:   tile 0 e0 INTRA ... 32 B     tile 16 e0 INTRA ... 32 B
+```
+
+A flattened tile does not cost nothing: it costs **the per-tile floor**, about 32 bytes of
+tile header and minimum payload that an INTRA tile cannot go below however flat it is. So
+flattening recovers only what the tile's content cost ABOVE that floor — 20 bytes here, and
+6 × 20 = 120 B/frame, which is the 123 B measured. The tile share is not the byte share.
+
+On an inter stream the ceiling is lower still for the opposite reason: a WARP_SKIP tile is
+genuinely absent and costs zero, but the corner tiles of a mostly-static clip were already
+skipping before the mask touched them, so there was nothing left to save. The configuration
+where the mask actually pays is the one this harness cannot synthesise — a live session with
+head motion, where the corners carry real detail that keeps being re-coded.
+
+What would remove the floor is telling the codec a tile is ABSENT rather than flat, and nxvc
+has no syntax for that: `nxvc_encoder_set_skip_map` pins a MODE, and `row_present` (tool 32)
+is row-granular over the atlas rather than per tile. That is an nx-warp change, not a WiVRn
+one, and it is the thing to ask for before spending more here.
+
+An earlier run of this A/B reported −1.8 %. It was measured before the edge-bleed rebase and
+it was wrong: the two legs had landed their not-held resyncs on different frames (INTRA 504
+against 472), and one extra all-intra frame is worth more than the whole effect. Both legs
+are now byte-identical run to run, which is the property that makes a 0.1 % number worth
+printing at all.
+
+Only 6 tiles are masked here rather than the 12 the unmasked geometry gives because the
+harness's own foveation runs compress the left and top edges. `tests/lens_mask_test.cpp` is
+the geometry on its own:
+
+```sh
+g++ -std=c++23 -O2 -I. -o lens_mask_test tests/lens_mask_test.cpp && ./lens_mask_test
+```
+
 **`--tile-map auto|spans|chunks`** forces the encoder's mapping of frame bytes onto the
 tile grid, which is the A/B for anything the per-tile span mapping is suspected of
 costing: same clip, same QP, same frames, two mappings. Without it the mapping can only be

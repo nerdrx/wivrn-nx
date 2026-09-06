@@ -488,6 +488,17 @@ Kirigami.ScrollablePage {
             }
 
             RowLayout {
+                visible: Settings.nxwarpSelected
+                Controls.CheckBox {
+                    id: nxwarp_lens_mask
+                    text: i18n("Skip invisible tiles")
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("The lens shows a round region and the encoded picture is a rectangle. The 64x64 tiles in the corners are never seen: this fills them with a flat grey so they cost almost nothing, and tells the codec to skip them where it can. A one-tile ring around the visible region is always still coded.")
+                }
+            }
+
+            RowLayout {
                 Kirigami.FormData.label: i18n("Intra period:")
                 visible: Settings.nxwarpSelected && nxwarp_inter.checked
                 Controls.SpinBox {
@@ -784,6 +795,7 @@ Kirigami.ScrollablePage {
             Settings.nxwarpCodedVectors = nxwarp_coded_vectors.model[nxwarp_coded_vectors.currentIndex].value;
             Settings.nxwarpEffort = nxwarp_effort.checked;
             Settings.nxwarpInter = nxwarp_inter.checked;
+            Settings.nxwarpLensMask = nxwarp_lens_mask.checked;
             Settings.nxwarpIntraPeriod = nxwarp_intra_period.value;
         }
         Settings.mirror = desktop_mirror.checked;
@@ -814,6 +826,7 @@ Kirigami.ScrollablePage {
         nxwarp_coded_vectors.currentIndex = nxwarp_coded_vectors.model.findIndex(i => i.value === Settings.nxwarpCodedVectors);
         nxwarp_effort.checked = Settings.nxwarpEffort;
         nxwarp_inter.checked = Settings.nxwarpInter;
+        nxwarp_lens_mask.checked = Settings.nxwarpLensMask;
         nxwarp_intra_period.value = Settings.nxwarpIntraPeriod;
         desktop_mirror.checked = Settings.mirror;
         debug_gui.checked = Settings.debugGui;

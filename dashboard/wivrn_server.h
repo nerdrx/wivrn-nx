@@ -194,6 +194,9 @@ public:
 
 	// Headset information, valid only if HeadsetConnected is true
 	Q_PROPERTY(QSize recommendedEyeSize READ recommendedEyeSize NOTIFY recommendedEyeSizeChanged)
+	// Per-eye size the connected headset asked the server to encode, before "stream_scale".
+	// A null size means no headset has connected since the server started.
+	Q_PROPERTY(QSize streamEyeSize READ streamEyeSize NOTIFY streamEyeSizeChanged)
 	Q_PROPERTY(std::vector<float> availableRefreshRates READ availableRefreshRates NOTIFY availableRefreshRatesChanged)
 	Q_PROPERTY(float preferredRefreshRate READ preferredRefreshRate NOTIFY preferredRefreshRateChanged)
 	Q_PROPERTY(bool eyeGaze READ eyeGaze NOTIFY eyeGazeChanged)
@@ -262,6 +265,11 @@ public:
 	bool isEncryptionEnabled() const
 	{
 		return m_isEncryptionEnabled;
+	}
+
+	QSize streamEyeSize() const
+	{
+		return m_streamEyeSize;
 	}
 
 	QSize recommendedEyeSize() const
@@ -369,6 +377,7 @@ private:
 	bool m_isEncryptionEnabled{};
 
 	QSize m_recommendedEyeSize{};
+	QSize m_streamEyeSize{};
 	std::vector<float> m_availableRefreshRates{};
 	float m_preferredRefreshRate{};
 	bool m_eyeGaze{};
@@ -396,6 +405,7 @@ Q_SIGNALS:
 	void encryptionEnabledChanged(bool);
 
 	void recommendedEyeSizeChanged(QSize);
+	void streamEyeSizeChanged(QSize);
 	void availableRefreshRatesChanged(const std::vector<float> &);
 	void preferredRefreshRateChanged(float);
 	void eyeGazeChanged(bool);

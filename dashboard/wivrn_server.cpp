@@ -374,6 +374,16 @@ void wivrn_server::on_server_properties_changed(const QString & interface_name, 
 		encryptionEnabledChanged(m_isEncryptionEnabled = changed_properties["EncryptionEnabled"].toBool());
 	}
 
+	if (changed_properties.contains("StreamEyeSize"))
+	{
+		const auto arg = qvariant_cast<QDBusArgument>(changed_properties["StreamEyeSize"]);
+
+		arg.beginStructure();
+		arg >> m_streamEyeSize.rwidth() >> m_streamEyeSize.rheight();
+		arg.endStructure();
+		streamEyeSizeChanged(m_streamEyeSize);
+	}
+
 	if (changed_properties.contains("RecommendedEyeSize"))
 	{
 		const auto arg = qvariant_cast<QDBusArgument>(changed_properties["RecommendedEyeSize"]);

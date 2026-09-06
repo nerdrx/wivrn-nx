@@ -454,6 +454,49 @@ but a link with real jitter would exercise it properly and this does not.
 
 ---
 
+### Under the Vulkan validation layers
+
+The harness links the shipping client decoder and the real encoder against one device, which
+makes it the only place either Vulkan path can be checked without a headset. With
+`vulkan-validation-layers` installed:
+
+```sh
+mkdir -p run && cd run          # the harness writes fixed filenames into cwd
+ffmpeg -f lavfi -i "testsrc2=size=320x240:rate=30:duration=0.5" \
+       -pix_fmt yuv420p -f rawvideo src.yuv
+VK_LOADER_LAYERS_ENABLE='*validation*' \
+    wivrn-nxwarp-e2e --yuv src.yuv --width 320 --height 240 --frames 12 --backend vk
+```
+
+Two findings are expected and are **not** bugs:
+
+* `VUID-VkImageMemoryBarrier-oldLayout-01212` and
+  `VUID-vkCmdCopyImageToBuffer-srcImage-00186`, both on the image named `nxwarp image`.
+  The decoder's pool images are created `SAMPLED | TRANSFER_DST` because that is all the
+  headset needs; the harness reads one back with `vkCmdCopyImageToBuffer`, which wants
+  `TRANSFER_SRC`. Adding that usage to satisfy a test would change what the shipping client
+  allocates, so the harness carries the finding instead.
+
+Everything else must be silent. What the device has to enable for that to be true is not
+obvious, because the party that needs it is not the party that creates the device: nxvc's
+decoder runs on the VkDevice it is handed, so its requirements land on
+`server/utils/wivrn_vk_bundle.cpp` here and on `client/application.cpp` on the headset, and
+both have to ask for the same three things.
+
+* `shaderInt16` and `storageBuffer16BitAccess` — Pass A decodes into int16 coefficients and
+  writes them to a storage buffer, so its SPIR-V declares both capabilities. Without them
+  `vkCreateShaderModule` is undefined behaviour that happens to work
+  (`VUID-VkShaderModuleCreateInfo-pCode-08740`,
+  `VUID-RuntimeSpirv-storageBuffer16BitAccess-11161`).
+* `samplerYcbcrConversion` — the decoder's pool is `G8_B8R8_2PLANE_420_UNORM` and every view
+  of one carries a conversion object (`VUID-vkCreateSamplerYcbcrConversion-None-01648`).
+
+All three are asked for only where the device offers them and reported when it does not: a
+GPU without them can still run every other encoder, so it is a reason to refuse NX Warp and
+not a reason to refuse to start.
+
+---
+
 ## 5. What works, and what does not
 
 Works, end to end, in process:

@@ -134,9 +134,17 @@ struct vk_bundle
 #ifdef VK_KHR_unified_image_layouts
 	        vk::PhysicalDeviceUnifiedImageLayoutsFeaturesKHR,
 #endif
+	        vk::PhysicalDeviceVulkan11Features,
 	        vk::PhysicalDeviceVulkan12Features,
 	        vk::PhysicalDeviceVulkan13Features>
 	        feat{};
+
+	// Whether this device came up with everything nxvc's decoder shaders need
+	// (shaderInt16, storageBuffer16BitAccess) and everything its image pool needs
+	// (samplerYcbcrConversion). False is not fatal -- every other encoder is unaffected
+	// -- but an NX Warp decode on this device would be building shader modules the
+	// device never agreed to run.
+	bool nxwarp_decoder_features = false;
 
 	std::vector<const char *> instance_extensions;
 	std::vector<const char *> device_extensions;

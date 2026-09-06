@@ -380,7 +380,13 @@ public:
 	// run at the full display rate even while the application sits at a low frame rate.
 	// Experimental: guarded by a conservative dirty check, and it falls straight back
 	// to a normal render on anything it does not recognise.
-	bool reduce_gpu_load = false;
+	// On by default. Measured on a Pico 4: the render loop turns faster than decoded
+	// frames arrive, so about one iteration in eight redraws an image identical to the
+	// last, and skipping those took the display pass from 3.55 to 2.04 ms of GPU an
+	// iteration -- loop 54.0 -> 63.3/s, compositor FPS 54 -> 63, motion-to-photon
+	// 42.0 -> 39.9 ms, with 1137 frames re-presented over a minute and no change to
+	// the decode.
+	bool reduce_gpu_load = true;
 
 	// Share of the defoveated size the display pass actually renders, 0.4 to 1.0.
 	//
@@ -494,7 +500,18 @@ public:
 	// difference between that experiment and this one is that this is the
 	// sanctioned API rather than a Vulkan back door.
 	uint32_t perf_level_cpu = 0;
-	uint32_t perf_level_gpu = 0;
+	// GPU: BOOST by default, measured rather than assumed. On a Pico 4 the GPU sat
+	// pinned at 490 MHz and 99% utilisation with the decode and the display pass
+	// sharing one Adreno ring; asking for boost took the clock to 587 MHz and moved
+	// everything downstream at once -- loop 53.0 -> 85.9/s, compositor FPS 53 -> 86,
+	// motion-to-photon 42.0 -> 35.8 ms, decode 18.2 -> 14.4 ms a pair, server pacing
+	// 41.4 -> 53.4 fps, and utilisation DOWN to 92%. The ring was clock limited, not
+	// merely busy.
+	//
+	// CPU stays `auto`: it was not measured, and the warning below is about exactly
+	// this kind of change, so pinning it on the strength of a GPU result would be
+	// guessing with the same dice that came up badly last time.
+	uint32_t perf_level_gpu = 2;
 	uint32_t fps_divider = 1;
 
 	// Allow unsafe config values

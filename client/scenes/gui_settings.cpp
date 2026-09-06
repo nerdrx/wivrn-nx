@@ -1165,8 +1165,8 @@ void settings_post_processing(const settings_context & ctx)
 
 	list.push_back({
 	        .id = "##reduce_gpu_load",
-	        .label = _("Reduce GPU load (experimental)"),
-	        .description = _("Skip re-rendering the streamed image on refreshes where nothing has changed, re-presenting the previous one instead. Saves GPU power when the application runs below the display rate; head tracking stays responsive because the runtime still reprojects every refresh. Watch the Defoveate meter in the Statistics tab to see the effect."),
+	        .label = _("Reduce GPU load"),
+	        .description = _("Skip re-rendering the streamed image on refreshes where nothing has changed, re-presenting the previous one instead. Head tracking stays responsive because the headset still reprojects every refresh.\n\nOn by default, measured on a Pico 4: the render loop turns faster than new images arrive, so about one refresh in eight was redrawing a picture identical to the last. Skipping those halved the cost of the display pass — 3.55 to 2.04 ms of GPU an iteration — and took the loop from 54 to 63 a second and motion-to-photon from 42.0 to 39.9 ms, with 1137 frames re-presented over a minute and no change to decoding. Watch the Defoveate meter in the Statistics tab to see the effect."),
 	        .ui = ui_kind::toggle,
 	        .get_bool = [&config] { return config.reduce_gpu_load; },
 	        .set_bool = [&config](bool v) { config.reduce_gpu_load = v; config.save(); },
@@ -1447,7 +1447,7 @@ void settings_system(const settings_context & ctx)
 			        _("Auto"), _("High"), _("Boost")};
 		};
 		const std::string perf_desc =
-		        _("Ask the runtime for a CPU or GPU performance level. 'Auto' follows High power mode, which is what this client has always done. 'High' pins sustained_high; 'Boost' asks for the transient level, which the runtime may bound, ignore or take back — the in-stream overlay shows what it actually did.\n\nLeave this on Auto unless you are measuring. Forcing clocks on this headset has gone badly before: raising the Vulkan queue priority made decoding TEN TIMES slower because the compositor lost the scheduling fight. This is the sanctioned way to ask, which is not the same as it being free.");
+		        _("Ask the runtime for a CPU or GPU performance level. 'Auto' follows High power mode, which is what this client has always done. 'High' pins sustained_high; 'Boost' asks for the transient level, which the runtime may bound, ignore or take back — the in-stream overlay shows what it actually did.\n\nGPU defaults to Boost, and that is measured rather than assumed. On a Pico 4 the GPU sat pinned at 490 MHz at 99%% use, with decoding and the display pass sharing one graphics engine. Asking for Boost took it to 587 MHz and moved everything at once: the render loop from 53 to 86 a second, the headset's own frame rate from 53 to 86, motion-to-photon from 42.0 to 35.8 ms, decoding from 18.2 to 14.4 ms a pair, and the computer's send rate from 41 to 53 fps — with the GPU LESS busy afterwards, at 92%%. It was running out of clock, not out of capacity.\n\nCPU stays on Auto: it has not been measured. Forcing clocks on this headset has gone badly before — raising the Vulkan queue priority made decoding TEN TIMES slower because the compositor lost the scheduling fight. This is the sanctioned way to ask, which is not the same as it being free, so turn it down if the headset gets hot or the battery goes quickly.");
 		list.push_back({
 		        .id = "##perf_cpu",
 		        .label = _("CPU performance level"),

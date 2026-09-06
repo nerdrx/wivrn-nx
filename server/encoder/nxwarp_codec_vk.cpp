@@ -165,6 +165,23 @@ public:
 			}
 		}
 
+		// The entropy tool (stream bit 30).  Written out rather than cast for
+		// the same reason `coded_vectors` is, and passed unconditionally
+		// because -- unlike the inter fields -- it is legal on every
+		// configuration.  Selecting Lite also turns SIGN_HIDE, CUSTOM_TABLES
+		// and TAB_V2 off inside the library, because the syntax forbids the
+		// combination; the stream header the client parses is the authority
+		// on what a stream actually carries.
+		switch (c.entropy)
+		{
+			case wivrn::nxwarp_codec_config::entropy_t::lite:
+				ci.entropy = NXVC_VKE_ENTROPY_LITE;
+				break;
+			case wivrn::nxwarp_codec_config::entropy_t::rans:
+				ci.entropy = NXVC_VKE_ENTROPY_RANS;
+				break;
+		}
+
 		nxvc_vke_status st = nxvc_vk_encoder_create(&ci, &enc);
 		if (st != NXVC_VKE_OK or not enc)
 			throw std::runtime_error(std::format("nxvc_vk_encoder_create failed: {}",

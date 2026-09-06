@@ -79,6 +79,12 @@ public:
 		// lane per tile at high QP, which costs the Adreno decoder 4x of Pass A
 		// for a 30% rate saving it cannot afford (vk/decoder README, live shape).
 		cfg.nsub_log2 = 3;
+		// The entropy tool, stream bit 30.  The reference codec forces
+		// sign_hide, custom_tables and nsub_log2 itself when it is on, so this
+		// is the whole of the mapping.  1 is the FIXED variant, which is the
+		// only one the GPU decoder on the headset implements.
+		cfg.entropy_lite =
+		        c.entropy == wivrn::nxwarp_codec_config::entropy_t::lite ? 1u : 0u;
 		cfg.rdo = 0;         // dead-zone quantiser instead of the RD trellis (~2.7x)
 		cfg.qp_search = 0;   // no per-tile QP offset search
 		cfg.intra_dir = c.intra_dir ? 1 : 0;

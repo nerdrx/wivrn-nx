@@ -29,11 +29,17 @@
 // from_headset::feedback at all on this path (close_frame returned early on a hole), so
 // the one signal that should make the controller back off was invisible to it.
 //
-// Part A is the bug: the old numbering, a clean link, a rare uneven hole -> the floor.
+// Part A was the bug: the old numbering, a clean link, a rare uneven hole -> the floor.
+//          It now holds the ceiling, because the cure moved from the numbering to the
+//          measurement -- see the assertion there and Part F.
 // Part B is the fix: the wire frame id, the same clean link -> the ceiling is held.
 // Part C: loss is now visible, backs the bitrate off, and the link recovers afterwards.
 // Part D: an even hole (both eyes lose the same frame) was never enough to desync, so it
 //         has to still be harmless -- the fix must not have bought B by making loss inert.
+// Part F: the eyes PACED APART on a clean link. The second route into Part A's bug and
+//         the one that was live: each stream numbers by its own wire id and the encoder
+//         paces each stream to that eye's decode cost, so the ids drift. 50 -> 10 Mbit/s
+//         with zero lost datagrams, before the span was measured per stream.
 //
 // Build:
 //   g++ -std=c++23 -I server -I common -I build-server/common \
@@ -195,6 +201,56 @@ struct harness
 		now += std::chrono::nanoseconds(period);
 	}
 
+	// One frame as both eyes report it, with the eyes PACED INDEPENDENTLY.
+	//
+	// This is the live shape and the second route into the same bug. The NX Warp
+	// encoder paces each stream to the decode cost that eye reports, and the two eyes
+	// do not decode at the same speed: live, stream 0 sent 76 frames in the same two
+	// seconds stream 1 sent 67. Each stream numbers its feedback by its own wire id,
+	// so the ids drift the way the survivor counters used to -- for a different reason
+	// and with the same consequence.
+	//
+	// `skip_eye` is the eye that does not send this composited frame. Its wire id
+	// therefore stops advancing while the other eye's goes on.
+	void frame_paced(int skip_eye)
+	{
+		const XrTime base = 1'000'000'000 + XrTime(composited) * period;
+		const XrTime wire = XrTime(0.15 * double(period));
+
+		for (uint8_t eye = 0; eye < eyes; ++eye)
+		{
+			if (skip_eye >= 0 and uint8_t(skip_eye) == eye)
+				continue;
+
+			wivrn::from_headset::feedback fb{};
+			fb.stream_index = eye;
+			// Each eye numbers by ITS OWN wire id, which is what the client does.
+			fb.frame_index = paced_wire[eye]++;
+			fb.received_first_packet = base;
+			fb.received_last_packet = base + wire;
+			fb.sent_to_decoder = base + wire;
+			fb.received_from_decoder = base + wire + period;
+			fb.blitted = base + wire + 2 * period;
+			fb.times_displayed = 1;
+			feed(fb);
+		}
+
+		++composited;
+		now += std::chrono::nanoseconds(period);
+	}
+
+	uint64_t composited = 0;
+	uint64_t paced_wire[eyes] = {0, 0};
+
+	// n seconds in which eye 1 sends one frame in `skip_every` fewer than eye 0, which
+	// is what a slower-decoding eye produces. The link is clean throughout.
+	void seconds_paced(double n, int skip_every)
+	{
+		const size_t frames = size_t(n * 1e9 / double(period));
+		for (size_t i = 0; i < frames; ++i)
+			frame_paced((skip_every > 0 and int(i % size_t(skip_every)) == 0) ? 1 : -1);
+	}
+
 	// n seconds of video with a hole every `hole_period` frames, alternating eyes so
 	// that the survivor counters drift apart rather than staying in step. 0 = none.
 	void seconds(double n, int hole_period = 0)
@@ -250,9 +306,17 @@ void part_a()
 	std::printf("  survivor counter, no loss reports: %.1f -> %.1f Mbit/s (%zu changes)\n",
 	            mbit(ceiling), mbit(h.current()), h.changes.size());
 
-	// The bug, asserted so it cannot come back quietly. Not one lost frame was reported;
-	// the numbering alone took a healthy link to the floor.
-	CHECK(h.current() == floor_bps);
+	// This used to assert the FLOOR, and it was right to: the numbering alone took a
+	// healthy link there, and pinning that was what stopped the bug coming back quietly.
+	//
+	// It asserts the ceiling now, and the change is the point. The cure is no longer a
+	// numbering that happens to stay in step -- Part F shows the wire id drifting out
+	// of step for a second reason the moment the eyes were paced independently -- but
+	// the measurement itself: a frame's time on the wire is taken within ONE stream, so
+	// two streams' timestamps can no longer end up in one span whatever they are
+	// numbered by. The old numbering is still wrong for other reasons and no client
+	// uses it; what it can no longer do is fabricate congestion.
+	CHECK(h.current() == ceiling);
 }
 
 void part_b()
@@ -367,6 +431,39 @@ extern "C" enum u_logging_level u_log_get_global_level(void)
 	return U_LOGGING_INFO;
 }
 
+// Part F: the eyes PACED apart, on a link that loses nothing.
+//
+// The second route into Part A's bug, and the one that was live. The encoder paces each
+// stream to the decode cost that eye reports; the eyes do not decode at the same speed,
+// so each stream's wire id advances at its own rate and the two drift apart for good.
+// The controller joined its per-stream feedback by that id, so it was measuring the span
+// between the arrival of one eye's frame N and a different eye's frame N -- the drift,
+// not the wire. Live that read p90 utilisation 3.27 and then 21.08 against a threshold of
+// 1.00, and the automatic bitrate went 50 -> 20 -> 10 Mbit/s with ZERO lost datagrams.
+//
+// The cure is not another numbering. A frame's time on the wire is a property of ONE
+// stream, so it is measured within one stream and the widest taken; then no numbering
+// scheme can put two streams' timestamps into one span again.
+void part_f()
+{
+	std::printf("Part F: eyes paced apart on a clean link hold the ceiling\n");
+
+	// The drift has to stay inside the controller's 16-entry frame ring to do damage:
+	// once the eyes are more than a ring apart, a late report finds its slot already
+	// recycled and is closed on its own rather than merged. So the case that bites is
+	// SLOW drift, and the live one was slow -- nine frames per two seconds.
+	//
+	// A frame a second, held for twenty, which walks the drift from 0 through 16.
+	for (int skip_every : {90, 45, 20})
+	{
+		harness h(numbering::wire_frame_id, true);
+		h.seconds_paced(20, skip_every);
+		std::printf("  eye 1 skips 1 in %-3d:               %.1f Mbit/s\n",
+		            skip_every, mbit(h.current()));
+		CHECK(h.current() == ceiling);
+	}
+}
+
 int main(int argc, char ** argv)
 {
 	verbose = argc > 1 and std::string(argv[1]) == std::string("-v");
@@ -375,6 +472,7 @@ int main(int argc, char ** argv)
 	part_c();
 	part_d();
 	part_e();
+	part_f();
 
 	std::printf("\n%d checks, %d failure(s)\n", checks, failures);
 	return failures ? 1 : 0;

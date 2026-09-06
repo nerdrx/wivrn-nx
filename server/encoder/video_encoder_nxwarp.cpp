@@ -703,11 +703,31 @@ void wivrn::video_encoder_nxwarp::run_rate_control(size_t last_frame_bytes,
 
 	// The live compositor rate when the session has set one, else the rate the
 	// stream was configured at. A zero here would make the budget infinite.
+	// The rate the frames the budget is FOR actually leave at.
+	//
+	// The compositor's rate is what the link is shared at, but this encoder does not
+	// send every composited frame: the pace admits one every `pace_interval`, and at
+	// a paced 34.5 fps a per-frame budget derived from 90 Hz asks each SENT frame to
+	// be 2.6x smaller than the link can carry. That is what pinned the quantiser at
+	// max QP with the frames 9 % over a 6.1 kB target while the link allowed 15.9 kB
+	// a frame -- the encoder was aiming at a budget for frames it was not sending.
+	//
+	// It follows the pace, so it is read here rather than at construction: the pace
+	// moves with the headset's reported decode cost.
 	float fps = pending_framerate.load();
 	if (not(fps > 0))
 		fps = rc_fps;
 	if (not(fps > 0))
 		return;
+	const double composited_fps = double(fps);
+	if (pace_mode != pace_mode_t::off and pace_interval > 0)
+	{
+		const double paced = 1.0 / pace_interval;
+		// The pace can only send FEWER frames than are composited, so it can only
+		// raise the per-frame budget. Clamped so a pace that has run away above the
+		// compositor rate cannot shrink it.
+		fps = float(std::min(composited_fps, paced));
+	}
 
 	// The byte target is the smaller of what the link will carry and what the
 	// tile grid will carry. Capped at 0.9 of the ceiling rather than at it, so
@@ -737,15 +757,17 @@ void wivrn::video_encoder_nxwarp::run_rate_control(size_t last_frame_bytes,
 		{
 			rc_unreachable_logged = now;
 			U_LOG_W("nxwarp: stream %d cannot reach its bitrate ceiling: at max QP %u the frames are "
-			        "%.0f B and the ceiling allows %.0f B (%u bit/s at %.0f Hz). Every NX Warp frame is "
-			        "intra, so this is the smallest frame there is — raise the ceiling, lower the "
-			        "resolution, or raise \"max-qp\"",
+			        "%.0f B and the ceiling allows %.0f B (%u bit/s at the %.1f fps this stream is "
+			        "paced to, %.0f Hz composited). This is the smallest frame this quantiser can "
+			        "make of this picture — raise the ceiling, lower the resolution, or raise "
+			        "\"max-qp\"",
 			        int(stream_idx),
 			        unsigned(rc_max_qp),
 			        actual,
 			        rc_target_bytes,
 			        unsigned(rc_bitrate),
-			        double(fps));
+			        double(fps),
+			        composited_fps);
 		}
 	}
 	else

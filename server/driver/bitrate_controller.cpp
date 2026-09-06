@@ -401,7 +401,19 @@ void bitrate_controller::close_frame(frame_state & frame, clock::time_point now)
 	}
 	else if (frame.valid and frame.first and frame.last >= frame.first and frame_period > 0)
 	{
-		const int64_t wire_ns = int64_t(frame.last - frame.first);
+		// The widest span any ONE stream took, not the span across streams: see
+		// frame_state::stream_first for why the difference is the whole bug.
+		int64_t wire_ns = 0;
+		for (size_t i = 0; i < frame_state::max_streams; ++i)
+		{
+			const XrTime f0 = frame.stream_first[i], f1 = frame.stream_last[i];
+			if (f0 and f1 >= f0)
+				wire_ns = std::max(wire_ns, int64_t(f1 - f0));
+		}
+		// Nothing per-stream (an old feedback with no stream detail): fall back to
+		// the merged pair, which is what this always used.
+		if (wire_ns == 0)
+			wire_ns = int64_t(frame.last - frame.first);
 
 		double rate = 0;
 		// Only a frame that actually loaded the link says anything about how much the
@@ -742,6 +754,17 @@ std::optional<uint32_t> bitrate_controller::on_feedback(const from_headset::feed
 			frame.first = frame.first ? std::min(frame.first, feedback.received_first_packet) : feedback.received_first_packet;
 		if (feedback.received_last_packet)
 			frame.last = std::max(frame.last, feedback.received_last_packet);
+		// And the same pair for THIS stream alone, which is what the wire span is
+		// measured from. See frame_state::stream_first.
+		if (feedback.stream_index < frame_state::max_streams)
+		{
+			auto & sf = frame.stream_first[feedback.stream_index];
+			auto & sl = frame.stream_last[feedback.stream_index];
+			if (feedback.received_first_packet)
+				sf = sf ? std::min(sf, feedback.received_first_packet) : feedback.received_first_packet;
+			if (feedback.received_last_packet)
+				sl = std::max(sl, feedback.received_last_packet);
+		}
 		frame.valid = true;
 	}
 
@@ -800,10 +823,13 @@ void bitrate_controller::update_emergency(clock::time_point now, const stats & s
 	}
 
 	// Same verdicts the AIMD law uses, kept mode independent here so the last resort behaves
-	// the same whichever control law is in force.
+	// the same whichever control law is in force -- including that a frame decoded and
+	// then replaced before it was shown only counts as congestion when the link also
+	// dropped something. The emergency mode halves the frame rate, and doing that
+	// because a saturated client GPU could not show every frame makes it worse.
 	const bool severe = s.utilisation > utilisation_severe or
 	                    s.lost >= lost_frames_severe or
-	                    s.late >= late_frames_severe;
+	                    (s.lost > 0 and s.late >= late_frames_severe);
 	const bool healthy = s.utilisation < utilisation_increase and s.lost == 0 and s.late == 0;
 	const bool at_floor = bitrate <= min_bitrate;
 
@@ -873,13 +899,24 @@ bool bitrate_controller::emergency_framerate_active() const
 
 std::optional<uint32_t> bitrate_controller::evaluate_aimd(clock::time_point now, const stats & s)
 {
+	// A frame the client decoded and then replaced before showing it is a statement
+	// about the CLIENT keeping up, not about the link. On a codec whose headset drops
+	// frames at a bounded decode queue by design, it is the normal state of a healthy
+	// link -- and lowering the bitrate cannot fix a GPU that is saturated. Live, this
+	// alone would have called congestion on a window with zero lost datagrams.
+	//
+	// So `late` only counts toward a DECREASE when the same window also shows the link
+	// dropping something. It still counts against `healthy` below, so a client that is
+	// not keeping up stops the controller climbing; it just may not push it down.
+	const bool link_lost_something = s.lost > 0;
+	const size_t late_for_decrease = link_lost_something ? s.late : 0;
 	const bool severe = s.utilisation > utilisation_severe or
 	                    s.lost >= lost_frames_severe or
-	                    s.late >= late_frames_severe;
+	                    late_for_decrease >= late_frames_severe;
 	const bool degraded = severe or
 	                      s.utilisation > utilisation_decrease or
 	                      s.lost >= lost_frames_decrease or
-	                      s.late >= late_frames_decrease;
+	                      late_for_decrease >= late_frames_decrease;
 	const bool healthy = s.utilisation < utilisation_increase and s.lost == 0 and s.late == 0;
 
 	const uint32_t previous = bitrate;
@@ -999,8 +1036,10 @@ std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, 
 	// the frames past a frame period on purpose, and reading that back as congestion would
 	// turn every probe into a backoff. Frames actually lost or dropped still count.
 	const bool overshooting = bbr_st == bbr_state::probe;
+	// Same rule as the AIMD law: a frame decoded and dropped before it was shown is
+	// the client not keeping up, and only counts as congestion alongside real loss.
 	const bool acute = s.lost >= lost_frames_decrease or
-	                   s.late >= late_frames_decrease or
+	                   (s.lost > 0 and s.late >= late_frames_decrease) or
 	                   (not overshooting and
 	                    (s.utilisation > utilisation_severe or
 	                     (bbr_st != bbr_state::startup and slowdown > slowdown_backoff)));

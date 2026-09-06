@@ -320,6 +320,7 @@ public:
 	bool identityFromDecoder() const
 	{
 		return s.identity_from_decoder;
+	}
 	QString planar() const
 	{
 		return QString::fromStdString(s.planar);

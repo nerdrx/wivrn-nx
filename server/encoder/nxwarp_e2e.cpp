@@ -1950,11 +1950,14 @@ int main(int argc, char ** argv)
 	// not have to know that to trust the line.
 	const std::string planar_note =
 	        planar.empty() ? std::string() : ", planar request \"" + planar + "\"";
+	// Both notes, one call. The two branches each appended their own to this
+	// line; a union that kept both calls would have printed the header twice and
+	// left a stray argument, so the format string carries both slots instead.
 	std::fprintf(stderr,
-	             "[e2e] simulated headset nxvc_tools = 0x%llx (entropy request \"%s\"%s)\n",
+	             "[e2e] simulated headset nxvc_tools = 0x%llx (entropy request \"%s\"%s%s)\n",
 	             (unsigned long long)settings.nxvc_tools,
 	             entropy.c_str(),
-	             snap_note.c_str());
+	             snap_note.c_str(),
 	             planar_note.c_str());
 	// Rate control off by default. The byte-identity check below compares this
 	// run's bitstream against nxv-dec's decode of it, which a moving quantiser

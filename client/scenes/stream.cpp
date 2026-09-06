@@ -2449,8 +2449,25 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 		// pool, since that is where the choice is made. A global rather than a
 		// constructor argument because the decoder header is also compiled into the
 		// e2e harness, which has no configuration layer to ask.
-		wivrn::g_nxwarp_decoupled_display.store(application::get_config().decoupled_display,
-		                                        std::memory_order_relaxed);
+		//
+		// debug.wivrn.decoupled is a measurement override on top of the setting, the
+		// same arrangement debug.wivrn.jit already has and for the same reason: the
+		// two halves of an A/B are only comparable against one server on one link,
+		// and the setting itself is reachable only from the headset's own GUI. Unlike
+		// the jit switch this one is read once, here, because the choice is made when
+		// the decoder builds its image pool -- so flipping it takes effect on the next
+		// connection rather than the next frame. Absent or empty means "whatever the
+		// setting says", which is every device that is not being measured.
+		bool decoupled = application::get_config().decoupled_display;
+#ifdef __ANDROID__
+		{
+			char value[PROP_VALUE_MAX] = {};
+			if (const int len = __system_property_get("debug.wivrn.decoupled", value); len > 0)
+				decoupled = value[0] != '0';
+		}
+#endif
+		spdlog::info("nxwarp: decoupled display {}", decoupled ? "on" : "off");
+		wivrn::g_nxwarp_decoupled_display.store(decoupled, std::memory_order_relaxed);
 #endif
 
 		item = accumulator_images{

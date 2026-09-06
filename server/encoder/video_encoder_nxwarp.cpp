@@ -570,6 +570,8 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 			U_LOG_I("nxwarp: \"snap-identity\": %u/16 sample (still tiles become "
 			        "a copy on the headset; error bounded by %.2f sample)",
 			        want, (double)want / 32.0);
+	}
+
 	// ---- the piecewise-planar tile mode, resolved against the backend and the
 	// headset (nxvc SYNTAX.md 13.13, tool bit 35).
 	//

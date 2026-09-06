@@ -88,8 +88,7 @@
 //                    [--reconnect-at N] [--start-frame-id F]
 //                    [--pace auto|off|FPS] [--client-decode-ms N] [--present-hz N]
 //                    [--feedback-delay N] [--effort 0|1] [--snap-identity N]
-//                    [--head-rate S]
-//                    [--feedback-delay N] [--effort 0|1] [--planar off|rd|prefer]
+//                    [--head-rate S] [--planar off|rd|prefer]
 //
 //   --eyes             1 (the default, and every run that predates this flag) or 2, which
 //                      is encoder_settings::eyes: ONE stream carrying BOTH eyes as a
@@ -1951,10 +1950,10 @@ int main(int argc, char ** argv)
 	const std::string planar_note =
 	        planar.empty() ? std::string() : ", planar request \"" + planar + "\"";
 	std::fprintf(stderr,
-	             "[e2e] simulated headset nxvc_tools = 0x%llx (entropy request \"%s\"%s)\n",
+	             "[e2e] simulated headset nxvc_tools = 0x%llx (entropy request \"%s\"%s%s)\n",
 	             (unsigned long long)settings.nxvc_tools,
 	             entropy.c_str(),
-	             snap_note.c_str());
+	             snap_note.c_str(),
 	             planar_note.c_str());
 	// Rate control off by default. The byte-identity check below compares this
 	// run's bitstream against nxv-dec's decode of it, which a moving quantiser

@@ -1110,6 +1110,8 @@ void Settings::set_nxwarpSnapIdentity(const nxwarp_snap & value)
 	                           nxd::nxwarp_default_snap_identity);
 	if (old != nxwarpSnapIdentity())
 		nxwarpSnapIdentityChanged();
+}
+
 Settings::nxwarp_planar Settings::nxwarpPlanar() const
 {
 	const auto v = nxd::nxwarp_option(m_jsonSettings, "planar")

@@ -10,6 +10,10 @@
 #include "nxwarp_stream_grid.h"
 #include "nxwarp_decoder.h"
 
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
+
 #include "wivrn_config.h"
 
 #if WIVRN_USE_NXWARP
@@ -176,6 +180,34 @@ uint64_t now_us()
 	                        .count());
 }
 
+// Chroma reconstruction for the YCbCr conversion the display pass samples through.
+//
+// Every pixel of the reprojection pass takes at least one sample through this conversion,
+// and on Adreno a LINEAR chroma filter is not free: the driver cannot use the plain
+// bilinear path, so it reconstructs chroma explicitly around each sample. The pass costs
+// 6.37 ms for 2.37 Mpx on a Pico 4 -- 372 Mpx/s, well under what a blit should manage --
+// and this is the per-sample term in it. See docs/CLIENT-REPROJECTION.md.
+//
+// NEAREST is a display-quality trade and nothing more: the chroma planes are already at
+// half resolution, and the compositor resamples the whole layer again when it timewarps
+// it. There is no byte-exactness to lose here -- this is the picture, not the bitstream.
+//
+// Read once, when the conversion is created, so a change takes effect on the next
+// connection. debug.wivrn.chroma_nearest is the measurement override, the same
+// arrangement debug.wivrn.jit and debug.wivrn.decoupled already use, so the A/B is one
+// build.
+static vk::Filter chroma_filter()
+{
+	bool nearest = false;
+#ifdef __ANDROID__
+	char value[PROP_VALUE_MAX] = {};
+	if (const int len = __system_property_get("debug.wivrn.chroma_nearest", value); len > 0)
+		nearest = value[0] != '0';
+#endif
+	spdlog::info("nxwarp: ycbcr chroma filter {}", nearest ? "nearest" : "linear");
+	return nearest ? vk::Filter::eNearest : vk::Filter::eLinear;
+}
+
 vk::raii::Sampler make_sampler(vk::raii::Device & device, vk::SamplerYcbcrConversion conv)
 {
 	vk::StructureChain info{
@@ -239,7 +271,7 @@ nxwarp_decoder::nxwarp_decoder(vk::raii::Device & device,
                                          .format = vk::Format::eG8B8R82Plane420Unorm,
                                          .ycbcrModel = vk::SamplerYcbcrModelConversion::eYcbcr709,
                                          .ycbcrRange = vk::SamplerYcbcrRange::eItuFull,
-                                         .chromaFilter = vk::Filter::eLinear,
+                                         .chromaFilter = chroma_filter(),
                                  }),
         sampler_(make_sampler(device, *ycbcr_conversion)),
         command_pool(device, vk::CommandPoolCreateInfo{

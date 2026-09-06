@@ -735,6 +735,16 @@ void settings_streaming(const settings_context & ctx)
 	});
 
 	list.push_back({
+	        .id = "##decoupled_display",
+	        .label = _("Decoupled display"),
+	        .description = _("Draw the picture every refresh instead of once per decoded frame. Without this the drawing pass is queued behind the whole decode, so a headset that takes longer to decode a frame than a refresh lasts also draws less often, and the image on screen is built from an older head position. With it the decode runs on its own and each refresh draws the newest frame that has finished, so the picture keeps up with your head even while a slow frame is still being decoded."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.decoupled_display; },
+	        .set_bool = [&config](bool v) { config.decoupled_display = v; config.save(); },
+	        .default_bool = default_config.decoupled_display,
+	});
+
+	list.push_back({
 	        .id = "##encoder_failover",
 	        .label = _("Encoder failover"),
 	        .description = _("If the graphics card's video encoder stops working in the middle of a session, let the computer carry on encoding that eye in software instead of leaving it frozen until you reconnect. Costs CPU on the computer while it lasts, and only works for H.264."),

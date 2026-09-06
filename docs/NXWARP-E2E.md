@@ -176,6 +176,49 @@ nxwarp[0]: 320x240 on <device>, 5 x 4 tiles, 1166 bytes per tile
 once the codec stream header arrives. If you see neither, the negotiation picked another
 codec — check that **both** ends were built with `WIVRN_USE_NXWARP=ON`.
 
+### Decoupled display
+
+The reprojection pass used to be submitted with a wait on the decoder's semaphore, so it
+sat behind the whole decode on the queue, and `render()` then blocked on the previous
+submission's fence for as long as that took. Measured on a clean live pair: a 16.7 ms
+decode per eye pair in front of a display pass costing one or two, a loop turning at
+**43/s against an 11.1 ms refresh**, and a **94 ms** old pose on the panel.
+
+With `decoupled_display` (on by default, and a headset setting) a frame is handed over
+only once its decode has actually FINISHED, and the display pass carries no wait at all.
+Every refresh warps and presents the newest complete frame with the freshest pose,
+whether or not a decode is running.
+
+It is not new code. A pool item with no semaphore already meant "the decode thread waits
+its own fence and publishes a finished frame", which is the path the Pico's Adreno driver
+forces on this client anyway — it advertises timeline semaphores and then refuses to
+create one. The option chooses that path deliberately rather than only as a fallback, so
+the better-tested of the two becomes the default.
+
+What it costs is the one frame of CPU-side pipelining the semaphore bought. On Adreno
+that is not a loss: every queue is the same hardware ring, so there was no GPU overlap to
+give up. The win is that the display pass is no longer serialised behind the decode from
+the CPU side, and the compositor gets a frame every refresh.
+
+Pose age stays meaningful without any change: it is measured against the frame the
+refresh actually chose, and under decoupling every frame in the buffer is a completed
+one, so "the frame drawn" and "the latest complete frame" are the same statement.
+
+`client/utils/frame_ring.h` is the lock-free hand-over the render thread reads before it
+takes any lock — a sequence-locked ring with an atomic latest-complete index, so the
+render loop can know what is ready without waiting on the decoders. Its payload is
+constrained to trivially copyable types on purpose: a seqlock copies a slot
+speculatively and discards it if it was being written, and a `shared_ptr` copied
+mid-write would touch a reference count before the check could reject it. Tested by
+`tests/frame_ring_test.cpp`:
+
+```sh
+g++ -std=c++23 -O2 -Iclient -o frame_ring_test tests/frame_ring_test.cpp -pthread && ./frame_ring_test
+```
+
+which races a writer against a reader for millions of hand-overs and asserts no torn
+frame, and is clean under `-fsanitize=thread`.
+
 ### A protocol break
 
 Adding the codec to the enumeration changes WiVRn's protocol version hash, and so does the

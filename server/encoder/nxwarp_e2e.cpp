@@ -87,7 +87,8 @@
 //                    [--intra-period N] [--coded-vectors default|none|static]
 //                    [--reconnect-at N] [--start-frame-id F]
 //                    [--pace auto|off|FPS] [--client-decode-ms N] [--present-hz N]
-//                    [--feedback-delay N] [--effort 0|1]
+//                    [--feedback-delay N] [--effort 0|1] [--snap-identity N]
+//                    [--head-rate S]
 //
 //   --eyes             1 (the default, and every run that predates this flag) or 2, which
 //                      is encoder_settings::eyes: ONE stream carrying BOTH eyes as a
@@ -163,6 +164,7 @@
 #include "driver/bitrate_controller.h"
 #include "encoder/encoder_settings.h"
 #include "encoder/video_encoder_nxwarp.h"
+#include "nxwarp_stats.h"
 #include "utils/wivrn_vk_bundle.h"
 
 #include "wivrn_packets.h"
@@ -250,11 +252,24 @@ bool same(const view_info_t & a, const view_info_t & b)
 	return a.quad.has_value() == b.quad.has_value();
 }
 
+// How fast the simulated head turns, as a multiple of this harness's original
+// rate.  1.0 is 0.017 rad a frame -- about 87 deg/s at 90 Hz, a brisk turn --
+// which is what every run here has always used and what the pose-freshness
+// checks want.
+//
+// It is a knob because a fast head is the wrong fixture for anything that only
+// happens when the head is STILL: `snap-identity` cannot fire at 87 deg/s and
+// a harness that can only turn quickly can only prove that it does not.
+// `--head-rate 0.05` is about 4 deg/s, the drift of someone sitting still.
+float g_head_rate = 1.0f;
+
 // A pose that is different every frame, so that a decoder republishing a stale one, or
-// publishing a default, cannot pass by accident.
+// publishing a default, cannot pass by accident.  It stays different every frame at
+// every head rate: the position and fov terms move with `t` too, and the display time
+// is independent of it.
 view_info_t make_view_info(uint64_t frame)
 {
-	const float t = float(frame) * 0.017f;
+	const float t = float(frame) * 0.017f * g_head_rate;
 	view_info_t vi{};
 	vi.display_time = XrTime(1'000'000'000ll + int64_t(frame) * 11'111'111ll);
 	vi.alpha = false;
@@ -1454,6 +1469,14 @@ std::vector<uint8_t> readback(vk_bundle & vk, vk::Image image, uint32_t w, uint3
 
 } // namespace
 
+// Filled by the stub publish_nxwarp_stats() in nxwarp_e2e_stubs.cpp: the last
+// stats record the encoder published.  It lives in namespace wivrn, where the
+// stub defines it.
+namespace wivrn
+{
+extern nxwarp_stream_stats nxwarp_stats_last;
+}
+
 int main(int argc, char ** argv)
 {
 	std::string yuv_path, nxv_out = "e2e.nxv", decoded_out, nxv_dec = "nxv-dec";
@@ -1597,6 +1620,9 @@ int main(int argc, char ** argv)
 	// something nobody ships. `--effort 0` is how a run reaches the pre-effort
 	// bitstream, which is what makes the two comparable in one binary.
 	std::string effort = "1";
+	// The snap-to-identity threshold, 1/16 luma samples.  Absent unless asked
+	// for, so every existing run keeps the server's default of 0.
+	std::string snap_identity;
 
 	for (int i = 1; i < argc; ++i)
 	{
@@ -1650,6 +1676,10 @@ int main(int argc, char ** argv)
 			entropy = next();
 		else if (a == "--effort")
 			effort = next();
+		else if (a == "--snap-identity")
+			snap_identity = next();
+		else if (a == "--head-rate")
+			g_head_rate = std::stof(next());
 		else if (a == "--qp")
 			qp = uint32_t(std::stoul(next()));
 		else if (a == "--reconnect-at")
@@ -1845,6 +1875,8 @@ int main(int argc, char ** argv)
 	settings.options["stereo-compose"] = stereo_compose;
 	settings.options["entropy"] = entropy;
 	settings.options["effort"] = effort;
+	if (not snap_identity.empty())
+		settings.options["snap-identity"] = snap_identity;
 	// The simulated headset mask. "all" is every bit set, which is a headset that can
 	// decode anything this encoder emits and is what keeps every existing run in this
 	// harness unchanged. It is spelled ~0 rather than read from nxvc because this file,
@@ -1856,10 +1888,14 @@ int main(int argc, char ** argv)
 		settings.nxvc_tools = 0;
 	else
 		settings.nxvc_tools = std::stoull(client_tools, nullptr, 0);
+	const std::string snap_note =
+	        snap_identity.empty() ? std::string()
+	                              : ", snap-identity \"" + snap_identity + "\"";
 	std::fprintf(stderr,
-	             "[e2e] simulated headset nxvc_tools = 0x%llx (entropy request \"%s\")\n",
+	             "[e2e] simulated headset nxvc_tools = 0x%llx (entropy request \"%s\"%s)\n",
 	             (unsigned long long)settings.nxvc_tools,
-	             entropy.c_str());
+	             entropy.c_str(),
+	             snap_note.c_str());
 	// Rate control off by default. The byte-identity check below compares this
 	// run's bitstream against nxv-dec's decode of it, which a moving quantiser
 	// does not disturb -- but the frame sizes and the loss pattern would stop
@@ -3422,6 +3458,20 @@ int main(int argc, char ** argv)
 			            p.total_ms / double(p.frames), p.max_ms,
 			            (unsigned long long)p.frames,
 			            (unsigned long long)(p.bytes / p.frames));
+		/* The identity count, from the published stats the encoder filled --
+		 * the same number the dashboard card shows, so a harness run and a
+		 * live session cannot disagree about it. */
+		if (wivrn::nxwarp_stats_last.identity_tiles_total)
+			std::printf("identity tiles: %llu of %llu (%.1f %%), "
+			            "snap-identity %u/16 sample%s\n",
+			            (unsigned long long)wivrn::nxwarp_stats_last.identity_tiles,
+			            (unsigned long long)wivrn::nxwarp_stats_last.identity_tiles_total,
+			            100.0 * double(wivrn::nxwarp_stats_last.identity_tiles) /
+			                    double(wivrn::nxwarp_stats_last.identity_tiles_total),
+			            wivrn::nxwarp_stats_last.snap_identity,
+			            wivrn::nxwarp_stats_last.identity_from_decoder
+			                    ? " (counted by the headset)"
+			                    : " (counted by the encoder)");
 	}
 
 	std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures,

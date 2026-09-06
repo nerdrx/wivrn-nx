@@ -477,6 +477,46 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 			break;
 	}
 
+	// ---- snap-to-identity, checked against the backend and against `inter`.
+	//
+	// It is a GPU-encoder tool -- it changes the warp record E1c's skip tiles
+	// are predicted from -- and it needs a warp to snap, so both the reference
+	// backend and an intra-only stream are refusals rather than degradations.
+	// Unlike the entropy tool there is no sensible fallback to slide to: the
+	// operator asked for fewer milliseconds on the headset and there is no
+	// cheaper way to give them.
+	{
+		const uint32_t want = option_u32(settings.options, "snap-identity", 0);
+		if (want != 0)
+		{
+			if (not nxwarp_backend_is_vk(settings))
+				throw std::runtime_error(std::format(
+				        "nxwarp: \"snap-identity\": {} needs \"backend\": \"vk\" "
+				        "-- the reference codec has no snap-to-identity. Use 0, "
+				        "or the Vulkan backend.",
+				        want));
+			if (not codec_cfg.inter)
+				throw std::runtime_error(std::format(
+				        "nxwarp: \"snap-identity\": {} needs \"inter\": \"on\" "
+				        "-- there is no warp to snap on an intra-only stream.",
+				        want));
+			if (want > 32)
+				throw std::runtime_error(std::format(
+				        "nxwarp: \"snap-identity\": {} is more than two samples. "
+				        "The unit is SIXTEENTHS of a luma sample: 16 is one "
+				        "sample and is the measured useful setting, 32 is two. "
+				        "Past that the tool discards real motion rather than "
+				        "rounding it.",
+				        want));
+		}
+		codec_cfg.snap_identity = want;
+		stats_snap_identity = want;
+		if (want)
+			U_LOG_I("nxwarp: \"snap-identity\": %u/16 sample (still tiles become "
+			        "a copy on the headset; error bounded by %.2f sample)",
+			        want, (double)want / 32.0);
+	}
+
 	// The same three facts the log states once, kept so every two-second report can carry
 	// them: a status page must not depend on having been open when the session started.
 	stats_effort = codec_cfg.effort;
@@ -1866,6 +1906,20 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				st.dominant_reason_count = best;
 
 				st.effort = stats_effort;
+				st.snap_identity = stats_snap_identity;
+				if (codec)
+				{
+					uint64_t idt = 0, idtot = 0;
+					codec->identity_tiles(idt, idtot);
+					st.identity_tiles = idt;
+					st.identity_tiles_total = idtot;
+				}
+				/* The headset's own count would go here, from
+				 * nxvc's tiles_identity_seg once a client reports
+				 * it (NXVC_VK_DECODER_PASSB_IDENTITY).  Until then
+				 * the encoder's is the number and the card says so
+				 * rather than implying the headset measured it. */
+				st.identity_from_decoder = false;
 				st.entropy = stats_entropy_name;
 				st.entropy_was_auto = stats_entropy_was_auto;
 				st.negotiated_tools = stats_negotiated_tools;

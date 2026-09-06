@@ -270,6 +270,24 @@ Kirigami.ScrollablePage {
                         }
 
                         RowLayout {
+                            Kirigami.FormData.label: i18n("Identity tiles:")
+                            visible: modelData.identityTiles.length > 0
+                            Controls.Label {
+                                // "will copy" and "copied" are different
+                                // claims: until the headset reports its own
+                                // count this is the encoder saying what the
+                                // decoder's fast path is entitled to take.
+                                text: modelData.identityFromDecoder
+                                      ? i18n("%1 copied by the headset", modelData.identityTiles)
+                                      : i18n("%1 the headset can copy (counted by the encoder)",
+                                             modelData.identityTiles)
+                            }
+                            Kirigami.ContextualHelpButton {
+                                toolTipText: i18n("Tiles whose motion was snapped to nothing, which the headset decodes as a straight copy instead of a filtered warp. Zero unless 'Snap still tiles' is on and the scene is nearly still. Until headsets report their own count this is the encoder's number: what the decoder is entitled to copy, not a measurement of what it did.")
+                            }
+                        }
+
+                        RowLayout {
                             Kirigami.FormData.label: i18n("Entropy coder:")
                             Controls.Label {
                                 text: modelData.entropyWasAuto

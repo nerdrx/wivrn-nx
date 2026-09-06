@@ -59,6 +59,9 @@ inline constexpr std::string_view nxwarp_default_coded_vectors = "default";
 inline constexpr bool nxwarp_default_inter = false;
 // "effort": 1 is the default the server applies, so an unchecked box is what gets written out.
 inline constexpr uint32_t nxwarp_default_effort = 1;
+// "snap-identity": 1/16 luma samples, 0 = off, which is the server's default
+// and stays it until the saving is measured on the headset.
+inline constexpr uint32_t nxwarp_default_snap_identity = 0;
 inline constexpr std::string_view nxwarp_default_stereo_frame = "auto";
 inline constexpr std::string_view nxwarp_default_tile_map = "auto";
 inline constexpr uint32_t nxwarp_default_intra_period = 180;

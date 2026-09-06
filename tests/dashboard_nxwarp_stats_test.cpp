@@ -116,6 +116,10 @@ nxwarp_stream_stats sample()
 	s.dominant_reason = nxwarp_not_held_reason::worker_backlog;
 	s.dominant_reason_count = 3;
 	s.effort = 0; // not the default, so a field that is silently dropped shows up
+	s.snap_identity = 16;
+	s.identity_tiles = 2136;
+	s.identity_tiles_total = 2148;
+	s.identity_from_decoder = false;
 	s.entropy = "lite";
 	s.entropy_was_auto = true;
 	s.negotiated_tools = 0x777a1fffull;
@@ -161,6 +165,12 @@ void check_same(const nxwarp_stream_stats & a, const nxwarp_stream_stats & b, co
 	check(a.dominant_reason == b.dominant_reason, h + ": dominant_reason");
 	check(a.dominant_reason_count == b.dominant_reason_count, h + ": dominant_reason_count");
 	check(a.effort == b.effort, h + ": effort");
+	check(a.snap_identity == b.snap_identity, h + ": snap_identity");
+	check(a.identity_tiles == b.identity_tiles, h + ": identity_tiles");
+	check(a.identity_tiles_total == b.identity_tiles_total,
+	      h + ": identity_tiles_total");
+	check(a.identity_from_decoder == b.identity_from_decoder,
+	      h + ": identity_from_decoder");
 	check(a.entropy == b.entropy, h + ": entropy");
 	check(a.entropy_was_auto == b.entropy_was_auto, h + ": entropy_was_auto");
 	check(a.negotiated_tools == b.negotiated_tools, h + ": negotiated_tools");
@@ -245,12 +255,23 @@ static void part_b()
 		older.erase("encode_scale");
 		older.erase("entropy");
 		older.erase("effort");
+		older.erase("snap_identity");
+		older.erase("identity_tiles");
+		older.erase("identity_tiles_total");
+		older.erase("identity_from_decoder");
 		const auto s = older.get<nxwarp_stream_stats>();
 		check(near(s.encode_scale, 1.0), "a missing field keeps its default");
 		// A server too old to report the level is a server that does not have it, so
 		// the default has to read as 1 rather than as 0: 0 would put "dead-zone
 		// quantiser" on the card for an encoder that is running the level.
 		check(s.effort == 1, "a server with no effort field reads as the default level");
+		// A server too old to report these has the tool off, and -- crucially
+		// -- has not measured anything, so the count must read as zero and NOT
+		// as "the headset counted it".
+		check(s.snap_identity == 0, "a server with no snap field reads as off");
+		check(s.identity_tiles_total == 0, "and reports no identity tiles");
+		check(not s.identity_from_decoder,
+		      "and does not claim the headset counted them");
 		check(s.entropy.empty(), "a missing string keeps its default");
 		check(s.encoded_width == 896, "the fields that are present still arrive");
 		auto older2 = nlohmann::json(sample());

@@ -531,6 +531,7 @@ Per-stream `options` (all optional):
 | `intra-period` | `180` | rolling intra refresh period in frames; `1` forces every tile every frame |
 | `intra-dir` | `on` | directional intra prediction (tool 17). It is most of the CPU encoder's time at headset resolutions; `off` codes the DC-plane predictor only, for more bits and a much faster encode |
 | `effort` | `1` | how hard the encoder looks for the cheapest way to say each frame. `1` adds the **integer requantiser**: a coefficient quantised to ±1 whose squared error is worth less than the bits it saves is dropped. Measured on RADV at 2 × 1088×1088, it is **−1.5 % BD-rate on rANS and −3.6 % on Lite for no measurable encode time** (9.12 → 9.18 ms a frame, inside the run-to-run spread). `0` is the plain dead-zone quantiser, which is what the encoder did before this option existed. It changes which levels are coded and nothing about how they decode — the stream carries no tool bit for it and no decoder can tell the levels apart — and both backends honour it. There is no level 2: nxvc refuses one, because a wider motion search measures −0.05 % for +12 % encode time and its own trellis RDOQ cannot run on a GPU. Out of range is an error, not a fallback |
+| `snap-identity` | `0` | **snap still tiles to a copy**, in 1/16 luma samples; 0 = off. When the head has barely moved -- every tile corner displaced by less than this -- the encoder sends the frame as if it had not moved at all, and the headset decodes those tiles as a straight copy instead of a filtered warp. On a Pico 4 that warp is 8.25 of 13.7 ms of Pass B per pair. The error introduced is at most **half the setting**: half a sample at 16, which is the rounding the motion search already accepts. Measured: **below 16 nothing ever snaps** (a head at rest still drifts ~0.57 samples a frame), at 16 about a third of still frames qualify for -0.05 dB and slightly FEWER bytes, and at ordinary head speeds nothing snaps at all. Needs `"backend": "vk"` and `"inter": "on"`; above 32 is refused, because the unit is sixteenths and past two samples the tool discards motion rather than rounding it |
 | `preset` | `1` | nxvc effort preset: `0` medium, `1` fast, `2` slow. Encoder-side only |
 | `threads` | `0` | encoder worker threads for the tile pool: `0` uses every core (capped at 16), `1` is the serial path. Byte-identical either way |
 | `pace` | `auto` | send pacing: `auto` follows the rate the headset reports it can decode at, `off` sends every composited frame, a number is a fixed frame rate. See below |
@@ -674,7 +675,8 @@ The dashboard renders it on the **Headset statistics** page, one card per stream
 the rate they are paced to, the headset's own decode time, frames the pacer held back, encode
 time, frame size against the controller's target, the quantiser and its band, the bitrate the
 controller allows, what the headset failed to reconstruct and the reason that accounts for most of
-it, the encoded size and tile count, the effort level and the negotiated entropy coder. Each line has a one-sentence
+it, the encoded size and tile count, the effort level, how many tiles the headset can decode as a copy,
+and the negotiated entropy coder. Each line has a one-sentence
 note on what it means. Nothing there requires reading the log.
 
 ### In the dashboard
@@ -684,7 +686,8 @@ dashboard's settings page reveals an **NX Warp encoder** section carrying the se
 are worth changing: [`stream_scale`](#stream_scale) (with the per-eye size and tile count it will
 produce, from the size the last connected headset asked for), `entropy`, `pace` with its fixed
 frame rate, `rc` with its `min-qp`/`max-qp` band, `coded-vectors`, `effort` (as **Extra encoder
-effort**, on by default), and `inter` with `intra-period`. Each carries a one-line note on what it trades away.
+effort**, on by default), `snap-identity` (as **Snap still tiles**, off), and
+`inter` with `intra-period`. Each carries a one-line note on what it trades away.
 
 The remaining options — `backend`, `qp`, `intra-dir`, `preset`, `threads`, `band-rows`, `mtu` —
 are bring-up and debugging controls rather than things to tune, and stay in the file. The

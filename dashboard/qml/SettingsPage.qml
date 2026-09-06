@@ -382,6 +382,24 @@ Kirigami.ScrollablePage {
             }
 
             RowLayout {
+                Kirigami.FormData.label: i18n("Snap still tiles:")
+                visible: Settings.nxwarpSelected
+                Controls.ComboBox {
+                    id: nxwarp_snap
+                    model: [
+                        { label: i18nc("snap to identity", "Off"), value: Settings.SnapOff },
+                        { label: i18n("1 sample"), value: Settings.SnapOneSample },
+                        { label: i18n("1.5 samples"), value: Settings.SnapOneAndHalf },
+                        { label: i18n("2 samples"), value: Settings.SnapTwo }
+                    ]
+                    textRole: "label"
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("When the head has barely moved, send the frame as if it had not moved at all. Tiles that did not change then cost the headset a straight copy instead of a filtered warp, which is most of what its decode spends on a still scene. The picture error this can introduce is at most half the setting — half a sample at '1 sample', which is the same rounding the motion search already accepts.\n\nMeasured: below 1 sample nothing is ever snapped, because a head at rest still drifts about half a sample per frame; at 1 sample about a third of still frames qualify, for 0.05 dB and slightly FEWER bytes. Moving scenes are unaffected — nothing snaps at ordinary head speeds. Needs the GPU encoder with inter prediction on.")
+                }
+            }
+
+            RowLayout {
                 Kirigami.FormData.label: i18n("Send pacing:")
                 visible: Settings.nxwarpSelected
                 Controls.ComboBox {
@@ -783,6 +801,7 @@ Kirigami.ScrollablePage {
             Settings.nxwarpTileMap = nxwarp_tile_map.model[nxwarp_tile_map.currentIndex].value;
             Settings.nxwarpCodedVectors = nxwarp_coded_vectors.model[nxwarp_coded_vectors.currentIndex].value;
             Settings.nxwarpEffort = nxwarp_effort.checked;
+            Settings.nxwarpSnapIdentity = nxwarp_snap.model[nxwarp_snap.currentIndex].value;
             Settings.nxwarpInter = nxwarp_inter.checked;
             Settings.nxwarpIntraPeriod = nxwarp_intra_period.value;
         }
@@ -813,6 +832,7 @@ Kirigami.ScrollablePage {
         nxwarp_tile_map.currentIndex = nxwarp_tile_map.model.findIndex(i => i.value === Settings.nxwarpTileMap);
         nxwarp_coded_vectors.currentIndex = nxwarp_coded_vectors.model.findIndex(i => i.value === Settings.nxwarpCodedVectors);
         nxwarp_effort.checked = Settings.nxwarpEffort;
+        nxwarp_snap.currentIndex = nxwarp_snap.model.findIndex(i => i.value === Settings.nxwarpSnapIdentity);
         nxwarp_inter.checked = Settings.nxwarpInter;
         nxwarp_intra_period.value = Settings.nxwarpIntraPeriod;
         desktop_mirror.checked = Settings.mirror;

@@ -186,6 +186,20 @@ struct nxwarp_stream_stats
 	// are coded and nothing about how they decode -- so the encoder reporting it here is
 	// the only way anything downstream can say which one produced a stream.
 	uint32_t effort = 1;
+	// Snap-to-identity: the threshold in force (1/16 luma samples, 0 = off) and
+	// the tiles the headset's decoder will COPY instead of warping, of the
+	// tiles considered.
+	//
+	// `identity_from_decoder` says which end counted.  The headset reports its
+	// own count only when its nxvc has tiles_identity_seg
+	// (NXVC_VK_DECODER_PASSB_IDENTITY); until then the number is the ENCODER's,
+	// which is what the decoder's fast path will claim rather than what it did
+	// claim.  The card says which, because "the headset copied 578 tiles" and
+	// "the headset will copy 578 tiles" are different sentences.
+	uint32_t snap_identity = 0;
+	uint64_t identity_tiles = 0;
+	uint64_t identity_tiles_total = 0;
+	bool identity_from_decoder = false;
 
 	// --- the encode size -----------------------------------------------------
 	// Per eye, whether or not the eyes are paired: the stereo frame on the wire is twice
@@ -320,6 +334,10 @@ inline void to_json(nlohmann::json & j, const nxwarp_stream_stats & s)
 	        {"dominant_reason", uint8_t(s.dominant_reason)},
 	        {"dominant_reason_count", s.dominant_reason_count},
 	        {"effort", s.effort},
+	        {"snap_identity", s.snap_identity},
+	        {"identity_tiles", s.identity_tiles},
+	        {"identity_tiles_total", s.identity_tiles_total},
+	        {"identity_from_decoder", s.identity_from_decoder},
 	        {"entropy", s.entropy},
 	        {"entropy_was_auto", s.entropy_was_auto},
 	        {"negotiated_tools", s.negotiated_tools},
@@ -390,6 +408,10 @@ inline void from_json(const nlohmann::json & j, nxwarp_stream_stats & s)
 	get("not_reconstructed_costly", s.not_reconstructed_costly);
 	get("dominant_reason_count", s.dominant_reason_count);
 	get("effort", s.effort);
+	get("snap_identity", s.snap_identity);
+	get("identity_tiles", s.identity_tiles);
+	get("identity_tiles_total", s.identity_tiles_total);
+	get("identity_from_decoder", s.identity_from_decoder);
 	get("entropy", s.entropy);
 	get("entropy_was_auto", s.entropy_was_auto);
 	get("negotiated_tools", s.negotiated_tools);

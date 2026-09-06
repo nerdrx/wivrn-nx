@@ -203,10 +203,10 @@ static const QList<control> controls{
         {"nxwarpCodedVectors", QVariant::fromValue(int(Settings::VectorsStatic))},
         {"nxwarpInter", true},
         {"nxwarpIntraPeriod", 240},
-        // The effort level is a checkbox for a two-valued option whose default is ON, so the
-        // interesting value to round-trip is false -- the one that has to be WRITTEN, where
-        // every other control here writes when it moves away from an off-by-default value.
-        {"nxwarpEffort", false},
+        // The effort level is a checkbox for a two-valued option whose default is now OFF
+        // (it was ON until the level was measured on rendered content), so the interesting
+        // value to round-trip is true -- the one that has to be WRITTEN.
+        {"nxwarpEffort", true},
         {"nxwarpSnapIdentity", QVariant::fromValue(int(Settings::SnapOneSample))},
         {"nxwarpPlanar", QVariant::fromValue(int(Settings::PlanarPrefer))},
 };
@@ -293,7 +293,7 @@ static void part_b()
 		d.load_json(live_config());
 		d.setProperty("nxwarpEntropy", int(Settings::EntropyAuto));
 		d.setProperty("nxwarpInter", false);
-		d.setProperty("nxwarpEffort", true);
+		d.setProperty("nxwarpEffort", false);
 		d.setProperty("nxwarpSnapIdentity", int(Settings::SnapOff));
 		d.setProperty("nxwarpPlanar", int(Settings::PlanarRd));
 		const json out = d.configuration();
@@ -301,12 +301,13 @@ static void part_b()
 		      "entropy set to Auto is erased, not written");
 		check(nxd::nxwarp_option(out, "inter") == std::nullopt,
 		      "inter set to its default is erased, not written");
-		// The default here is ON, so it is the checked box that erases the key and the
-		// UNCHECKED one that writes "0". A default written out would be harmless; a
-		// default written as the WRONG value would quietly turn the level off for
-		// everyone who opened the settings page once.
+		// The default here is OFF, so it is the UNCHECKED box that erases the key and the
+		// checked one that writes "1". A default written out would be harmless; a default
+		// written as the WRONG value would quietly turn the level ON for everyone who
+		// opened the settings page once -- which is exactly the level this change is
+		// getting people off, so the direction of this check matters.
 		check(nxd::nxwarp_option(out, "effort") == std::nullopt,
-		      "effort left on is erased, not written");
+		      "effort left off is erased, not written");
 		check(nxd::nxwarp_option(out, "snap-identity") == std::nullopt,
 		      "snap-identity left off is erased, not written");
 		// The four settings are 0/16/24/32, and the file carries the NUMBER:
@@ -325,9 +326,16 @@ static void part_b()
 		d.setProperty("nxwarpPlanar", int(Settings::PlanarOff));
 		check(nxd::nxwarp_option(d.configuration(), "planar") == std::string("off"),
 		      "planar turned off is written as \"off\"");
+		d.setProperty("nxwarpEffort", true);
+		check(nxd::nxwarp_option(d.configuration(), "effort") == std::string("1"),
+		      "effort turned on is written as \"1\"");
+		// And back: a box the user checks and unchecks again must leave the file the way
+		// it found it, not pinned at an explicit "0" that would survive a later change of
+		// default. The erase-on-default rule has to work in both directions or the
+		// dashboard silently freezes whatever the default was on the day it was opened.
 		d.setProperty("nxwarpEffort", false);
-		check(nxd::nxwarp_option(d.configuration(), "effort") == std::string("0"),
-		      "effort turned off is written as \"0\"");
+		check(nxd::nxwarp_option(d.configuration(), "effort") == std::nullopt,
+		      "effort checked and unchecked again erases the key rather than pinning \"0\"");
 	}
 
 	// --- stereo pairing ------------------------------------------------------------------

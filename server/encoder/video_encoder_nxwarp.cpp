@@ -290,15 +290,17 @@ std::string option_string(const std::map<std::string, std::string> & options,
 	return it == options.end() ? std::string(fallback) : it->second;
 }
 
-// "effort": "0" | "1".  How hard the encoder looks for the cheapest way to say
-// the frame; see nxwarp_codec_config::effort for what each level is and what it
-// was measured to be worth.  Out of range is an error rather than a clamp, for
+// "effort": "0" | "1", default 0.  How hard the encoder looks for the cheapest
+// way to say the frame; see nxwarp_codec_config::effort for what each level is
+// and what it was measured to be worth.  1 was the default until it was
+// measured on rendered content, where it costs between 0.1 % and 3.2 % of the
+// bytes; it wins only on the synthetic pan fixture.  Out of range is an error rather than a clamp, for
 // the reason "coded-vectors" is: nxvc itself refuses a level it does not have,
 // and a caller asking for a search that does not exist would otherwise be
 // handed the stream it was trying to beat with nothing to say so.
 uint32_t nxwarp_effort_from(const std::map<std::string, std::string> & options)
 {
-	const std::string v = option_string(options, "effort", "1");
+	const std::string v = option_string(options, "effort", "0");
 	if (v == "0")
 		return 0;
 	if (v == "1")

@@ -185,6 +185,12 @@ struct nxwarp_stream_stats
 	// wire -- the level leaves no tool bit, by design, because it changes which levels
 	// are coded and nothing about how they decode -- so the encoder reporting it here is
 	// the only way anything downstream can say which one produced a stream.
+	//
+	// This initialiser is 1 and NOT the server's current default, which is 0.
+	// It is what a stats blob with no `effort` field means, and a blob with no
+	// field came from a server old enough to have defaulted the option to 1 --
+	// so 1 is the truthful reading of that silence, and tracking the default
+	// down to 0 here would report those sessions as something they were not.
 	uint32_t effort = 1;
 	// Snap-to-identity: the threshold in force (1/16 luma samples, 0 = off) and
 	// the tiles the headset's decoder will COPY instead of warping, of the

@@ -816,6 +816,17 @@ public:
 		return out;
 	}
 
+	// The effort level this encoder RESOLVED, for a harness that wants to prove
+	// what the server's default actually is.  Deliberately not read out of the
+	// published stats: those are built inside the two-second reporting window,
+	// so a session shorter than that publishes nothing and a reader would get
+	// nxwarp_stream_stats' initialiser -- which is 1, the old default, and would
+	// have reported the exact opposite of the truth.
+	uint32_t resolved_effort() const
+	{
+		return stats_effort;
+	}
+
 	encode_profile profile() const
 	{
 		return {prof_total_n,

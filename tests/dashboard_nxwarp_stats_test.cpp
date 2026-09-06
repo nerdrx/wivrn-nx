@@ -267,10 +267,12 @@ static void part_b()
 		older.erase("planar_note");
 		const auto s = older.get<nxwarp_stream_stats>();
 		check(near(s.encode_scale, 1.0), "a missing field keeps its default");
-		// A server too old to report the level is a server that does not have it, so
-		// the default has to read as 1 rather than as 0: 0 would put "dead-zone
-		// quantiser" on the card for an encoder that is running the level.
-		check(s.effort == 1, "a server with no effort field reads as the default level");
+		// A server too old to report the level is a server from when the option
+		// DEFAULTED to 1, so the missing field has to read as 1 -- even though the
+		// current default is 0. This is deliberately not tracking the default: 0 here
+		// would put "dead-zone quantiser" on the card for an encoder that was running
+		// the requantiser, which is a wrong answer rather than a missing one.
+		check(s.effort == 1, "a server with no effort field reads as 1, the default it had");
 		// A server too old to report these has the tool off, and -- crucially
 		// -- has not measured anything, so the count must read as zero and NOT
 		// as "the headset counted it".

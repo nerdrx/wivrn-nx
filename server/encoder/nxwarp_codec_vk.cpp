@@ -101,6 +101,7 @@ class nxwarp_codec_vk final : public wivrn::nxwarp_codec
 	// 90 Hz and hide whatever came next.
 	bool warned_view = false;
 	bool warned_recv = false;
+	bool warned_held = false;
 	uint32_t width = 0, height = 0;
 	std::string device;
 
@@ -297,6 +298,28 @@ public:
 		{
 			warned_recv = true;
 			U_LOG_W("nxwarp: the GPU encoder refused a receipt map: %s (%s)",
+			        nxvc_vk_encoder_status_string(st),
+			        nxvc_vk_encoder_last_error(enc));
+		}
+	}
+
+	// The frame-level report, which is what lets a dropped frame cost one
+	// ref_sel step instead of a whole intra frame.  nxvc keeps the chain --
+	// a frame predicted from an unheld frame is itself unheld -- so this
+	// forwards the report and nothing more.
+	bool supports_frame_held() const override
+	{
+		return true;
+	}
+
+	void set_frame_held(uint32_t frame_number, bool held) override
+	{
+		const nxvc_vke_status st =
+		        nxvc_vk_encoder_set_frame_held(enc, frame_number, held ? 1 : 0);
+		if (st != NXVC_VKE_OK and not warned_held)
+		{
+			warned_held = true;
+			U_LOG_W("nxwarp: the GPU encoder refused a frame-held report: %s (%s)",
 			        nxvc_vk_encoder_status_string(st),
 			        nxvc_vk_encoder_last_error(enc));
 		}

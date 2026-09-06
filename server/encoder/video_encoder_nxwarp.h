@@ -185,14 +185,42 @@ class video_encoder_nxwarp : public video_encoder
 	// two encodes, and last_resync_id, which discards the ones that arrive after the
 	// answer has already gone out.
 	//
-	// What is deliberately NOT here is falling back to an OLDER reference than the
-	// last frame -- keeping frame N-2 as the prediction source when the headset lost
-	// N-1. nxvc has a four-slot ring and both its encoders address it internally, but
-	// neither C API (nxvc.h, nxvc_vk_enc.h) exposes a way to choose a slot: the only
-	// lever a caller has is set_received_tiles() over the tiles of the frame just
-	// encoded, and its all-zero form. Doing better needs an nxvc encoder API that does
-	// not exist yet.
-	std::atomic<bool> client_dropped_frame{false};
+	// Falling back to an OLDER reference -- keeping frame N-2 as the prediction source
+	// when the headset lost N-1 -- is what nxvc_vk_encoder_set_frame_held() now does,
+	// and it is why the reports below are a QUEUE of frame ids rather than the single
+	// flag they used to be. The codec needs to know WHICH frames were lost to walk
+	// ref_sel out to the newest one that survives; a coalesced "something was lost"
+	// can only be answered with an intra frame.
+	//
+	// A backend whose codec cannot take the report (nxwarp_codec::supports_frame_held
+	// is false -- the CPU reference codec, whose reference distance is fixed at
+	// create()) still gets the old answer: an all-zero receipt map and one intra
+	// frame. That is what `held_fallback_reset` carries.
+	std::mutex not_held_mutex;
+	std::vector<uint16_t> not_held_ids;
+	std::atomic<bool> held_fallback_reset{false};
+	// Set when a report has been handed to the codec and not yet answered by a frame
+	// the headset can trust. Only an all-INTRA frame answers it, and only then is the
+	// resync notice worth sending: an ordinary inter frame that merely stepped ref_sel
+	// out is not a point the headset may start trusting its own output from.
+	bool chain_broken = false;
+
+	// --- wire frame id to the codec's own frame number -----------------------
+	//
+	// The headset names a frame by its WIRE id; the codec names it by the number in
+	// the bitstream's own frame header, which is what its reference ring is keyed on.
+	// The two are equal in a session that starts from zero and are NOT after a resume
+	// (--start-frame-id), so the pair is recorded as each frame goes out rather than
+	// assumed. Sixty-four deep: a report that arrives later than that names a frame no
+	// reference range can reach.
+	struct wire_to_codec
+	{
+		uint16_t wire = 0;
+		uint32_t codec = 0;
+		bool used = false;
+	};
+	static constexpr size_t kFrameMapDepth = 64;
+	std::array<wire_to_codec, kFrameMapDepth> frame_map{};
 	// The last one reported and why, for the two-second report. Written under no lock:
 	// they are for a log line, and a torn read of them costs a wrong number in a log.
 	std::atomic<uint16_t> last_not_held_id{0};

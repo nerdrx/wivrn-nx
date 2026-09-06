@@ -28,6 +28,9 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 #define MAX_DIM 4097
 #define MAX_SAMPLES 4
+// The lens mask: one bit per 64x64 tile, per eye. Must match FOVEATION_MASK_WORDS and the
+// tail of ubo_data in foveation.cpp.
+#define MASK_WORDS 128
 
 layout(set = 0, binding = 0) uniform sampler2D source[2];
 layout(set = 0, binding = 1, std430) buffer restrict Config
@@ -35,6 +38,15 @@ layout(set = 0, binding = 1, std430) buffer restrict Config
 	// foveation parameters
 	uint x[2*MAX_DIM];
 	uint y[2*MAX_DIM];
+	// The lens mask. A tile whose whole area falls outside what the optics can show is
+	// written as a constant mid grey instead of the resampled picture: it is never seen,
+	// and a tile that does not change from frame to frame is a skip in every encoder on
+	// the stream. mask_on is 0 when nothing is masked, which is the common case under
+	// strong foveation, and then this costs one uniform branch per invocation.
+	uint mask[2*MASK_WORDS];
+	uint mask_cols;
+	uint mask_on;
+	uint mask_pad[2];
 } ubo;
 
 layout(set = 0, binding = 2) uniform writeonly restrict image2DArray luma;
@@ -128,6 +140,20 @@ void main()
 	}
 	colour /= max(count, 1);
 	colour.xyz = rgb_to_ycbcr(from_linear_to_srgb(colour.rgb));
+
+	// A 64x64 tile is 64 whole 8x8 workgroups, so this branch is uniform across the
+	// workgroup AND across every subgroup in it -- which is what makes it safe to take
+	// after the sampling loop and before the chroma reduction below, whose
+	// subgroupShuffleDown would be undefined if some lanes of a subgroup had left.
+	// Overriding the value rather than skipping the fetches also keeps the alpha channel
+	// genuine: only the picture is replaced.
+	if (ubo.mask_on != 0u)
+	{
+		uint tile = (iy >> 6) * ubo.mask_cols + (ix >> 6);
+		uint word = ubo.mask[MASK_WORDS * iz + (tile >> 5)];
+		if ((word & (1u << (tile & 31u))) != 0u)
+			colour.xyz = vec3(0.5); // neutral grey: Y, Cb and Cr all mid scale
+	}
 
 	imageStore(luma, ivec3(ix, iy, iz), vec4(colour.x));
 

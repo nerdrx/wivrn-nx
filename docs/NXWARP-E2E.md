@@ -98,6 +98,28 @@ cmake --build build/client -j4
 `ktx` must be on `PATH`. The client builds its own nx-warp through `ExternalProject`, from
 `../nx-warp`; `WIVRN_NXWARP_DIR` overrides that path.
 
+**In a git worktree this is not optional.** `../nx-warp` is relative to the
+checkout, so a worktree at `wivrn-nx-e2e-wt/<branch>/` looks for
+`wivrn-nx-e2e-wt/nx-warp`, which does not exist, and the build fails a long way
+in with
+
+```
+client/./decoder/nxwarp/nxwarp_reassemble.h:52:10: fatal error:
+    'nxvc/transport/common.h' file not found
+```
+
+which reads like a missing package and is a missing path. Pass the nx-warp
+source tree explicitly:
+
+```sh
+./gradlew assembleRelease -Psuffix=.warp ... \
+    -Pnxwarp_dir=/absolute/path/to/nx-warp
+```
+
+The server build takes the same thing as a CMake prefix
+(`-DCMAKE_PREFIX_PATH=...`), but the CLIENT compiles nxvc from source, so it
+wants the source tree rather than an install prefix.
+
 **`WIVRN_USE_NXWARP=ON` is required on the client too.** Without it the client builds and
 runs, but with no NX Warp decoder in it at all — it will simply never offer the codec.
 
@@ -314,6 +336,91 @@ directory overwrite each other's capture and the byte-identity check then compar
 picture against somebody else's stream — which shows up as a nonsense count like
 "decoded every unit this decoder consumed (400/6)" rather than as a plain failure.
 
+### The lens mask
+
+`--lens-mask on|off`, `--lens-mask-margin N` and `--lens-mask-skip on|off` are the A/B for
+the tiles the optics cannot show (docs/configuration.md, `"lens-mask"`). The harness prints
+what the mask covered and what the frames coded:
+
+```
+lens mask: on (never coded: nxvc skip map) -- 6 of 289 tiles per eye masked, margin 1 tile
+coded tiles: 54.3 of 289.0 per frame (18.8%) over 40 frames
+```
+
+**`--static-view` is not optional for this measurement.** The harness varies the FOV and the
+foveation runs with the frame number on purpose -- it is how a stale or default-constructed
+`view_info` on the wire becomes visible. The lens mask is recomputed whenever those move, so
+runs that move every frame make the MASK move every frame, tiles cross in and out of it, and
+each crossing costs a coded tile. `--static-view` pins the view configuration and nothing
+else: the pose and the display time still move, so every check that identifies a frame by
+its `view_info` still can. A live session's foveation runs move when the gaze does and not
+otherwise.
+
+`--deterministic` is the second half. Without it the not-held reports and the all-intra
+resyncs they cause land at different frames in the two legs, and a single 21 kB resync frame
+is worth ~200 bytes/frame over a 40-frame run -- larger than the effect being measured.
+
+The leg, at the Pico 4's geometry:
+
+```sh
+ffmpeg -f lavfi -i "mandelbrot=size=1088x1088:rate=30" -t 2 \
+       -pix_fmt yuv420p -f rawvideo mandel.yuv
+
+# in two separate directories, because the harness writes e2e.nxv under a fixed name
+wivrn-nxwarp-e2e --yuv ../mandel.yuv --width 1088 --height 1088 --frames 40 \
+    --inter on --qp 30 --deterministic --static-view --lens-mask off
+wivrn-nxwarp-e2e --yuv ../mandel.yuv --width 1088 --height 1088 --frames 40 \
+    --inter on --qp 30 --deterministic --static-view --lens-mask on
+```
+
+measured 2026-09-06 on the rebased branch, both legs PASSED and both legs are byte-exactly
+repeatable across three runs:
+
+| 1088x1088, QP 30 | mask off | mask on | |
+|---|---|---|---|
+| inter, mandelbrot, 40 frames | 12105 B/frame | **12091** | −0.12 % |
+| all intra, mandelbrot, 12 frames | 43952 B/frame | **43806** | −0.33 % |
+| all intra, uniform detail, 12 frames | 47161 B/frame | **47038** | −0.26 % |
+
+6 of 289 tiles per eye are masked, which is 2.1 % of the tiles — and the byte saving is an
+order of magnitude smaller than that. **That gap is the finding, and it is not noise.**
+`nxv-info --tiles` on the uniform-detail pair says exactly where it goes:
+
+```
+mask off:  tile 0 e0 INTRA ... 52 B     tile 16 e0 INTRA ... 50 B
+mask on:   tile 0 e0 INTRA ... 32 B     tile 16 e0 INTRA ... 32 B
+```
+
+A flattened tile does not cost nothing: it costs **the per-tile floor**, about 32 bytes of
+tile header and minimum payload that an INTRA tile cannot go below however flat it is. So
+flattening recovers only what the tile's content cost ABOVE that floor — 20 bytes here, and
+6 × 20 = 120 B/frame, which is the 123 B measured. The tile share is not the byte share.
+
+On an inter stream the ceiling is lower still for the opposite reason: a WARP_SKIP tile is
+genuinely absent and costs zero, but the corner tiles of a mostly-static clip were already
+skipping before the mask touched them, so there was nothing left to save. The configuration
+where the mask actually pays is the one this harness cannot synthesise — a live session with
+head motion, where the corners carry real detail that keeps being re-coded.
+
+What would remove the floor is telling the codec a tile is ABSENT rather than flat, and nxvc
+has no syntax for that: `nxvc_encoder_set_skip_map` pins a MODE, and `row_present` (tool 32)
+is row-granular over the atlas rather than per tile. That is an nx-warp change, not a WiVRn
+one, and it is the thing to ask for before spending more here.
+
+An earlier run of this A/B reported −1.8 %. It was measured before the edge-bleed rebase and
+it was wrong: the two legs had landed their not-held resyncs on different frames (INTRA 504
+against 472), and one extra all-intra frame is worth more than the whole effect. Both legs
+are now byte-identical run to run, which is the property that makes a 0.1 % number worth
+printing at all.
+
+Only 6 tiles are masked here rather than the 12 the unmasked geometry gives because the
+harness's own foveation runs compress the left and top edges. `tests/lens_mask_test.cpp` is
+the geometry on its own:
+
+```sh
+g++ -std=c++23 -O2 -I. -o lens_mask_test tests/lens_mask_test.cpp && ./lens_mask_test
+```
+
 **`--tile-map auto|spans|chunks`** forces the encoder's mapping of frame bytes onto the
 tile grid, which is the A/B for anything the per-tile span mapping is suspected of
 costing: same clip, same QP, same frames, two mappings. Without it the mapping can only be
@@ -489,6 +596,108 @@ search measures −0.05 % BD-rate for +12 % encoder time, and the reference's ow
 cannot run on a GPU at all. On `--backend ref` the level reaches the non-directional path
 only — the scope nxvc pins byte-identical against the GPU encoder — so with `intra-dir` on,
 that backend's default, it changes nothing and the encoder logs a warning saying so.
+
+### Snapping still tiles to a copy
+
+`--snap-identity N` is the encoder's `"snap-identity"` option, in 1/16 luma
+samples. When every tile corner has moved less than that, the frame is sent as
+if the head had not moved, and the headset decodes its skipped tiles as a
+straight copy instead of a filtered warp -- 8.25 of 13.7 ms of Pass B per pair
+on a Pico 4.
+
+**`--head-rate S` exists because of this.** The harness's simulated head turns
+at a fixed 0.017 rad a frame -- about 87 deg/s, a brisk turn -- and at that
+speed nothing can ever snap: a fixture that can only turn quickly can only
+prove that the tool does not fire. `--head-rate` scales that motion, default
+1.0, so every existing run is unchanged and a still head is one flag away.
+
+```sh
+wivrn-nxwarp-e2e --yuv rest.yuv --width 256 --height 192 --frames 200 --qp 26 \
+    --backend vk --inter on --intra-period 180 --present-hz 90 \
+    --head-rate 0.05 --snap-identity 16
+```
+
+| run | identity tiles | decoder check |
+| --- | --- | --- |
+| `--head-rate 0.05 --snap-identity 0` | 0 / 2148 (0.0 %) | byte-identical to `nxv-dec` over 198 frames |
+| `--head-rate 0.05 --snap-identity 16` | **2136 / 2136 (100.0 %)** | byte-identical over 194 frames |
+
+Both PASSED. At a still head every frame snaps; at the harness's default rate
+none do, which is the tool behaving.
+
+**The count comes from the ENCODER, and the line says so.** The headset will
+report its own once its nxvc carries `tiles_identity_seg`
+(`NXVC_VK_DECODER_PASSB_IDENTITY`); until then the number is what the decoder's
+fast path is *entitled* to copy, not a measurement of what it did. "The headset
+copied 2136 tiles" and "the headset can copy 2136 tiles" are different claims
+and the stats card makes the difference visible rather than rounding it away.
+
+Three refusals rather than a silent no-op, all at startup: on the reference
+backend (it has no such tool), without `"inter"` (there is no warp to snap),
+and above 32 -- the unit is SIXTEENTHS of a sample, and a caller who reads it
+as samples and asks for 16 samples gets told rather than getting a stream
+several decibels worse.
+### Low-poly tiles, and the decoder that is not there
+
+`"planar"` codes a tile as two to four flat shaded regions with sharp
+boundaries instead of as transform blocks (nxvc tool bit 35, SYNTAX.md 13.13).
+`off`, `rd` (the default: taken only where it is cheaper AND no worse) and
+`prefer` (taken wherever it is cheaper — the low-polygon look, at 2 to 4 dB).
+
+**The e2e harness cannot prove this one, and finding out why is the useful
+part.** `wivrn-nxwarp-e2e --backend ref --client-tools all --planar prefer`
+runs, encodes, and then its client refuses the stream header:
+
+```
+nxwarp[0]: stream header refused: unsupported version or tool
+```
+
+That is the harness being right. Its client is the *shipping* decoder —
+`nxvc_vk_decoder`, the GPU one — and that decoder has no mode 5, so
+`nxvc_vk_decoder_tools_supported()` is `0x17f7a1fff` with bit 35 clear.
+`--client-tools all` simulates a headset that advertises everything; the
+harness's own decoder then demonstrates what advertising something you cannot
+decode buys you. **A real headset never advertises bit 35**, so on a real
+session the server degrades to `off` and the dashboard says
+*"off — the client does not support planar tiles"*.
+
+The path that does work end to end is `wivrn-nxwarp-loopback`, which decodes
+with `nxvc_decoder`, the reference decoder, which implements the mode:
+
+```sh
+wivrn-nxwarp-loopback --w 256 --h 192 --frames 8 --qp 44 --planar off|rd|prefer
+```
+
+| `--planar` | B/frame | worst luma PSNR | planar tiles | stream tools |
+| --- | --- | --- | --- | --- |
+| `off` | 1195 | 29.10 dB | 0 / 98 | `0x016a0045` |
+| `rd` | 1192 (−0.3 %) | 29.10 dB | 1 / 98 | `0x8016a0045` |
+| `prefer` | **526 (−56 %)** | 23.91 dB | 96 / 98 | `0x8016a0045` |
+
+All three reassemble byte-identically and decode 8 of 8 frames. `rd` is
+neutral, as it is designed to be; `prefer` is the look, and on this synthetic
+panel content it is also a large byte saving, which says more about the content
+than about the mode. Note the tool bit in the last column: it appears only when
+the mode is enabled, because it is negotiated.
+
+The two refusals are worth running once, since they are the whole point of the
+option not being a silent no-op:
+
+```sh
+# explicit level on the GPU backend
+wivrn-nxwarp-e2e ... --backend vk --planar prefer
+#   nxwarp: "planar": "prefer" needs "backend": "ref" -- the Vulkan encoder
+#   does not implement the piecewise-planar tile mode (nxvc mode 5).
+
+# explicit level, headset without the tool bit
+wivrn-nxwarp-e2e ... --backend ref --client-tools none --planar prefer
+#   nxwarp: "planar": "prefer" needs the headset to advertise PLANAR (nxvc
+#   tool bit 35) and its mask is 0x0 ... which is a black screen.
+```
+
+The DEFAULT never refuses: with the same headset it degrades to `off`, logs the
+reason and the run passes, because a default must not stop a session nobody
+asked to change.
 
 ### Send pacing, and a slow client
 

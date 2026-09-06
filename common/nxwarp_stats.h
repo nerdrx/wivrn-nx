@@ -186,6 +186,32 @@ struct nxwarp_stream_stats
 	// are coded and nothing about how they decode -- so the encoder reporting it here is
 	// the only way anything downstream can say which one produced a stream.
 	uint32_t effort = 1;
+	// Snap-to-identity: the threshold in force (1/16 luma samples, 0 = off) and
+	// the tiles the headset's decoder will COPY instead of warping, of the
+	// tiles considered.
+	//
+	// `identity_from_decoder` says which end counted.  The headset reports its
+	// own count only when its nxvc has tiles_identity_seg
+	// (NXVC_VK_DECODER_PASSB_IDENTITY); until then the number is the ENCODER's,
+	// which is what the decoder's fast path will claim rather than what it did
+	// claim.  The card says which, because "the headset copied 578 tiles" and
+	// "the headset will copy 578 tiles" are different sentences.
+	uint32_t snap_identity = 0;
+	uint64_t identity_tiles = 0;
+	uint64_t identity_tiles_total = 0;
+	bool identity_from_decoder = false;
+	// The piecewise-planar tile mode (nxvc tool bit 35): "off", "rd" or
+	// "prefer", as the session actually resolved it -- and, when that is not
+	// what the configuration asked for, why not.  An empty note means the
+	// configured level is the level in use.
+	//
+	// Like `effort` this cannot be read off the wire, and unlike `effort` it
+	// can be silently unavailable for two different reasons (the Vulkan
+	// backend has no mode 5; the headset does not advertise bit 35).  Carrying
+	// the reason is what turns "it did nothing" into "it did nothing BECAUSE",
+	// which is the difference between a status page and a shrug.
+	std::string planar = "off";
+	std::string planar_note;
 
 	// --- the encode size -----------------------------------------------------
 	// Per eye, whether or not the eyes are paired: the stereo frame on the wire is twice
@@ -199,6 +225,34 @@ struct nxwarp_stream_stats
 	// min(headset render_scale, the server's "stream_scale"): the linear factor the size
 	// above was derived at.
 	float encode_scale = 1;
+
+	// --- the lens mask -------------------------------------------------------
+	//
+	// Tiles PER EYE whose whole area falls outside what the headset's optics can show, and
+	// which are therefore not worth coding (client/utils/view_geometry.h, and the
+	// "lens-mask" option). `lens_mask_tiles` is the denominator, which equals tiles()
+	// whenever the codec's grid and the encode size agree -- it is carried separately
+	// rather than derived so that a disagreement shows up as two numbers that differ
+	// instead of as a share quietly computed against the wrong one.
+	//
+	// `lens_mask_enforced` is the honest half: TRUE when the codec was actually told
+	// (nxvc's skip map, which the reference encoder has), FALSE when the mask is known
+	// and reported but the backend has no per-tile mode override, in which case the
+	// saving is only what the mode search makes of the flat grey the compositor paints
+	// there. Zero masked tiles with the option on is a real answer, not a missing one: a
+	// strongly foveated encode has no fully-invisible tile left.
+	// Tiles the frames of this window actually put bytes in, and how many they had, both
+	// over the CODED FRAME (the eye pair when paired). A tile in WARP_SKIP is not coded.
+	// This is the number the lens mask moves, and the pair (coded, total) is carried
+	// rather than a ratio so that a window with no frames is visibly empty.
+	float tiles_coded_per_frame = 0;
+	float tiles_per_frame = 0;
+
+	uint32_t lens_mask_masked = 0;
+	uint32_t lens_mask_tiles = 0;
+	uint8_t lens_mask_margin = 0;
+	bool lens_mask_on = false;
+	bool lens_mask_enforced = false;
 
 	// --- how this window's frames were laid on the transport's tile grid -----
 	//
@@ -320,9 +374,22 @@ inline void to_json(nlohmann::json & j, const nxwarp_stream_stats & s)
 	        {"dominant_reason", uint8_t(s.dominant_reason)},
 	        {"dominant_reason_count", s.dominant_reason_count},
 	        {"effort", s.effort},
+	        {"snap_identity", s.snap_identity},
+	        {"identity_tiles", s.identity_tiles},
+	        {"identity_tiles_total", s.identity_tiles_total},
+	        {"identity_from_decoder", s.identity_from_decoder},
+	        {"planar", s.planar},
+	        {"planar_note", s.planar_note},
 	        {"entropy", s.entropy},
 	        {"entropy_was_auto", s.entropy_was_auto},
 	        {"negotiated_tools", s.negotiated_tools},
+	        {"tiles_coded_per_frame", s.tiles_coded_per_frame},
+	        {"tiles_per_frame", s.tiles_per_frame},
+	        {"lens_mask_masked", s.lens_mask_masked},
+	        {"lens_mask_tiles", s.lens_mask_tiles},
+	        {"lens_mask_margin", s.lens_mask_margin},
+	        {"lens_mask_on", s.lens_mask_on},
+	        {"lens_mask_enforced", s.lens_mask_enforced},
 	        {"encoded_width", s.encoded_width},
 	        {"encoded_height", s.encoded_height},
 	        {"paired_eyes", s.paired_eyes},
@@ -390,9 +457,22 @@ inline void from_json(const nlohmann::json & j, nxwarp_stream_stats & s)
 	get("not_reconstructed_costly", s.not_reconstructed_costly);
 	get("dominant_reason_count", s.dominant_reason_count);
 	get("effort", s.effort);
+	get("snap_identity", s.snap_identity);
+	get("identity_tiles", s.identity_tiles);
+	get("identity_tiles_total", s.identity_tiles_total);
+	get("identity_from_decoder", s.identity_from_decoder);
+	get("planar", s.planar);
+	get("planar_note", s.planar_note);
 	get("entropy", s.entropy);
 	get("entropy_was_auto", s.entropy_was_auto);
 	get("negotiated_tools", s.negotiated_tools);
+	get("tiles_coded_per_frame", s.tiles_coded_per_frame);
+	get("tiles_per_frame", s.tiles_per_frame);
+	get("lens_mask_masked", s.lens_mask_masked);
+	get("lens_mask_tiles", s.lens_mask_tiles);
+	get("lens_mask_margin", s.lens_mask_margin);
+	get("lens_mask_on", s.lens_mask_on);
+	get("lens_mask_enforced", s.lens_mask_enforced);
 	get("encoded_width", s.encoded_width);
 	get("encoded_height", s.encoded_height);
 	get("paired_eyes", s.paired_eyes);

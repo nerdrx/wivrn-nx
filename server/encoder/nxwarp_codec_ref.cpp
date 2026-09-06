@@ -100,6 +100,23 @@ public:
 		// so with `intra_dir` on it changes nothing here, and the encoder logs
 		// that combination instead of letting it look like a tuning result.
 		cfg.int_rdoq = c.effort >= 1 ? 1 : 0;
+		/* There is no snap-to-identity here and there cannot be: it is a
+		 * property of the GPU encoder's per-frame warp record, and this codec
+		 * derives its matrix with no such knob.  video_encoder_nxwarp refuses
+		 * the combination before a config reaches this constructor, so
+		 * reaching it with a threshold set is a wiring mistake in this server
+		 * rather than a configuration a user can write. */
+		if (c.snap_identity != 0)
+			throw std::runtime_error(
+			        "nxwarp: the reference backend has no snap-to-identity; "
+			        "the option should have been refused before the codec was "
+			        "built");
+		// The piecewise-planar tile mode (nxvc tool bit 35).  This backend is
+		// the one that HAS it: the Vulkan encoder does not implement mode 5,
+		// and video_encoder_nxwarp has already resolved the option to `off`
+		// there, so by the time a config reaches here the level is one this
+		// codec can deliver.
+		cfg.planar = (uint32_t)c.planar;
 		cfg.qp_search = 0;   // no per-tile QP offset search
 		cfg.intra_dir = c.intra_dir ? 1 : 0;
 		cfg.intra_dir_cand = 1;
@@ -234,6 +251,23 @@ public:
 		if (received.empty())
 			return;
 		nxvc_encoder_set_received_tiles(enc, received.data(), uint32_t(received.size()));
+	}
+
+	// The lens mask reaches the reference encoder as nxvc's own skip map, so a masked
+	// tile is genuinely never coded rather than merely cheap. The library still
+	// overrides the request where correctness needs the tile -- rolling intra refresh,
+	// no eligible reference, an alpha plane -- which is why nothing here checks for
+	// those conditions.
+	bool supports_skip_map() const override
+	{
+		return true;
+	}
+
+	void set_skip_map(std::span<const uint8_t> skip) override
+	{
+		if (skip.size() != layout.tile_count)
+			return;
+		nxvc_encoder_set_skip_map(enc, skip.data(), uint32_t(skip.size()));
 	}
 
 	std::string description() const override

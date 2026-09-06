@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include "client/utils/view_geometry.h"
 #include "vk/allocation.h"
 #include "wivrn_packets.h"
 #include "xrt/xrt_defines.h"
@@ -61,6 +62,29 @@ class foveation
 	shape_params shape;
 
 	std::array<to_headset::foveation_parameter, 2> params;
+
+	// --- the lens mask -------------------------------------------------------
+	//
+	// The 64x64 tiles of the encoded image that fall entirely outside what a lens can
+	// show. This class is where they are computed because this is where both inputs
+	// already are -- the per-eye FOV and the foveation runs that decide which source
+	// pixels a destination tile covers -- and it is recomputed exactly when they move,
+	// which is what compute_params() is for.
+	//
+	// What is done with them here is the FALLBACK half of the mechanism: the shader
+	// writes a constant mid grey into a masked tile instead of the resampled picture, so
+	// every encoder on the stream sees a tile that does not change from frame to frame
+	// and codes it as a skip. It is what the NX Warp GPU backend gets, because nxvc's
+	// Vulkan encoder has no per-tile mode override; the CPU reference backend is told
+	// outright, through nxvc's skip map, by video_encoder_nxwarp.
+	//
+	// Off by default here: the compositor turns it on when the configuration asks for it.
+	bool lens_mask_enabled = false;
+	uint32_t lens_mask_margin = 1;
+	float lens_mask_overscan = 0;
+	std::array<wivrn::view_geometry::tile_mask, 2> lens_mask_tiles;
+	// must hold lock on mutex to call it
+	void compute_lens_mask();
 
 	buffer_allocation gpu_buffer;
 	vk::raii::Sampler sampler;
@@ -105,6 +129,16 @@ public:
 	// render_scale is the active encode-size factor for the guardrail. Applied on the next
 	// update_ubo, i.e. live and per frame with no encode-size change and no renegotiation.
 	void set_shape(float strength, float render_scale);
+
+	// Turn the lens mask on and set its ring. `overscan` grows the visible region and
+	// must be at least whatever the stream encodes beyond the displayed FOV, or the mask
+	// would eat exactly the ring that overscan exists to keep. Applied on the next
+	// update_ubo, i.e. live and per frame.
+	void set_lens_mask(bool enabled, uint32_t margin_tiles, float overscan);
+
+	// What the mask currently covers, per eye, for the report. Takes the lock.
+	std::array<uint32_t, 2> lens_mask_counts();
+	uint32_t lens_mask_total();
 
 	std::array<to_headset::foveation_parameter, 2> foveate(
 	        vk::raii::Device &,

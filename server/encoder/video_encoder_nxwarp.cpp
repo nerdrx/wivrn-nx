@@ -23,6 +23,10 @@
 
 #include "nxwarp_packetize.h"
 
+// The lens-mask geometry, shared with the compositor's foveation pass and with edge bleed.
+// Header only; it links nothing and knows nothing about Vulkan or OpenXR.
+#include "client/utils/view_geometry.h"
+
 #include "encoder/encoder_settings.h"
 #include "os/os_time.h"
 #include "util/u_logging.h"
@@ -32,6 +36,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <format>
 #include <optional>
 #include <span>
@@ -167,6 +172,44 @@ entropy_request nxwarp_entropy_from(const std::string & v)
 	        std::format("nxwarp: \"entropy\": \"{}\" is not one of auto, rans, lite", v));
 }
 
+// "planar": "off" | "rd" | "prefer".  An unknown value is an error rather than
+// a fallback, for the same reason "entropy" is: a typo that silently gives a
+// different picture is worse than a refusal.
+//
+// Unlike "entropy" there is no "auto", and that is deliberate.  The default is
+// `rd`, which is already the conservative level -- it takes the mode only where
+// it is no worse -- so an "auto" would have nothing left to decide.  What the
+// resolution below decides is not WHICH level but whether the level is
+// available at all, and that is a property of the backend and of the headset,
+// not a preference.
+wivrn::nxwarp_codec_config::planar_t nxwarp_planar_from(const std::string & v)
+{
+	using pl = wivrn::nxwarp_codec_config::planar_t;
+	if (v == "off")
+		return pl::off;
+	if (v == "rd")
+		return pl::rd;
+	if (v == "prefer")
+		return pl::prefer;
+	throw std::runtime_error(std::format(
+	        "nxwarp: \"planar\": \"{}\" is not one of off, rd, prefer", v));
+}
+
+const char * nxwarp_planar_name(wivrn::nxwarp_codec_config::planar_t p)
+{
+	using pl = wivrn::nxwarp_codec_config::planar_t;
+	switch (p)
+	{
+		case pl::off:
+			return "off";
+		case pl::rd:
+			return "rd";
+		case pl::prefer:
+			return "prefer";
+	}
+	return "off";
+}
+
 // The nxvc tool bits, by name, for the one log line that shows what was
 // negotiated.  Only the bits this encoder can emit are listed; anything else
 // prints as its number, which is what an unexpected bit deserves.
@@ -218,6 +261,8 @@ std::string nxwarp_tools_string(uint64_t m)
 // this file is deliberately free of nxvc headers (see nxwarp_codec.h), and one
 // bit number with the tool's name beside it is clearer than a dependency.
 constexpr uint64_t kNxvcToolEntropyLite = 1ull << 30;
+// PLANAR, nxvc SYNTAX.md 13.13.  Named here for the same reason bit 30 is.
+constexpr uint64_t kNxvcToolPlanar = 1ull << 35;
 
 constexpr uint32_t kNxvcMagic = 0x3156584Eu; // 'NXV1'
 constexpr size_t kNxvcToolsOffset = 32;
@@ -372,6 +417,16 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 			        "\"spans\" or \"chunks\"",
 			        tm));
 	}
+	// "lens-mask": do not code the 64x64 tiles the headset's optics cannot show, and
+	// "lens-mask-margin": how wide a ring around the visible region to leave coded
+	// anyway, in tiles. The default 1 means the whole ring of tiles that touches the
+	// boundary is still coded, which is what makes this safe against everything the
+	// geometry does not model. 0 turns the ring off, not the mask; "lens-mask": "off"
+	// turns the mask off.
+	lens_mask_enabled = option_bool(settings.options, "lens-mask", true);
+	lens_mask_margin = std::min(64u, option_u32(settings.options, "lens-mask-margin", 1));
+	lens_mask_skip = option_bool(settings.options, "lens-mask-skip", true);
+
 	rc_min_qp = std::min(63u, option_u32(settings.options, "min-qp", 20));
 	rc_max_qp = std::min(63u, option_u32(settings.options, "max-qp", 44));
 	if (rc_min_qp > rc_max_qp)
@@ -475,6 +530,109 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 		case entropy_request::rans:
 			codec_cfg.entropy = nxwarp_codec_config::entropy_t::rans;
 			break;
+	}
+
+	// ---- snap-to-identity, checked against the backend and against `inter`.
+	//
+	// It is a GPU-encoder tool -- it changes the warp record E1c's skip tiles
+	// are predicted from -- and it needs a warp to snap, so both the reference
+	// backend and an intra-only stream are refusals rather than degradations.
+	// Unlike the entropy tool there is no sensible fallback to slide to: the
+	// operator asked for fewer milliseconds on the headset and there is no
+	// cheaper way to give them.
+	{
+		const uint32_t want = option_u32(settings.options, "snap-identity", 0);
+		if (want != 0)
+		{
+			if (not nxwarp_backend_is_vk(settings))
+				throw std::runtime_error(std::format(
+				        "nxwarp: \"snap-identity\": {} needs \"backend\": \"vk\" "
+				        "-- the reference codec has no snap-to-identity. Use 0, "
+				        "or the Vulkan backend.",
+				        want));
+			if (not codec_cfg.inter)
+				throw std::runtime_error(std::format(
+				        "nxwarp: \"snap-identity\": {} needs \"inter\": \"on\" "
+				        "-- there is no warp to snap on an intra-only stream.",
+				        want));
+			if (want > 32)
+				throw std::runtime_error(std::format(
+				        "nxwarp: \"snap-identity\": {} is more than two samples. "
+				        "The unit is SIXTEENTHS of a luma sample: 16 is one "
+				        "sample and is the measured useful setting, 32 is two. "
+				        "Past that the tool discards real motion rather than "
+				        "rounding it.",
+				        want));
+		}
+		codec_cfg.snap_identity = want;
+		stats_snap_identity = want;
+		if (want)
+			U_LOG_I("nxwarp: \"snap-identity\": %u/16 sample (still tiles become "
+			        "a copy on the headset; error bounded by %.2f sample)",
+			        want, (double)want / 32.0);
+	}
+
+	// ---- the piecewise-planar tile mode, resolved against the backend and the
+	// headset (nxvc SYNTAX.md 13.13, tool bit 35).
+	//
+	// Two things can stop it and NEITHER may be silent, which is the whole
+	// point of the option: the Vulkan backend has no mode 5 at all, and a
+	// headset that does not advertise bit 35 refuses the stream HEADER, which
+	// is a black screen rather than a degraded picture.
+	//
+	// The rule is the one "entropy" already uses, and for the same reason: a
+	// DEFAULT that cannot be honoured degrades quietly-with-a-log, because a
+	// default must never stop a session an operator did not ask for; an
+	// EXPLICIT request that cannot be honoured is refused, because the operator
+	// asked for something and deserves to be told it is not happening.
+	{
+		using pl = nxwarp_codec_config::planar_t;
+		const pl want = nxwarp_planar_from(
+		        option_string(settings.options, "planar", "rd"));
+		const bool explicit_ask = settings.options.count("planar") != 0;
+		const bool client_has_planar = (client_tools & kNxvcToolPlanar) != 0;
+		pl eff = want;
+		std::string note;
+		if (want != pl::off)
+		{
+			if (nxwarp_backend_is_vk(settings))
+			{
+				if (explicit_ask)
+					throw std::runtime_error(std::format(
+					        "nxwarp: \"planar\": \"{}\" needs \"backend\": "
+					        "\"ref\" -- the Vulkan encoder does not implement "
+					        "the piecewise-planar tile mode (nxvc mode 5). Use "
+					        "\"planar\": \"off\", or the reference backend.",
+					        nxwarp_planar_name(want)));
+				eff = pl::off;
+				note = "the GPU backend has no planar mode";
+			}
+			else if (not client_has_planar)
+			{
+				if (explicit_ask)
+					throw std::runtime_error(std::format(
+					        "nxwarp: \"planar\": \"{}\" needs the headset to "
+					        "advertise PLANAR (nxvc tool bit 35) and its mask is "
+					        "{:#x} ({}). A headset without it refuses the stream "
+					        "header outright, which is a black screen. Use "
+					        "\"planar\": \"off\".",
+					        nxwarp_planar_name(want), client_tools,
+					        client_tools == 0
+					                ? "the headset reported no mask at all"
+					                : "bit 35 is clear"));
+				eff = pl::off;
+				note = "the client does not support planar tiles";
+			}
+		}
+		codec_cfg.planar = eff;
+		stats_planar_name = nxwarp_planar_name(eff);
+		stats_planar_note = note;
+		if (not note.empty())
+			U_LOG_I("nxwarp: \"planar\": \"%s\" -> \"off\" (%s)",
+			        nxwarp_planar_name(want), note.c_str());
+		else if (eff != pl::off)
+			U_LOG_I("nxwarp: \"planar\": \"%s\" (nxvc tool bit 35)",
+			        nxwarp_planar_name(eff));
 	}
 
 	// The same three facts the log states once, kept so every two-second report can carry
@@ -1259,6 +1417,172 @@ void wivrn::video_encoder_nxwarp::send_resync_notice(uint16_t frame_id)
 	SendControlPacket(std::move(pkt));
 }
 
+// --- the lens mask ------------------------------------------------------------------
+//
+// Recompute the set of never-visible tiles, if the FOV or the foveation runs moved.
+//
+// Both can move mid-session: the FOV when the runtime changes the view configuration, the
+// foveation runs whenever the gaze does, since the fovea centre is what the curve is built
+// around. So this is a per-frame check against the last inputs rather than a one-shot at
+// construction -- but the check is a comparison of a handful of floats and two short run
+// lists, and the recompute behind it happens only when one of them actually changed, which
+// on a settled stream is never.
+void wivrn::video_encoder_nxwarp::update_lens_mask(
+        const to_headset::video_stream_data_shard::view_info_t & view_info)
+{
+	if (not lens_mask_enabled)
+		return;
+
+	const uint32_t eyes = stereo_eyes ? stereo_eyes : 1;
+	// Which of the frame's two views each coded eye is. A paired stream codes views 0
+	// and 1; a mono stream codes this stream's own eye. Same rule as view_at() below.
+	const auto view_index = [&](uint32_t e) -> size_t {
+		return eyes == 2 ? size_t(e) : size_t(eye);
+	};
+
+	auto same = [](const XrFovf & a, const XrFovf & b) {
+		return a.angleLeft == b.angleLeft and a.angleRight == b.angleRight and
+		       a.angleUp == b.angleUp and a.angleDown == b.angleDown;
+	};
+
+	bool unchanged = lens_have_last;
+	for (uint32_t e = 0; e < eyes and unchanged; ++e)
+	{
+		const size_t v = std::min(view_index(e), view_info.fov.size() - 1);
+		unchanged = same(lens_last_fov[e], view_info.fov[v]) and
+		            lens_last_fx[e] == view_info.foveation[v].x and
+		            lens_last_fy[e] == view_info.foveation[v].y;
+	}
+	if (unchanged)
+		return;
+
+	const uint32_t cols = stream_cfg.cols, rows = stream_cfg.rows;
+	const uint32_t cols_per_eye = eyes ? cols / eyes : cols;
+	lens_tiles_per_eye = cols_per_eye * rows;
+	lens_skip_map.assign(size_t(cols) * rows, 0);
+	lens_masked = {};
+
+	for (uint32_t e = 0; e < eyes; ++e)
+	{
+		const size_t v = std::min(view_index(e), view_info.fov.size() - 1);
+		const XrFovf & f = view_info.fov[v];
+		const auto & fov_runs = view_info.foveation[std::min(v, view_info.foveation.size() - 1)];
+
+		lens_last_fov[e] = f;
+		lens_last_fx[e] = fov_runs.x;
+		lens_last_fy[e] = fov_runs.y;
+
+		const auto m = view_geometry::lens_tile_mask(
+		        {f.angleLeft, f.angleRight, f.angleUp, f.angleDown},
+		        fov_runs.x,
+		        fov_runs.y,
+		        extent.width,
+		        extent.height,
+		        // No overscan margin here, and that is not "edge bleed is off": the
+		        // FOV on view_info has already been widened by
+		        // wivrn_hmd::get_view_poses(), so the protected region is the widened
+		        // one. view_geometry.h states the identity, and lens_mask_test pins it.
+		        {.margin_tiles = lens_mask_margin});
+
+		// The codec's grid and this eye's grid must agree, or the map would be
+		// laid down on the wrong tiles. They are derived from the same encoded
+		// size through the same alignment, so a disagreement is a wiring change
+		// and not a rounding difference: say so and mask nothing.
+		if (m.cols != cols_per_eye or m.rows != rows)
+		{
+			if (not lens_logged)
+			{
+				lens_logged = true;
+				U_LOG_W("nxwarp: stream %d lens mask off: the geometry says %ux%u "
+				        "tiles per eye and the codec says %ux%u",
+				        int(stream_idx),
+				        unsigned(m.cols),
+				        unsigned(m.rows),
+				        unsigned(cols_per_eye),
+				        unsigned(rows));
+			}
+			lens_mask_enabled = false;
+			lens_skip_map.clear();
+			lens_masked = {};
+			return;
+		}
+
+		lens_masked[e] = m.masked;
+		for (uint32_t ty = 0; ty < rows; ++ty)
+			for (uint32_t tx = 0; tx < cols_per_eye; ++tx)
+				lens_skip_map[size_t(ty) * cols + e * cols_per_eye + tx] =
+				        m.tiles[size_t(ty) * m.cols + tx];
+	}
+	lens_have_last = true;
+
+	if (not lens_logged)
+	{
+		lens_logged = true;
+		const size_t v0 = std::min(view_index(0), view_info.fov.size() - 1);
+		const XrFovf & f = view_info.fov[v0];
+		// Which of the two mechanisms this stream actually got, said once. On the
+		// reference backend the tiles are genuinely never coded; on the GPU backend
+		// nxvc has no per-tile mode override (nxvc_vk_enc.h), so the saving is
+		// whatever the mode search makes of the flat grey the compositor paints
+		// there -- which is WARP_SKIP, but by its own decision and not by request.
+		U_LOG_I("nxwarp: stream %d lens mask: %u of %u tiles per eye masked "
+		        "(margin %u tile%s, fov %.1f/%.1f/%.1f/%.1f deg); %s",
+		        int(stream_idx),
+		        unsigned(lens_masked[0]),
+		        unsigned(lens_tiles_per_eye),
+		        unsigned(lens_mask_margin),
+		        lens_mask_margin == 1 ? "" : "s",
+		        double(f.angleLeft) * 180.0 / M_PI,
+		        double(f.angleRight) * 180.0 / M_PI,
+		        double(f.angleUp) * 180.0 / M_PI,
+		        double(f.angleDown) * 180.0 / M_PI,
+		        codec->supports_skip_map()
+		                ? "never coded (nxvc skip map)"
+		                : "flattened only: this backend has no skip-map input, so the "
+		                  "tiles are coded as whatever the mode search makes of a "
+		                  "constant grey");
+	}
+}
+
+// Mid grey into the masked tiles of the host planes, in place.
+//
+// `y_base` is the mapped readback: the luma plane followed by the interleaved CbCr the
+// de-interleave above has already consumed, so only the luma part of it is written here and
+// the two planar chroma buffers are written separately. `y_stride` is the per-eye encoded
+// width -- this path only ever carries one eye (a paired stream reads the compositor image
+// instead), so the tile grid is this eye's own.
+//
+// 128 in all three planes is neutral grey in the limited-range YCbCr the compositor writes.
+// Any constant would do for the codec; a mid grey is chosen so that a masked tile which
+// somehow does become visible reads as a deliberate blank rather than as a black hole or a
+// colour.
+void wivrn::video_encoder_nxwarp::flatten_masked_tiles(uint8_t * y_base, size_t y_stride, size_t chroma_stride)
+{
+	constexpr uint32_t tile = 64;
+	const uint32_t cols = stream_cfg.cols, rows = stream_cfg.rows;
+	uint8_t * cb = cb_plane.data();
+	uint8_t * cr = cr_plane.data();
+
+	for (uint32_t ty = 0; ty < rows; ++ty)
+	{
+		for (uint32_t tx = 0; tx < cols; ++tx)
+		{
+			if (not lens_skip_map[size_t(ty) * cols + tx])
+				continue;
+			const uint32_t x0 = tx * tile, y0 = ty * tile;
+			const uint32_t x1 = std::min(x0 + tile, uint32_t(extent.width));
+			const uint32_t y1 = std::min(y0 + tile, uint32_t(extent.height));
+			for (uint32_t row = y0; row < y1; ++row)
+				std::memset(y_base + size_t(row) * y_stride + x0, 128, x1 - x0);
+			for (uint32_t row = y0 / 2; row < (y1 + 1) / 2; ++row)
+			{
+				std::memset(cb + size_t(row) * chroma_stride + x0 / 2, 128, (x1 - x0) / 2);
+				std::memset(cr + size_t(row) * chroma_stride + x0 / 2, 128, (x1 - x0) / 2);
+			}
+		}
+	}
+}
+
 std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(uint8_t slot, uint64_t frame_id)
 {
 	if (vk.device.waitForFences(*in[slot].fence, true, 1'000'000'000) == vk::Result::eTimeout)
@@ -1287,6 +1611,11 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	}
 
 	const auto & view_info = in[slot].view_info;
+
+	// The lens mask, recomputed only when the FOV or the foveation runs moved. It has to
+	// happen here, before the host planes are laid out, because flattening the masked
+	// tiles is done on the way through them.
+	update_lens_mask(view_info);
 
 	if (not header_sent or sent_frames - last_header_frame >= header_period_frames)
 	{
@@ -1330,6 +1659,29 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				dcr[x] = src[2 * x + 1];
 			}
 		}
+
+		// --- flatten the masked tiles -----------------------------------
+		//
+		// Mid grey into every tile the lens cannot show. It is not a saving in
+		// itself: it is what MAKES the saving available, and it is the half that
+		// works on every backend.
+		//
+		// A tile that is the same constant every frame has a zero prediction
+		// residual and zero displacement error, so the mode search chooses
+		// WARP_SKIP for it by itself, keeps choosing it, and never trips the
+		// displacement bound that would force it back to INTRA. That last part
+		// is why this exists and is not merely an optimisation of the skip map:
+		// asking nxvc to skip a tile whose PICTURE is still moving means asking
+		// it to reconstruct a moving picture by warping, which drifts, which the
+		// forced refresh then has to pay for -- measured on a rotating clip, the
+		// skip map alone made the stream LARGER. Flattening removes the picture
+		// instead of hiding it, and there is then nothing to drift.
+		//
+		// This is the host-plane path. The image path never touches host memory,
+		// and its flattening is done a stage earlier, by the compositor's
+		// foveation pass (server/compositor/foveation.cpp).
+		if (lens_mask_enabled and not lens_skip_map.empty())
+			flatten_masked_tiles((uint8_t *)base, extent.width, cw);
 	}
 
 	// --- what the client actually holds of the previous frame -------------
@@ -1534,6 +1886,12 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		codec->set_views(&v, 1);
 	}
 
+	// The lens mask is handed to the codec for THIS frame: nxvc consumes a skip map with
+	// one encode. The library overrides it wherever a coded tile is required, which is
+	// why nothing here excludes the intra-refresh frames.
+	if (lens_mask_skip and lens_mask_enabled and not lens_skip_map.empty() and codec->supports_skip_map())
+		codec->set_skip_map(lens_skip_map);
+
 	if (not logged_rc_mode and pending_bitrate.load())
 	{
 		logged_rc_mode = true;
@@ -1616,14 +1974,24 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// exists to prevent.
 	{
 		bool all_intra = true;
+		uint32_t coded = 0, total = 0;
 		for (const auto & d: codec->tiles())
 		{
+			++total;
+			// A tile the frame did not code: WARP_SKIP puts nothing in the
+			// bitstream and the decoder reconstructs it from the pose warp
+			// alone. This is what the lens mask is trying to move tiles into,
+			// so it is counted rather than inferred from the byte count.
+			if (d.mode != 0 /* NXVC_MODE_WARP_SKIP */)
+				++coded;
 			if (d.mode != 3 /* NXVC_MODE_INTRA */)
-			{
 				all_intra = false;
-				break;
-			}
 		}
+		prof_tiles_coded += coded;
+		prof_tiles_total += total;
+		life_tiles_coded += coded;
+		life_tiles_total += total;
+		++life_frames;
 		resync_this_frame = all_intra and (resync_this_frame or chain_broken);
 		if (resync_this_frame)
 			chain_broken = false;
@@ -1866,6 +2234,22 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				st.dominant_reason_count = best;
 
 				st.effort = stats_effort;
+				st.snap_identity = stats_snap_identity;
+				if (codec)
+				{
+					uint64_t idt = 0, idtot = 0;
+					codec->identity_tiles(idt, idtot);
+					st.identity_tiles = idt;
+					st.identity_tiles_total = idtot;
+				}
+				/* The headset's own count would go here, from
+				 * nxvc's tiles_identity_seg once a client reports
+				 * it (NXVC_VK_DECODER_PASSB_IDENTITY).  Until then
+				 * the encoder's is the number and the card says so
+				 * rather than implying the headset measured it. */
+				st.identity_from_decoder = false;
+				st.planar = stats_planar_name;
+				st.planar_note = stats_planar_note;
 				st.entropy = stats_entropy_name;
 				st.entropy_was_auto = stats_entropy_was_auto;
 				st.negotiated_tools = stats_negotiated_tools;
@@ -1873,6 +2257,20 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				st.encoded_width = stats_width;
 				st.encoded_height = stats_height;
 				st.encode_scale = encode_scale_reported;
+				// The lens mask. `lens_mask_on` is the option; `masked` is 0
+				// until the first frame has been encoded, and 0 afterwards is a
+				// real answer -- a strongly foveated encode has no fully
+				// invisible tile left.
+				st.lens_mask_on = lens_mask_enabled;
+				st.lens_mask_enforced = lens_mask_enabled and codec->supports_skip_map();
+				st.lens_mask_masked = lens_masked[0];
+				st.lens_mask_tiles = lens_tiles_per_eye;
+				st.lens_mask_margin = uint8_t(std::min<uint32_t>(255, lens_mask_margin));
+				if (prof_n)
+				{
+					st.tiles_coded_per_frame = float(double(prof_tiles_coded) / double(prof_n));
+					st.tiles_per_frame = float(double(prof_tiles_total) / double(prof_n));
+				}
 				st.span_frames = window_span_frames;
 				st.chunk_frames = window_chunk_frames;
 
@@ -1903,6 +2301,8 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 			prof_compose_ms = 0;
 			prof_compose_max_ms = 0;
 			prof_bytes = 0;
+			prof_tiles_coded = 0;
+			prof_tiles_total = 0;
 			prof_qp_sum = 0;
 			prof_qp_lo = 63;
 			prof_qp_hi = 0;

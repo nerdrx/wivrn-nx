@@ -531,6 +531,8 @@ Per-stream `options` (all optional):
 | `intra-period` | `180` | rolling intra refresh period in frames; `1` forces every tile every frame |
 | `intra-dir` | `on` | directional intra prediction (tool 17). It is most of the CPU encoder's time at headset resolutions; `off` codes the DC-plane predictor only, for more bits and a much faster encode |
 | `effort` | `1` | how hard the encoder looks for the cheapest way to say each frame. `1` adds the **integer requantiser**: a coefficient quantised to ±1 whose squared error is worth less than the bits it saves is dropped. Measured on RADV at 2 × 1088×1088, it is **−1.5 % BD-rate on rANS and −3.6 % on Lite for no measurable encode time** (9.12 → 9.18 ms a frame, inside the run-to-run spread). `0` is the plain dead-zone quantiser, which is what the encoder did before this option existed. It changes which levels are coded and nothing about how they decode — the stream carries no tool bit for it and no decoder can tell the levels apart — and both backends honour it. There is no level 2: nxvc refuses one, because a wider motion search measures −0.05 % for +12 % encode time and its own trellis RDOQ cannot run on a GPU. Out of range is an error, not a fallback |
+| `snap-identity` | `0` | **snap still tiles to a copy**, in 1/16 luma samples; 0 = off. When the head has barely moved -- every tile corner displaced by less than this -- the encoder sends the frame as if it had not moved at all, and the headset decodes those tiles as a straight copy instead of a filtered warp. On a Pico 4 that warp is 8.25 of 13.7 ms of Pass B per pair. The error introduced is at most **half the setting**: half a sample at 16, which is the rounding the motion search already accepts. Measured: **below 16 nothing ever snaps** (a head at rest still drifts ~0.57 samples a frame), at 16 about a third of still frames qualify for -0.05 dB and slightly FEWER bytes, and at ordinary head speeds nothing snaps at all. Needs `"backend": "vk"` and `"inter": "on"`; above 32 is refused, because the unit is sixteenths and past two samples the tool discards motion rather than rounding it |
+| `planar` | `rd` | the **piecewise-planar tile mode** (nxvc tool bit 35): a tile may be coded as two to four flat, shaded regions meeting at sharp boundaries instead of as transform blocks. It changes how the picture FAILS when bits run short — flat facets and edges, like a low-polygon model, instead of blocky mush — and it is a taste, not an optimisation: at equal bytes the transform is 5 to 12 dB ahead on luma. `off`; `rd` takes it only where it is both cheaper and no worse (measured neutral, within 0.015 dB); `prefer` takes it wherever it is cheaper, which is the look, at 2 to 4 dB. **It needs `"backend": "ref"` and a headset that advertises the tool** — see below. An unrecognised value is an error, not a fallback |
 | `preset` | `1` | nxvc effort preset: `0` medium, `1` fast, `2` slow. Encoder-side only |
 | `threads` | `0` | encoder worker threads for the tile pool: `0` uses every core (capped at 16), `1` is the serial path. Byte-identical either way |
 | `pace` | `auto` | send pacing: `auto` follows the rate the headset reports it can decode at, `off` sends every composited frame, a number is a fixed frame rate. See below |
@@ -539,6 +541,98 @@ Per-stream `options` (all optional):
 | `band-rows` | `6` | tile rows per transport band, which is the unit of pacing and of feedback |
 | `tile-map` | `auto` | how a frame's bytes are laid on the transport's tile grid. `auto` uses per-tile spans when the codec reports them and every coded tile fits a transport slot, and the fixed-chunk mapping otherwise, decided per frame; `chunks` never uses spans; `spans` is `auto` under a different name, kept so a measurement run can say which it meant. See below |
 | `mtu` | `1280` | transport MTU. Leaves room for WiVRn's own packet envelope inside a 1400-byte datagram |
+| `lens-mask` | `on` | do not spend bits on the 64x64 tiles the headset's optics cannot show. See below |
+| `lens-mask-margin` | `1` | the ring of tiles around the visible region left coded anyway, in tiles. `0` masks right up to the boundary |
+| `lens-mask-skip` | `on` | also hand the mask to the codec as nxvc's skip map, where the backend has one. Separable from the mask itself so the two halves can be measured apart |
+
+**`"lens-mask"`: the tiles no lens can show.** A headset shows a round region through each
+lens; the encoded picture is a rectangle. The tiles in the corners are encoded, sent,
+decoded and never seen by an eye.
+
+The geometry is `client/utils/view_geometry.h`, the same header edge bleed uses, and the two
+share one tangent-space model rather than two that agree today: `visible_region()`'s growth
+factor and `overscan_angle()`'s tangent scaling are the same number, and
+`tests/lens_mask_test.cpp` asserts
+
+    visible_region(display_fov, f) == visible_region(widen(display_fov, f), 0)
+
+**Edge bleed does not change the mask by one tile.** The overscan widens the FOV and leaves
+the encoded size alone, so the tangent rectangle and the protected ellipse scale together
+and every tile lands in the same place relative to the region. The test asserts that too,
+tile for tile, which is how the ring edge bleed paid for is kept: the mask cannot eat it.
+It also means nothing downstream has to be told the setting exists -- the encoder and the
+compositor pass a margin of 0 because the FOV that reaches them has already been widened at
+`wivrn_hmd::get_view_poses()`.
+
+`is_maskable()` in that header is the RECTANGULAR question -- is a region disjoint from the
+panel's bounding box -- and it is what the reprojection pass asks. The lens mask asks a
+different one, and a stricter one: the four corners of that bounding box are inside it and
+outside the round lens, and masking them is the whole point. The two are therefore not
+ANDed; at overscan 0 the panel rectangle IS the whole image and an AND would mask nothing.
+Measured on the 100 deg case at 5 % overscan: all 12 masked tiles overlap the panel
+rectangle and none is wholly inside the ring.
+
+The visible region is
+modelled as an ellipse in TANGENT space, centred on the lens axis, with a half-extent on
+each axis of the LARGER of that axis's two FOV half-angles. Sizing it from the larger half
+is the conservative choice and it is what makes an asymmetric FOV matter: the region then
+covers the narrow side of the picture entirely and only the far corners of the wide side
+can be masked.
+
+A tile is masked only when its whole source footprint -- destination pixels mapped back
+through the foveation runs -- falls outside that region, AND so does every tile within
+`lens-mask-margin` of it. At the default 1 the entire ring of tiles that touches the
+boundary is still coded, which is the guard against everything the model does not carry:
+lens tolerances, an eye off the optical axis, a runtime reporting a FOV slightly larger
+than the optics, and the resampling the headset's defoveator does at a tile edge.
+
+Two mechanisms, and they are not the same:
+
+* the masked tiles are **filled with a flat mid grey** before they are encoded -- by the
+  compositor's foveation pass on the image path, and by the encoder itself on the host-plane
+  path. A tile that is the same constant every frame has no residual and no displacement
+  error, so the mode search picks WARP_SKIP for it, keeps picking it, and never trips the
+  bound that would force it back to INTRA. This half works on every backend and on every
+  codec;
+* where the backend has an input for it, the codec is **also told** (`nxvc_encoder_set_skip_map`,
+  which the CPU reference encoder has and the Vulkan one does not). nxvc still overrides the
+  request wherever a coded tile is required -- rolling intra refresh, no eligible reference,
+  an alpha plane -- so this is a request, not an assertion.
+
+The flattening is the half that matters, and that is a measurement rather than a
+preference: asking nxvc to skip a tile whose PICTURE is still moving asks it to reconstruct
+a moving picture by warping, which drifts into a forced refresh, and on a rotating clip the
+skip map ALONE made the stream larger. With the pixels already flat there is nothing to
+drift and the request is free.
+
+The server says once per stream what it got:
+
+```
+nxwarp: stream 0 lens mask: 12 of 289 tiles per eye masked (margin 1 tile, fov -52.5/52.5/52.5/-52.5 deg); never coded (nxvc skip map)
+```
+
+or `flattened only: this backend has no skip-map input ...` on the Vulkan backend.
+
+**What it is worth, measured.** Small, and the reason is worth knowing before turning it
+off. A masked tile does not become free: an INTRA tile has a per-tile floor of about 32
+bytes of header and minimum payload however flat it is, so flattening recovers only what
+the tile cost above that floor. Measured at 1088x1088 QP 30 (docs/NXWARP-E2E.md has the
+runs): −0.12 % on an inter clip, −0.33 % all-intra, −0.26 % all-intra on uniformly detailed
+content — against a 2.1 % tile share. On an inter stream the corner tiles of a static scene
+are already skipping anyway; the configuration where it pays is a live session with head
+motion, where the corners carry detail that keeps being re-coded. The mechanism is exact and
+costs nothing to keep on, but do not expect the tile share in bytes. Removing the floor
+would need a way to tell the codec a tile is ABSENT rather than flat, which nxvc does not
+have — a skip map pins a mode, and `row_present` is row-granular over the atlas.
+
+**Zero masked tiles is a real answer, not a failure.** The mask is computed on the ENCODED
+picture, after foveation, and foveation compresses the periphery hard: at 1088x1088 encoded
+from a 2176x2176 render, one corner tile covers about a seventh of the source width and
+reaches into the visible region, so nothing is entirely outside it any more. Unfoveated, the
+same geometry masks 12 of 289 tiles per eye (40 at margin 0). The dashboard's headset
+statistics page shows the pair, next to the encode size.
+
+**Settings → Skip invisible tiles** is the switch, on by default.
 
 **`"tile-map"`, and when to move it.** With spans, a codec tile's own bytes travel at its
 own tile index, so a lost datagram costs the tiles it carried instead of the whole frame,
@@ -564,6 +658,27 @@ too, on the stream's geometry line, told from what arrived rather than from anyt
 the wire: under fixed chunks a frame carries one transport tile per MTU-sized piece of its
 bitstream and under spans it carries every tile it coded, which on a paired 1088x1088 is 45
 against 578.
+
+**`planar` is off in practice today, and the dashboard says so rather than
+pretending.** Two things can stop it and the server resolves both before the
+codec is built:
+
+* the **Vulkan encoder does not implement the mode** (nxvc mode 5 exists in the
+  reference codec only). `"planar"` set explicitly together with
+  `"backend": "vk"` is refused at startup with a message naming both; the
+  default degrades to `off` and is logged.
+* **no shipping headset advertises tool bit 35.** The client sends
+  `nxvc_vk_decoder_tools_supported()`, whose mask is `0x17f7a1fff` — bit 35
+  clear, because the headset decodes with the GPU decoder and that has no
+  mode 5 either. A decoder without the bit refuses the stream *header*, which
+  is a black screen and not a degraded picture, so an explicit request is
+  refused and the default degrades to `off`.
+
+So on a real session today the Headset statistics page reads *"off — the client
+does not support planar tiles"*, and that is the truthful answer rather than a
+setting quietly doing nothing. The path that works end to end is
+`wivrn-nxwarp-loopback --planar`, which decodes with the reference decoder;
+see `docs/NXWARP-E2E.md`.
 
 **`"backend": "vk"` is intra-only, and that is not free.** It implements the DC-plane
 intra half of the v1 bitstream and nothing else: no inter prediction (`"inter": "on"`
@@ -674,7 +789,10 @@ The dashboard renders it on the **Headset statistics** page, one card per stream
 the rate they are paced to, the headset's own decode time, frames the pacer held back, encode
 time, frame size against the controller's target, the quantiser and its band, the bitrate the
 controller allows, what the headset failed to reconstruct and the reason that accounts for most of
-it, the encoded size and tile count, the effort level and the negotiated entropy coder. Each line has a one-sentence
+it, the encoded size and tile count, the effort level, how many tiles the headset can decode as a copy,
+and the negotiated entropy coder. Each line has a one-sentence
+it, the encoded size and tile count, the effort level, whether low-poly tiles are in use (and, when
+they are not, which of the two reasons applies), and the negotiated entropy coder. Each line has a one-sentence
 note on what it means. Nothing there requires reading the log.
 
 ### In the dashboard
@@ -684,7 +802,10 @@ dashboard's settings page reveals an **NX Warp encoder** section carrying the se
 are worth changing: [`stream_scale`](#stream_scale) (with the per-eye size and tile count it will
 produce, from the size the last connected headset asked for), `entropy`, `pace` with its fixed
 frame rate, `rc` with its `min-qp`/`max-qp` band, `coded-vectors`, `effort` (as **Extra encoder
-effort**, on by default), and `inter` with `intra-period`. Each carries a one-line note on what it trades away.
+effort**, on by default), `snap-identity` (as **Snap still tiles**, off), and
+`inter` with `intra-period`. Each carries a one-line note on what it trades away.
+effort**, on by default), `planar` (as **Low-poly tiles**), and `inter` with
+`intra-period`. Each carries a one-line note on what it trades away.
 
 The remaining options — `backend`, `qp`, `intra-dir`, `preset`, `threads`, `band-rows`, `mtu` —
 are bring-up and debugging controls rather than things to tune, and stay in the file. The

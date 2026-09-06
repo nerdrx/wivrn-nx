@@ -382,6 +382,50 @@ Kirigami.ScrollablePage {
             }
 
             RowLayout {
+                Kirigami.FormData.label: i18n("Snap still tiles:")
+                visible: Settings.nxwarpSelected
+                Controls.ComboBox {
+                    id: nxwarp_snap
+                    model: [
+                        { label: i18nc("snap to identity", "Off"), value: Settings.SnapOff },
+                        { label: i18n("1 sample"), value: Settings.SnapOneSample },
+                        { label: i18n("1.5 samples"), value: Settings.SnapOneAndHalf },
+                        { label: i18n("2 samples"), value: Settings.SnapTwo }
+                    ]
+                    textRole: "label"
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("When the head has barely moved, send the frame as if it had not moved at all. Tiles that did not change then cost the headset a straight copy instead of a filtered warp, which is most of what its decode spends on a still scene. The picture error this can introduce is at most half the setting — half a sample at '1 sample', which is the same rounding the motion search already accepts.\n\nMeasured: below 1 sample nothing is ever snapped, because a head at rest still drifts about half a sample per frame; at 1 sample about a third of still frames qualify, for 0.05 dB and slightly FEWER bytes. Moving scenes are unaffected — nothing snaps at ordinary head speeds. Needs the GPU encoder with inter prediction on.")
+                }
+            }
+
+            RowLayout {
+                Kirigami.FormData.label: i18n("Low-poly tiles:")
+                visible: Settings.nxwarpSelected
+                Controls.ComboBox {
+                    id: nxwarp_planar
+                    model: [
+                        {
+                            label: i18nc("piecewise-planar tile mode", "Off"),
+                            value: Settings.PlanarOff
+                        },
+                        {
+                            label: i18n("Where it is free"),
+                            value: Settings.PlanarRd
+                        },
+                        {
+                            label: i18n("Prefer the look"),
+                            value: Settings.PlanarPrefer
+                        }
+                    ]
+                    textRole: "label"
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("Code a tile as a few flat, shaded regions with sharp edges instead of as transform blocks. It changes how the picture FAILS when bits run short: flat facets and edges, like a low-polygon model, instead of blocky mush. \"Where it is free\" takes it only where it costs nothing, which is measured as no change worth seeing; \"Prefer the look\" takes it wherever it is cheaper and trades 2-4 dB for the look. Needs the reference encoder and a headset that supports it — the Headset statistics page says which one you have.")
+                }
+            }
+
+            RowLayout {
                 Kirigami.FormData.label: i18n("Send pacing:")
                 visible: Settings.nxwarpSelected
                 Controls.ComboBox {
@@ -484,6 +528,17 @@ Kirigami.ScrollablePage {
                 }
                 Kirigami.ContextualHelpButton {
                     toolTipText: i18n("Predict each frame from the one before: far less bitrate for the same quality, at the cost of a lost frame damaging the ones that follow until the next intra frame.")
+                }
+            }
+
+            RowLayout {
+                visible: Settings.nxwarpSelected
+                Controls.CheckBox {
+                    id: nxwarp_lens_mask
+                    text: i18n("Skip invisible tiles")
+                }
+                Kirigami.ContextualHelpButton {
+                    toolTipText: i18n("The lens shows a round region and the encoded picture is a rectangle. The 64x64 tiles in the corners are never seen: this fills them with a flat grey so they cost almost nothing, and tells the codec to skip them where it can. A one-tile ring around the visible region is always still coded.")
                 }
             }
 
@@ -783,7 +838,10 @@ Kirigami.ScrollablePage {
             Settings.nxwarpTileMap = nxwarp_tile_map.model[nxwarp_tile_map.currentIndex].value;
             Settings.nxwarpCodedVectors = nxwarp_coded_vectors.model[nxwarp_coded_vectors.currentIndex].value;
             Settings.nxwarpEffort = nxwarp_effort.checked;
+            Settings.nxwarpSnapIdentity = nxwarp_snap.model[nxwarp_snap.currentIndex].value;
+            Settings.nxwarpPlanar = nxwarp_planar.model[nxwarp_planar.currentIndex].value;
             Settings.nxwarpInter = nxwarp_inter.checked;
+            Settings.nxwarpLensMask = nxwarp_lens_mask.checked;
             Settings.nxwarpIntraPeriod = nxwarp_intra_period.value;
         }
         Settings.mirror = desktop_mirror.checked;
@@ -813,7 +871,10 @@ Kirigami.ScrollablePage {
         nxwarp_tile_map.currentIndex = nxwarp_tile_map.model.findIndex(i => i.value === Settings.nxwarpTileMap);
         nxwarp_coded_vectors.currentIndex = nxwarp_coded_vectors.model.findIndex(i => i.value === Settings.nxwarpCodedVectors);
         nxwarp_effort.checked = Settings.nxwarpEffort;
+        nxwarp_snap.currentIndex = nxwarp_snap.model.findIndex(i => i.value === Settings.nxwarpSnapIdentity);
+        nxwarp_planar.currentIndex = nxwarp_planar.model.findIndex(i => i.value === Settings.nxwarpPlanar);
         nxwarp_inter.checked = Settings.nxwarpInter;
+        nxwarp_lens_mask.checked = Settings.nxwarpLensMask;
         nxwarp_intra_period.value = Settings.nxwarpIntraPeriod;
         desktop_mirror.checked = Settings.mirror;
         debug_gui.checked = Settings.debugGui;

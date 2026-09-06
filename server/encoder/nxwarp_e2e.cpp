@@ -87,7 +87,9 @@
 //                    [--intra-period N] [--coded-vectors default|none|static]
 //                    [--reconnect-at N] [--start-frame-id F]
 //                    [--pace auto|off|FPS] [--client-decode-ms N] [--present-hz N]
-//                    [--feedback-delay N] [--effort 0|1]
+//                    [--feedback-delay N] [--effort 0|1] [--snap-identity N]
+//                    [--head-rate S]
+//                    [--feedback-delay N] [--effort 0|1] [--planar off|rd|prefer]
 //
 //   --eyes             1 (the default, and every run that predates this flag) or 2, which
 //                      is encoder_settings::eyes: ONE stream carrying BOTH eyes as a
@@ -163,6 +165,7 @@
 #include "driver/bitrate_controller.h"
 #include "encoder/encoder_settings.h"
 #include "encoder/video_encoder_nxwarp.h"
+#include "nxwarp_stats.h"
 #include "utils/wivrn_vk_bundle.h"
 
 #include "wivrn_packets.h"
@@ -250,11 +253,36 @@ bool same(const view_info_t & a, const view_info_t & b)
 	return a.quad.has_value() == b.quad.has_value();
 }
 
+// How fast the simulated head turns, as a multiple of this harness's original
+// rate.  1.0 is 0.017 rad a frame -- about 87 deg/s at 90 Hz, a brisk turn --
+// which is what every run here has always used and what the pose-freshness
+// checks want.
+//
+// It is a knob because a fast head is the wrong fixture for anything that only
+// happens when the head is STILL: `snap-identity` cannot fire at 87 deg/s and
+// a harness that can only turn quickly can only prove that it does not.
+// `--head-rate 0.05` is about 4 deg/s, the drift of someone sitting still.
+float g_head_rate = 1.0f;
+
 // A pose that is different every frame, so that a decoder republishing a stale one, or
-// publishing a default, cannot pass by accident.
+// publishing a default, cannot pass by accident.  It stays different every frame at
+// every head rate: the position and fov terms move with `t` too, and the display time
+// is independent of it.
+//
+// --static-view: hold the view configuration still.
+//
+// The harness varies the FOV and the foveation runs with the frame number on purpose -- it
+// is how a stale or default-constructed view_info on the wire becomes visible. That makes it
+// the wrong clip for measuring anything that DEPENDS on the view configuration: the lens
+// mask is recomputed whenever the foveation runs move, and runs that move every frame make
+// the mask move every frame, so tiles cross in and out of it and each crossing costs a coded
+// tile. A live session's runs move when the gaze does and not otherwise. This pins them so
+// the A/B measures the mask rather than the harness's own churn.
+bool static_view = false;
+
 view_info_t make_view_info(uint64_t frame)
 {
-	const float t = float(frame) * 0.017f;
+	const float t = float(frame) * 0.017f * g_head_rate;
 	view_info_t vi{};
 	vi.display_time = XrTime(1'000'000'000ll + int64_t(frame) * 11'111'111ll);
 	vi.alpha = false;
@@ -263,10 +291,13 @@ view_info_t make_view_info(uint64_t frame)
 		const float s = t + float(eye) * 0.5f;
 		vi.pose[eye].orientation = {std::sin(s) * 0.1f, std::cos(s) * 0.1f, 0.0f, std::sqrt(1.0f - 0.02f)};
 		vi.pose[eye].position = {0.032f * (eye ? 1.f : -1.f), 1.6f + 0.01f * std::sin(s), 0.05f * std::cos(s)};
-		vi.fov[eye] = {-0.9f - 0.001f * t, 0.9f, 0.9f, -0.9f};
+		// Only the VIEW CONFIGURATION is pinned by --static-view: the pose and the
+		// display time still move, so every check that identifies a frame by its
+		// view_info still can.
+		vi.fov[eye] = {-0.9f - (static_view ? 0.f : 0.001f * t), 0.9f, 0.9f, -0.9f};
 		// The foveation runs: source pixels per output pixel, middle entry 1:1. Made
 		// to vary with the frame so a stale or default one is visible.
-		vi.foveation[eye].x = {uint16_t(1 + frame % 3), 4, 5, 3, 1};
+		vi.foveation[eye].x = {uint16_t(1 + (static_view ? 0 : frame % 3)), 4, 5, 3, 1};
 		vi.foveation[eye].y = {1, 4, uint16_t(5 + eye), 3, 1};
 	}
 	return vi;
@@ -1454,6 +1485,14 @@ std::vector<uint8_t> readback(vk_bundle & vk, vk::Image image, uint32_t w, uint3
 
 } // namespace
 
+// Filled by the stub publish_nxwarp_stats() in nxwarp_e2e_stubs.cpp: the last
+// stats record the encoder published.  It lives in namespace wivrn, where the
+// stub defines it.
+namespace wivrn
+{
+extern nxwarp_stream_stats nxwarp_stats_last;
+}
+
 int main(int argc, char ** argv)
 {
 	std::string yuv_path, nxv_out = "e2e.nxv", decoded_out, nxv_dec = "nxv-dec";
@@ -1466,6 +1505,11 @@ int main(int argc, char ** argv)
 	// all-intra stream its assertions were written against.
 	std::string inter = "false";
 	uint32_t intra_period = 180;
+	// The lens mask: "on" (the server's default) or "off", and the ring of tiles around
+	// the visible region left coded anyway.
+	std::string lens_mask = "on";
+	uint32_t lens_mask_margin = 1;
+	std::string lens_mask_skip = "true";
 	// "default" (STATIC when inter is on), "none", or "static".
 	std::string coded_vectors = "default";
 	std::string stereo_compose = "layers";
@@ -1597,6 +1641,19 @@ int main(int argc, char ** argv)
 	// something nobody ships. `--effort 0` is how a run reaches the pre-effort
 	// bitstream, which is what makes the two comparable in one binary.
 	std::string effort = "1";
+	// The snap-to-identity threshold, 1/16 luma samples.  Absent unless asked
+	// for, so every existing run keeps the server's default of 0.
+	std::string snap_identity;
+	// The piecewise-planar tile mode: "off", "rd" (the server's default) or
+	// "prefer".  It needs --backend ref: the Vulkan encoder has no mode 5, and
+	// the server refuses the combination rather than dropping it, which this
+	// harness is a good place to prove.
+	// Unset unless asked: leaving the key ABSENT is what makes the server's own
+	// default apply, and the server refuses an EXPLICIT level the simulated
+	// headset cannot decode.  Writing it unconditionally would turn every
+	// existing run in this harness -- all of which simulate a headset with no
+	// tool mask -- into a startup error.
+	std::string planar;
 
 	for (int i = 1; i < argc; ++i)
 	{
@@ -1640,6 +1697,20 @@ int main(int argc, char ** argv)
 		}
 		else if (a == "--intra-period")
 			intra_period = uint32_t(std::stoul(next()));
+		else if (a == "--lens-mask")
+		{
+			const std::string v = next();
+			lens_mask = (v == "on" or v == "true" or v == "1") ? "on" : "off";
+		}
+		else if (a == "--lens-mask-margin")
+			lens_mask_margin = uint32_t(std::stoul(next()));
+		else if (a == "--static-view")
+			static_view = true;
+		else if (a == "--lens-mask-skip")
+		{
+			const std::string v = next();
+			lens_mask_skip = (v == "on" or v == "true" or v == "1") ? "true" : "false";
+		}
 		else if (a == "--stereo-compose")
 			stereo_compose = next();
 		else if (a == "--coded-vectors")
@@ -1650,6 +1721,12 @@ int main(int argc, char ** argv)
 			entropy = next();
 		else if (a == "--effort")
 			effort = next();
+		else if (a == "--snap-identity")
+			snap_identity = next();
+		else if (a == "--head-rate")
+			g_head_rate = std::stof(next());
+		else if (a == "--planar")
+			planar = next();
 		else if (a == "--qp")
 			qp = uint32_t(std::stoul(next()));
 		else if (a == "--reconnect-at")
@@ -1836,6 +1913,11 @@ int main(int argc, char ** argv)
 	settings.options["backend"] = backend;
 	settings.options["inter"] = inter;
 	settings.options["intra-period"] = std::to_string(intra_period);
+	// The lens mask. On by default here as it is in the server, so the harness runs the
+	// shipping configuration; --lens-mask off is the other half of the A/B.
+	settings.options["lens-mask"] = lens_mask;
+	settings.options["lens-mask-margin"] = std::to_string(lens_mask_margin);
+	settings.options["lens-mask-skip"] = lens_mask_skip;
 	settings.options["coded-vectors"] = coded_vectors;
 	// "layers" (the default) reads the eye pair straight out of two array layers;
 	// "blit" copies them into one side-by-side picture first. nxvc pins that the
@@ -1845,6 +1927,10 @@ int main(int argc, char ** argv)
 	settings.options["stereo-compose"] = stereo_compose;
 	settings.options["entropy"] = entropy;
 	settings.options["effort"] = effort;
+	if (not snap_identity.empty())
+		settings.options["snap-identity"] = snap_identity;
+	if (not planar.empty())
+		settings.options["planar"] = planar;
 	// The simulated headset mask. "all" is every bit set, which is a headset that can
 	// decode anything this encoder emits and is what keeps every existing run in this
 	// harness unchanged. It is spelled ~0 rather than read from nxvc because this file,
@@ -1856,10 +1942,23 @@ int main(int argc, char ** argv)
 		settings.nxvc_tools = 0;
 	else
 		settings.nxvc_tools = std::stoull(client_tools, nullptr, 0);
+	const std::string snap_note =
+	        snap_identity.empty() ? std::string()
+	                              : ", snap-identity \"" + snap_identity + "\"";
+	// Named rather than built inside the call: a std::string temporary's
+	// c_str() does live to the end of the full expression, but a reader should
+	// not have to know that to trust the line.
+	const std::string planar_note =
+	        planar.empty() ? std::string() : ", planar request \"" + planar + "\"";
+	// Both notes, one call. The two branches each appended their own to this
+	// line; a union that kept both calls would have printed the header twice and
+	// left a stray argument, so the format string carries both slots instead.
 	std::fprintf(stderr,
-	             "[e2e] simulated headset nxvc_tools = 0x%llx (entropy request \"%s\")\n",
+	             "[e2e] simulated headset nxvc_tools = 0x%llx (entropy request \"%s\"%s%s)\n",
 	             (unsigned long long)settings.nxvc_tools,
-	             entropy.c_str());
+	             entropy.c_str(),
+	             snap_note.c_str(),
+	             planar_note.c_str());
 	// Rate control off by default. The byte-identity check below compares this
 	// run's bitstream against nxv-dec's decode of it, which a moving quantiser
 	// does not disturb -- but the frame sizes and the loss pattern would stop
@@ -2280,6 +2379,28 @@ int main(int argc, char ** argv)
 	std::printf("reassembly produced %zu complete frame units of %llu sent (%u presented)\n",
 	            host.units.size(), (unsigned long long)sent_frames, frames);
 	std::printf("decoder published %zu frames\n", host.frames.size());
+
+	// --- the lens mask -----------------------------------------------------------
+	//
+	// What it masked, whether the codec was actually told, and what the frames of this
+	// run coded. The A/B is the same clip at the same quantiser with --lens-mask off,
+	// and the numbers to compare are "coded tiles per frame" and the size of the .nxv.
+	{
+		const auto lm = enc.lens_mask_report();
+		std::printf("\nlens mask: %s%s -- %u of %u tiles per eye masked, margin %u tile%s\n",
+		            lm.on ? "on" : "off",
+		            lm.on ? (lm.enforced ? " (never coded: nxvc skip map)"
+		                                 : " (flattened only: this backend has no skip-map "
+		                                   "input)")
+		                  : "",
+		            lm.masked, lm.tiles_per_eye, lm.margin, lm.margin == 1 ? "" : "s");
+		if (lm.frames)
+			std::printf("coded tiles: %.1f of %.1f per frame (%.1f%%) over %llu frames\n",
+			            double(lm.coded_tiles) / double(lm.frames),
+			            double(lm.total_tiles) / double(lm.frames),
+			            100.0 * double(lm.coded_tiles) / double(lm.total_tiles ? lm.total_tiles : 1),
+			            (unsigned long long)lm.frames);
+	}
 
 	// --- the pace ---------------------------------------------------------------
 	{
@@ -3422,6 +3543,20 @@ int main(int argc, char ** argv)
 			            p.total_ms / double(p.frames), p.max_ms,
 			            (unsigned long long)p.frames,
 			            (unsigned long long)(p.bytes / p.frames));
+		/* The identity count, from the published stats the encoder filled --
+		 * the same number the dashboard card shows, so a harness run and a
+		 * live session cannot disagree about it. */
+		if (wivrn::nxwarp_stats_last.identity_tiles_total)
+			std::printf("identity tiles: %llu of %llu (%.1f %%), "
+			            "snap-identity %u/16 sample%s\n",
+			            (unsigned long long)wivrn::nxwarp_stats_last.identity_tiles,
+			            (unsigned long long)wivrn::nxwarp_stats_last.identity_tiles_total,
+			            100.0 * double(wivrn::nxwarp_stats_last.identity_tiles) /
+			                    double(wivrn::nxwarp_stats_last.identity_tiles_total),
+			            wivrn::nxwarp_stats_last.snap_identity,
+			            wivrn::nxwarp_stats_last.identity_from_decoder
+			                    ? " (counted by the headset)"
+			                    : " (counted by the encoder)");
 	}
 
 	std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures,

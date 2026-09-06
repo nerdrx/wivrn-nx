@@ -95,6 +95,11 @@ struct nxwarp_stream_stat
 	Q_PROPERTY(double dominantReasonCount READ dominantReasonCount CONSTANT)
 
 	Q_PROPERTY(int effort READ effort CONSTANT)
+	Q_PROPERTY(int snapIdentity READ snapIdentity CONSTANT)
+	Q_PROPERTY(QString identityTiles READ identityTiles CONSTANT)
+	Q_PROPERTY(bool identityFromDecoder READ identityFromDecoder CONSTANT)
+	Q_PROPERTY(QString planar READ planar CONSTANT)
+	Q_PROPERTY(QString planarNote READ planarNote CONSTANT)
 	Q_PROPERTY(QString entropy READ entropy CONSTANT)
 	Q_PROPERTY(bool entropyWasAuto READ entropyWasAuto CONSTANT)
 	Q_PROPERTY(QString toolsText READ toolsText CONSTANT)
@@ -110,6 +115,14 @@ struct nxwarp_stream_stat
 	Q_PROPERTY(int encodedWidth READ encodedWidth CONSTANT)
 	Q_PROPERTY(int encodedHeight READ encodedHeight CONSTANT)
 	Q_PROPERTY(int tiles READ tiles CONSTANT)
+	// The lens mask: tiles per eye the optics cannot show. `lensMaskEnforced` is the
+	// honest half -- false means the mask is known and the pixels are flattened, but this
+	// backend has no way to be told to skip them.
+	Q_PROPERTY(bool lensMaskOn READ lensMaskOn CONSTANT)
+	Q_PROPERTY(bool lensMaskEnforced READ lensMaskEnforced CONSTANT)
+	Q_PROPERTY(int lensMaskMasked READ lensMaskMasked CONSTANT)
+	Q_PROPERTY(int lensMaskTiles READ lensMaskTiles CONSTANT)
+	Q_PROPERTY(int lensMaskMargin READ lensMaskMargin CONSTANT)
 	Q_PROPERTY(double encodeScale READ encodeScale CONSTANT)
 	// How this window's frames were laid on the transport's tile grid. Counts and not a
 	// mode, because the choice is per frame: "auto" can produce all spans, all chunks or
@@ -287,6 +300,37 @@ public:
 	{
 		return int(s.effort);
 	}
+	int snapIdentity() const
+	{
+		return int(s.snap_identity);
+	}
+	// "N/M (share)" or an empty string when there is nothing to say -- an
+	// intra-only stream, or a codec with no such notion.
+	QString identityTiles() const
+	{
+		if (s.identity_tiles_total == 0)
+			return {};
+		const double pc = 100.0 * double(s.identity_tiles) /
+		                  double(s.identity_tiles_total);
+		return QStringLiteral("%1/%2 (%3 %)")
+		        .arg(s.identity_tiles)
+		        .arg(s.identity_tiles_total)
+		        .arg(pc, 0, 'f', 1);
+	}
+	bool identityFromDecoder() const
+	{
+		return s.identity_from_decoder;
+	}
+	QString planar() const
+	{
+		return QString::fromStdString(s.planar);
+	}
+	// Empty when the configured level is the level in use; otherwise the
+	// reason it is not, which is the half of this field that matters.
+	QString planarNote() const
+	{
+		return QString::fromStdString(s.planar_note);
+	}
 	QString entropy() const
 	{
 		return QString::fromStdString(s.entropy);
@@ -324,6 +368,26 @@ public:
 	int tiles() const
 	{
 		return int(s.tiles());
+	}
+	bool lensMaskOn() const
+	{
+		return s.lens_mask_on;
+	}
+	bool lensMaskEnforced() const
+	{
+		return s.lens_mask_enforced;
+	}
+	int lensMaskMasked() const
+	{
+		return int(s.lens_mask_masked);
+	}
+	int lensMaskTiles() const
+	{
+		return int(s.lens_mask_tiles ? s.lens_mask_tiles : s.tiles());
+	}
+	int lensMaskMargin() const
+	{
+		return int(s.lens_mask_margin);
 	}
 	int spanFrames() const
 	{

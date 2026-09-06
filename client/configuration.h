@@ -218,6 +218,19 @@ public:
 	// case is the behaviour it replaces.
 	bool jit_display = true;
 
+	// Skip the parts of the streamed image the optics can never show, in the display
+	// pass. The corners of a rendered eye image fall outside a round lens, and the pass
+	// costs 6.37 ms of GPU an iteration on a Pico 4 -- 278 ms/s, the second largest
+	// consumer after the decode (docs/CLIENT-REPROJECTION.md).
+	//
+	// OFF by default, and it should stay off until someone has looked through the
+	// headset with it on. The geometry is conservative in every direction it can be --
+	// a cell that merely touches the visible region is drawn, the overscan ring is
+	// grown into the region rather than masked, and anything degenerate masks nothing
+	// -- but the failure it would produce is a cropped picture, and no test on a build
+	// machine can rule that out.
+	bool lens_mask_display = false;
+
 	// Let the display loop run at the refresh rate instead of at the decode rate.
 	//
 	// The reprojection pass used to be submitted with a wait on the decoder's

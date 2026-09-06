@@ -148,6 +148,63 @@ struct nxwarp_codec_config
 	// reaches nothing, and video_encoder_nxwarp says so in the log rather than
 	// leaving it to be discovered as two runs with the same byte count.
 	uint32_t effort = 1;
+	// SNAP TO IDENTITY, in 1/16 luma samples; 0 = off.
+	//
+	// When the frame's warp displaces every tile corner by less than this, the
+	// encoder emits the IDENTITY matrix instead of the exact sub-sample one,
+	// and every skipped tile becomes a plain COPY on the headset instead of a
+	// four-tap integer warp.  On a Pico 4 that warp is 8.25 of 13.7 ms of
+	// Pass B per pair, and at rest almost all of it is following motion below
+	// a sample.
+	//
+	// The error is bounded by the threshold: at 16 -- one whole sample -- no
+	// corner ends up more than half a sample from where the exact warp put it,
+	// which is the bound the quarter-pel vector search already lives with.
+	//
+	// nxvc measured it on its own fixtures: below 16 NOTHING snaps, because a
+	// head at rest still moves about 0.57 samples a frame; at 16 it catches
+	// roughly a third of still frames for -0.05 dB, and the bytes go slightly
+	// DOWN at a high quantiser because an identity predictor on a still
+	// picture beats a sub-sample warp that resamples it.  At 30 deg/s nothing
+	// snaps at all.  It is a REST tool and it ships off.
+	//
+	// Vulkan backend only, and only with `inter`: the reference codec has no
+	// such tool and there is no warp to snap without a reference.  Both are
+	// refused rather than ignored.
+	uint32_t snap_identity = 0;
+	// The piecewise-planar tile mode: nxvc tool bit 35, `mode == 5`, nxvc's
+	// SYNTAX.md 13.13 and docs/LOWPOLY-MODE.md.  A tile whose content is a few
+	// smoothly shaded regions meeting at sharp boundaries is coded as those
+	// regions instead of as transform coefficients.
+	//
+	// It exists for the KIND of failure it has, not for its PSNR.  A transform
+	// codec starved of bits turns the picture into its own coding grid, and in
+	// a headset that pattern reshuffles every frame; a planar tile loses detail
+	// and keeps structure, which degrades toward the look of a low-polygon
+	// model.  Measured on nxvc's own fixtures the transform is 5 to 12 dB ahead
+	// on luma at equal bytes, so this is a taste and never an optimisation --
+	// which is exactly why `prefer` is a separate level and not the default.
+	//
+	//   off    the mode is not offered.
+	//   rd     offered per tile, and taken only where it is BOTH cheaper and no
+	//          worse than the intra tile it would replace.  Measured neutral --
+	//          within 0.015 dB and 2.4 % of the mode being off -- and the
+	//          default.
+	//   prefer taken wherever it is cheaper, distortion notwithstanding: the
+	//          low-polygon look as a setting, at 2 to 4 dB.
+	//
+	// TWO THINGS CAN STOP IT, and neither may be silent.  The Vulkan backend
+	// does not implement mode 5 at all, and a headset that does not advertise
+	// tool bit 35 would refuse the stream header outright -- a black screen,
+	// not a degraded picture.  video_encoder_nxwarp resolves both before the
+	// codec is built and reports what it did in `nxwarp_stream_stats`.
+	enum class planar_t
+	{
+		off = 0,
+		rd = 1,
+		prefer = 2,
+	};
+	planar_t planar = planar_t::rd;
 	// Encoder-side speed knobs; none of them changes how a stream decodes.
 	// Directional intra (tool 17): costs the CPU encoder most of its time at
 	// this resolution; off codes the DC-plane predictor only.
@@ -320,6 +377,22 @@ public:
 	// frame's layout and reporting it is a read of that. The reference codec's C ABI
 	// cannot -- nxvc_tile_info has a length but no offset -- so it says false and the
 	// transport keeps the chunk mapping for it.
+	// Tiles the headset's decoder will COPY rather than warp, summed over the
+	// frames encoded, and the tiles considered.  Zero/zero on a codec that has
+	// no such notion, which is every codec but the Vulkan one.
+	//
+	// It is asked of the ENCODER because nothing else has it: an identity
+	// warp_ext says nothing about how it was arrived at, and a decoder without
+	// the copy fast path decodes the stream regardless.  When the headset's
+	// decoder does report its own count (nxvc's tiles_identity_seg, behind
+	// NXVC_VK_DECODER_PASSB_IDENTITY), that is the better number and this one
+	// becomes the server's estimate of it.
+	virtual void identity_tiles(uint64_t & tiles, uint64_t & total) const
+	{
+		tiles = 0;
+		total = 0;
+	}
+
 	virtual bool reports_tile_spans() const
 	{
 		return false;
@@ -358,6 +431,38 @@ public:
 	{
 		(void)frame_number;
 		(void)held;
+	}
+
+	// --- tiles that are never worth coding -----------------------------------
+	//
+	// The lens mask: 64x64 tiles whose whole area falls outside what the headset's
+	// optics can show (client/utils/view_geometry.h). They are encoded, sent and
+	// decoded today and no eye ever sees them.
+	//
+	// `skip[t] != 0` asks for tile t to be coded as WARP_SKIP in the NEXT frame, over
+	// the codec's own tile grid -- which spans the eye PAIR on a stereo stream, the
+	// same indexing tiles() and set_received_tiles() use. It is nxvc's
+	// nxvc_encoder_set_skip_map, and the important half of its contract is that the
+	// LIBRARY OVERRIDES THE REQUEST wherever correctness needs a coded tile: a tile due
+	// for rolling intra refresh, a frame with no eligible reference, a stream with an
+	// alpha plane. A caller must rely on that rather than reproduce the conditions,
+	// which is why this is a request and not an assertion.
+	//
+	// The map is consumed by ONE encode; it is set every frame or not at all.
+	//
+	// Default: nothing, and supports_skip_map() says so. The GPU encoder has no such
+	// input -- nxvc_vk_enc.h has set_views, set_received_tiles and set_frame_held and
+	// no per-tile mode override -- so on that backend the mask is computed, reported
+	// and used to flatten the pixels (the compositor paints masked tiles a constant
+	// grey, so the mode search chooses WARP_SKIP for them by itself), but nothing here
+	// forces it. video_encoder_nxwarp logs which of the two it got.
+	virtual bool supports_skip_map() const
+	{
+		return false;
+	}
+	virtual void set_skip_map(std::span<const uint8_t> skip)
+	{
+		(void)skip;
 	}
 
 	// Human readable identification of the backend, logged once at stream start.

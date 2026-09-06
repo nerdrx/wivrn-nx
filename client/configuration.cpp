@@ -341,6 +341,7 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("ref_invalidation", &configuration::ref_invalidation),
 	        scalar("dejitter", &configuration::dejitter),
 	        scalar("jit_display", &configuration::jit_display),
+	        scalar("lens_mask_display", &configuration::lens_mask_display),
 	        scalar("decoupled_display", &configuration::decoupled_display),
 	        scalar("emergency_framerate", &configuration::emergency_framerate),
 	        scalar("standby_freeze", &configuration::standby_freeze),

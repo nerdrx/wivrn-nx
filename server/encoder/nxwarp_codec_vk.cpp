@@ -217,6 +217,26 @@ public:
 		// does not have rather than clamping it, and nxwarp_codec_config
 		// carries the reason the default is 1.
 		ci.effort = c.effort;
+		/* Snap-to-identity (nxwarp_codec_config::snap_identity).  The library
+		 * refuses it without `inter` and above two samples, so the value that
+		 * reaches here has already been checked by video_encoder_nxwarp; this
+		 * is the one place it crosses into nxvc. */
+		ci.snap_identity = c.inter ? c.snap_identity : 0;
+
+		// The piecewise-planar tile mode has NO field here, because this
+		// encoder does not implement mode 5: nxvc's GPU decoder and GPU
+		// encoder both stop at the transform path, and docs/LOWPOLY-GPU-PLAN.md
+		// is the plan rather than the code.  video_encoder_nxwarp resolves the
+		// option to `off` for this backend before a config is built, so
+		// reaching here with a level set is a wiring mistake in THIS server,
+		// not a configuration a user can write -- and it is refused rather
+		// than dropped, because a silently ignored level is the exact failure
+		// this option exists to avoid.
+		if (c.planar != wivrn::nxwarp_codec_config::planar_t::off)
+			throw std::runtime_error(
+			        "nxwarp: the Vulkan backend has no piecewise-planar tile "
+			        "mode; the option should have been resolved to \"off\" "
+			        "before the codec was built");
 
 		// The entropy tool (stream bit 30).  Written out rather than cast for
 		// the same reason `coded_vectors` is, and passed unconditionally
@@ -563,6 +583,14 @@ public:
 			        .ref_delta = ti[i].ref_delta,
 			};
 		}
+	}
+
+	void identity_tiles(uint64_t & tiles, uint64_t & total) const override
+	{
+		tiles = 0;
+		total = 0;
+		if (enc)
+			nxvc_vk_encoder_identity_tiles(enc, &tiles, &total);
 	}
 
 	std::span<const wivrn::nxwarp_tile_desc> tiles() const override

@@ -285,6 +285,17 @@ class video_encoder_nxwarp : public video_encoder
 	// The effort level the codec was built with, for the stats card: it leaves
 	// no trace in the stream, so this is the only place it can be read back.
 	uint32_t stats_effort = 1;
+	/* The snap-to-identity threshold in force, and the identity-tile count the
+	 * encoder reports for it.  Neither can be read off the wire: an identity
+	 * warp_ext says nothing about how it was arrived at. */
+	uint32_t stats_snap_identity = 0;
+	// The planar level actually in use, and -- when it is not the level that
+	// was asked for -- the reason.  It leaves no trace in the stream that the
+	// server could read back, and the reason is a fact about the SESSION (this
+	// backend, this headset), so reporting it here is the only way anything
+	// downstream can say what happened.
+	std::string stats_planar_name = "off";
+	std::string stats_planar_note;
 	std::string stats_entropy_name;
 	bool stats_entropy_was_auto = true;
 	uint64_t stats_negotiated_tools = 0;
@@ -432,6 +443,80 @@ class video_encoder_nxwarp : public video_encoder
 	// path, so it keeps the same struct and fills it itself.
 	std::optional<to_headset::video_stream_data_shard::timing_info_t> frame_timing;
 
+	// --- the lens mask -------------------------------------------------------
+	//
+	// A headset shows a ROUND region through each lens; the encoded picture is a
+	// rectangle. The tiles in the corners are encoded, sent, decoded and never seen.
+	//
+	// The geometry is client/utils/view_geometry.h, shared with the compositor's
+	// foveation pass (which paints the same tiles flat) and with edge bleed (which
+	// grows the same region rather than shrinking it). What lives here is only the
+	// per-frame application of it: the mask depends on the FOV and the foveation runs,
+	// both of which arrive on view_info and both of which move -- foveation follows the
+	// gaze -- so it is recomputed when they move and cached when they do not.
+	//
+	// "lens-mask": on by default. "lens-mask-margin": the ring of tiles around the
+	// visible region left coded, in tiles, default 1.
+	bool lens_mask_enabled = true;
+	uint32_t lens_mask_margin = 1;
+	// The last inputs the mask was computed from, so a frame that changed neither
+	// recomputes nothing.
+	std::array<XrFovf, 2> lens_last_fov{};
+	std::array<std::vector<uint16_t>, 2> lens_last_fx, lens_last_fy;
+	bool lens_have_last = false;
+	// The map handed to the codec: one byte per tile over the codec's own PAIR-WIDE
+	// grid, row-major and eye-minor ([SYN] Annex D D-3). Empty when the mask is off or
+	// masks nothing.
+	std::vector<uint8_t> lens_skip_map;
+	// Per eye, for the report and the log. `lens_tiles_per_eye` is the denominator.
+	std::array<uint32_t, 2> lens_masked{};
+	uint32_t lens_tiles_per_eye = 0;
+	// The one-shot log line, and whether the codec could actually be told.
+	bool lens_logged = false;
+	// Also hand the mask to the codec as nxvc's skip map, where the backend has one.
+	// "lens-mask-skip", on by default. It is separable from the mask itself because the
+	// two halves are different mechanisms with different failure modes: flattening the
+	// pixels always helps, while ASKING for a skip on a tile whose picture still moves
+	// makes nxvc warp a moving picture, which drifts into a forced refresh. With the
+	// pixels flat there is nothing to drift and the request is free; the switch is what
+	// let that be measured rather than assumed.
+	bool lens_mask_skip = true;
+	// Recompute the mask if view_info moved it. Called once per encoded frame.
+	void update_lens_mask(const to_headset::video_stream_data_shard::view_info_t &);
+	// Mid grey into the masked tiles of the host planes. The image path is flattened by
+	// the compositor's foveation pass instead.
+	void flatten_masked_tiles(uint8_t * y_base, size_t y_stride, size_t chroma_stride);
+
+public:
+	// What the lens mask did, over the whole stream. For the e2e harness, which runs for
+	// far less than one two-second report window and would otherwise see nothing.
+	struct lens_report
+	{
+		bool on = false;
+		bool enforced = false; // the codec was actually told, rather than only the pixels flattened
+		uint32_t masked = 0;   // tiles per eye
+		uint32_t tiles_per_eye = 0;
+		uint32_t margin = 0;
+		uint64_t frames = 0;
+		uint64_t coded_tiles = 0; // over the coded frame, i.e. the pair when paired
+		uint64_t total_tiles = 0;
+	};
+	lens_report lens_mask_report() const
+	{
+		return {
+		        lens_mask_enabled,
+		        lens_mask_enabled and codec and codec->supports_skip_map(),
+		        lens_masked[0],
+		        lens_tiles_per_eye,
+		        lens_mask_margin,
+		        life_frames,
+		        life_tiles_coded,
+		        life_tiles_total,
+		};
+	}
+
+private:
+
 	uint32_t base_qp;
 	uint32_t current_qp;
 	// "rc": "auto" honours the bitrate ceiling; "fixed" is the old behaviour,
@@ -498,6 +583,17 @@ class video_encoder_nxwarp : public video_encoder
 	uint64_t prof_bytes = 0;
 	// The quantiser over that interval: the sum for a mean, and the extremes,
 	// which is what says whether the controller settled or is hunting.
+	// Tiles this window's frames actually coded, and how many there were. A tile in
+	// WARP_SKIP is not coded: it puts nothing in the bitstream. It is the number the lens
+	// mask moves, so it is counted rather than inferred from the frame size.
+	uint64_t prof_tiles_coded = 0;
+	uint64_t prof_tiles_total = 0;
+	// The same two over the life of the stream, which the two-second window cannot give
+	// a run shorter than a window. The e2e harness reads them.
+	uint64_t life_tiles_coded = 0;
+	uint64_t life_tiles_total = 0;
+	uint64_t life_frames = 0;
+
 	uint64_t prof_qp_sum = 0;
 	uint32_t prof_qp_lo = 63, prof_qp_hi = 0;
 	// --- the transport ceiling ----------------------------------------------

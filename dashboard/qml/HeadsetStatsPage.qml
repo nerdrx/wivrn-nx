@@ -242,6 +242,24 @@ Kirigami.ScrollablePage {
                         }
 
                         RowLayout {
+                            Kirigami.FormData.label: i18n("Invisible tiles:")
+                            Controls.Label {
+                                text: !modelData.lensMaskOn
+                                      ? i18n("not skipped")
+                                      : (modelData.lensMaskEnforced
+                                         ? i18n("%1 of %2 tiles per eye masked, margin %3",
+                                                modelData.lensMaskMasked, modelData.lensMaskTiles,
+                                                modelData.lensMaskMargin)
+                                         : i18n("%1 of %2 tiles per eye masked, margin %3 (flattened only)",
+                                                modelData.lensMaskMasked, modelData.lensMaskTiles,
+                                                modelData.lensMaskMargin))
+                            }
+                            Kirigami.ContextualHelpButton {
+                                toolTipText: i18n("The lens shows a round region; the encoded picture is a rectangle. These are the 64x64 tiles whose whole area falls outside it, plus a margin ring of tiles that is deliberately still coded. Zero is a real answer and not a failure: a strongly foveated encode compresses the periphery so hard that no tile is entirely outside any more. 'Flattened only' means this backend has no way to be told to skip a tile, so the tiles are filled with a flat grey and the codec decides for itself.")
+                            }
+                        }
+
+                        RowLayout {
                             Kirigami.FormData.label: i18n("Tile mapping:")
                             visible: modelData.spanFrames + modelData.chunkFrames > 0
                             Controls.Label {
@@ -266,6 +284,43 @@ Kirigami.ScrollablePage {
                             }
                             Kirigami.ContextualHelpButton {
                                 toolTipText: i18n("How hard the encoder looks for the cheapest way to say each frame. Level 1 drops a coefficient whose error is worth less than the bits it saves: measured 1.5%% fewer bytes on rANS and 3.6%% on Lite, for no measurable encode time. The level leaves no trace in the stream, so this line is the only place it can be read back.")
+                            }
+                        }
+
+                        RowLayout {
+                            Kirigami.FormData.label: i18n("Identity tiles:")
+                            visible: modelData.identityTiles.length > 0
+                            Controls.Label {
+                                // "will copy" and "copied" are different
+                                // claims: until the headset reports its own
+                                // count this is the encoder saying what the
+                                // decoder's fast path is entitled to take.
+                                text: modelData.identityFromDecoder
+                                      ? i18n("%1 copied by the headset", modelData.identityTiles)
+                                      : i18n("%1 the headset can copy (counted by the encoder)",
+                                             modelData.identityTiles)
+                            }
+                            Kirigami.ContextualHelpButton {
+                                toolTipText: i18n("Tiles whose motion was snapped to nothing, which the headset decodes as a straight copy instead of a filtered warp. Zero unless 'Snap still tiles' is on and the scene is nearly still. Until headsets report their own count this is the encoder's number: what the decoder is entitled to copy, not a measurement of what it did.")
+                            }
+                        }
+
+                        RowLayout {
+                            Kirigami.FormData.label: i18n("Low-poly tiles:")
+                            Controls.Label {
+                                // The note is the point of this line: the level
+                                // can be unavailable for two different reasons
+                                // and neither shows up anywhere else.
+                                text: modelData.planarNote.length > 0
+                                      ? i18n("off — %1", modelData.planarNote)
+                                      : (modelData.planar === "off"
+                                         ? i18n("off")
+                                         : (modelData.planar === "prefer"
+                                            ? i18n("on, preferring the look")
+                                            : i18n("on where it is free")))
+                            }
+                            Kirigami.ContextualHelpButton {
+                                toolTipText: i18n("Whether tiles may be coded as flat shaded regions with sharp edges instead of as transform blocks. It needs the reference encoder and a headset that advertises the tool; when either is missing this line says which, because the setting is then doing nothing and nothing else would tell you.")
                             }
                         }
 

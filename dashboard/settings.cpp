@@ -152,6 +152,7 @@ void Settings::emitAllChanged()
 	nxwarpTileMapChanged();
 	nxwarpCodedVectorsChanged();
 	nxwarpInterChanged();
+	nxwarpLensMaskChanged();
 	nxwarpIntraPeriodChanged();
 }
 
@@ -1081,6 +1082,58 @@ void Settings::set_nxwarpEffort(const bool & value)
 		nxwarpEffortChanged();
 }
 
+// The four settings and the thresholds they mean.  An out-of-range value in a
+// hand-edited file reads as the nearest lower setting rather than being
+// silently dropped: the file is the authority on what the server will do, and
+// the dashboard's job is to show it honestly.
+Settings::nxwarp_snap Settings::nxwarpSnapIdentity() const
+{
+	const uint32_t v = nxd::nxwarp_option_u32(m_jsonSettings, "snap-identity",
+	                                          nxd::nxwarp_default_snap_identity);
+	if (v >= 32)
+		return SnapTwo;
+	if (v >= 24)
+		return SnapOneAndHalf;
+	if (v >= 16)
+		return SnapOneSample;
+	return SnapOff;
+}
+
+void Settings::set_nxwarpSnapIdentity(const nxwarp_snap & value)
+{
+	const auto old = nxwarpSnapIdentity();
+	const uint32_t v = value == SnapTwo ? 32u
+	                                    : (value == SnapOneAndHalf
+	                                               ? 24u
+	                                               : (value == SnapOneSample ? 16u : 0u));
+	nxd::set_nxwarp_option_u32(m_jsonSettings, "snap-identity", v,
+	                           nxd::nxwarp_default_snap_identity);
+	if (old != nxwarpSnapIdentity())
+		nxwarpSnapIdentityChanged();
+}
+
+Settings::nxwarp_planar Settings::nxwarpPlanar() const
+{
+	const auto v = nxd::nxwarp_option(m_jsonSettings, "planar")
+	                       .value_or(std::string(nxd::nxwarp_default_planar));
+	if (v == "off")
+		return PlanarOff;
+	if (v == "prefer")
+		return PlanarPrefer;
+	return PlanarRd;
+}
+
+void Settings::set_nxwarpPlanar(const nxwarp_planar & value)
+{
+	const auto old = nxwarpPlanar();
+	const char * v = value == PlanarOff ? "off"
+	                                    : (value == PlanarPrefer ? "prefer" : "rd");
+	nxd::set_nxwarp_option_or_default(m_jsonSettings, "planar", v,
+	                                  nxd::nxwarp_default_planar);
+	if (old != nxwarpPlanar())
+		nxwarpPlanarChanged();
+}
+
 bool Settings::nxwarpInter() const
 {
 	return nxd::nxwarp_option_bool(m_jsonSettings, "inter", nxd::nxwarp_default_inter);
@@ -1092,6 +1145,19 @@ void Settings::set_nxwarpInter(const bool & value)
 	nxd::set_nxwarp_option_bool(m_jsonSettings, "inter", value, nxd::nxwarp_default_inter);
 	if (old != nxwarpInter())
 		nxwarpInterChanged();
+}
+
+bool Settings::nxwarpLensMask() const
+{
+	return nxd::nxwarp_option_bool(m_jsonSettings, "lens-mask", nxd::nxwarp_default_lens_mask);
+}
+
+void Settings::set_nxwarpLensMask(const bool & value)
+{
+	const auto old = nxwarpLensMask();
+	nxd::set_nxwarp_option_bool(m_jsonSettings, "lens-mask", value, nxd::nxwarp_default_lens_mask);
+	if (old != nxwarpLensMask())
+		nxwarpLensMaskChanged();
 }
 
 int Settings::nxwarpIntraPeriod() const

@@ -218,6 +218,7 @@ std::string nxwarp_tools_string(uint64_t m)
 // this file is deliberately free of nxvc headers (see nxwarp_codec.h), and one
 // bit number with the tool's name beside it is clearer than a dependency.
 constexpr uint64_t kNxvcToolEntropyLite = 1ull << 30;
+constexpr uint64_t kNxvcToolAtlas = 1ull << 31;
 
 constexpr uint32_t kNxvcMagic = 0x3156584Eu; // 'NXV1'
 constexpr size_t kNxvcToolsOffset = 32;
@@ -352,6 +353,12 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	        .eyes = stereo_eyes,
 	        .base_qp = current_qp,
 	        .inter = option_bool(settings.options, "inter", false),
+	        // ATLAS (tool bit 31), the reference model the hybrid base layer
+	        // patches into. Negotiated, and asked for: a decoder that does not
+	        // offer bit 31 refuses the stream HEADER, which is a black screen
+	        // rather than a degraded picture, so this is AND-ed with the
+	        // headset's mask below and is off by default.
+	        .atlas = option_bool(settings.options, "atlas", false),
 	        // "stereo-compose": "layers" (the default) or "blit". See
 	        // nxwarp_codec_config::eye_layers -- identical bitstream either way,
 	        // and "layers" is a full-frame device blit per frame cheaper.
@@ -395,6 +402,27 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	// as "supports nothing", or every stream would be refused.
 	const uint64_t client_tools = settings.nxvc_tools;
 	const bool client_has_lite = (client_tools & kNxvcToolEntropyLite) != 0;
+
+	// ATLAS is negotiated the same way, and refused rather than sent when it
+	// was asked for and the headset cannot read it -- for the same reason the
+	// explicit entropy request is refused: emitting a header this client will
+	// reject buys a black screen, where refusing here names the reason on the
+	// first line of the log. A zero mask is "no information", not "supports
+	// nothing", so it cannot enable the tool either.
+	if (codec_cfg.atlas)
+	{
+		if ((client_tools & kNxvcToolAtlas) == 0)
+			throw std::runtime_error(std::format(
+			        "nxwarp: \"atlas\": true needs the headset to advertise ATLAS "
+			        "(nxvc tool bit 31) and its mask is {:#x} ({}).",
+			        client_tools,
+			        client_tools == 0 ? "the headset reported no mask at all"
+			                          : "bit 31 is clear"));
+		if (not codec_cfg.inter)
+			throw std::runtime_error(
+			        "nxwarp: \"atlas\": true requires \"inter\": true -- the atlas IS "
+			        "the inter reference, and nxvc refuses the combination at create()");
+	}
 	const entropy_request entropy_req =
 	        nxwarp_entropy_from(option_string(settings.options, "entropy", "auto"));
 	switch (entropy_req)

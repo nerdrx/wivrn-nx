@@ -129,6 +129,12 @@ class nxwarp_codec_vk final : public wivrn::nxwarp_codec
 	// default -- an unexercised fallback is not a fallback.
 	bool use_eye_layers = true;
 	bool compose_warned = false;
+	// Whether this stream has an atlas at all. A base-sourced write is an
+	// ATLAS-stream operation: nxvc refuses it with ERR_UNSUPPORTED on an intra
+	// stream, and asking is cheaper than being refused once a frame.
+	bool inter = false;
+	bool atlas = false;
+	bool warned_patch = false;
 
 	// Wall time of the last encode(), milliseconds, as the library measured it
 	// around its own submits. video_encoder_nxwarp times the whole call; this
@@ -175,6 +181,10 @@ public:
 		// passed with it; 0 there would mean "the library's default", and
 		// the option's own default is already 180.
 		ci.inter = c.inter ? 1u : 0u;
+		inter = c.inter;
+		// Refused at create() without `inter`, so it is only passed with it.
+		ci.atlas = (c.inter and c.atlas) ? 1u : 0u;
+		atlas = ci.atlas != 0;
 		ci.intra_period = c.inter ? c.intra_period : 0u;
 		// The headset confirms the frames it reconstructs, so require a confirmation
 		// from the first frame rather than waiting for one to arrive: the frames
@@ -397,6 +407,91 @@ public:
 			        nxvc_vk_encoder_status_string(st),
 			        nxvc_vk_encoder_last_error(enc));
 		}
+	}
+
+	// --------------------------------------------- base-sourced atlas writes
+	//
+	// nxvc_vk_encoder_atlas_write_tiles(). The copy is recorded on the
+	// encoder's OWN command buffer at the top of the next encode, one barrier
+	// ahead of the E-stages, so it lands before Pass W reads the atlas -- the
+	// call itself neither submits nor waits, and that ordering is not one a
+	// caller could arrange from outside.
+	bool supports_base_patch() const override
+	{
+		return atlas;
+	}
+
+	// nxvc publishes no query for the ring-slot layout, so this reproduces
+	// nxvw_ring_layout() from vk/decoder/inter/inter_layout.h. See the header
+	// note in nxwarp_base_patch.h for why that is a reported gap and not a
+	// design: if the two ever disagree, nx-warp's header is right.
+	bool atlas_layout(atlas_slot_layout & L) const override
+	{
+		if (not atlas)
+			return false;
+		const uint32_t cw = width / 2, ch = height / 2;
+		L = {};
+		L.planes = 3;
+		uint32_t o = 0;
+		for (uint32_t p = 0; p < 4; ++p)
+		{
+			const uint32_t pw = (p == 1 or p == 2) ? cw : width;
+			const uint32_t ph = (p == 1 or p == 2) ? ch : height;
+			L.off[p] = o;
+			// The eye pair's width rounded up to an even number of samples, so
+			// that every row starts on the uint boundary the ring's packed-u16
+			// stores address.
+			L.stride[p] = (pw * eyes + 1) & ~1u;
+			L.plane_w[p] = pw;
+			L.plane_h[p] = ph;
+			if (p < L.planes)
+				o += L.stride[p] * ph;
+		}
+		L.slot_u16 = o;
+		L.cols_per_eye = cols / eyes;
+		L.rows = rows;
+		L.cols = cols;
+		return true;
+	}
+
+	bool base_patch_tiles(uint32_t eye,
+	                      uint32_t first_tile,
+	                      uint32_t count,
+	                      VkBuffer src,
+	                      VkDeviceSize offset,
+	                      uint32_t src_frame,
+	                      uint32_t & applied,
+	                      uint32_t & superseded) override
+	{
+		applied = 0;
+		superseded = 0;
+		if (count == 0)
+			return true;
+		const nxvc_vke_atlas_src as{
+		        .buffer = src,
+		        .offset = offset,
+		        .image = VK_NULL_HANDLE,
+		};
+		const nxvc_vke_status st = nxvc_vk_encoder_atlas_write_tiles(
+		        enc, eye, first_tile, count, &as, src_frame, &applied, &superseded);
+		if (st != NXVC_VKE_OK)
+		{
+			// Once, not once a frame: a refused run is a wiring mistake, and at
+			// 90 Hz it would bury whatever came after it.
+			if (not warned_patch)
+			{
+				warned_patch = true;
+				U_LOG_W("nxwarp: the GPU encoder refused a base-sourced atlas write "
+				        "(eye %u, tiles %u..%u): %s (%s)",
+				        unsigned(eye),
+				        unsigned(first_tile),
+				        unsigned(first_tile + count - 1),
+				        nxvc_vk_encoder_status_string(st),
+				        nxvc_vk_encoder_last_error(enc));
+			}
+			return false;
+		}
+		return true;
 	}
 
 	// The quantiser, which this backend DOES honour: nxvc_vk_encoder_set_qp

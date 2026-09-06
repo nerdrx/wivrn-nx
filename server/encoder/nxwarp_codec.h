@@ -67,6 +67,18 @@ struct nxwarp_codec_config
 	// ring. Off makes every frame all-intra, which is the safe default for a
 	// first end-to-end bring-up because it needs no client reference state.
 	bool inter = false;
+
+	// ATLAS (nxvc tool bit 31). The reference stops being the previous decoded
+	// picture and becomes a per-tile atlas: for each tile position, the pixels
+	// of the most recent frame that CODED it, warped from that frame's pose to
+	// this one. Requires `inter`.
+	//
+	// It is a NEGOTIATED tool -- a decoder that does not offer bit 31 cannot
+	// read the stream at all -- so this must never be set against a client that
+	// did not advertise it. It is also what a base-sourced atlas write needs:
+	// with no atlas there is nothing to write into, and
+	// nxvc_vk_encoder_atlas_write_tiles() refuses the call.
+	bool atlas = false;
 	// How a paired stream's two eyes reach E0. "layers" (the default) points the
 	// encoder at the two ARRAY LAYERS the compositor already keeps them in,
 	// which is what NXVC_VKE_IMAGE_EYE_LAYERS is for; "blit" copies them into
@@ -332,6 +344,80 @@ public:
 	{
 		(void)frame_number;
 		(void)held;
+	}
+
+	// ------------------------------------------------ base-sourced atlas writes
+	//
+	// The hybrid base layer's half of the encoder seam. NXWARP-HYBRID.md 12.3
+	// asked the encoder agent three questions about the shape of this call; the
+	// answers came back as nxvc_vk_encoder_atlas_write_tiles(), and they are
+	// what this seam is shaped like:
+	//
+	//   * DEVICE memory, not host. FFmpeg's picture arrives in host memory, so
+	//     the caller stages it -- see nxwarp_base_patch.h, which is where the
+	//     u8-to-u16 conversion and the atlas layout live.
+	//   * a CONTIGUOUS RUN of tiles, not a list. A caller with a partial or
+	//     foveated refresh batches several runs; the writes coalesce to row
+	//     strips either way, so a run per tile row is the natural form.
+	//   * the encoder keeps `base_sourced` itself, in the tile's own entry, so
+	//     the caller does not shadow it and the two cannot drift.
+	//
+	// A write whose `src_frame` does not ADVANCE a position has been overtaken
+	// and is dropped rather than applied -- the ordinary case when a base
+	// picture arrives through a decoder with its own latency while coded tiles
+	// come down the usual path. That is a success, not an error, which is why
+	// `applied` and `superseded` are out-parameters and not deducible from the
+	// return: a caller that needs to know its patch LANDED must read them.
+	// They always sum to `count` on success.
+	virtual bool supports_base_patch() const
+	{
+		return false;
+	}
+
+	// The shape of one reference-ring slot, which is the shape the staging
+	// buffer must already be in. nxvc has no public query for this -- see the
+	// note in nxwarp_base_patch.h -- so the backend that knows the layout
+	// states it here rather than every caller reproducing it.
+	struct atlas_slot_layout
+	{
+		uint32_t off[4]{};     // plane offset, u16 elements into the slot
+		uint32_t stride[4]{};  // plane row stride, u16 elements
+		uint32_t plane_w[4]{}; // PER-EYE plane width, samples
+		uint32_t plane_h[4]{};
+		uint32_t planes = 0;
+		uint32_t slot_u16 = 0; // u16 elements one slot occupies
+		uint32_t cols_per_eye = 0, rows = 0, cols = 0;
+	};
+	virtual bool atlas_layout(atlas_slot_layout &) const
+	{
+		return false;
+	}
+
+	// Fill `count` tile positions of `eye`, from `first_tile` in that eye's own
+	// row-major order, from a slot-shaped buffer on the codec's own device.
+	// `offset` is where the slot-shaped image begins in `src`.
+	//
+	// Returns false only on a real refusal (a non-atlas stream, a run that
+	// leaves the eye, a null buffer). A fully superseded run returns true with
+	// `applied == 0`.
+	virtual bool base_patch_tiles(uint32_t eye,
+	                              uint32_t first_tile,
+	                              uint32_t count,
+	                              VkBuffer src,
+	                              VkDeviceSize offset,
+	                              uint32_t src_frame,
+	                              uint32_t & applied,
+	                              uint32_t & superseded)
+	{
+		(void)eye;
+		(void)first_tile;
+		(void)count;
+		(void)src;
+		(void)offset;
+		(void)src_frame;
+		applied = 0;
+		superseded = 0;
+		return false;
 	}
 
 	// Human readable identification of the backend, logged once at stream start.

@@ -158,6 +158,7 @@
 
 #include "driver/bitrate_controller.h"
 #include "encoder/encoder_settings.h"
+#include "encoder/nxwarp_base_patch.h"
 #include "encoder/video_encoder_nxwarp.h"
 #include "utils/wivrn_vk_bundle.h"
 
@@ -1410,6 +1411,8 @@ int main(int argc, char ** argv)
 	// Inter prediction on the codec backend, and its rolling refresh.  Off by
 	// default so every existing invocation of this harness keeps producing the
 	// all-intra stream its assertions were written against.
+	bool base_patch = false;
+	bool atlas_tool = false;
 	std::string inter = "false";
 	uint32_t intra_period = 180;
 	// "default" (STATIC when inter is on), "none", or "static".
@@ -1562,6 +1565,10 @@ int main(int argc, char ** argv)
 			nxv_dec = next();
 		else if (a == "--backend")
 			backend = next();
+		else if (a == "--base-patch")
+			base_patch = true;
+		else if (a == "--atlas")
+			atlas_tool = (next() == "on");
 		else if (a == "--inter")
 		{
 			const std::string v = next();
@@ -1715,6 +1722,7 @@ int main(int argc, char ** argv)
 	settings.options["qp"] = std::to_string(qp);
 	settings.options["backend"] = backend;
 	settings.options["inter"] = inter;
+	settings.options["atlas"] = atlas_tool ? "true" : "false";
 	settings.options["intra-period"] = std::to_string(intra_period);
 	settings.options["coded-vectors"] = coded_vectors;
 	// "layers" (the default) reads the eye pair straight out of two array layers;
@@ -1729,6 +1737,14 @@ int main(int argc, char ** argv)
 	// harness unchanged. It is spelled ~0 rather than read from nxvc because this file,
 	// like the rest of the server encoder layer, carries no nxvc type -- see the header
 	// comment of nxwarp_codec.h. A specific mask goes in as a number.
+	// ATLAS is negotiated, and this harness's simulated headset advertises
+	// nothing by default, so --atlas on its own would be refused by the
+	// encoder. "all" rather than just bit 31: an atlas stream still carries
+	// every other tool the encoder would have used anyway. An EXPLICIT
+	// --client-tools is left alone, so "the headset does not offer it" stays
+	// reachable and testable.
+	if (atlas_tool and client_tools == "none")
+		client_tools = "all";
 	if (client_tools == "all")
 		settings.nxvc_tools = ~0ull;
 	else if (client_tools == "none")
@@ -3273,6 +3289,145 @@ int main(int argc, char ** argv)
 			            p.total_ms / double(p.frames), p.max_ms,
 			            (unsigned long long)p.frames,
 			            (unsigned long long)(p.bytes / p.frames));
+	}
+
+	// --- base-sourced atlas writes ------------------------------------------
+	//
+	// The hybrid base layer's patch call, against the REAL encoder, on a codec
+	// of its OWN rather than the one the run above streamed through.
+	//
+	// It has to be its own, and that is a finding rather than a convenience:
+	// ATLAS is nxvc tool bit 31, and the NX Warp decoder this harness links --
+	// the shipping client one -- REFUSES the stream header of an atlas stream
+	// outright ("unsupported version or tool"). So an atlas stream cannot be
+	// carried through the rest of this harness today; turning the tool on for
+	// the main run replaces every decode-side check with a cascade of failures
+	// that say nothing about the patch. A second encoder costs one create() and
+	// keeps both questions answerable.
+	//
+	// What this proves: that the staging produces a buffer nxvc accepts, that a
+	// full-frame refresh applies every tile of both eyes, that the ordering rule
+	// of SYNTAX 13.12.9 DROPS a write which does not advance a position instead
+	// of failing it, and that a run leaving the eye is refused rather than
+	// clamped.
+	//
+	// What it does NOT prove, and the limit is worth stating exactly: that the
+	// patched SAMPLES are right. That needs the client's atlas patched from the
+	// same base picture and the two compared, which is the other half of the
+	// wiring and does not exist -- neither does the route that would bring an
+	// encoded base access unit from stream 1 to stream 0, nor any HEVC decode on
+	// the server at all. A layout error would pass every check below and produce
+	// a wrong picture some frames later, which is exactly why nxvc publishing a
+	// ring-slot layout query would be worth more than this test.
+	if (base_patch)
+	{
+		std::printf("\n");
+		if (backend != "vk")
+		{
+			check(false, "--base-patch needs --backend vk");
+		}
+		else if (source_frames.empty())
+		{
+			check(false, "there is a composed picture to patch from");
+		}
+		else
+		{
+			try
+			{
+				wivrn::nxwarp_codec_config bc{};
+				bc.width = width;
+				bc.height = height;
+				bc.eyes = eyes;
+				bc.base_qp = qp;
+				bc.inter = true;
+				bc.atlas = true;
+				auto bcodec = wivrn::nxwarp_codec::make_vulkan(
+				        bc, *vk.instance, *vk.physical_device, *vk.device,
+				        *vk.queue.queue, vk.queue.family_index);
+
+				wivrn::base_patcher patcher(*bcodec, *vk.physical_device,
+				                            *vk.device, eyes);
+				const auto & L = patcher.layout();
+				const uint32_t pair_w = width * eyes;
+
+				// The harness's own composed pair, read as a base picture:
+				// yuv420p at the PAIR geometry, which is the geometry and the
+				// sample domain a decoded base access unit would hand over.
+				const auto & pic = source_frames.front();
+				const size_t y_size = size_t(pair_w) * height;
+				const size_t c_size = y_size / 4;
+				wivrn::base_picture bp{
+				        .y = pic.data(),
+				        .cb = pic.data() + y_size,
+				        .cr = pic.data() + y_size + c_size,
+				        .y_stride = pair_w,
+				        .c_stride = pair_w / 2,
+				        .width = pair_w,
+				        .height = height,
+				};
+				std::printf("base patch: atlas slot %u u16, planes at %u/%u/%u, "
+				            "strides %u/%u/%u, grid %ux%u per eye\n",
+				            L.slot_u16, L.off[0], L.off[1], L.off[2],
+				            L.stride[0], L.stride[1], L.stride[2],
+				            L.cols_per_eye, L.rows);
+
+				check(bcodec->supports_base_patch(),
+				      "an atlas stream offers base-sourced writes");
+				check(patcher.stage(bp),
+				      "a decoded base picture stages into the atlas layout");
+
+				const uint32_t want = L.cols_per_eye * L.rows * eyes;
+
+				// A fresh atlas: nothing has coded these positions, so a patch
+				// at any src_frame advances them and every tile lands.
+				uint32_t applied = 0, superseded = 0;
+				const bool ok = patcher.patch_all(10, applied, superseded);
+				std::printf("base patch: src_frame 10 on a fresh atlas -- "
+				            "%u applied, %u superseded, of %u tiles\n",
+				            applied, superseded, want);
+				check(ok, "the encoder accepted every base-sourced run");
+				check(applied + superseded == want,
+				      "every tile of a full-frame refresh is accounted for "
+				      "(applied + superseded == tiles)");
+				check(applied == want,
+				      "a full-frame base refresh applies every tile");
+
+				// 13.12.9's ordering rule, which is the half a caller is most
+				// likely to get wrong: a write whose src_frame does not ADVANCE
+				// the position has been overtaken and is DROPPED, and the call
+				// still succeeds. The same src_frame, not an older one -- "does
+				// not advance" is the rule, not "goes backwards".
+				uint32_t a2 = 0, s2 = 0;
+				const bool ok2 = patcher.patch_all(10, a2, s2);
+				std::printf("base patch: src_frame 10 again -- "
+				            "%u applied, %u superseded\n", a2, s2);
+				check(ok2, "a fully superseded refresh is a success, not an error");
+				check(s2 == want and a2 == 0,
+				      "a patch that does not advance the position is dropped, "
+				      "not applied");
+
+				// And one that does advance lands again, so the supersede above
+				// was the ordering rule and not a wedged atlas.
+				uint32_t a3 = 0, s3 = 0;
+				patcher.patch_all(11, a3, s3);
+				std::printf("base patch: src_frame 11 -- %u applied, %u superseded\n",
+				            a3, s3);
+				check(a3 == want,
+				      "a later src_frame patches the same positions again");
+
+				// The refusals are part of the contract: a run that leaves the
+				// eye is ERR_ARG, not a silent clamp. Without this, every check
+				// above would pass just as well against a stub returning OK.
+				uint32_t a4 = 0, s4 = 0;
+				check(not patcher.patch_run(0, L.cols_per_eye * L.rows, 1, 12, a4, s4),
+				      "a run that leaves the eye is refused, not clamped");
+			}
+			catch (const std::exception & e)
+			{
+				std::printf("base patch: %s\n", e.what());
+				check(false, "the base patcher initialises");
+			}
+		}
 	}
 
 	std::printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures,

@@ -578,6 +578,16 @@ public:
 	video_encoder_nxwarp(wivrn::vk_bundle & vk, const encoder_settings & settings, uint8_t stream_idx);
 	~video_encoder_nxwarp() override;
 
+	// The codec backend, for a caller that has to talk to it directly rather
+	// than through a frame. Today that is the hybrid base layer: a base-sourced
+	// atlas write is not part of encoding a frame -- it is a statement about
+	// tiles the NEXT frame's mode decision should treat as already covered --
+	// so it does not belong on any of the methods above. Never null.
+	nxwarp_codec & backend()
+	{
+		return *codec;
+	}
+
 	void present_image(vk::Image y_cbcr,
 	                   vk::SemaphoreSubmitInfo info,
 	                   uint8_t slot,

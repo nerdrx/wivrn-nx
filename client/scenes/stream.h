@@ -387,6 +387,23 @@ private:
 		float nxwarp_late = 0;
 		float nxwarp_holes = 0;
 		float nxwarp_ms = 0;
+		// --- the rest of the NX Warp block ---------------------------------------
+		// Rates, like the four above.
+		float nxwarp_withheld = 0;
+		// Straight from the decoder's last two-second window, taken as they are: the
+		// GPU decode and its two halves (pass B is the one that scales with the pixel
+		// count), the frame size, and the interval frames are arriving at.
+		float nxwarp_gpu_ms = 0;
+		float nxwarp_pass_a_ms = 0;
+		float nxwarp_pass_b_ms = 0;
+		float nxwarp_bytes = 0;
+		float nxwarp_arrival_ms = 0;
+		// Fixed for the stream: how many arriving frames one decode takes, the size
+		// being encoded, and which entropy coder the server settled on.
+		uint32_t nxwarp_stride = 1;
+		uint32_t nxwarp_width = 0;
+		uint32_t nxwarp_height = 0;
+		bool nxwarp_entropy_lite = false;
 	};
 	fps_readout fps;
 	// One snapshot of every counter the readout differences, with the time it was taken.
@@ -396,6 +413,7 @@ private:
 		uint64_t displayed = 0;
 		std::array<uint64_t, view_count> decoded{};
 		uint64_t nxwarp_closed = 0, nxwarp_decoded = 0, nxwarp_late = 0, nxwarp_holes = 0;
+		uint64_t nxwarp_withheld = 0;
 	};
 	// Snapshots taken every fps_sample_period; the rate is the difference between the
 	// newest and the one fps_window old, which is what makes the average roll rather
@@ -407,8 +425,20 @@ private:
 	XrTime fps_last_sample = 0;
 	// Fold one window into `fps`. Called from accumulate_metrics, render thread.
 	void accumulate_fps(XrTime now);
-	// The two short lines that go under the latency figure. Empty strings are not drawn.
-	std::array<std::string, 2> fps_lines() const;
+	// The short lines that go under the latency figure. Empty strings are not drawn.
+	//
+	// Built once per sample window by accumulate_fps and cached here, NOT formatted per
+	// frame: both call sites draw them every frame, and the numbers in them only move when
+	// the decoder's two-second profile window turns over.
+	static constexpr size_t fps_line_count = 5;
+	std::array<std::string, fps_line_count> fps_line_cache{};
+	void rebuild_fps_lines();
+	const std::array<std::string, fps_line_count> & fps_lines() const
+	{
+		return fps_line_cache;
+	}
+	// Draws the cached block. Both the full and the compact view call it.
+	void draw_fps_lines();
 	// Colour for one rate against the panel: muted at or above the refresh rate, warning
 	// below half of it, the plain text colour in between.
 	ImVec4 fps_colour(float rate) const;

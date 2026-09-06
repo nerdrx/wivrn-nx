@@ -72,6 +72,11 @@
 namespace wivrn
 {
 
+// The decode stride, which is a process-wide value living in the decoder's translation unit (both
+// eyes share one). Declared here so the in-view statistics overlay can read it without reaching
+// into the decoder, and without the stride becoming a per-decoder member it is not.
+uint32_t nxwarp_decode_stride();
+
 class nxwarp_decoder : public decoder
 {
 	static const int image_count = 5;
@@ -408,6 +413,28 @@ public:
 		float decode_wall_ms = 0;          // mean, over the last two-second window
 		float decode_gpu_ms = 0;
 		float bytes_per_frame = 0;
+		// --- added for the in-view statistics overlay -----------------------------
+		// The two halves of the GPU decode, which is where the cost actually is: pass A
+		// is the entropy decode, pass B the dequantize/transform/intra store, and pass B
+		// is the one that scales with the pixel count. Same two-second window as above.
+		float decode_pass_a_ms = 0;
+		float decode_pass_b_ms = 0;
+		// Frames decoded and deliberately not published (a resync notice arrived for a
+		// frame they predict from). Monotonic, like the other counters here.
+		uint64_t frames_withheld = 0;
+		// How many arriving frames one decode currently takes: 1 means every frame is
+		// decoded, 2 means every other one. Process-wide, shared by both eyes.
+		uint32_t decode_stride = 1;
+		// The interval between arriving frames, i.e. the rate the server is sending at
+		// as measured here. Milliseconds.
+		float arrival_ms = 0;
+		// From the stream header, so fixed for the life of the stream: the size actually
+		// being encoded and the tool mask the server settled on. Bit 30
+		// (NXVC_TOOL_ENTROPY_LITE) is what says which entropy coder is in use. Zero
+		// width means no header has arrived yet.
+		uint32_t encoded_width = 0;
+		uint32_t encoded_height = 0;
+		uint64_t stream_tools = 0;
 	};
 
 	live_stats stats() const
@@ -421,6 +448,14 @@ public:
 		        .decode_wall_ms = prof_wall_ms.load(std::memory_order_relaxed),
 		        .decode_gpu_ms = prof_gpu_ms.load(std::memory_order_relaxed),
 		        .bytes_per_frame = prof_bytes.load(std::memory_order_relaxed),
+		        .decode_pass_a_ms = prof_pass_a_ms.load(std::memory_order_relaxed),
+		        .decode_pass_b_ms = prof_pass_b_ms.load(std::memory_order_relaxed),
+		        .frames_withheld = frames_withheld.load(std::memory_order_relaxed),
+		        .decode_stride = nxwarp_decode_stride(),
+		        .arrival_ms = arrival_period_ms.load(std::memory_order_relaxed),
+		        .encoded_width = hdr_width.load(std::memory_order_relaxed),
+		        .encoded_height = hdr_height.load(std::memory_order_relaxed),
+		        .stream_tools = hdr_tools.load(std::memory_order_relaxed),
 		};
 	}
 
@@ -573,6 +608,11 @@ private:
 	std::atomic<uint64_t> net_frames = 0;
 	// Last completed two-second profile window, republished for stats() below.
 	std::atomic<float> prof_wall_ms = 0, prof_gpu_ms = 0, prof_bytes = 0;
+	// The pass split of the same window, for live_stats above.
+	std::atomic<float> prof_pass_a_ms = 0, prof_pass_b_ms = 0;
+	// What the stream header said, published once for live_stats above.
+	std::atomic<uint32_t> hdr_width = 0, hdr_height = 0;
+	std::atomic<uint64_t> hdr_tools = 0;
 	bool warned_view_info = false;
 };
 

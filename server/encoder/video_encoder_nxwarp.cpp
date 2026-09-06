@@ -1472,7 +1472,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		// src_layer) exactly as before.
 		bitstream = codec_reads_image
 		                    ? (stereo_eyes == 2
-		                               ? codec->encode_image_pair(in[slot].image, src_layer, src_layer_right)
+		                               ? codec->encode_image_pair(in[slot].image, src_layer, src_layer_right, frame_id)
 		                               : codec->encode_image(in[slot].image, src_layer))
 		                    : codec->encode(y, extent.width, cb_plane.data(), cr_plane.data(), cw);
 	}

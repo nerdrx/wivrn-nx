@@ -50,6 +50,11 @@ private:
 
 	uint8_t stream_index;
 	const vk::Extent2D extent;
+	// How many of the two copy regions below copyBufferToImage is given: two for an NV12
+	// colour picture (a luma plane and an interleaved chroma plane), one otherwise. It
+	// follows from what the stream IS rather than where it sits, so it is settled once
+	// here instead of being re-derived from the stream index on every frame.
+	const uint32_t plane_count;
 
 	std::array<image, image_count> image_pool;
 

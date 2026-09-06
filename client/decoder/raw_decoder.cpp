@@ -67,6 +67,35 @@ vk::raii::Sampler make_sampler(
 		info.unlink<vk::SamplerYcbcrConversionInfo>();
 	return vk::raii::Sampler(device, info.get());
 }
+
+// Whether a stream carries a single monochrome channel rather than a colour picture.
+// Only the passthrough alpha plane does, and it is asked by ROLE rather than by index
+// (it used to be "stream 2 is the alpha plane") because a stream's position no longer
+// says what it is -- see wivrn::stream_role.
+bool is_monochrome(const wivrn::to_headset::video_stream_description & description, uint8_t stream_index)
+{
+	return description.role_of(stream_index) == wivrn::stream_role::alpha;
+}
+
+// How many of the two copy regions the buffer-to-image copy is given.
+uint32_t plane_count_for(const wivrn::to_headset::video_stream_description & description, uint8_t stream_index)
+{
+	switch (description.role_of(stream_index))
+	{
+		case wivrn::stream_role::alpha:
+			// One R8 channel, one plane.
+			return 1;
+		case wivrn::stream_role::quad:
+			// The promoted quad layer is NV12 like a view, but only its luma plane
+			// has ever been copied here. Left exactly as it was: this is a rewrite
+			// of how a stream's role is discovered, not a fix to the raw path.
+			return 1;
+		default:
+			// A view, and the hybrid base layer, which is a colour picture of the
+			// eye pair and so is copied the same way a view is.
+			return 2;
+	}
+}
 } // namespace
 
 namespace wivrn
@@ -80,12 +109,12 @@ raw_decoder::raw_decoder(
         std::weak_ptr<scenes::stream> scene,
         shard_accumulator * accumulator) :
         device(device),
-        ycbcr_conversion(stream_index == 2 ? nullptr : vk::raii::SamplerYcbcrConversion(device, {
-                                                                                                        .format = vk::Format::eG8B8R82Plane420Unorm,
-                                                                                                        .ycbcrModel = vk::SamplerYcbcrModelConversion::eYcbcr709,
-                                                                                                        .ycbcrRange = vk::SamplerYcbcrRange::eItuFull,
-                                                                                                        .chromaFilter = vk::Filter::eNearest,
-                                                                                                })),
+        ycbcr_conversion(is_monochrome(description, stream_index) ? nullptr : vk::raii::SamplerYcbcrConversion(device, {
+                                                                                                                               .format = vk::Format::eG8B8R82Plane420Unorm,
+                                                                                                                               .ycbcrModel = vk::SamplerYcbcrModelConversion::eYcbcr709,
+                                                                                                                               .ycbcrRange = vk::SamplerYcbcrRange::eItuFull,
+                                                                                                                               .chromaFilter = vk::Filter::eNearest,
+                                                                                                                       })),
         sampler_(make_sampler(device, *ycbcr_conversion)),
         command_pool(device, vk::CommandPoolCreateInfo{
                                      .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
@@ -102,20 +131,22 @@ raw_decoder::raw_decoder(
                 .width = description.stream_size(stream_index).first,
                 .height = description.stream_size(stream_index).second,
         },
+        plane_count(plane_count_for(description, stream_index)),
         weak_scene(scene),
         accumulator(accumulator)
 {
 	vk::DeviceSize buffer_size = extent.width * extent.height;
 	vk::Format format{};
-	switch (stream_index)
+	if (is_monochrome(description, stream_index))
 	{
-		case 2: // alpha (monochrome)
-			format = vk::Format::eR8Unorm;
-			break;
-		default: // colour: left, right and the promoted quad layer
-			buffer_size += buffer_size / 2;
-			format = vk::Format::eG8B8R82Plane420Unorm;
-			break;
+		// alpha
+		format = vk::Format::eR8Unorm;
+	}
+	else
+	{
+		// colour: the views, the promoted quad layer and the base layer
+		buffer_size += buffer_size / 2;
+		format = vk::Format::eG8B8R82Plane420Unorm;
 	}
 	for (auto & i: input)
 	{
@@ -280,7 +311,7 @@ void raw_decoder::frame_completed(
 	        input[0],
 	        item->image,
 	        item->current_layout,
-	        stream_index < 2 ? 2 : 1,
+	        plane_count,
 	        regions.data());
 
 	vk::ImageMemoryBarrier barrier{

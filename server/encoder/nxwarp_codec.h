@@ -217,10 +217,17 @@ public:
 	// The split exists because the two sides disagree about where an eye lives:
 	// WiVRn keeps them in layers, nxvc's image entry point wants one side-by-side
 	// picture and uses `array_layer` to pick a layer of an array image, not an
-	// eye. The backend brings them together; see nxwarp_codec_vk.cpp.
+	// eye. `wivrn::pair_compose` brings them together.
+	//
+	// `frame_index` identifies the compositor frame the layers belong to. It is
+	// not used by the codec: it is what lets the shared compose be paid ONCE for
+	// a frame that has two consumers -- the nxvc encoder here and the hybrid
+	// base layer's HEVC encoder, which wants the identical side-by-side picture.
+	// Callers must pass the same index both encoders see for the same frame.
 	virtual std::span<const uint8_t> encode_image_pair(VkImage image,
 	                                                   uint32_t layer_left,
-	                                                   uint32_t)
+	                                                   uint32_t,
+	                                                   uint64_t frame_index)
 	{
 		return encode_image(image, layer_left);
 	}

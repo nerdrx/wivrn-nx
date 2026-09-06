@@ -246,8 +246,12 @@ void scenes::stream::accumulate_fps(XrTime now)
 	c.displayed = displayed_frames;
 	c.iterations = render_iterations;
 	c.period_ns = render_period_ns;
+	// Per eye, and only from a stream that carries one: decoded_frames counts every
+	// stream, so a base layer stream in a view's slot would otherwise be read out as that
+	// eye's frame rate. Its slot stays at zero, which is what it already does on a stereo
+	// session where the second stream is silent.
 	for (size_t i = 0; i < view_count; ++i)
-		c.decoded[i] = decoded_frames[i].load(std::memory_order_relaxed);
+		c.decoded[i] = is_view(i) ? decoded_frames[i].load(std::memory_order_relaxed) : 0;
 
 	bool nxwarp = false;
 #if WIVRN_USE_NXWARP
@@ -264,7 +268,11 @@ void scenes::stream::accumulate_fps(XrTime now)
 		uint64_t tools = 0;
 		for (size_t i = 0; i < view_count; ++i)
 		{
-			if (not decoders[i].decoder)
+			// Eye streams only. The base layer is hardware HEVC, so the cast below
+			// would fail on it anyway, but its bytes and decode times are not part of
+			// what this block reports (which is the NX Warp codec's own cost per eye)
+			// and summing them in would overstate both.
+			if (not is_view(i) or not decoders[i].decoder)
 				continue;
 			auto * d = dynamic_cast<wivrn::nxwarp_decoder *>(decoders[i].decoder->get_decoder().get());
 			if (not d)
@@ -1091,11 +1099,19 @@ void scenes::stream::gui_transport()
 			                true);
 			ImGui::Dummy({0, 4});
 
-			const std::string stream_names[] = {
-			        _C("video stream", "Left"),
-			        _C("video stream", "Right"),
-			        _C("video stream", "Alpha"),
-			        _C("video stream", "Quad layer"),
+			// By role, not by position: the base layer sits in the slot the eye
+			// pairing vacates, so naming these by index would list it as "Right".
+			// The two views keep their left/right names, which is the one thing a
+			// role cannot say -- for those the index IS the view index.
+			const auto stream_name = [this](size_t i) -> std::string {
+				if (is_alpha(i))
+					return _C("video stream", "Alpha");
+				if (is_base(i))
+					return _C("video stream", "Base layer");
+				if (i == quad_stream_idx)
+					return _C("video stream", "Quad layer");
+				return i == 0 ? _C("video stream", "Left")
+				              : _C("video stream", "Right");
 			};
 
 			// decoder_mutex is held, shared, by render() around the whole frame,
@@ -1117,7 +1133,7 @@ void scenes::stream::gui_transport()
 				// A stream the server had to hand to x264 is the one thing on this
 				// page a user can act on, so it is the one thing coloured.
 				const bool software = status and (status->software_encoders & (1u << i));
-				stat(stream_names[i],
+				stat(stream_name(i),
 				     software ? fmt::format("{} · {}", codec, _("software")) : std::string(codec),
 				     software ? t.warning : t.text);
 			}

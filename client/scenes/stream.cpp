@@ -2628,7 +2628,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		             jit.slept, g_rp.iters,
 		             double(jit.budget_ns()) / 1e6, double(jit.cost_ns()) / 1e6,
 		             double(jit.margin_ns) / 1e6, double(jit.sleep_cap_ns) / 1e6);
-		spdlog::info("render: displayed pose age {:.1f} ms mean (worst {:.1f}) over {} frames | submit lead {:.1f} ms mean (worst {:.1f}) | misses: {} overrun {} late {} skipped refresh",
+		spdlog::info("render: source display-time offset {:.1f} ms mean (worst {:.1f}) over {} frames | submit lead {:.1f} ms mean (worst {:.1f}) | misses: {} overrun {} late {} skipped refresh",
 		             g_rp.pose_age_n ? g_rp.pose_age_ms / double(g_rp.pose_age_n) : 0.0,
 		             g_rp.pose_age_max_ms, g_rp.pose_age_n,
 		             jit.lead_n ? double(jit.lead_total_ns) / 1e6 / double(jit.lead_n) : 0.0,

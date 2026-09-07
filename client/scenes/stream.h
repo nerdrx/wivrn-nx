@@ -220,7 +220,7 @@ private:
 	struct latest_complete
 	{
 		uint64_t frame_id = 0;
-		// The display time the server stamped on it, which is what the pose age and
+		// The display time the server stamped on it, which is what the source display-time offset and
 		// the just-in-time schedule are both measured against.
 		XrTime display_time = 0;
 		// When this client finished decoding it, on the same clock as the render
@@ -554,7 +554,7 @@ private:
 	// distinction the shown/decoded pair alone cannot make.
 	uint64_t render_iterations = 0;
 	uint64_t render_period_ns = 0;
-	// Displayed pose age, summed over the iterations that had a frame to show, and
+	// Source display-time offset, summed over the iterations that had a frame to show, and
 	// the count of those. Same arithmetic as the period above: the mean over a window
 	// is the difference of the sums over the difference of the counts.
 	uint64_t pose_age_ns = 0;

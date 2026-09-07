@@ -507,6 +507,8 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 		codec_cfg.frame_held = false;
 	if (const char * v = std::getenv("NXWARP_PACE_DIAGNOSTICS"); v and v[0] == '1')
 		pace_diag_enabled = true;
+	if (const char * v = std::getenv("NXWARP_PACE_DISPLAY_TIME"); v and v[0] == '1')
+		pace_display_time = true;
 
 	// "backend": "ref" (the default) is the CPU reference codec; "vk" is the
 	// Vulkan compute encoder, running on this server's own VkDevice. The
@@ -1411,6 +1413,15 @@ bool wivrn::video_encoder_nxwarp::pace_admit(std::chrono::steady_clock::time_poi
 {
 	if (pace_mode == pace_mode_t::off)
 		return true;
+	const bool display_clock = pace_display_time and pace_mode == pace_mode_t::fixed;
+	if (display_clock and (display_time <= 0 or
+	                       (pace_last_display > 0 and display_time <= pace_last_display)))
+	{
+		// A zero or regressing runtime timestamp cannot pace safely. Start a new
+		// epoch and admit this frame; the next positive step can use display time.
+		pace_have_last = false;
+		pace_last_display = 0;
+	}
 	auto observe = [&](bool admitted) {
 		if (not pace_diag_enabled)
 			return;
@@ -1446,6 +1457,7 @@ bool wivrn::video_encoder_nxwarp::pace_admit(std::chrono::steady_clock::time_poi
 	{
 		pace_have_last = true;
 		pace_last_sent = now;
+		pace_last_display = display_clock and display_time > 0 ? display_time : 0;
 		observe(true);
 		return true;
 	}
@@ -1462,12 +1474,16 @@ bool wivrn::video_encoder_nxwarp::pace_admit(std::chrono::steady_clock::time_poi
 		fps = rc_fps;
 	const double tolerance = fps > 0 ? 0.5 / double(fps) : 0.0;
 
-	if (std::chrono::duration<double>(now - pace_last_sent).count() < pace_interval - tolerance)
+	const double elapsed = display_clock and pace_last_display > 0 and display_time > pace_last_display
+	                               ? double(display_time - pace_last_display) / 1'000'000'000.0
+	                               : std::chrono::duration<double>(now - pace_last_sent).count();
+	if (elapsed < pace_interval - tolerance)
 	{
 		observe(false);
 		return false;
 	}
 	pace_last_sent = now;
+	pace_last_display = display_clock and display_time > 0 ? display_time : 0;
 	observe(true);
 	return true;
 }
@@ -1687,6 +1703,7 @@ void wivrn::video_encoder_nxwarp::reset_stream()
 	if (pace_mode == pace_mode_t::automatic)
 		pace_interval = pace_min_interval;
 	pace_have_last = false;
+	pace_last_display = 0;
 	pace_diag_have_previous = false;
 	pace_stride_seen = stride_not_held.load(std::memory_order_relaxed);
 	// Send it now rather than at the next period boundary: the new client decodes

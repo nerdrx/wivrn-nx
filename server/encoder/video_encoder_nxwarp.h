@@ -392,6 +392,8 @@ class video_encoder_nxwarp : public video_encoder
 	static constexpr double pace_max_interval = 1.0 / 15.0;
 	std::chrono::steady_clock::time_point pace_last_sent{};
 	bool pace_have_last = false;
+	bool pace_display_time = false;
+	int64_t pace_last_display = 0;
 	// Not-held reports whose reason was the decode stride, and the count the pace
 	// controller has already acted on. Only the stride: it is the one reason that
 	// means "you are sending faster than I can decode". A hole is the link's fault, a

@@ -1193,6 +1193,7 @@ struct render_probe
 	// iterations by that whole parked span and announce a render loop running at 0.1/s.
 	std::chrono::steady_clock::time_point last_call{};
 	uint64_t iters = 0, gated_out = 0, no_render = 0, cache_hits = 0, new_source = 0, submitted = 0;
+	uint64_t selected_forward = 0, selected_backward = 0, selected_repeat = 0, selected_max_gap = 0;
 	double period_ms = 0, fence_ms = 0, query_ms = 0, submit_ms = 0, blit_ms = 0;
 	double app_gpu_ms = 0;
 	// Just-in-time display, per report window. pose_age is the client's own
@@ -2485,6 +2486,20 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		if (current_blit_handles[0])
 		{
 			const uint64_t id = current_blit_handles[0]->feedback.frame_index;
+			if (last_selected_source_frame)
+			{
+				if (id > *last_selected_source_frame)
+				{
+					++g_rp.selected_forward;
+					g_rp.selected_max_gap = std::max(g_rp.selected_max_gap,
+					                                id - *last_selected_source_frame);
+				}
+				else if (id < *last_selected_source_frame)
+					++g_rp.selected_backward;
+				else
+					++g_rp.selected_repeat;
+			}
+			last_selected_source_frame = id;
 			if (not last_submitted_source_frame or id > *last_submitted_source_frame)
 			{
 				++g_rp.new_source;
@@ -2583,6 +2598,9 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		             g_rp.iters, secs, n / secs, g_rp.submitted, g_rp.new_source,
 		             g_rp.iters - g_rp.gated_out - g_rp.no_render, g_rp.no_render,
 		             g_rp.period_ms / n);
+		spdlog::info("render: selected source transitions forward {} backward {} repeat {}, greatest forward gap {}",
+		             g_rp.selected_forward, g_rp.selected_backward, g_rp.selected_repeat,
+		             g_rp.selected_max_gap);
 		spdlog::info("render: this app's own GPU pass {:.1f} ms per iteration", g_rp.app_gpu_ms / n);
 		spdlog::info("render: defoveate {}x{} per eye x2 = {:.2f} Mpx/frame at scale {:.2f} atlas-prototype {}; {} re-presented from the cache (reduce_gpu_load {})",
 		             g_rp.out_w, g_rp.out_h,
@@ -2680,6 +2698,7 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 		std::unique_lock frame_lock(frames_mutex);
 		dejitter.reset();
 		last_submitted_source_frame.reset();
+		last_selected_source_frame.reset();
 	}
 
 	for (const auto & [stream_index, item]: utils::enumerate(decoders))

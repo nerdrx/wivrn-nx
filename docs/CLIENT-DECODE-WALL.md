@@ -260,19 +260,38 @@ and asymmetrically: up hard when it is over budget (+2 when the overrun is more 
 half the budget again), down one step at a time and only with real headroom, so a
 decode that merely grazes the budget does not oscillate.
 
-**The budget is not a share of the live paced interval**, and this is the part worth
-reading twice. The pacer targets `1.1 x decode + 1 ms`, so decode is about 0.9 of the
-interval it produces *by construction*. Budgeting against that interval would find
-decode over budget at every quality, raise the quantiser, watch the interval shrink with
-it, and find it over budget again — a ratchet to `max-qp` that says nothing about the
-headset. The reference has to be a period the controller cannot move, so it is the
-slowest frame rate worth holding: half the stream's configured rate, 45 fps at 90 Hz.
-Above that the pacer is free and this controller is silent; below it, quality gives way
-instead.
+**The budget is a share of the rate the pacer is choosing** — and that was not always
+true, so the older argument is worth keeping in view. The pacer targets
+`1.1 x decode + 1 ms`, so decode is about 0.9 of the interval it produces *by
+construction*; budgeting naively against that interval finds decode over budget at every
+quality, raises the quantiser, watches the interval shrink with it, and finds it over
+budget again — a ratchet to `max-qp` that says nothing about the headset. The first fix
+was to pick a reference the controller could not move: half the configured rate, 45 fps
+at 90 Hz.
 
-The dashboard exposes the budget as **Decode budget**, a percentage of that defended
-period (default 80%, so 17.8 ms at 90 Hz). 0 turns the controller off, for a headset
-whose reported decode cannot be trusted.
+That reference was wrong on the device in the ordinary case. A Pico 4 at rest decodes in
+about 18.0 ms; 0.8 of a 45 fps period is 17.8 ms; so the controller bound continuously,
+drove the quantiser from 22 to its `max-qp` of 40 and held it there — against a decode
+time that did not move, because at rest the decode is dominated by the Pass B *skip*
+path (9.1 of 13.6 ms over 286 skipped tiles) and a copy does not read the quantiser. A
+wall nobody chose was spending the entire quality band on a term it could not reach.
+
+So the reference is now the paced rate, and what keeps it from ratcheting is not the
+reference standing still but **the controller noticing when it is pushing on nothing**:
+
+* **Two raises that do not land, and it stops.** If two consecutive floor raises each
+  move the headset's reported decode by less than 3 %, the floor is held and then
+  given back one step per report window until it is gone. A decode that comes back
+  under budget clears the hold — it is a statement about those steps, not the stream.
+* **It may not bind on a frame that coded almost nothing.** Below 25 % coded tiles the
+  frame's cost is copies and warps, not bits, so bytes are not the term and the
+  quantiser is not the lever. Checked before the raise.
+
+An operator who wants the old fixed wall names the rate: `decode-budget-fps`.
+
+The dashboard exposes the budget as **Decode budget**, a percentage of the defended
+period (default 80%). 0 turns the controller off, for a headset whose reported decode
+cannot be trusted.
 
 ### What it does, measured
 

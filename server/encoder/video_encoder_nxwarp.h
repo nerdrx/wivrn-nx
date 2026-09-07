@@ -641,12 +641,38 @@ private:
 	// half the stream's configured rate, 45 fps at 90 Hz. Above that the pacer is
 	// free and this controller is silent; below it, quality gives way instead.
 	double rc_decode_budget_frac = 0.8;
-	// Frames per second the pacer should not be pushed below. Zero means "half the
-	// configured rate", resolved once the stream's fps is known.
+	// Frames per second the pacer should not be pushed below. Zero means "the rate
+	// the pacer would otherwise choose", resolved per frame from the live pace.
 	double rc_decode_budget_fps = 0;
+	// THE DEFAULT REFERENCE IS THE PACED RATE, not half the panel rate.
+	//
+	// Half of 90 Hz is 45 fps and 0.8 of that is a 17.8 ms wall, which on a Pico 4
+	// at rest is a wall the headset stands 0.2 ms the wrong side of -- so the
+	// controller bound for sixty seconds straight, drove the quantiser to max_qp,
+	// and bought nothing, because at rest the decode is the SKIP path and the skip
+	// path does not read the quantiser. A budget the operator never chose was
+	// spending the whole quality band on a term it could not move.
+	//
+	// The rate that matters is the one the frames actually leave at, which is the
+	// pacer's. Budgeting against it is what the older comment here warned against
+	// -- the pacer targets 1.1*decode + 1 ms, so decode is 0.9 of the interval by
+	// construction, and a naive budget against it finds decode over budget at every
+	// quality and ratchets to max_qp saying nothing about the headset. What makes
+	// it safe now is the responsiveness gate below: a ratchet whose steps do not
+	// move the decode time is detected in two steps and released. The reference
+	// moving is fine as long as the controller stops when it is pushing on nothing.
+	//
+	// Clamped to [15, composited] for the same reasons the pacer is: below 15 fps
+	// there is no session worth protecting, and a pace that has run away above the
+	// compositor rate must not shrink the budget below what the link carries.
+	double rc_decode_pace_fps = 0; // 1/pace_interval, or 0 while the pacer is off
 	double rc_decode_floor_fps() const
 	{
-		return rc_decode_budget_fps > 0 ? rc_decode_budget_fps : std::max(15.0, double(rc_fps) / 2.0);
+		if (rc_decode_budget_fps > 0)
+			return rc_decode_budget_fps; // the operator said, so it is not ours to move
+		if (rc_decode_pace_fps > 0)
+			return std::clamp(rc_decode_pace_fps, 15.0, std::max(15.0, double(rc_fps)));
+		return std::max(15.0, double(rc_fps) / 2.0);
 	}
 	// The decode wall this stream is aiming to stay under, in seconds.
 	double rc_decode_budget_s() const
@@ -657,6 +683,46 @@ private:
 	}
 	// The floor this controller is currently imposing. 0 when it is not binding.
 	uint32_t rc_decode_floor = 0;
+
+	// --- when this controller is pushing on nothing -------------------------
+	//
+	// Two guards, and both come from the same measured failure: a Pico 4 at rest,
+	// decode 18.0 ms against a 17.8 ms budget, QP driven to 40 and held there for
+	// sixty seconds while the decode time did not move by a tenth of a millisecond.
+	// Pass B was 13.6 ms of which 9.1 was the SKIP path over 286 skipped tiles --
+	// a copy, whose cost is the number of tiles and not the number of bits in them.
+	// The quantiser cannot buy a millisecond of it, so raising the quantiser spends
+	// quality for nothing, and "for nothing" is measurable in two ways:
+	//
+	//   1. THE FRAME ISN'T MOSTLY CODED. If fewer than a quarter of the tiles put
+	//      anything in the bitstream, the decode is dominated by terms the byte
+	//      size does not reach, so bytes are not the term and this controller has
+	//      no business binding. Checked before the raise, not after.
+	//   2. THE RAISES AREN'T LANDING. Two consecutive raises that each move the
+	//      headset's reported decode by less than 3 % are a controller pushing on
+	//      something that does not give. It holds, and then gives the quality back
+	//      one step per report window until the floor is gone.
+	//
+	// A decode that comes back under budget clears both: the hold is a statement
+	// about the steps just taken, not a permanent verdict on the stream.
+	static constexpr double rc_decode_coded_min_frac = 0.25;
+	static constexpr double rc_decode_response_frac = 0.03;
+	static constexpr uint32_t rc_decode_stall_limit = 2;
+	// Coded tiles / total tiles for the frame just encoded. 1.0 until the first
+	// frame has been walked, so an unmeasured stream behaves as it always did.
+	double rc_decode_coded_frac = 1.0;
+	// The decode time in force when the floor was last raised, and how many
+	// consecutive raises have failed to move it.
+	uint16_t rc_decode_raise_us = 0;
+	uint32_t rc_decode_stalled = 0;
+	// Set once the raises stopped landing: no more raises, and one step of the
+	// floor is given back on every report window until there is none left.
+	bool rc_decode_held = false;
+	// Raised by the report window, consumed by the release. The floor is released
+	// per WINDOW rather than per frame so the giving-back is visible in the same
+	// two-second line that shows what it bought, and so a 90 Hz stream does not
+	// unwind forty steps in half a second.
+	bool rc_decode_window_tick = false;
 
 	// Which controller last moved, or would move, the quantiser. Reported once a
 	// window: "the picture is soft" and "the picture is soft BECAUSE the headset

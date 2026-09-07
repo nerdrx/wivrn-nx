@@ -132,6 +132,11 @@ class nxwarp_decoder : public decoder
 	struct image
 	{
 		image_allocation image;
+		std::array<image_allocation, 2> atlas_planes;
+		std::array<vk::raii::ImageView, 2> atlas_views{nullptr, nullptr};
+		buffer_allocation atlas_table;
+		nxvc_vkd_atlas_images atlas_snapshot{};
+		VkDeviceSize atlas_table_size = 0;
 		vk::raii::ImageView view_full = nullptr;
 		vk::ImageLayout current_layout = vk::ImageLayout::eUndefined;
 		std::atomic_bool free = true;
@@ -141,6 +146,8 @@ class nxwarp_decoder : public decoder
 	// Set when the device refuses timeline semaphores (Adreno 650): frames are then
 	// fenced on the host and published with no semaphore.
 	bool host_sync = false;
+	// Requested only after the stream header confirms the negotiated ATLAS tool.
+	bool atlas_view_active = false;
 	// Rolling per-stream timing, reported every two seconds (decode_unit).
 	struct
 	{
@@ -199,6 +206,9 @@ class nxwarp_decoder : public decoder
 		// Frames whose measured cost was so far above the running EWMA that they were
 		// clipped rather than believed (see decode_us_report).
 		uint64_t stalls = 0;
+		// Atlas-only mode/cost counters, reported separately from ordinary decode timing.
+		uint64_t atlas_frames = 0, picture_frames = 0;
+		double atlas_tiles_assembled = 0, atlas_entries_valid = 0, atlas_dispatches = 0;
 		// Frames that reached the worker and were decoded but withheld (see showable).
 		uint64_t withheld = 0;
 		// --- the copy, measured on the DEVICE rather than on the host.

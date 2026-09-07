@@ -38,6 +38,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <format>
+#include <limits>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -145,6 +146,14 @@ wivrn::nxwarp_codec_config::coded_vectors_t nxwarp_coded_vectors_from(const std:
 	        std::format("nxwarp: \"coded-vectors\": \"{}\" is not one of "
 	                    "default, none, static",
 	                    v));
+}
+
+wivrn::nxwarp_codec_config::atlas_t nxwarp_atlas_from(const std::string & v)
+{
+	using a = wivrn::nxwarp_codec_config::atlas_t;
+	if (v == "off") return a::off;
+	if (v == "auto") return a::automatic;
+	throw std::runtime_error(std::format("nxwarp: \"atlas\": \"{}\" is not one of off, auto", v));
 }
 
 // "entropy": "auto" | "rans" | "lite".  An unknown value is an error rather than
@@ -261,6 +270,8 @@ std::string nxwarp_tools_string(uint64_t m)
 // this file is deliberately free of nxvc headers (see nxwarp_codec.h), and one
 // bit number with the tool's name beside it is clearer than a dependency.
 constexpr uint64_t kNxvcToolEntropyLite = 1ull << 30;
+constexpr uint64_t kNxvcToolAtlas = 1ull << 31;
+constexpr uint64_t kNxvcToolAtlasRebase = 1ull << 34;
 // PLANAR, nxvc SYNTAX.md 13.13.  Named here for the same reason bit 30 is.
 constexpr uint64_t kNxvcToolPlanar = 1ull << 35;
 
@@ -472,6 +483,8 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	        .intra_period = option_u32(settings.options, "intra-period", 180),
 	        .coded_vectors = nxwarp_coded_vectors_from(
 	                option_string(settings.options, "coded-vectors", "default")),
+	        .atlas = nxwarp_atlas_from(option_string(settings.options, "atlas", "off")),
+	        .atlas_picture_d = option_u32(settings.options, "atlas-picture-threshold", 0),
 	        // Resolved just below, once the headset's mask is in hand.
 	        .entropy = nxwarp_codec_config::entropy_t::rans,
 	        .effort = nxwarp_effort_from(settings.options),
@@ -479,6 +492,10 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	        .preset = option_u32(settings.options, "preset", 1),
 	        .threads = option_u32(settings.options, "threads", 0),
 	};
+	if (codec_cfg.atlas != nxwarp_codec_config::atlas_t::off and not codec_cfg.inter)
+		throw std::runtime_error("nxwarp: \"atlas\": \"auto\" needs \"inter\": true");
+	if (codec_cfg.atlas_picture_d > uint32_t(std::numeric_limits<int>::max()))
+		throw std::runtime_error("nxwarp: \"atlas-picture-threshold\" exceeds NXVC's signed range");
 	// NXWARP_FRAME_HELD=0 restores the answer this encoder gave before the headset's
 	// verdict on a frame was acted on at all: one all-intra frame per burst of not-held
 	// reports, and no confirmations. It is a kill switch rather than a tuning knob --
@@ -508,6 +525,11 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	// with no NX Warp decoder -- and must be read as no information rather than
 	// as "supports nothing", or every stream would be refused.
 	const uint64_t client_tools = settings.nxvc_tools;
+	if (codec_cfg.atlas != nxwarp_codec_config::atlas_t::off and
+	    (client_tools & (kNxvcToolAtlas | kNxvcToolAtlasRebase)) !=
+	            (kNxvcToolAtlas | kNxvcToolAtlasRebase))
+		throw std::runtime_error(
+		        "nxwarp: \"atlas\": \"auto\" needs client ATLAS and ATLAS_REBASE tools");
 	const bool client_has_lite = (client_tools & kNxvcToolEntropyLite) != 0;
 	const entropy_request entropy_req =
 	        nxwarp_entropy_from(option_string(settings.options, "entropy", "auto"));

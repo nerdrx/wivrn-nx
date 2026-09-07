@@ -59,6 +59,8 @@ class nxwarp_codec_ref final : public wivrn::nxwarp_codec
 public:
 	explicit nxwarp_codec_ref(const wivrn::nxwarp_codec_config & c)
 	{
+		if (c.atlas != wivrn::nxwarp_codec_config::atlas_t::off)
+			throw std::runtime_error("nxwarp: \"atlas\" is unsupported by the reference backend; use \"backend\": \"vk\"");
 		nxvc_config cfg;
 		nxvc_config_default(&cfg);
 		cfg.width = c.width;

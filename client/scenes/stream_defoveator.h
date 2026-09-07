@@ -78,6 +78,8 @@ private:
 	};
 	pipeline_t pipeline_rgb[view_count];
 	pipeline_t pipeline_a[view_count];
+	pipeline_t pipeline_atlas_r8_rgb[view_count];
+	pipeline_t pipeline_atlas_r8_a[view_count];
 
 	// CAS kernel the currently built pipelines were specialized for. defoveate()
 	// rebuilds them if the requested kernel differs, so switching is a rare pipeline
@@ -154,7 +156,7 @@ private:
 	void ensure_vertices(size_t num_vertices);
 	vertex * get_vertices(size_t view);
 
-	pipeline_t & ensure_pipeline(size_t view, vk::Sampler rgb, vk::Sampler a);
+	pipeline_t & ensure_pipeline(size_t view, vk::Sampler rgb, vk::Sampler a, bool atlas_r8);
 
 public:
 	struct input
@@ -173,6 +175,11 @@ public:
 		// leaves the blend weight at zero.
 		vk::ImageView prev_rgb = nullptr;
 		vk::ImageLayout layout_prev_rgb = vk::ImageLayout::eGeneral;
+		bool atlas_valid = false;
+		std::array<vk::ImageView, 3> atlas_views{};
+		std::array<vk::Extent2D, 3> atlas_extents{};
+		vk::Buffer atlas_table = nullptr;
+		vk::DeviceSize atlas_table_bytes = 0;
 	};
 
 	// Post-processing folded into the defoveation pass, all values are neutral by default

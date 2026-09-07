@@ -98,6 +98,9 @@ struct nxwarp_codec_config
 		statik = 2,
 	};
 	coded_vectors_t coded_vectors = coded_vectors_t::def;
+	enum class atlas_t { off = 0, automatic = 1 };
+	atlas_t atlas = atlas_t::off;
+	uint32_t atlas_picture_d = 0;
 	// The entropy tool the bitstream uses. `rans` is interleaved rANS, the
 	// default and the only thing every NX Warp decoder can read. `lite` is
 	// ENTROPY_LITE (stream tool bit 30), which trades bytes for the CLIENT's

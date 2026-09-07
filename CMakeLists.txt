@@ -155,6 +155,8 @@ if (WIVRN_BUILD_SERVER)
         else()
             find_package(nxvc CONFIG REQUIRED)
         endif()
+        include(NxvcAtlasFeatures)
+        wivrn_probe_nxvc_atlas_features()
     endif()
 
     if (WIVRN_USE_PIPEWIRE)

@@ -136,9 +136,10 @@ stream_defoveator::vertex * stream_defoveator::get_vertices(size_t view)
 	return reinterpret_cast<vertex *>(reinterpret_cast<uintptr_t>(buffer.map()) + view * vertices_size);
 }
 
-stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, vk::Sampler rgb, vk::Sampler a)
+stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, vk::Sampler rgb, vk::Sampler a, bool atlas_r8)
 {
-	auto & target = a ? pipeline_a[view] : pipeline_rgb[view];
+	auto & target = atlas_r8 ? (a ? pipeline_atlas_r8_a[view] : pipeline_atlas_r8_rgb[view])
+	                         : (a ? pipeline_a[view] : pipeline_rgb[view]);
 	if (*target.pipeline)
 		return target;
 
@@ -182,15 +183,15 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 	                .stageFlags = vk::ShaderStageFlagBits::eFragment,
 	                .pImmutableSamplers = &*atlas_sampler,
 	        },
-	        vk::DescriptorSetLayoutBinding{
-	                .binding = 4,
-	                .descriptorType = vk::DescriptorType::eStorageImage,
+		vk::DescriptorSetLayoutBinding{
+		                .binding = 4,
+		                .descriptorType = atlas_r8 ? vk::DescriptorType::eCombinedImageSampler : vk::DescriptorType::eStorageImage,
 	                .descriptorCount = 1,
 	                .stageFlags = vk::ShaderStageFlagBits::eFragment,
 	        },
-	        vk::DescriptorSetLayoutBinding{
-	                .binding = 5,
-	                .descriptorType = vk::DescriptorType::eUniformBuffer,
+		vk::DescriptorSetLayoutBinding{
+		                .binding = 5,
+		                .descriptorType = atlas_r8 ? vk::DescriptorType::eStorageBuffer : vk::DescriptorType::eUniformBuffer,
 	                .descriptorCount = 1,
 	                .stageFlags = vk::ShaderStageFlagBits::eFragment,
 	        },
@@ -233,7 +234,7 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 	const auto & vk_device_extensions = application::get_vk_device_extensions();
 
 	// Vertex shader
-	auto vertex_shader = load_shader(device, "reprojection.vert");
+	auto vertex_shader = load_shader(device, atlas_r8 ? "reprojection_atlas_r8.vert" : "reprojection.vert");
 
 	// Fragment shader
 	auto specialization = make_specialization_constants(
@@ -241,12 +242,12 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 	        VkBool32(application::get_hmd_traits().needs_srgb_conversion),
 	        VkBool32(cas_full_baked),
 	        VkBool32(fsr_baked),
-	        int32_t(atlas_baked),
+	        int32_t(atlas_r8 ? 1 : atlas_baked),
 	        int32_t(kAtlasTiles),
 	        int32_t(view),
 	        VkBool32(lowpoly_baked),
 	        VkBool32(lowpoly_full_baked));
-	auto fragment_shader = load_shader(device, "reprojection.frag");
+	auto fragment_shader = load_shader(device, atlas_r8 ? "reprojection_atlas_r8.frag" : "reprojection.frag");
 
 	vk::pipeline_builder pipeline_info{
 	        .flags = {},
@@ -356,21 +357,25 @@ stream_defoveator::stream_defoveator(
 	                .type = vk::DescriptorType::eCombinedImageSampler,
 	                // rgb, alpha, the motion field, the previous frame and the two
 	                // atlas planes, for both variants
-	                .descriptorCount = view_count * 12,
+	                .descriptorCount = view_count * 24,
 	        },
 	        // [atlas prototype] the per-tile table
 	        vk::DescriptorPoolSize{
 	                .type = vk::DescriptorType::eUniformBuffer,
 	                .descriptorCount = view_count * 2,
 	        },
-	        vk::DescriptorPoolSize{
-	                .type = vk::DescriptorType::eStorageImage,
-	                .descriptorCount = view_count * 2,
-	        },
+		vk::DescriptorPoolSize{
+		                .type = vk::DescriptorType::eStorageImage,
+		                .descriptorCount = view_count * 2,
+		},
+		vk::DescriptorPoolSize{
+		                .type = vk::DescriptorType::eStorageBuffer,
+		                .descriptorCount = view_count * 2,
+		},
 	};
 
 	ds_pool = device.createDescriptorPool(vk::DescriptorPoolCreateInfo{
-	        .maxSets = view_count * 2,
+	        .maxSets = view_count * 4,
 	        .poolSizeCount = pool_sizes.size(),
 	        .pPoolSizes = pool_sizes.data(),
 	});
@@ -440,6 +445,10 @@ void stream_defoveator::reset_pipelines()
 	for (auto & p: pipeline_rgb)
 		p = {};
 	for (auto & p: pipeline_a)
+		p = {};
+	for (auto & p: pipeline_atlas_r8_rgb)
+		p = {};
+	for (auto & p: pipeline_atlas_r8_a)
 		p = {};
 	// Reclaim the descriptor sets; the pool is sized for one generation and has
 	// no free-flag, so without this a rebuild (resolution/codec change, or the
@@ -935,7 +944,8 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		};
 
 		const auto & input = inputs[view];
-		auto & pipeline = ensure_pipeline(view, input.sampler_rgb, input.sampler_a);
+		const bool atlas_r8 = input.atlas_valid && input.atlas_table != nullptr && input.atlas_table_bytes != 0;
+		auto & pipeline = ensure_pipeline(view, input.sampler_rgb, input.sampler_a, atlas_r8);
 
 		std::array image_info{
 		        vk::DescriptorImageInfo{
@@ -973,21 +983,23 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		// nothing allocated (the prototype is off) they point at images the shader
 		// never reads on that path.
 		vk::DescriptorImageInfo atlas_r16_info{
-		        .imageView = *atlas_r16_sampled ? *atlas_r16_sampled : *motion_views[view],
-		        .imageLayout = *atlas_r16_sampled ? vk::ImageLayout::eGeneral : vk::ImageLayout::eShaderReadOnlyOptimal,
+		        .sampler = *atlas_sampler,
+		        .imageView = atlas_r8 ? input.atlas_views[0] : (*atlas_r16_sampled ? *atlas_r16_sampled : *motion_views[view]),
+		        .imageLayout = atlas_r8 ? vk::ImageLayout::eShaderReadOnlyOptimal : (*atlas_r16_sampled ? vk::ImageLayout::eGeneral : vk::ImageLayout::eShaderReadOnlyOptimal),
 		};
 		vk::DescriptorImageInfo atlas_store_info{
-		        .imageView = (atlas_storage_ok and *atlas_r16_storage) ? *atlas_r16_storage : *output_image_views[destination * view_count + view],
-		        .imageLayout = vk::ImageLayout::eGeneral,
+		        .sampler = *atlas_sampler,
+		        .imageView = atlas_r8 ? input.atlas_views[1] : ((atlas_storage_ok and *atlas_r16_storage) ? *atlas_r16_storage : *output_image_views[destination * view_count + view]),
+		        .imageLayout = atlas_r8 ? vk::ImageLayout::eShaderReadOnlyOptimal : vk::ImageLayout::eGeneral,
 		};
 		vk::DescriptorImageInfo atlas_rgba8_info{
 		        .imageView = *atlas_rgba8_view ? *atlas_rgba8_view : *motion_views[view],
 		        .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
 		};
 		vk::DescriptorBufferInfo atlas_table_info{
-		        .buffer = atlas_table_buffer ? vk::Buffer(atlas_table_buffer) : vk::Buffer(buffer),
+		        .buffer = atlas_r8 ? input.atlas_table : (atlas_table_buffer ? vk::Buffer(atlas_table_buffer) : vk::Buffer(buffer)),
 		        .offset = 0,
-		        .range = VK_WHOLE_SIZE,
+		        .range = atlas_r8 ? input.atlas_table_bytes : VK_WHOLE_SIZE,
 		};
 
 		std::array descriptor_writes{
@@ -1023,14 +1035,14 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		                .dstSet = pipeline.ds,
 		                .dstBinding = 4,
 		                .descriptorCount = 1,
-		                .descriptorType = vk::DescriptorType::eStorageImage,
+		                .descriptorType = atlas_r8 ? vk::DescriptorType::eCombinedImageSampler : vk::DescriptorType::eStorageImage,
 		                .pImageInfo = &atlas_store_info,
 		        },
 		        vk::WriteDescriptorSet{
 		                .dstSet = pipeline.ds,
 		                .dstBinding = 5,
 		                .descriptorCount = 1,
-		                .descriptorType = vk::DescriptorType::eUniformBuffer,
+		                .descriptorType = atlas_r8 ? vk::DescriptorType::eStorageBuffer : vk::DescriptorType::eUniformBuffer,
 		                .pBufferInfo = &atlas_table_info,
 		        },
 		        vk::WriteDescriptorSet{

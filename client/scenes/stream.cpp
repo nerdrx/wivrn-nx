@@ -1726,6 +1726,26 @@ void scenes::stream::render(const XrFrameState & frame_state)
 				        },
 				        .layout_rgb = blit_handle->current_layout,
 				};
+				// The first R8 consumer is deliberately scoped to the measured v1 layout;
+				// refuse other dimensions until this consumer supports them.
+				const bool atlas_layout_supported =
+				                       blit_handle->atlas_extents[0] == vk::Extent2D{2176, 1088} &&
+				                       blit_handle->atlas_extents[1] == vk::Extent2D{1088, 544} &&
+				                       blit_handle->atlas_formats[0] == vk::Format::eR8Unorm &&
+				                       blit_handle->atlas_formats[1] == vk::Format::eR8G8Unorm;
+				if (blit_handle->atlas_valid && not atlas_layout_supported)
+					throw std::runtime_error("NX Warp atlas view dimensions/formats are unsupported by the R8 renderer");
+				images[v].atlas_valid = blit_handle->atlas_valid;
+				if (images[v].atlas_valid)
+				{
+					for (size_t p = 0; p < images[v].atlas_views.size(); ++p)
+					{
+						images[v].atlas_views[p] = blit_handle->atlas_image_views[p];
+						images[v].atlas_extents[p] = blit_handle->atlas_extents[p];
+					}
+					images[v].atlas_table = blit_handle->atlas_table_buffer;
+					images[v].atlas_table_bytes = blit_handle->atlas_table_bytes;
+				}
 			}
 		}
 		else

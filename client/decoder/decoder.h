@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <array>
 #include <vulkan/vulkan_raii.hpp>
 
 namespace scenes
@@ -46,6 +47,17 @@ public:
 		vk::ImageLayout & current_layout;
 		vk::Semaphore semaphore = nullptr;
 		uint64_t * semaphore_val = nullptr;
+		// Optional NX Warp atlas handoff.  The ordinary image fields above remain
+		// authoritative unless atlas_valid is true.  Atlas handles refer to snapshots
+		// owned by the decoder's pool item; the existing semaphore orders the snapshot
+		// copy before renderer access and the free lifetime keeps it alive.
+		bool atlas_valid = false;
+		std::array<vk::ImageView, 3> atlas_image_views{};
+		std::array<vk::Image, 3> atlas_images{};
+		std::array<vk::Format, 3> atlas_formats{};
+		std::array<vk::Extent2D, 3> atlas_extents{};
+		vk::Buffer atlas_table_buffer = nullptr;
+		vk::DeviceSize atlas_table_bytes = 0;
 	};
 
 public:

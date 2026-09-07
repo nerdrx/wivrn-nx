@@ -186,6 +186,29 @@ if(EXISTS "${WIVRN_NXWARP_DIR}/CMakeLists.txt")
     )
     file(MAKE_DIRECTORY ${NXWARP_INSTALL}/include)
 
+    set(_nxvc_hdr ${WIVRN_NXWARP_DIR}/include/nxvc/nxvc_vk.h)
+    set(WIVRN_NXVC_ATLAS_DECODE OFF)
+    set(WIVRN_NXVC_ATLAS_STATS OFF)
+    set(WIVRN_NXVC_TOOLS_FOR OFF)
+    if(EXISTS ${_nxvc_hdr})
+        file(READ ${_nxvc_hdr} _nxvc_hdr_text)
+        if(NOT _nxvc_hdr_text MATCHES "NXVC_VK_DECODER_ATLAS_TABLE_BUFFER")
+            message(FATAL_ERROR "This NX Warp client needs the GPU atlas table API (codec 6030bab or newer)")
+        endif()
+        if(_nxvc_hdr_text MATCHES "nxvc_vk_decoder_set_atlas_view")
+            set(WIVRN_NXVC_ATLAS_DECODE ON)
+        endif()
+        if(_nxvc_hdr_text MATCHES "tiles_superseded")
+            set(WIVRN_NXVC_ATLAS_STATS ON)
+        endif()
+        if(_nxvc_hdr_text MATCHES "nxvc_vk_decoder_tools_for")
+            set(WIVRN_NXVC_TOOLS_FOR ON)
+        endif()
+        unset(_nxvc_hdr_text)
+    endif()
+    message(STATUS "NX Warp atlas (client): decoder ${WIVRN_NXVC_ATLAS_DECODE}, stats ${WIVRN_NXVC_ATLAS_STATS}, tools_for ${WIVRN_NXVC_TOOLS_FOR}")
+
+
     foreach(_lib nxvc_vk_decoder nxvc_vk_common nxvc_transport)
         add_library(${_lib} STATIC IMPORTED GLOBAL)
         set_target_properties(${_lib} PROPERTIES
@@ -239,6 +262,11 @@ target_link_libraries(wivrn
 
 if(WIVRN_HAVE_NXWARP)
     target_link_libraries(wivrn nxvc_vk_decoder nxvc_vk_common nxvc_transport)
+    foreach(_feature ATLAS_DECODE ATLAS_STATS TOOLS_FOR)
+        if(WIVRN_NXVC_${_feature})
+            target_compile_definitions(wivrn PRIVATE WIVRN_NXVC_${_feature})
+        endif()
+    endforeach()
 
     # The depacketize-and-reassemble path, exercisable without a headset. See the file
     # header for what it proves.

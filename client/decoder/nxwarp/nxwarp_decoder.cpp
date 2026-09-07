@@ -245,6 +245,21 @@ struct nxwarp_blit_handle : public wivrn::decoder::blit_handle
 	{
 		free = true;
 	}
+	void set_atlas(const nxvc_vkd_atlas_images & images,
+	              vk::Buffer table_buffer,
+	              vk::DeviceSize table_bytes)
+	{
+		atlas_valid = true;
+		atlas_table_buffer = table_buffer;
+		atlas_table_bytes = table_bytes;
+		for (size_t i = 0; i < atlas_image_views.size(); ++i)
+		{
+			atlas_images[i] = images.image[i];
+			atlas_image_views[i] = images.view[i];
+			atlas_formats[i] = vk::Format(images.format[i]);
+			atlas_extents[i] = vk::Extent2D{images.width[i], images.height[i]};
+		}
+	}
 };
 
 // Kept for readability at the use site; the values themselves live in wivrn_packets.h so
@@ -625,6 +640,31 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 	hdr_height.store(si.height, std::memory_order_relaxed);
 	hdr_tools.store(si.tools, std::memory_order_relaxed);
 
+	// Select the decoder's real sampled atlas view only when the negotiated stream
+	// carries the ATLAS tool.  This bounded handoff is R8-only: it is valid only for
+	// CT_NONE. Other ATLAS representations are refused rather than displayed through
+	// the ordinary picture output, which is not normative for an atlas stream.
+	atlas_view_active = false;
+#if defined(WIVRN_NXVC_ATLAS_DECODE) && defined(NXVC_VK_DECODER_ATLAS_TABLE_BUFFER)
+	if ((si.tools & (1ull << 31)) && si.color_transform == 0)
+	{
+		if (nxvc_vk_decoder_set_atlas_view(nxvc, NXVC_VKD_ATLAS_VIEW_R8) == NXVC_VKD_OK)
+			atlas_view_active = true;
+		else
+			spdlog::warn("nxwarp[{}]: atlas view refused", stream_index);
+	}
+#endif
+	if ((si.tools & (1ull << 31)) && !atlas_view_active)
+	{
+		spdlog::error("nxwarp[{}]: negotiated ATLAS stream has no supported R8 handoff", stream_index);
+		nxvc_vk_decoder_destroy(nxvc);
+		nxvc = nullptr;
+		nxvc_failed = true;
+		return false;
+	}
+
+	if (atlas_view_active)
+		spdlog::info("nxwarp[{}]: real R8 atlas display with per-frame GPU snapshots", stream_index);
 	spdlog::info("nxwarp[{}]: {}x{} per eye, {} {}, on {}, {} x {} tiles, {} bytes per tile",
 	             stream_index, si.width, si.height, si.eyes, si.eyes == 1 ? "eye" : "eyes",
 	             nxvc_vk_decoder_device_name(nxvc), cfg.cols, cfg.rows, chunk);
@@ -1405,6 +1445,27 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		drain_bin_sem();
 		return;
 	}
+	nxvc_vkd_atlas_images atlas_images{};
+	VkBuffer atlas_table_buffer = VK_NULL_HANDLE;
+	VkDeviceSize atlas_table_bytes = 0;
+#ifdef WIVRN_NXVC_ATLAS_DECODE
+	if (atlas_view_active && nxvc_vk_decoder_atlas_images(nxvc, &atlas_images) == NXVC_VKD_OK &&
+	    atlas_images.image[0] != VK_NULL_HANDLE)
+	{
+#ifdef NXVC_VK_DECODER_ATLAS_TABLE_BUFFER
+		(void)nxvc_vk_decoder_atlas_table_buffer(nxvc, &atlas_table_buffer, &atlas_table_bytes);
+#endif
+	}
+#endif
+
+	if (atlas_view_active && (!atlas_table_buffer || !atlas_table_bytes || !atlas_images.image[1]))
+	{
+		++frames_dropped_codec;
+		host.report_frame_not_held(stream_index, job.frame_id,
+		                           from_headset::nxwarp_frame_not_held::reason::refused);
+		drain_bin_sem();
+		return;
+	}
 
 	auto item = get_free();
 	const auto t_got_free = std::chrono::steady_clock::now();
@@ -1425,6 +1486,42 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		spdlog::warn("nxwarp: waitForFences failed");
 	const auto t_fence_pre = std::chrono::steady_clock::now();
 
+	// Snapshot into a free pool item. The renderer can retain its latest frame
+	// while the codec updates its single mutable atlas for the next frame.
+	if (atlas_view_active)
+	{
+		for (int p = 0; p < 2; ++p)
+		{
+			if (item->atlas_snapshot.width[p] == atlas_images.width[p] &&
+			    item->atlas_snapshot.height[p] == atlas_images.height[p] &&
+			    item->atlas_snapshot.format[p] == atlas_images.format[p]) continue;
+			item->atlas_views[p] = nullptr;
+			item->atlas_planes[p] = image_allocation(device, vk::ImageCreateInfo{
+			    .imageType = vk::ImageType::e2D, .format = vk::Format(atlas_images.format[p]),
+			    .extent = {atlas_images.width[p], atlas_images.height[p], 1},
+			    .mipLevels = 1, .arrayLayers = 1, .tiling = vk::ImageTiling::eOptimal,
+			    .usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled},
+			    {.usage = VMA_MEMORY_USAGE_AUTO}, "nxwarp atlas snapshot");
+			item->atlas_views[p] = vk::raii::ImageView(device, vk::ImageViewCreateInfo{
+			    .image = item->atlas_planes[p], .viewType = vk::ImageViewType::e2D,
+			    .format = vk::Format(atlas_images.format[p]),
+			    .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}});
+			item->atlas_snapshot.image[p] = VkImage(vk::Image(item->atlas_planes[p]));
+			item->atlas_snapshot.view[p] = VkImageView(*item->atlas_views[p]);
+			item->atlas_snapshot.format[p] = atlas_images.format[p];
+			item->atlas_snapshot.width[p] = atlas_images.width[p];
+			item->atlas_snapshot.height[p] = atlas_images.height[p];
+		}
+		if (item->atlas_table_size != atlas_table_bytes)
+		{
+			item->atlas_table = buffer_allocation(device, vk::BufferCreateInfo{
+			    .size = atlas_table_bytes,
+			    .usage = vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eStorageBuffer},
+			    {.usage = VMA_MEMORY_USAGE_AUTO});
+			item->atlas_table_size = atlas_table_bytes;
+		}
+	}
+
 	cmd.reset();
 	cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
 	// Query 0 is written at the top of the pipe, which is AFTER the submit's semaphore
@@ -1436,74 +1533,114 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		cmd.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, *ts_pool, 0);
 	}
 
-	// nxvc leaves its output in GENERAL and overwrites it in place on the next frame; the
-	// copy below is what decouples the codec's own images from the pool of frames the
-	// render thread picks from.
-	std::array<vk::ImageMemoryBarrier, 3> pre{
-	        vk::ImageMemoryBarrier{
-	                .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
-	                .dstAccessMask = vk::AccessFlagBits::eTransferRead,
-	                .oldLayout = vk::ImageLayout::eGeneral,
-	                .newLayout = vk::ImageLayout::eGeneral,
-	                .image = img.image[0],
-	                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
-	        },
-	        vk::ImageMemoryBarrier{
-	                .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
-	                .dstAccessMask = vk::AccessFlagBits::eTransferRead,
-	                .oldLayout = vk::ImageLayout::eGeneral,
-	                .newLayout = vk::ImageLayout::eGeneral,
-	                .image = img.image[1],
-	                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
-	        },
-	        vk::ImageMemoryBarrier{
-	                .srcAccessMask = vk::AccessFlagBits::eNone,
-	                .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
-	                .oldLayout = vk::ImageLayout::eUndefined,
-	                .newLayout = vk::ImageLayout::eTransferDstOptimal,
-	                .image = item->image,
-	                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
-	        },
-	};
-	item->current_layout = vk::ImageLayout::eTransferDstOptimal;
-	cmd.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
-	                    vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, pre);
+	// Real atlas display reads only the snapshots below. Initialize the unused
+	// ordinary descriptor once per pool item, then avoid copying that picture.
+	if (!atlas_view_active || item->current_layout == vk::ImageLayout::eUndefined)
+	{
+		// nxvc leaves its output in GENERAL and overwrites it in place on the next frame; the
+		// copy below is what decouples the codec's own images from the pool of frames the
+		// render thread picks from.
+		std::array<vk::ImageMemoryBarrier, 3> pre{
+		        vk::ImageMemoryBarrier{
+		                .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
+		                .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+		                .oldLayout = vk::ImageLayout::eGeneral,
+		                .newLayout = vk::ImageLayout::eGeneral,
+		                .image = img.image[0],
+		                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+		        },
+		        vk::ImageMemoryBarrier{
+		                .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
+		                .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+		                .oldLayout = vk::ImageLayout::eGeneral,
+		                .newLayout = vk::ImageLayout::eGeneral,
+		                .image = img.image[1],
+		                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+		        },
+		        vk::ImageMemoryBarrier{
+		                .srcAccessMask = vk::AccessFlagBits::eNone,
+		                .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
+		                .oldLayout = vk::ImageLayout::eUndefined,
+		                .newLayout = vk::ImageLayout::eTransferDstOptimal,
+		                .image = item->image,
+		                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+		        },
+		};
+		item->current_layout = vk::ImageLayout::eTransferDstOptimal;
+		cmd.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+		                    vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, pre);
 
-	vk::ImageCopy luma{
-	        .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-	        .dstSubresource = {vk::ImageAspectFlagBits::ePlane0, 0, 0, 1},
-	        .extent = {std::min(img.width[0], extent.width), std::min(img.height[0], extent.height), 1},
-	};
-	vk::ImageCopy chroma{
-	        .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-	        .dstSubresource = {vk::ImageAspectFlagBits::ePlane1, 0, 0, 1},
-	        .extent = {std::min(img.width[1], extent.width / 2), std::min(img.height[1], extent.height / 2), 1},
-	};
-	cmd.copyImage(img.image[0], vk::ImageLayout::eGeneral, item->image,
-	              vk::ImageLayout::eTransferDstOptimal, luma);
-	cmd.copyImage(img.image[1], vk::ImageLayout::eGeneral, item->image,
-	              vk::ImageLayout::eTransferDstOptimal, chroma);
+		vk::ImageCopy luma{
+		        .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+		        .dstSubresource = {vk::ImageAspectFlagBits::ePlane0, 0, 0, 1},
+		        .extent = {std::min(img.width[0], extent.width), std::min(img.height[0], extent.height), 1},
+		};
+		vk::ImageCopy chroma{
+		        .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+		        .dstSubresource = {vk::ImageAspectFlagBits::ePlane1, 0, 0, 1},
+		        .extent = {std::min(img.width[1], extent.width / 2), std::min(img.height[1], extent.height / 2), 1},
+		};
+		cmd.copyImage(img.image[0], vk::ImageLayout::eGeneral, item->image,
+		              vk::ImageLayout::eTransferDstOptimal, luma);
+		cmd.copyImage(img.image[1], vk::ImageLayout::eGeneral, item->image,
+		              vk::ImageLayout::eTransferDstOptimal, chroma);
 
-	vk::ImageMemoryBarrier to_read{
-	        .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
-	        .dstAccessMask = vk::AccessFlagBits::eShaderRead,
-	        .oldLayout = item->current_layout,
-	        .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
-	        .image = item->image,
-	        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
-	};
-	item->current_layout = to_read.newLayout;
-	// eAllCommands, not eFragmentShader. The reader IS the fragment shader of the
-	// reprojection pass, but this command buffer does not run on a queue that has one:
-	// the decode work took the second queue, whose family is COMPUTE|TRANSFER with no
-	// graphics bit, and naming a graphics-only stage in dstStageMask there is
-	// VUID-vkCmdPipelineBarrier-dstStageMask-06462 -- the validation layers report it
-	// once per decoded frame. The pass that samples this image is on the other queue
-	// and is ordered against this one by the timeline semaphore, not by this barrier,
-	// so widening the destination scope to eAllCommands costs nothing and is what the
-	// queue can actually express.
-	cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
-	                    vk::PipelineStageFlagBits::eAllCommands, {}, {}, {}, to_read);
+		vk::ImageMemoryBarrier to_read{
+		        .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+		        .dstAccessMask = vk::AccessFlagBits::eShaderRead,
+		        .oldLayout = item->current_layout,
+		        .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+		        .image = item->image,
+		        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+		};
+		item->current_layout = to_read.newLayout;
+		// eAllCommands, not eFragmentShader. The reader IS the fragment shader of the
+		// reprojection pass, but this command buffer does not run on a queue that has one:
+		// the decode work took the second queue, whose family is COMPUTE|TRANSFER with no
+		// graphics bit, and naming a graphics-only stage in dstStageMask there is
+		// VUID-vkCmdPipelineBarrier-dstStageMask-06462 -- the validation layers report it
+		// once per decoded frame. The pass that samples this image is on the other queue
+		// and is ordered against this one by the timeline semaphore, not by this barrier,
+		// so widening the destination scope to eAllCommands costs nothing and is what the
+		// queue can actually express.
+		cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+		                    vk::PipelineStageFlagBits::eAllCommands, {}, {}, {}, to_read);
+	}
+
+	if (atlas_view_active)
+	{
+		for (int p = 0; p < 2; ++p)
+		{
+			std::array<vk::ImageMemoryBarrier, 2> barriers{
+			    vk::ImageMemoryBarrier{.srcAccessMask = vk::AccessFlagBits::eShaderWrite,
+			        .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+			        .oldLayout = vk::ImageLayout::eGeneral, .newLayout = vk::ImageLayout::eGeneral,
+			        .image = atlas_images.image[p],
+			        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}},
+			    vk::ImageMemoryBarrier{.dstAccessMask = vk::AccessFlagBits::eTransferWrite,
+			        .oldLayout = vk::ImageLayout::eUndefined, .newLayout = vk::ImageLayout::eTransferDstOptimal,
+			        .image = item->atlas_planes[p],
+			        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}}};
+			cmd.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, barriers);
+			cmd.copyImage(atlas_images.image[p], vk::ImageLayout::eGeneral,
+			    item->atlas_planes[p], vk::ImageLayout::eTransferDstOptimal, vk::ImageCopy{
+			        .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+			        .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+			        .extent = {atlas_images.width[p], atlas_images.height[p], 1}});
+			const vk::ImageMemoryBarrier ready{
+			    .srcAccessMask = vk::AccessFlagBits::eTransferWrite, .dstAccessMask = vk::AccessFlagBits::eShaderRead,
+			    .oldLayout = vk::ImageLayout::eTransferDstOptimal, .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+			    .image = item->atlas_planes[p],
+			    .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}};
+			cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eAllCommands, {}, {}, {}, ready);
+		}
+		const vk::MemoryBarrier before{.srcAccessMask = vk::AccessFlagBits::eShaderWrite, .dstAccessMask = vk::AccessFlagBits::eTransferRead};
+		cmd.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eTransfer, {}, before, {}, {});
+		cmd.copyBuffer(atlas_table_buffer, item->atlas_table, vk::BufferCopy{0, 0, atlas_table_bytes});
+		const vk::MemoryBarrier after{.srcAccessMask = vk::AccessFlagBits::eTransferWrite, .dstAccessMask = vk::AccessFlagBits::eShaderRead};
+		cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eAllCommands, {}, after, {}, {});
+	}
+
 	if (have_ts)
 		cmd.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *ts_pool, 1);
 	cmd.end();
@@ -1550,6 +1687,10 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	        *item->semaphore,
 	        item->semaphore_val,
 	        item->free);
+	if (atlas_table_buffer != VK_NULL_HANDLE && atlas_table_bytes != 0)
+	{
+		handle->set_atlas(item->atlas_snapshot, item->atlas_table, item->atlas_table_size);
+	}
 
 	// What the copy waits on, in order of preference: the timeline where the driver
 	// gives one, the binary semaphore where it does not, and the host only where
@@ -1736,6 +1877,19 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		prof.fpost_ms += ms(t_fence_post - t_qsubmit);
 		prof.pub_ms += ms(t_published - t_fence_post);
 		prof.withheld += showable ? 0 : 1;
+		if (atlas_view_active)
+		{
+			prof.atlas_dispatches += st.dispatches;
+#ifdef NXVC_VK_DECODER_ATLAS_STATS
+			// PICTURE assembly covers every tile; ATLAS frames assemble none.
+			if (st.tiles_assembled > 0)
+				++prof.picture_frames;
+			else
+				++prof.atlas_frames;
+			prof.atlas_tiles_assembled += st.tiles_assembled;
+			prof.atlas_entries_valid += st.atlas_entries_valid;
+#endif
+		}
 		prof.wall_max_ms = std::max(prof.wall_max_ms, ms(t_end - t_decode0));
 		if (copy_gpu_ms >= 0)
 		{
@@ -1868,6 +2022,14 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			if (prof.stalls)
 				spdlog::info("nxwarp[{}]: {} of {} frames measured a stall not attributable to decoding (worst wall {:.1f} ms); clipped out of the reported decode cost and out of the stride",
 				             stream_index, prof.stalls, prof.n, prof.wall_max_ms);
+			if (atlas_view_active)
+			{
+				spdlog::info("nxwarp[{}] atlas: frames {}, atlas {}, picture {}, avg dispatches {:.1f}, "
+				             "avg assembled {:.1f}, avg valid {:.1f}",
+				             stream_index, prof.n, prof.atlas_frames, prof.picture_frames,
+				             prof.atlas_dispatches / n, prof.atlas_tiles_assembled / n,
+				             prof.atlas_entries_valid / n);
+			}
 
 			// The same window, republished for stats(): the GUI shows these under the
 			// latency figure instead of anybody reading the lines above out of the log.

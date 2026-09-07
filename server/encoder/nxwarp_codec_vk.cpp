@@ -24,6 +24,7 @@
 #include "util/u_logging.h"
 
 #include <algorithm>
+#include <chrono>
 #include <format>
 #include <stdexcept>
 #include <vector>
@@ -134,6 +135,42 @@ class nxwarp_codec_vk final : public wivrn::nxwarp_codec
 	// around its own submits. video_encoder_nxwarp times the whole call; this
 	// is the GPU half of that, and the difference is the plane repack.
 	double last_ms = 0, last_upload_ms = 0;
+	bool atlas_enabled = false;
+	std::chrono::steady_clock::time_point report_since = std::chrono::steady_clock::now();
+	uint32_t report_frames = 0, report_atlas = 0, report_picture = 0;
+	uint64_t report_skip = 0, report_intra = 0, report_coded = 0,
+	         report_worst_q4 = 0;
+
+	void report_frame()
+	{
+#ifdef WIVRN_NXVC_ATLAS_ENCODE
+		if (!atlas_enabled)
+			return;
+		nxvc_vke_frame_report r{};
+		if (nxvc_vk_encoder_frame_report(enc, &r) != NXVC_VKE_OK)
+			return;
+		++report_frames;
+		report_skip += r.skip;
+		report_intra += r.intra;
+		report_coded += r.coded;
+		report_worst_q4 += r.worst_disp_q4;
+		if (r.mode == NXVC_VKE_FRAME_ATLAS) ++report_atlas;
+		if (r.mode == NXVC_VKE_FRAME_PICTURE) ++report_picture;
+		const auto now = std::chrono::steady_clock::now();
+		if (now - report_since < std::chrono::seconds(2))
+			return;
+		U_LOG_I("nxwarp atlas: %u frames, avg skip %u intra %u coded %u, atlas %u picture %u, avg worst disp %.1f q4",
+		        report_frames,
+		        report_frames ? (uint32_t)(report_skip / report_frames) : 0,
+		        report_frames ? (uint32_t)(report_intra / report_frames) : 0,
+		        report_frames ? (uint32_t)(report_coded / report_frames) : 0,
+		        report_atlas, report_picture,
+		        report_frames ? (double)report_worst_q4 / report_frames : 0.0);
+		report_since = now;
+		report_frames = report_atlas = report_picture = 0;
+		report_skip = report_intra = report_coded = report_worst_q4 = 0;
+#endif
+	}
 
 public:
 	explicit nxwarp_codec_vk(const wivrn::nxwarp_codec_config & c,
@@ -216,6 +253,17 @@ public:
 		// the client had to change for this.  The library refuses a level it
 		// does not have rather than clamping it, and nxwarp_codec_config
 		// carries the reason the default is 1.
+		if (c.atlas != wivrn::nxwarp_codec_config::atlas_t::off)
+		{
+			atlas_enabled = true;
+#ifdef WIVRN_NXVC_ATLAS_ENCODE
+			ci.atlas = 1;
+			ci.atlas_mode = 1;
+			ci.atlas_picture_d = c.atlas_picture_d;
+#else
+			throw std::runtime_error("nxwarp: \"atlas\" was requested, but this build lacks NXVC ATLAS encoder support");
+#endif
+		}
 		ci.effort = c.effort;
 		/* Snap-to-identity (nxwarp_codec_config::snap_identity).  The library
 		 * refuses it without `inter` and above two samples, so the value that
@@ -536,6 +584,7 @@ public:
 		}
 		last_ms = nxvc_vk_encoder_last_encode_ms(enc);
 		last_upload_ms = nxvc_vk_encoder_last_upload_ms(enc);
+		report_frame();
 		fill_tiles();
 		return std::span<const uint8_t>(bytes, len);
 	}
@@ -557,6 +606,7 @@ public:
 		}
 		last_ms = nxvc_vk_encoder_last_encode_ms(enc);
 		last_upload_ms = nxvc_vk_encoder_last_upload_ms(enc);
+		report_frame();
 
 		fill_tiles();
 		return std::span<const uint8_t>(bytes, len);

@@ -63,9 +63,12 @@ inline constexpr bool nxwarp_default_lens_mask = true;
 // "effort": 0 is the default the server applies, so a CHECKED box is what gets written out.  It
 // was 1 until the level was measured on rendered content, where it costs 0.1-3.2 % of the bytes.
 inline constexpr uint32_t nxwarp_default_effort = 0;
-// "snap-identity": 1/16 luma samples, 0 = off, which is the server's default
-// and stays it until the saving is measured on the headset.
-inline constexpr uint32_t nxwarp_default_snap_identity = 0;
+// "snap-identity": 1/16 luma samples, 0 = off.  16 -- one luma sample -- is the
+// server's default now that the saving HAS been measured on the headset: a Pico 4
+// at rest went 15.1 -> 11.4 ms of decode per pair and 50.6 -> 62.8 paced fps, and
+// the quantiser fell to min-qp because the decode controller stopped binding.  So
+// the combo box starts at "1 sample" and choosing "Off" is what gets written.
+inline constexpr uint32_t nxwarp_default_snap_identity = 16;
 // "planar": the piecewise-planar tile mode.  The server's default is "rd", so
 // that is what an untouched configuration means and what gets erased rather
 // than written.

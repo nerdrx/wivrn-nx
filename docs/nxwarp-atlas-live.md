@@ -58,7 +58,7 @@ adb shell setprop debug.wivrn.nxwarp_atlas_speed false
 Clear that override to restore model selection:
 
 ```sh
-adb shell setprop debug.wivrn.nxwarp_atlas_speed ''
+adb shell 'setprop debug.wivrn.nxwarp_atlas_speed ""'
 ```
 
 `NXWARP_ATLAS_DIRECT=0` also disables direct targets when the client process is

@@ -155,6 +155,26 @@ std::vector<nxt::Datagram> wivrn::nxwarp_send_frame(nxt::Sender & sender,
 	if (not tile_spans and chunks > cfg.tiles_per_frame())
 		return out;
 
+	// The terminal band may contain no coded tiles for a sparse atlas frame.
+	// Packetizer marks the last emitted datagram only when `last_band` is true
+	// and the band has output, so identify the final band that will actually
+	// emit data rather than using the configured band count.
+	uint8_t last_nonempty_band = 0;
+	for (uint8_t band = 0; band < cfg.bands(); ++band)
+	{
+		const uint16_t first_row = cfg.first_row_of_band(band);
+		const uint16_t last_row = uint16_t(first_row + cfg.rows_in_band(band));
+		for (uint16_t row = first_row; row < last_row; ++row)
+		{
+			for (uint16_t col = 0; col < cfg.cols; ++col)
+			{
+				const uint32_t t = cfg.tile_index(row, col);
+				if (tile_spans ? range[t].second != 0 : t < chunks)
+					last_nonempty_band = band;
+			}
+		}
+	}
+
 	// THE POSE-HEADER DEAD ZONE, refused here rather than discovered halfway
 	// through a frame.
 	//
@@ -281,7 +301,7 @@ std::vector<nxt::Datagram> wivrn::nxwarp_send_frame(nxt::Sender & sender,
 			}
 		}
 
-		auto d = sender.send_band(band, band_tiles, now_us, enc_us, band + 1 == nbands);
+		auto d = sender.send_band(band, band_tiles, now_us, enc_us, band == last_nonempty_band);
 		out.insert(out.end(), std::make_move_iterator(d.begin()), std::make_move_iterator(d.end()));
 	}
 	return out;

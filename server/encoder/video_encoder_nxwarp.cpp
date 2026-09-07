@@ -18,6 +18,7 @@
 
 #include "video_encoder_nxwarp.h"
 #include "nxwarp_held_ack.h"
+#include "nxwarp_atlas_receipt.h"
 
 #include "nxwarp_stats.h"
 #include <chrono>
@@ -2101,8 +2102,10 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		{
 			for (uint16_t col = 0; col < stream_cfg.cols; ++col)
 			{
-				received_tiles[stream_cfg.tile_index(row, col)] =
-				        shadow.state(previous_frame_id, row, col) == nxt::ShadowState::kConcealed ? 0 : 1;
+				const auto tile = stream_cfg.tile_index(row, col);
+				received_tiles[tile] = nxwarp_tile_received(
+				        shadow.state(previous_frame_id, row, col) == nxt::ShadowState::kConcealed,
+				        previous_intentional_skips, tile);
 			}
 		}
 		codec->set_received_tiles(received_tiles);
@@ -2802,6 +2805,8 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	}
 	previous_frame_id = frame_id16;
 	have_previous_frame = true;
+	nxwarp_record_intentional_skips(previous_intentional_skips, tiles_per_frame,
+	                                 codec->last_frame_is_atlas(), codec->tiles());
 
 	// The quantiser for the NEXT frame, from the size of this one. Last, because
 	// everything above describes the frame that was just sent and the controller

@@ -648,6 +648,17 @@ public:
 		return tile_descs;
 	}
 
+	bool last_frame_is_atlas() const override
+	{
+#ifdef WIVRN_NXVC_ATLAS_ENCODE
+		nxvc_vke_frame_report r{};
+		return enc && nxvc_vk_encoder_frame_report(enc, &r) == NXVC_VKE_OK &&
+		       r.mode == NXVC_VKE_FRAME_ATLAS;
+#else
+		return false;
+#endif
+	}
+
 	bool reports_tile_spans() const override
 	{
 		return true;

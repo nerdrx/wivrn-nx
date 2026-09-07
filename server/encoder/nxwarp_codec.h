@@ -397,6 +397,9 @@ public:
 
 	// Per-tile records of the frame encode() just produced.
 	virtual std::span<const nxwarp_tile_desc> tiles() const = 0;
+	// True only when the most recently encoded frame was an ATLAS frame; PICTURE
+	// frames must not be classified from their tile modes.
+	virtual bool last_frame_is_atlas() const { return false; }
 
 	// Whether tiles() fills `offset` and `length`.
 	//

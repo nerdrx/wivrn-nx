@@ -160,6 +160,10 @@ class video_encoder_nxwarp : public video_encoder
 	// Per-tile receipt map derived from the client shadow, handed back to the
 	// codec so it predicts from what the client actually holds.
 	std::vector<uint8_t> received_tiles;
+	// For ATLAS, a WARP_SKIP tile in the previous frame has no packet and is
+	// intentionally reported concealed by the receiver. Preserve that fact so
+	// it is not mistaken for loss on the next encode.
+	std::vector<uint8_t> previous_intentional_skips;
 	uint16_t previous_frame_id = 0;
 	bool have_previous_frame = false;
 	// Set by reset() on the session thread, acted on by the next encode(): the client

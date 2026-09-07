@@ -221,6 +221,26 @@ int main(int argc, char ** argv)
 		check(id2, "non-square output identical to the original loop");
 	}
 
+	std::printf("reduced viewports retain the complete source field of view\n");
+	{
+		for (const auto & runs : {std::vector<uint16_t>{1088}, std::vector<uint16_t>{16, 32, 64}})
+		{
+			std::vector<vertex> grid(max_vertices(runs.size(), runs.size()));
+			const size_t n = emit_full_view(runs, runs, {}, grid.data(), grid.size());
+			uint32_t source = 0;
+			for (auto run : runs) source += run;
+			bool bounded = n > 0, left = false, right = false;
+			for (size_t i = 0; i < n; ++i)
+			{
+				const auto & v = grid[i];
+				bounded &= v.px >= -1.00001f && v.px <= 1.00001f && v.py >= -1.00001f && v.py <= 1.00001f;
+				left |= std::abs(v.px + 1.f) < 0.00001f && v.u == 0;
+				right |= std::abs(v.px - 1.f) < 0.00001f && v.u == source;
+			}
+			check(bounded && left && right, "full source reaches both viewport edges without clipping");
+		}
+	}
+
 	std::printf("the lens cell mask never eats the overscan ring\n");
 	{
 		using namespace wivrn::view_geometry;

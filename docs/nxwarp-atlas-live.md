@@ -34,33 +34,33 @@ The default `"atlas":"off"` retains ordinary coding. Optional
 The server ACK merge is covered by `g++ -std=c++23 -Wall -Wextra -Werror -Icommon tests/nxwarp_held_ack_test.cpp`: an older report at wire 98 with bit 0 must shift left two places when merged into base 100. Empty ACK-only payloads update reconstruction state but carry no transport receipt and are not passed to the sender.
 
 
-## Pico 4 speed preset
+## Full-resolution atlas output
 
-The `PICO 4` model now defaults to caller-owned R8 atlas targets and a 0.40
-AUTO output scale (864×864 per eye in the measured stream). This preserves the
-encoded atlas resolution while reducing display fragment work and image copies.
-An explicit `defoveate_scale` still takes precedence. Other headset models keep
-their existing defaults.
+NX Warp's automatic source scale is now 1.0, and the real atlas renderer uses
+full defoveated output resolution. Explicit source/output scale settings still
+take precedence. R8 stereo source dimensions and partial 64-pixel edge tiles are
+read from decoded images instead of assuming a 1088-pixel source.
 
-Four 180-second control/combined/combined/control captures measured renderer GPU
-medians of 2.5/1.6/1.6/2.3 ms and copy medians of 0.29/0.01/0.01/0.29 ms.
-Decoder wall medians were 2.3/1.9/2.0/2.3 ms. These summarize report-window means
-under uncontrolled shared host load; session gaps prevent a physical-FPS claim.
-The smaller output is a quality tradeoff. See the
-[raw evidence](https://github.com/nerdrx/nx-warp/tree/main/bench/results/240fps-2026-09-07/live-atlas/abba-180s).
+The display mesh is normalized against the full foveation extent. Viewport size
+only controls raster resolution; it must not change field of view. Earlier
+scaled-output experiments used the reduced viewport as the geometry basis and
+cropped the image. Their timing remains historical evidence, but not a comparison
+of equivalent full-field output. The grid regression rejects that old behavior.
 
-For comparison, disable the model preset before restarting the client:
+PICO 4 retains exact caller-owned R8 output to remove the snapshot image copy.
+Its `nxwarp_atlas_speed` trait now controls only that optimization; it no longer
+reduces output resolution. For comparisons, disable it before restarting:
 
 ```sh
 adb shell setprop debug.wivrn.nxwarp_atlas_speed false
 ```
 
-Clear that override to restore model selection:
+Restore automatic model selection:
 
 ```sh
 adb shell 'setprop debug.wivrn.nxwarp_atlas_speed ""'
 ```
 
-`NXWARP_ATLAS_DIRECT=0` also disables direct targets when the client process is
-launched with that environment variable. Exact sRGB conversion remains in use;
-the polynomial approximation was measured and rejected.
+The previous [ABBA results](https://github.com/nerdrx/nx-warp/tree/main/bench/results/240fps-2026-09-07/live-atlas/abba-180s)
+are explicitly caveated; new full-resolution measurements must identify both
+encoded source and output dimensions. Exact sRGB conversion remains in use.

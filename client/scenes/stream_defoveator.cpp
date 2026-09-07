@@ -922,11 +922,9 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		// is what every failure path in stream_grid produces, and what the caller
 		// passes when the setting is off -- writes the grid exactly as it always was.
 		const auto & mask = view < lens_masks.size() ? lens_masks[view] : wivrn::stream_grid::cell_mask{};
-		drawn_vertices[view] = wivrn::stream_grid::emit(
+		drawn_vertices[view] = wivrn::stream_grid::emit_full_view(
 		        px,
 		        py,
-		        out_size.width,
-		        out_size.height,
 		        mask,
 		        reinterpret_cast<wivrn::stream_grid::vertex *>(vertices),
 		        vertices_size / sizeof(vertex));
@@ -1115,10 +1113,8 @@ static uint16_t count_pixels(const std::vector<uint16_t> & param)
 
 XrExtent2Di stream_defoveator::defoveated_size(const wivrn::to_headset::foveation_parameter & view, float scale)
 {
-	// `scale` shrinks the pass's OUTPUT only. The geometry is untouched: the vertex
-	// positions below are normalised by the same out_size they are laid out in
-	// (out_pixel_size = 2 / out_size), so the drawn picture is identical and only the
-	// number of fragments changes -- which is the whole cost of this pass.
+	// Scale changes viewport/swapchain size only. emit_full_view normalizes vertices
+	// against the full foveation extent so lowering resolution preserves the FOV.
 	//
 	// Measured on a Pico 4: the pass renders 2160x2160 PER EYE, invariant across
 	// stream_scale, because the defoveated size is what the panel wants and not what

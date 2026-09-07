@@ -32,14 +32,18 @@ layout(std430,set=0,binding=5) readonly buffer atlas_table_t { uint e[]; } tbl;
 layout(location=0) in vec4 inUV;
 layout(location=1) in vec4 inPosition;
 layout(location=0) out vec4 outColor;
-const vec2 picture=vec2(1088.0,1088.0);
-const vec2 luma_image=vec2(2176.0,1088.0);
-const vec2 chroma_image=vec2(1088.0,544.0);
+// The decoder view spans both eyes horizontally; derive the geometry from the
+// actual snapshot so non-1088 streams and clipped edge tiles use the same table.
 vec3 srgb_linear(vec3 c) { return mix(c/12.92,pow((c+0.055)/1.055,vec3(2.4)),step(vec3(0.04045),c)); }
 void main() {
+	vec2 luma_image=vec2(textureSize(atlas_y,0));
+	vec2 picture=vec2(luma_image.x*0.5,luma_image.y);
+	vec2 chroma_image=vec2(textureSize(atlas_cbcr,0));
  vec2 eye_uv=clamp((inUV.xy*vec2(rgb_rect.zw)-vec2(rgb_rect.xy))/picture,vec2(0),vec2(0.999999));
- ivec2 cell=ivec2(eye_uv*float(atlas_tiles));
- int idx=(cell.y*atlas_tiles*2+atlas_eye*atlas_tiles+cell.x)*16;
+	int tiles_x=int(ceil(picture.x/64.0));
+	ivec2 cell=ivec2(floor((eye_uv*picture)/64.0));
+	cell=clamp(cell,ivec2(0),ivec2(tiles_x-1,int(ceil(picture.y/64.0))-1));
+	int idx=(cell.y*tiles_x*2+atlas_eye*tiles_x+cell.x)*16;
  if (((tbl.e[idx+10]>>16u)&1u)==0u) { outColor=vec4(0); return; }
  vec3 h=vec3((eye_uv-0.5)*picture,1.0);
  vec3 r0=vec3(int(tbl.e[idx]),int(tbl.e[idx+1]),int(tbl.e[idx+2]))/2097152.0;

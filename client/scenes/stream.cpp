@@ -1221,17 +1221,9 @@ float scenes::stream::resolve_defoveate_scale(
 	if (cfg > 0.f)
 		return std::clamp(cfg, 0.4f, 1.0f);
 
-	// AUTO. The pass's output is the size the stream already is, so it does no
-	// enlargement: a 1088x1088 stream is drawn at 1088x1088 and the runtime's
-	// compositor performs the one resampling it was always going to perform when it
-	// timewarps the layer. Measured on a Pico 4, this is the difference between
-	// 2160x2160 per eye at 8.4 ms a frame and 1080x1080 at 2.7 ms, with the render
-	// loop going from 34 to 73 iterations a second.
-	//
-	// The stream's per-eye size is the decoded image in hand, not anything configured:
-	// stream_scale, a mid-session renegotiation and a server that simply chose
-	// something else all arrive the same way. With no frame yet there is nothing to
-	// match, and the pass falls back to the defoveated size it has always used.
+	// AUTO keeps real atlas output at the full defoveated size. Other decoder
+	// paths retain their source-matched output policy. With no frame available,
+	// use the full extent until its source geometry can be inspected.
 	float s = 1.f;
 	bool have_any = false;
 	for (size_t i = 0; i < view_count; ++i)
@@ -1257,10 +1249,10 @@ float scenes::stream::resolve_defoveate_scale(
 		if (eye_w == 0)
 			continue;
 		have_any = true;
-		// The measured Pico atlas preset trades output resolution for fragment cost.
-		// Explicit defoveate_scale was handled above; source geometry is unchanged.
-		if (h->atlas_table_buffer && application::get_hmd_traits().nxwarp_atlas_speed)
-			s = std::min(s, 0.4f);
+		// Real atlas output targets the full defoveated resolution. An explicit
+		// quality setting was handled above; AUTO must not lower atlas resolution.
+		if (h->atlas_table_buffer)
+			continue;
 		// The smaller of the two ratios, so neither axis is ever enlarged. One
 		// scalar for both axes because the viewport and the swapchain take one.
 		s = std::min({s,
@@ -1731,11 +1723,16 @@ void scenes::stream::render(const XrFrameState & frame_state)
 				        },
 				        .layout_rgb = blit_handle->current_layout,
 				};
-				// The first R8 consumer is deliberately scoped to the measured v1 layout;
-				// refuse other dimensions until this consumer supports them.
-				const bool atlas_layout_supported =
-				                       blit_handle->atlas_extents[0] == vk::Extent2D{2176, 1088} &&
-				                       blit_handle->atlas_extents[1] == vk::Extent2D{1088, 544} &&
+				// R8 stereo 4:2:0 geometry comes from the decoded image, including
+				// partial 64-pixel edge tiles at native headset resolutions.
+				const auto atlas_y = blit_handle->atlas_extents[0];
+				const auto atlas_c = blit_handle->atlas_extents[1];
+				const uint64_t atlas_entries = uint64_t((atlas_y.width / 2 + 63) / 64) *
+				                               ((atlas_y.height + 63) / 64) * 2;
+				const bool atlas_layout_supported = eyes_joined && atlas_y.width > 0 && atlas_y.height > 0 &&
+				                       atlas_y.width % 4 == 0 && atlas_y.height % 2 == 0 &&
+				                       atlas_c == vk::Extent2D{atlas_y.width / 2, atlas_y.height / 2} &&
+				                       blit_handle->atlas_table_bytes >= atlas_entries * 64 &&
 				                       blit_handle->atlas_formats[0] == vk::Format::eR8Unorm &&
 				                       blit_handle->atlas_formats[1] == vk::Format::eR8G8Unorm;
 				if (blit_handle->atlas_valid && not atlas_layout_supported)

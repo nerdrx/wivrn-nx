@@ -225,6 +225,27 @@ inline size_t emit(const std::vector<uint16_t> & px,
 	return size_t(w - out);
 }
 
+// Geometry is normalized by the full foveation extent. Output resolution belongs
+// only to the viewport: using a reduced viewport here would crop the source.
+inline size_t emit_full_view(const std::vector<uint16_t> & px,
+                             const std::vector<uint16_t> & py,
+                             const cell_mask & mask,
+                             vertex * out,
+                             size_t capacity)
+{
+	const auto extent = [](const std::vector<uint16_t> & runs) {
+		int pixels = 0;
+		const int centre = (int(runs.size()) - 1) / 2;
+		for (size_t i = 0; i < runs.size(); ++i)
+			pixels += int(runs[i]) * (std::abs(centre - int(i)) + 1);
+		return pixels;
+	};
+	const int width = extent(px), height = extent(py);
+	if (width <= 0 || height <= 0)
+		return 0;
+	return emit(px, py, width, height, mask, out, capacity);
+}
+
 // Which cells of this view's grid the optics can never show.
 //
 // One `region_covers` test per grid cell, against the same ellipse the server's own lens

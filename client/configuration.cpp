@@ -462,6 +462,8 @@ float configuration::get_stream_scale() const
 
 float configuration::get_default_stream_scale() const
 {
+	if (nxwarp)
+		return 1.0f;
 	if (check_feature(feature::eye_gaze))
 		return 0.3;
 	return 0.5;

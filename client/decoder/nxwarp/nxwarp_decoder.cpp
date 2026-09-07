@@ -9,6 +9,7 @@
 
 #include "nxwarp_stream_grid.h"
 #include "nxwarp_decoder.h"
+#include "application.h"
 
 #ifdef __ANDROID__
 #include <sys/system_properties.h>
@@ -666,7 +667,7 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 #ifdef NXVC_VKD_ATLAS_BORROWED_TARGET
 	const char * direct = std::getenv("NXWARP_ATLAS_DIRECT");
 	atlas_direct_targets = atlas_view_active && si.bit_depth == 8 && si.chroma == 0 &&
-	                       direct && direct[0] == '1';
+	                       (direct ? direct[0] == '1' : application::get_hmd_traits().nxwarp_atlas_speed);
 	spdlog::info("nxwarp[{}]: direct atlas targets {}", stream_index, atlas_direct_targets);
 #endif
 	if (atlas_view_active)

@@ -1257,6 +1257,10 @@ float scenes::stream::resolve_defoveate_scale(
 		if (eye_w == 0)
 			continue;
 		have_any = true;
+		// The measured Pico atlas preset trades output resolution for fragment cost.
+		// Explicit defoveate_scale was handled above; source geometry is unchanged.
+		if (h->atlas_table_buffer && application::get_hmd_traits().nxwarp_atlas_speed)
+			s = std::min(s, 0.4f);
 		// The smaller of the two ratios, so neither axis is ever enlarged. One
 		// scalar for both axes because the viewport and the swapchain take one.
 		s = std::min({s,

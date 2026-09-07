@@ -215,6 +215,7 @@ void hmd_traits::init()
 		view_locate = false;
 		discard_frame = false;
 		const auto pico_model = get_property("pxr.vendorhw.product.model");
+		nxwarp_atlas_speed = pico_model == "PICO 4";
 		spdlog::info("    pxr.vendorhw.product.model = \"{}\":", pico_model.value_or("<unset>"));
 
 		if (pico_model == "Pico Neo 3")

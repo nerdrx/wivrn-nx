@@ -49,6 +49,7 @@ public:
 	XrVersion max_openxr_api_version = XR_API_VERSION_1_1;
 	uint32_t panel_width_override = 0;
 	bool needs_srgb_conversion = true;
+	bool nxwarp_atlas_speed = false; // Measured low-cost R8 output on Pico 4.
 	bool view_locate = true; // can locate relative to view
 	bool vk_debug_ext_allowed = true;
 	bool bind_simple_controller = true;

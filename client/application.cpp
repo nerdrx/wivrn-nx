@@ -2033,7 +2033,10 @@ void application::session_state_changed(XrSessionState new_state, XrTime timesta
 		case XR_SESSION_STATE_STOPPING:
 			session_visible = false;
 			session_focused = false;
-			xr_session.end_session();
+			// A runtime can deliver STOPPING after a handoff before this process
+			// receives READY; do not end a session this process never began.
+			if (session_running)
+				xr_session.end_session();
 			session_running = false;
 			break;
 

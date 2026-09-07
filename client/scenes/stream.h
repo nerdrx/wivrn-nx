@@ -541,6 +541,9 @@ private:
 	// per presented frame; decoded_frames by push_blit_handle, from the decoder threads.
 	uint64_t displayed_frames = 0;
 	std::array<std::atomic<uint64_t>, decoder_count> decoded_frames{};
+	// Highest source frame ID counted at a successful projection submission. This
+	// survives render telemetry windows so new-source is not a window-local repeat.
+	std::optional<uint64_t> last_submitted_source_frame;
 	// Bumped at the TOP of render(), before every gate: the count of times the loop
 	// entered this scene's frame, and the predicted display periods summed over them.
 	// displayed_frames counts the subset that reached a submission, so the two together

@@ -1192,7 +1192,7 @@ struct render_probe
 	// logging. Without this the first report after a resume would divide a handful of
 	// iterations by that whole parked span and announce a render loop running at 0.1/s.
 	std::chrono::steady_clock::time_point last_call{};
-	uint64_t iters = 0, gated_out = 0, no_render = 0, cache_hits = 0;
+	uint64_t iters = 0, gated_out = 0, no_render = 0, cache_hits = 0, new_source = 0, submitted = 0;
 	double period_ms = 0, fence_ms = 0, query_ms = 0, submit_ms = 0, blit_ms = 0;
 	double app_gpu_ms = 0;
 	// Just-in-time display, per report window. pose_age is the client's own
@@ -2458,6 +2458,19 @@ void scenes::stream::render(const XrFrameState & frame_state)
 
 		// One frame the render thread actually presented, for the frame rate readout.
 		++displayed_frames;
+		++g_rp.submitted;
+		// Count a source frame only when its projection layer was actually submitted.
+		// The high-water mark spans reporting windows, while this window count resets
+		// with the rest of the render probe.
+		if (current_blit_handles[0])
+		{
+			const uint64_t id = current_blit_handles[0]->feedback.frame_index;
+			if (not last_submitted_source_frame or id > *last_submitted_source_frame)
+			{
+				++g_rp.new_source;
+				last_submitted_source_frame = id;
+			}
+		}
 
 		accumulate_metrics(frame_state.predictedDisplayTime, current_blit_handles, timestamps);
 
@@ -2546,8 +2559,8 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	{
 		const double n = double(g_rp.iters);
 		const double secs = rp_ms(rp_t0 - g_rp.since) / 1000.0;
-		spdlog::info("render: {} iterations in {:.1f} s ({:.1f}/s), {} submitted a layer, {} skipped by the repeat gate, {} with nothing to show; display period {:.1f} ms",
-		             g_rp.iters, secs, n / secs, g_rp.gated_out,
+		spdlog::info("render: {} iterations in {:.1f} s ({:.1f}/s), {} submitted a layer, {} new-source, {} skipped by the repeat gate, {} with nothing to show; display period {:.1f} ms",
+		             g_rp.iters, secs, n / secs, g_rp.submitted, g_rp.new_source,
 		             g_rp.iters - g_rp.gated_out - g_rp.no_render, g_rp.no_render,
 		             g_rp.period_ms / n);
 		spdlog::info("render: this app's own GPU pass {:.1f} ms per iteration", g_rp.app_gpu_ms / n);
@@ -2646,6 +2659,7 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 	{
 		std::unique_lock frame_lock(frames_mutex);
 		dejitter.reset();
+		last_submitted_source_frame.reset();
 	}
 
 	for (const auto & [stream_index, item]: utils::enumerate(decoders))

@@ -553,8 +553,40 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	// Unlike the entropy tool there is no sensible fallback to slide to: the
 	// operator asked for fewer milliseconds on the headset and there is no
 	// cheaper way to give them.
+	//
+	// ON BY DEFAULT, at one luma sample. Measured live on a Pico 4 at rest,
+	// 1088x1088 per eye, the same session with and without it:
+	//
+	//   decode      15.1 -> 11.4 ms per pair   (Pass B skip 8.35 -> 0.05 ms;
+	//                                           the cost moves to the identity
+	//                                           copy, 0.09 -> 4.17 ms)
+	//   paced       50.6 -> 62.8 fps
+	//   quantiser   35.8 -> 22.0, which is min-qp: the decode controller stops
+	//               binding entirely, so the whole quality band comes back
+	//   tiles       290 skip / 288 coded  ->  7 skip / 291 coded
+	//
+	// The frames get bigger (7.0 -> 14.6 kB) and that is the quality returning,
+	// not a regression: the same link carried it at a higher frame rate.
+	//
+	// A DEFAULT MAY NOT REFUSE A STREAM. The checks below still throw for an
+	// operator who asked for it where it cannot work -- that request is a
+	// mistake worth naming -- but the default silently resolves to 0 on the
+	// reference backend or an intra-only stream, because neither of those is
+	// something the operator did wrong.
 	{
-		const uint32_t want = option_u32(settings.options, "snap-identity", 0);
+		static constexpr uint32_t snap_identity_default = 16;
+		const bool asked = settings.options.find("snap-identity") != settings.options.end();
+		uint32_t want = option_u32(settings.options, "snap-identity", snap_identity_default);
+		if (want != 0 and not asked and
+		    (not nxwarp_backend_is_vk(settings) or not codec_cfg.inter))
+		{
+			U_LOG_I("nxwarp: \"snap-identity\" defaults to %u/16 sample but this "
+			        "stream has no warp to snap (%s); leaving it off.",
+			        snap_identity_default,
+			        nxwarp_backend_is_vk(settings) ? "\"inter\": \"off\""
+			                                       : "\"backend\": \"ref\"");
+			want = 0;
+		}
 		if (want != 0)
 		{
 			if (not nxwarp_backend_is_vk(settings))
@@ -1139,12 +1171,50 @@ void wivrn::video_encoder_nxwarp::run_decode_rate_control()
 	// Release only with real headroom, so grazing the budget is stable.
 	static constexpr double release_frac = 0.85;
 
+	// The window mean, which is what the hold is cleared against.
+	//
+	// A single frame is too small a fact for it. Measured live: a held floor sat
+	// at +24 with the decode mean 18.2 ms against a 16.8 ms budget, and still
+	// cycled 23<->24 for a minute, because the PER-FRAME decode dips under
+	// 0.85 x budget every few frames, and each dip cleared the hold and bought
+	// one more pointless raise. The controller was right about the stream and
+	// wrong about the frame. So the hold is a statement about a window and only
+	// a window can withdraw it.
+	rc_decode_window_sum += decode_s;
+	++rc_decode_window_n;
+	bool window_closed = false;
+	double window_mean = 0;
+	if (rc_decode_window_tick)
+	{
+		rc_decode_window_tick = false;
+		window_closed = true;
+		window_mean = rc_decode_window_n > 0
+		                      ? rc_decode_window_sum / double(rc_decode_window_n)
+		                      : decode_s;
+		rc_decode_window_sum = 0;
+		rc_decode_window_n = 0;
+	}
+
 	// Under budget with headroom: whatever the last raises did or did not do, the
 	// question they were asked is closed. Clear the hold before the release path
-	// below, so a stream that recovers can bind again the next time it needs to.
-	if (decode_s < budget * release_frac)
+	// below, so a stream that recovers can bind again the next time it needs to --
+	// but clear it on the window, not on one lucky frame.
+	if (rc_decode_held)
 	{
-		rc_decode_held = false;
+		if (window_closed and window_mean < budget * release_frac)
+		{
+			rc_decode_held = false;
+			rc_decode_stalled = 0;
+			rc_decode_raise_us = 0;
+			U_LOG_I("nxwarp: stream %d decode window mean %.1f ms is back under the "
+			        "%.1f ms budget: the floor may rise again.",
+			        int(stream_idx),
+			        window_mean * 1000.0,
+			        budget * 1000.0);
+		}
+	}
+	else if (decode_s < budget * release_frac)
+	{
 		rc_decode_stalled = 0;
 		rc_decode_raise_us = 0;
 	}
@@ -1226,9 +1296,8 @@ void wivrn::video_encoder_nxwarp::run_decode_rate_control()
 		// Over budget, but not on anything this controller can move. Give the floor
 		// back one step per report window -- not per frame, so the unwind is slow
 		// enough to see and to reverse if the decode does start responding.
-		if (rc_decode_window_tick)
+		if (window_closed)
 		{
-			rc_decode_window_tick = false;
 			--rc_decode_floor;
 			if (rc_decode_floor <= rc_min_qp)
 			{

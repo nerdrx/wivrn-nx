@@ -718,11 +718,18 @@ private:
 	// Set once the raises stopped landing: no more raises, and one step of the
 	// floor is given back on every report window until there is none left.
 	bool rc_decode_held = false;
-	// Raised by the report window, consumed by the release. The floor is released
-	// per WINDOW rather than per frame so the giving-back is visible in the same
-	// two-second line that shows what it bought, and so a 90 Hz stream does not
-	// unwind forty steps in half a second.
+	// Raised by the report window, consumed at the top of the controller. The floor
+	// is released per WINDOW rather than per frame so the giving-back is visible in
+	// the same two-second line that shows what it bought, and so a 90 Hz stream does
+	// not unwind forty steps in half a second.
 	bool rc_decode_window_tick = false;
+	// The decode times seen since the last window closed, and their count. The hold
+	// is cleared against their MEAN: per-frame decode dips under the release
+	// threshold every few frames even while the window sits well over budget, and
+	// clearing on one of those dips is what left a held floor cycling one step up
+	// and one step down for a minute at a time.
+	double rc_decode_window_sum = 0;
+	uint32_t rc_decode_window_n = 0;
 
 	// Which controller last moved, or would move, the quantiser. Reported once a
 	// window: "the picture is soft" and "the picture is soft BECAUSE the headset

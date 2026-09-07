@@ -1425,6 +1425,20 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		host.report_frame_not_held(stream_index, job.frame_id, from_headset::nxwarp_frame_not_held::reason::refused);
 		return;
 	}
+	// Band feedback may already have gone out before this worker finished decoding.
+	// Send an ACK-only packet so the encoder can observe the positive held window
+	// without inventing or replaying a transport receipt payload.  This is outside
+	// the queue callback; the application host serializes control-socket sends.
+	{
+		uint16_t ack_base = 0;
+		uint32_t ack_mask = 0;
+		read_held_ack(ack_base, ack_mask);
+		if (ack_mask)
+			host.send_feedback(stream_index, 0, {},
+			                   publish_decode_us(stream_index,
+			                                     decode_us_report.load(std::memory_order_relaxed)),
+			                   ack_base, ack_mask);
+	}
 	// A slow device, on purpose (see sim_decode_ms). Inside the measured interval, so
 	// everything downstream -- the stride, the queue bound, the decode figure the
 	// server paces to -- sees it as the decode cost it is pretending to be.

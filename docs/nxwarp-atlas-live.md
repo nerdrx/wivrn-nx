@@ -30,3 +30,5 @@ still use the existing display path with a compatible codec.
 Example server encoder options: `"inter":"true", "atlas":"auto"`.
 The default `"atlas":"off"` retains ordinary coding. Optional
 `"atlas-picture-threshold":"8"` sets the full-picture trigger in luma samples.
+
+The server ACK merge is covered by `g++ -std=c++23 -Wall -Wextra -Werror -Icommon tests/nxwarp_held_ack_test.cpp`: an older report at wire 98 with bit 0 must shift left two places when merged into base 100. Empty ACK-only payloads update reconstruction state but carry no transport receipt and are not passed to the sender.

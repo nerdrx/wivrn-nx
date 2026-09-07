@@ -17,6 +17,7 @@
  */
 
 #include "video_encoder_nxwarp.h"
+#include "nxwarp_held_ack.h"
 
 #include "nxwarp_stats.h"
 #include <chrono>
@@ -2893,29 +2894,16 @@ void wivrn::video_encoder_nxwarp::on_nxwarp_feedback(uint8_t path_id,
 	if (held_mask)
 	{
 		std::lock_guard lock(not_held_mutex);
-		if (not ack_valid)
-		{
-			ack_base = held_base;
-			ack_mask = held_mask;
-			ack_valid = true;
-		}
-		else if (int16_t(held_base - ack_base) > 0)
-		{
-			const uint16_t d = uint16_t(held_base - ack_base);
-			ack_mask = (d >= 32 ? 0u : (ack_mask << d)) | held_mask;
-			ack_base = held_base;
-		}
-		else
-		{
-			const uint16_t d = uint16_t(ack_base - held_base);
-			if (d < 32)
-				ack_mask |= (held_mask >> d);
-		}
+		nxwarp_merge_held_ack(ack_base, ack_mask, ack_valid, held_base, held_mask);
 	}
 	// The headset's decode cost, for the pace controller. Zero means it has not decoded
 	// anything yet and is not a measurement, so it is not one.
 	if (decode_us)
 		client_decode_us.store(decode_us, std::memory_order_relaxed);
+	// An empty payload is an ACK-only update emitted after decode completion. It
+	// deliberately carries no transport receipt and must not be passed to nxt.
+	if (payload.empty())
+		return;
 	std::lock_guard lock(sender_mutex);
 	// Decrypts, applies the per-band bitmaps to the client shadow and updates the
 	// path statistics. Everything the encoder does with the result happens at the

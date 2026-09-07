@@ -148,6 +148,7 @@ class nxwarp_decoder : public decoder
 	bool host_sync = false;
 	// Requested only after the stream header confirms the negotiated ATLAS tool.
 	bool atlas_view_active = false;
+	bool atlas_direct_targets = false;
 	// Rolling per-stream timing, reported every two seconds (decode_unit).
 	struct
 	{
@@ -207,7 +208,7 @@ class nxwarp_decoder : public decoder
 		// clipped rather than believed (see decode_us_report).
 		uint64_t stalls = 0;
 		// Atlas-only mode/cost counters, reported separately from ordinary decode timing.
-		uint64_t atlas_frames = 0, picture_frames = 0;
+		uint64_t atlas_frames = 0, picture_frames = 0, atlas_direct_frames = 0;
 		double atlas_tiles_assembled = 0, atlas_entries_valid = 0, atlas_dispatches = 0;
 		// Frames that reached the worker and were decoded but withheld (see showable).
 		uint64_t withheld = 0;
@@ -668,6 +669,7 @@ public:
 
 private:
 	image * get_free();
+	void prepare_atlas_images(image & item, const nxvc_vkd_atlas_images & source);
 	// Build (or rebuild) the pool of images the worker copies decoded pictures into, at
 	// the current `extent`. Called from the constructor, and a second time only when the
 	// stream header turns out to describe a stereo stream and the pool built from the

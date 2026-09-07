@@ -5,7 +5,7 @@ decode. From the 90 s capture on `a779904b`:
 
 ```
 render: this app's own GPU pass 6.37 ms per iteration     loop 43.64/s
-render: defoveate 1088x1088 per eye x2 = 2.37 Mpx/frame at scale 0.50 atlas-mode 0
+render: defoveate 1088x1088 per eye x2 = 2.37 Mpx/frame at scale 0.50 atlas-prototype 0
 render: shader path sharpness 0.00 fsr false alpha false motion false blend false
         glow 0.28 vignette 0.00 deband 1.00 lowpoly 0.00 levels 0 full-kernel false
 ```

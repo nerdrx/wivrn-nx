@@ -251,7 +251,7 @@ CLI = [
         r"render: this app's own GPU pass (?P<ms>[\d.]+) ms per iteration")),
     ("defov", re.compile(
         r"render: defoveate (?P<w>\d+)x(?P<h>\d+) per eye x2 = (?P<mpx>[\d.]+) "
-        r"Mpx/frame at scale (?P<scale>[\d.]+) atlas-mode (?P<atlas>\d+); "
+        r"Mpx/frame at scale (?P<scale>[\d.]+) atlas-prototype (?P<atlas>\d+); "
         r"(?P<cache>\d+) re-presented")),
     ("pose", re.compile(
         r"render: displayed pose age (?P<age>[\d.]+) ms mean \(worst (?P<worst>[\d.]+)\) over "

@@ -721,9 +721,13 @@ A second controller runs alongside it on the headset's reported decode time. `mi
 bounds the byte controller only: when the headset reports it cannot decode frames inside
 `decode-budget` percent of the frame period being defended, the decode controller raises
 the quantiser **above** `min-qp`, because a frame that arrives late is worse than a soft
-one. The report line and the dashboard's *Rate limited by* row name which of the two is
-binding. See [docs/CLIENT-DECODE-WALL.md](CLIENT-DECODE-WALL.md) for why the budget is a
-share of a fixed defended rate rather than of the live paced interval.
+one. The period defended is the one the pacer is choosing unless `decode-budget-fps`
+names a fixed rate. It stops raising when the raises stop working: two steps that move
+the reported decode by less than 3 %, or a frame with fewer than a quarter of its tiles
+coded, and the floor is given back instead — a decode dominated by tile copies cannot be
+bought down with bits. The report line and the dashboard's *Rate limited by* row name
+which of the two controllers is binding. See
+[docs/CLIENT-DECODE-WALL.md](CLIENT-DECODE-WALL.md) for the measurement behind that.
 
 `"rc": "fixed"` is the old behaviour — this encoder's `qp` for the whole session, whatever
 the link is doing — and the ceiling is then ignored, which the log says once.
@@ -769,6 +773,7 @@ composited frames were not sent.
 | `qp` | `28` | the quantiser, 0..63; with `auto`, where the controller starts |
 | `min-qp` | `20` | the finest quantiser the BYTE controller may reach; the decode controller may go above it |
 | `decode-budget` | `80` | percent of the defended frame period the headset's decode may take before quality is traded to protect the frame rate; `0` disables it |
+| `decode-budget-fps` | `0` | the frame rate that period is taken from; `0` means the rate the pacer is choosing |
 | `max-qp` | `44` | the coarsest |
 
 ```json

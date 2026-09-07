@@ -436,6 +436,10 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	// cannot be trusted.
 	rc_decode_budget_frac =
 	        double(std::min(200u, option_u32(settings.options, "decode-budget", 80))) / 100.0;
+	// The frame rate the budget is a share OF. Default 0, which means "whatever the
+	// pacer is choosing" -- see rc_decode_floor_fps. An operator who wants a fixed
+	// wall names the rate here and the controller stops following the pacer.
+	rc_decode_budget_fps = double(option_u32(settings.options, "decode-budget-fps", 0));
 	rc_min_qp = std::min(63u, option_u32(settings.options, "min-qp", 20));
 	rc_max_qp = std::min(63u, option_u32(settings.options, "max-qp", 44));
 	if (rc_min_qp > rc_max_qp)
@@ -1119,6 +1123,15 @@ void wivrn::video_encoder_nxwarp::run_decode_rate_control()
 		return; // no report yet: an unmeasured headset is not a slow one
 
 	const double decode_s = double(decode_us) * 1e-6;
+
+	// The reference period, read from the pacer rather than assumed. This is the
+	// rate the frames the budget is FOR actually leave at; `rc_decode_floor_fps`
+	// says why that is the right one and what keeps it from ratcheting. Zero while
+	// the pacer is off, and then the old half-the-panel-rate reference stands.
+	rc_decode_pace_fps = (pace_mode != pace_mode_t::off and pace_interval > 0)
+	                             ? 1.0 / pace_interval
+	                             : 0.0;
+
 	const double budget = rc_decode_budget_s();
 	if (not(budget > 0))
 		return;
@@ -1126,7 +1139,56 @@ void wivrn::video_encoder_nxwarp::run_decode_rate_control()
 	// Release only with real headroom, so grazing the budget is stable.
 	static constexpr double release_frac = 0.85;
 
-	if (decode_s > budget)
+	// Under budget with headroom: whatever the last raises did or did not do, the
+	// question they were asked is closed. Clear the hold before the release path
+	// below, so a stream that recovers can bind again the next time it needs to.
+	if (decode_s < budget * release_frac)
+	{
+		rc_decode_held = false;
+		rc_decode_stalled = 0;
+		rc_decode_raise_us = 0;
+	}
+
+	// Is the quantiser even the right lever for this frame? A frame whose tiles are
+	// mostly WARP_SKIP costs the headset a copy per tile, and a copy does not read
+	// the quantiser. Binding here would be spending quality on a term that cannot
+	// answer -- so the controller stands down and says so, and the floor it may
+	// have imposed earlier is given back a step at a time by the release below.
+	const bool coded_enough = rc_decode_coded_frac >= rc_decode_coded_min_frac;
+
+	if (decode_s > budget and coded_enough and not rc_decode_held)
+	{
+		// Did the last raise land? Compare against the decode time in force when it
+		// was made, not against the previous frame: the interesting quantity is
+		// what a step of quantiser bought, and it takes a frame or two to arrive.
+		if (rc_decode_raise_us > 0)
+		{
+			const double before = double(rc_decode_raise_us);
+			const double moved = std::fabs(double(decode_us) - before) / before;
+			if (moved < rc_decode_response_frac)
+				++rc_decode_stalled;
+			else
+				rc_decode_stalled = 0;
+		}
+		if (rc_decode_stalled >= rc_decode_stall_limit)
+		{
+			// Two steps that changed nothing. Stop, and hand the quality back.
+			rc_decode_held = true;
+			U_LOG_I("nxwarp: stream %d decode %.1f ms is over the %.1f ms budget but "
+			        "%u quantiser steps moved it less than %.0f%%: holding the floor at "
+			        "+%u and releasing it. The decode is not paying for bits here "
+			        "(coded tiles %.0f%% of the frame).",
+			        int(stream_idx),
+			        decode_s * 1000.0,
+			        budget * 1000.0,
+			        unsigned(rc_decode_stalled),
+			        rc_decode_response_frac * 100.0,
+			        unsigned(rc_decode_floor),
+			        rc_decode_coded_frac * 100.0);
+		}
+	}
+
+	if (decode_s > budget and coded_enough and not rc_decode_held)
 	{
 		const uint32_t step = decode_s > budget * 1.5 ? 2u : 1u;
 		// The floor is an ABSOLUTE quantiser, so the first step has to start from the
@@ -1141,6 +1203,7 @@ void wivrn::video_encoder_nxwarp::run_decode_rate_control()
 		if (want != rc_decode_floor)
 		{
 			rc_decode_floor = want;
+			rc_decode_raise_us = decode_us;
 			U_LOG_D("nxwarp: stream %d decode %.1f ms over budget %.1f ms, quantiser floor -> %u",
 			        int(stream_idx), decode_s * 1000.0, budget * 1000.0, unsigned(rc_decode_floor));
 		}
@@ -1157,6 +1220,29 @@ void wivrn::video_encoder_nxwarp::run_decode_rate_control()
 			rc_decode_floor = 0;
 			rc_binding = rc_binding_t::none;
 		}
+	}
+	else if (rc_decode_floor > 0 and (rc_decode_held or not coded_enough))
+	{
+		// Over budget, but not on anything this controller can move. Give the floor
+		// back one step per report window -- not per frame, so the unwind is slow
+		// enough to see and to reverse if the decode does start responding.
+		if (rc_decode_window_tick)
+		{
+			rc_decode_window_tick = false;
+			--rc_decode_floor;
+			if (rc_decode_floor <= rc_min_qp)
+			{
+				rc_decode_floor = 0;
+				rc_decode_held = false;
+				rc_decode_stalled = 0;
+				rc_decode_raise_us = 0;
+			}
+		}
+		// It is over budget and it is not binding: the operator is owed the second
+		// sentence, not the first. `none` here is what puts the pacer's rate, rather
+		// than the quantiser, in front of whoever reads the line.
+		if (rc_binding == rc_binding_t::decode)
+			rc_binding = rc_binding_t::none;
 	}
 }
 
@@ -2091,6 +2177,11 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		}
 		prof_tiles_coded += coded;
 		prof_tiles_total += total;
+		// What the decode controller needs to know before it decides the quantiser
+		// is the lever: a frame that coded almost nothing costs the headset copies,
+		// and copies do not read the quantiser. Per frame, because that is the
+		// granularity the controller runs at.
+		rc_decode_coded_frac = total > 0 ? double(coded) / double(total) : 1.0;
 		life_tiles_coded += coded;
 		life_tiles_total += total;
 		++life_frames;
@@ -2426,6 +2517,8 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 			prof_bytes = 0;
 			prof_tiles_coded = 0;
 			prof_tiles_total = 0;
+			// One step of the decode floor may come back now, if it is being held.
+			rc_decode_window_tick = true;
 			prof_qp_sum = 0;
 			prof_qp_lo = 63;
 			prof_qp_hi = 0;

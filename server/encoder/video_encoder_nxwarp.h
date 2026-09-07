@@ -404,6 +404,17 @@ class video_encoder_nxwarp : public video_encoder
 	// over the life of the stream.
 	uint64_t prof_paced_out = 0;
 	uint64_t paced_out_total = 0;
+	struct pace_diag_bucket
+	{
+		uint64_t n = 0;
+		double host_sum_us = 0, host_min_us = 0, host_max_us = 0;
+		double display_sum_ms = 0, display_min_ms = 0, display_max_ms = 0;
+	};
+	bool pace_diag_enabled = false;
+	bool pace_diag_have_previous = false;
+	std::chrono::steady_clock::time_point pace_diag_previous_host{};
+	int64_t pace_diag_previous_display = 0;
+	pace_diag_bucket pace_diag_admitted, pace_diag_rejected;
 
 	// The frame id on the wire. Counts SENT frames: seeded from the first frame the
 	// encoder actually sends and incremented once per frame that reaches the socket,
@@ -420,7 +431,7 @@ class video_encoder_nxwarp : public video_encoder
 	void run_pace_control();
 	// Should this composited frame be sent? Takes the pace decision and, when the
 	// answer is yes, marks `now` as the last send.
-	bool pace_admit(std::chrono::steady_clock::time_point now);
+	bool pace_admit(std::chrono::steady_clock::time_point now, int64_t display_time);
 
 	// The stream header goes out on the control (TCP) socket, because a client
 	// that misses it cannot decode anything at all. Repeated periodically so a

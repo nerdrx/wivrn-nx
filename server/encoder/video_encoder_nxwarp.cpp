@@ -505,6 +505,8 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	// behaviours be measured against each other on one build.
 	if (const char * v = std::getenv("NXWARP_FRAME_HELD"); v and v[0] == '0')
 		codec_cfg.frame_held = false;
+	if (const char * v = std::getenv("NXWARP_PACE_DIAGNOSTICS"); v and v[0] == '1')
+		pace_diag_enabled = true;
 
 	// "backend": "ref" (the default) is the CPU reference codec; "vk" is the
 	// Vulkan compute encoder, running on this server's own VkDevice. The
@@ -1404,10 +1406,39 @@ void wivrn::video_encoder_nxwarp::run_pace_control()
 // point is to space the frames the headset receives, and an encoder that fell behind for
 // a moment must not then send a burst to catch up on a schedule -- a burst is precisely
 // what overruns the decoder's queue of one.
-bool wivrn::video_encoder_nxwarp::pace_admit(std::chrono::steady_clock::time_point now)
+bool wivrn::video_encoder_nxwarp::pace_admit(std::chrono::steady_clock::time_point now,
+                                             int64_t display_time)
 {
 	if (pace_mode == pace_mode_t::off)
 		return true;
+	auto observe = [&](bool admitted) {
+		if (not pace_diag_enabled)
+			return;
+		if (not pace_diag_have_previous)
+		{
+			pace_diag_have_previous = true;
+			pace_diag_previous_host = now;
+			pace_diag_previous_display = display_time;
+			return;
+		}
+		const double host_us = std::chrono::duration<double, std::micro>(now - pace_diag_previous_host).count();
+		const double display_ms = double(display_time - pace_diag_previous_display) / 1'000'000.0;
+		auto & b = admitted ? pace_diag_admitted : pace_diag_rejected;
+		++b.n;
+		b.host_sum_us += host_us;
+		b.display_sum_ms += display_ms;
+		if (b.n == 1)
+			b.host_min_us = b.host_max_us = host_us, b.display_min_ms = b.display_max_ms = display_ms;
+		else
+		{
+			b.host_min_us = std::min(b.host_min_us, host_us);
+			b.host_max_us = std::max(b.host_max_us, host_us);
+			b.display_min_ms = std::min(b.display_min_ms, display_ms);
+			b.display_max_ms = std::max(b.display_max_ms, display_ms);
+		}
+		pace_diag_previous_host = now;
+		pace_diag_previous_display = display_time;
+	};
 
 	run_pace_control();
 
@@ -1415,6 +1446,7 @@ bool wivrn::video_encoder_nxwarp::pace_admit(std::chrono::steady_clock::time_poi
 	{
 		pace_have_last = true;
 		pace_last_sent = now;
+		observe(true);
 		return true;
 	}
 	// The compositor's frame period, which is the granularity this decision actually
@@ -1431,8 +1463,12 @@ bool wivrn::video_encoder_nxwarp::pace_admit(std::chrono::steady_clock::time_poi
 	const double tolerance = fps > 0 ? 0.5 / double(fps) : 0.0;
 
 	if (std::chrono::duration<double>(now - pace_last_sent).count() < pace_interval - tolerance)
+	{
+		observe(false);
 		return false;
+	}
 	pace_last_sent = now;
+	observe(true);
 	return true;
 }
 
@@ -1651,6 +1687,7 @@ void wivrn::video_encoder_nxwarp::reset_stream()
 	if (pace_mode == pace_mode_t::automatic)
 		pace_interval = pace_min_interval;
 	pace_have_last = false;
+	pace_diag_have_previous = false;
 	pace_stride_seen = stride_not_held.load(std::memory_order_relaxed);
 	// Send it now rather than at the next period boundary: the new client decodes
 	// nothing at all until it arrives.
@@ -1881,7 +1918,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// (client_holds_nothing) and the not-held queue are deliberately NOT read here --
 	// they are answered by the next frame that is actually sent, and consuming them on
 	// a frame that never leaves would throw the answer away.
-	if (not pace_admit(std::chrono::steady_clock::now()))
+	if (not pace_admit(std::chrono::steady_clock::now(), in[slot].view_info.display_time))
 	{
 		++prof_paced_out;
 		++paced_out_total;
@@ -2403,6 +2440,25 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				        achieved,
 				        unsigned(current_qp),
 				        pace_note.c_str());
+			if (pace_diag_enabled)
+			{
+				auto format_diag = [](const pace_diag_bucket & b) {
+					return b.n ? std::format("n{} host {:.1f}/{:.1f}/{:.1f} us display {:.3f}/{:.3f}/{:.3f} ms",
+					                              b.n, b.host_sum_us / b.n, b.host_min_us, b.host_max_us,
+					                              b.display_sum_ms / b.n, b.display_min_ms, b.display_max_ms)
+					         : std::string("n0");
+				};
+				float diag_fps = pending_framerate.load(std::memory_order_relaxed);
+				if (not(diag_fps > 0))
+					diag_fps = rc_fps;
+				const double tolerance_ms = diag_fps > 0 ? 500.0 / double(diag_fps) : 0.0;
+				U_LOG_I("nxwarp: stream %d pace diagnostics (mean/min/max; interval %.3f ms, tolerance %.3f ms): admitted %s; rejected %s",
+				        int(stream_idx), pace_interval * 1000.0, tolerance_ms,
+				        format_diag(pace_diag_admitted).c_str(),
+				        format_diag(pace_diag_rejected).c_str());
+				pace_diag_admitted = {};
+				pace_diag_rejected = {};
+			}
 			// How the frames of this window were laid on the tile grid. The
 			// harness has printed this since P1 landed and the SERVER never did,
 			// so a live session had no way to tell whether the mapping it was

@@ -346,6 +346,7 @@ private:
 	std::atomic<int64_t> frame_period_ns = 0;
 
 protected:
+	void dump_nx_frame_map(uint64_t outer_frame, uint16_t wire_frame);
 	std::atomic_uint32_t pending_bitrate;
 	std::atomic<float> pending_framerate;
 	std::unique_ptr<idr_handler> idr;

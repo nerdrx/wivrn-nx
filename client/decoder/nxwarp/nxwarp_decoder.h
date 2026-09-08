@@ -142,6 +142,7 @@ class nxwarp_decoder : public decoder
 		std::atomic_bool free = true;
 		vk::raii::Semaphore semaphore = nullptr;
 		uint64_t semaphore_val = 0;
+		uint64_t atlas_generation = 0;
 	};
 	// Set when the device refuses timeline semaphores (Adreno 650): frames are then
 	// fenced on the host and published with no semaphore.
@@ -149,6 +150,8 @@ class nxwarp_decoder : public decoder
 	// Requested only after the stream header confirms the negotiated ATLAS tool.
 	bool atlas_view_active = false;
 	bool atlas_direct_targets = false;
+	bool atlas_dirty_catchup = false;
+	uint64_t next_atlas_generation = 1;
 	// Rolling per-stream timing, reported every two seconds (decode_unit).
 	struct
 	{

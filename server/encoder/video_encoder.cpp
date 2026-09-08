@@ -782,6 +782,16 @@ void video_encoder::send_parity()
 	}
 }
 
+void video_encoder::dump_nx_frame_map(uint64_t outer_frame, uint16_t wire_frame)
+{
+	if (cnx)
+	{
+		char extra[32];
+		std::snprintf(extra, sizeof(extra), ",%u", unsigned(wire_frame));
+		cnx->dump_time("nx_frame_map", outer_frame, os_monotonic_get_ns(), stream_idx, extra);
+	}
+}
+
 void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool control, shard_pacer pacer, spill_scheduler spill)
 {
 	std::lock_guard lock(mutex);

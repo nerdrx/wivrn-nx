@@ -2,10 +2,10 @@
 
 The live atlas display path is opt-in. `atlas:auto` is meaningful only when the
 negotiated NX Warp tool mask contains bit 31 (ATLAS) and bit 34 (ATLAS_REBASE),
-and the stream is the paired stereo form. The current renderer accepts the
-decoder's R8 `CT_NONE` view at 2176×1088 luma resolution, with 1088×544
-interleaved CbCr. Other atlas dimensions or formats fail clearly at the display
-boundary until a matching shader variant exists.
+and the stream is the paired stereo form. The renderer accepts the decoder's
+8-bit R8 `CT_NONE` atlas view, with dimensions read from decoded images.
+The original 2176×1088 combined luma fixture is historical; current native
+captures use 4352×2176 combined luma and 2160×2160 output per eye.
 
 The renderer consumes per-pool snapshots of the decoder-owned atlas planes and
 the 64-byte-per-tile GPU table. The snapshot is retained with the frame handle
@@ -64,3 +64,30 @@ adb shell 'setprop debug.wivrn.nxwarp_atlas_speed ""'
 The previous [ABBA results](https://github.com/nerdrx/nx-warp/tree/main/bench/results/240fps-2026-09-07/live-atlas/abba-180s)
 are explicitly caveated; new full-resolution measurements must identify both
 encoded source and output dimensions. Exact sRGB conversion remains in use.
+
+
+## Persistent target catchup (experimental)
+
+The optional borrowed-target cache refreshes only tiles changed since a pool
+image was last decoded into. It keeps a bounded history across intervening
+frames, uses a separate GPU dirty list, and fully refreshes new generations or
+images whose history has expired. Recreated images receive a fresh generation.
+The caller preserves pixels and supplies the previous image layout; the decoder
+returns the target in `GENERAL` for the existing display barrier.
+
+This client requires nx-warp codec `4000fbf` or a compatible newer API. Enable
+before reconnecting with `adb shell setprop debug.wivrn.atlas_dirty_catchup 1`;
+set it to `0` to restore ordinary full target refresh. The option is off by default.
+Eight changing host GPU frames match full-reference pixels across three target
+images, with synchronization validation enabled; the ordinary three-frame
+borrowed-target regression also passes. Live image quality still depends on
+lossy atlas prediction and optimistic admission, independently of this cache.
+
+For latency experiments, `WIVRN_DUMP_TIMINGS` now records `nx_frame_map` rows
+joining outer encoder frame IDs to the NX 16-bit wire IDs after a successful
+send. Paced or dropped source frames make those ID sequences diverge. Historical
+CSVs without this mapping cannot support a direct NX encode-to-feedback join.
+Use the codec repository's `tools/summarize_pipeline_latency.py` on a complete
+single-session capture. `blit` measures render selection, not scanout or photons.
+The [codec evidence record](https://github.com/nerdrx/nx-warp/tree/main/bench/results/240fps-2026-09-07/live-atlas/borrowed-cache-corrected)
+contains screenshots, reproducible measurements, and experiment limits.

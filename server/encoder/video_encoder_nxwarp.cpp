@@ -2849,6 +2849,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		e.confirmed = false;
 	}
 	sent_frame_id = frame_id16;
+	dump_nx_frame_map(frame_id, frame_id16);
 	sent_frame_id_seeded = true;
 	++sent_frames;
 	// And now the headset can be told which frame it may trust again -- and the

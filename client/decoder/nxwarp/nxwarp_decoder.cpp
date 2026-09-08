@@ -668,6 +668,18 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 	const char * direct = std::getenv("NXWARP_ATLAS_DIRECT");
 	atlas_direct_targets = atlas_view_active && si.bit_depth == 8 && si.chroma == 0 &&
 	                       (direct ? direct[0] == '1' : application::get_hmd_traits().nxwarp_atlas_speed);
+	atlas_dirty_catchup = std::getenv("NXWARP_ATLAS_DIRTY_CATCHUP") != nullptr;
+#ifdef __ANDROID__
+	char catchup_prop[PROP_VALUE_MAX] = {};
+	if (__system_property_get("debug.wivrn.atlas_dirty_catchup", catchup_prop) > 0)
+		atlas_dirty_catchup = catchup_prop[0] != '0';
+#endif
+	if (atlas_dirty_catchup) {
+		setenv("NXWARP_ATLAS_DIRTY_CATCHUP", "1", 1);
+		setenv("NXVC_VKD_ATLAS_VIEW_DIRTY", "1", 1);
+	}
+	if (atlas_dirty_catchup)
+		spdlog::info("nxwarp[{}]: atlas borrowed-target dirty catchup enabled", stream_index);
 	spdlog::info("nxwarp[{}]: direct atlas targets {}", stream_index, atlas_direct_targets);
 #endif
 	if (atlas_view_active)
@@ -1358,6 +1370,7 @@ void nxwarp_decoder::prepare_atlas_images(image & item, const nxvc_vkd_atlas_ima
 		item.atlas_snapshot.format[p] = source.format[p];
 		item.atlas_snapshot.width[p] = source.width[p];
 		item.atlas_snapshot.height[p] = source.height[p];
+		item.atlas_generation = next_atlas_generation++;
 	}
 }
 
@@ -1443,7 +1456,9 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			if (reserved)
 			{
 				prepare_atlas_images(*reserved, source);
-				direct_target = nxvc_vk_decoder_set_atlas_borrowed_target(nxvc, &reserved->atlas_snapshot) == NXVC_VKD_OK;
+				direct_target = atlas_dirty_catchup
+					? nxvc_vk_decoder_set_atlas_borrowed_target_generation(nxvc, &reserved->atlas_snapshot, reserved->atlas_generation, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) == NXVC_VKD_OK
+					: nxvc_vk_decoder_set_atlas_borrowed_target(nxvc, &reserved->atlas_snapshot) == NXVC_VKD_OK;
 				if (!direct_target)
 					reserved.reset();
 			}

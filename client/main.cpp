@@ -22,6 +22,7 @@
 #include "spdlog/spdlog.h"
 #include "version.h"
 
+#include <cstdlib>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/socket.h>
@@ -84,7 +85,10 @@ void real_main()
 				source->process(native_app, source);
 		}
 	}
-	exit(0);
+	// Preserve process termination after Activity teardown, but do not run
+	// process-global finalizers: Pico's libutils crashed in RefBase::decStrong
+	// through __cxa_finalize here after the OpenXR application was destroyed.
+	std::_Exit(EXIT_SUCCESS);
 #endif
 }
 

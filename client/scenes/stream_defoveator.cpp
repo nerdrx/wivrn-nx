@@ -18,6 +18,7 @@
  */
 
 #include <cmath>
+#include <cstdlib>
 #include <glm/gtc/packing.hpp>
 #include "stream_defoveator.h"
 
@@ -32,11 +33,15 @@
 #include <glm/glm.hpp>
 #include <glm/gtx/quaternion.hpp>
 #include "scenes/stream_grid.h"
+#include "scenes/atlas_tile_grid.h"
 
 #include <cstddef>
 #include <vk_mem_alloc.h>
 #include <vulkan/vulkan_core.h>
 #include <vulkan/vulkan_raii.hpp>
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 
 struct stream_defoveator::vertex
 {
@@ -180,7 +185,7 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 	                .binding = 3,
 	                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
 	                .descriptorCount = 1,
-	                .stageFlags = vk::ShaderStageFlagBits::eFragment,
+	                .stageFlags = vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment,
 	                .pImmutableSamplers = &*atlas_sampler,
 	        },
 		vk::DescriptorSetLayoutBinding{
@@ -193,7 +198,7 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 		                .binding = 5,
 		                .descriptorType = atlas_r8 ? vk::DescriptorType::eStorageBuffer : vk::DescriptorType::eUniformBuffer,
 	                .descriptorCount = 1,
-	                .stageFlags = vk::ShaderStageFlagBits::eFragment,
+	                .stageFlags = vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment,
 	        },
 	        vk::DescriptorSetLayoutBinding{
 	                .binding = 6,
@@ -244,9 +249,10 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 	        VkBool32(fsr_baked),
 	        int32_t(atlas_r8 ? 1 : atlas_baked),
 	        int32_t(kAtlasTiles),
-	        int32_t(view),
-	        VkBool32(lowpoly_baked),
-	        VkBool32(lowpoly_full_baked));
+		int32_t(view),
+		VkBool32(lowpoly_baked),
+		VkBool32(lowpoly_full_baked),
+		VkBool32(atlas_r8 && atlas_vertex_warp));
 	auto fragment_shader = load_shader(device, atlas_r8 ? "reprojection_atlas_r8.frag" : "reprojection.frag");
 
 	vk::pipeline_builder pipeline_info{
@@ -307,6 +313,20 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 	        .subpass = 0,
 	};
 
+	if (atlas_r8)
+	{
+		pipeline_info.Stages[0].pSpecializationInfo = specialization;
+		const bool vertex_warp = atlas_vertex_warp;
+		pipeline_info.VertexAttributeDescriptions.push_back({
+		        .location = 2, .binding = 0, .format = vk::Format::eR32Uint,
+		        .offset = vertex_warp ? uint32_t(offsetof(wivrn::atlas_tile_grid::vertex, tile)) : 0u});
+		if (vertex_warp)
+		{
+			pipeline_info.VertexBindingDescriptions[0].stride = sizeof(wivrn::atlas_tile_grid::vertex);
+			pipeline_info.InputAssemblyState->topology = vk::PrimitiveTopology::eTriangleList;
+		}
+	}
+
 	target.pipeline = device.createGraphicsPipeline(application::get_pipeline_cache(), pipeline_info);
 	return target;
 }
@@ -320,8 +340,19 @@ stream_defoveator::stream_defoveator(
         device(device),
         physical_device(physical_device),
         output_images(std::move(output_images_)),
-        output_extent(output_extent)
+	output_extent(output_extent)
 {
+#ifdef __ANDROID__
+	char profile_value[PROP_VALUE_MAX] = {};
+	const int profile_len = __system_property_get("debug.wivrn.atlas_vertex_warp", profile_value);
+	if (profile_len > 0)
+		atlas_vertex_warp = std::atoi(profile_value) == 1;
+#else
+	if (const char * value = std::getenv("WIVRN_ATLAS_VERTEX_WARP"))
+		atlas_vertex_warp = std::atoi(value) == 1;
+#endif
+	if (atlas_vertex_warp)
+		spdlog::info("nxwarp atlas vertex warp enabled");
 	// Create renderpass
 	vk::AttachmentDescription attachment{
 	        .format = format,
@@ -944,6 +975,40 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		const auto & input = inputs[view];
 		const bool atlas_r8 = input.atlas_valid && input.atlas_table != nullptr && input.atlas_table_bytes != 0;
 		auto & pipeline = ensure_pipeline(view, input.sampler_rgb, input.sampler_a, atlas_r8);
+		if (atlas_r8 && atlas_vertex_warp &&
+		    (!atlas_mesh_buffers[view] || atlas_mesh_extents[view] != input.atlas_extents[0] ||
+		     atlas_mesh_foveation[view].x != foveation[view].x ||
+		     atlas_mesh_foveation[view].y != foveation[view].y))
+		{
+			const auto & f = foveation[view];
+			// The decoded allocation can include the final tile's padding (e.g.
+			// 2176 pixels for a 2160-pixel view). The visible grid may omit that
+			// padding, but its row stride must still address the same tile table.
+			const auto source_width = wivrn::atlas_tile_grid::extent(f.x);
+			const auto source_height = wivrn::atlas_tile_grid::extent(f.y);
+			const auto picture = input.atlas_extents[0];
+			if (source_width > picture.width / 2 || source_height > picture.height ||
+			    (source_width + 63) / 64 != (picture.width / 2 + 63) / 64)
+				throw std::runtime_error("Native atlas vertex grid does not match decoded source extent");
+			const size_t count = wivrn::atlas_tile_grid::required_vertices(f.x, f.y);
+			if (!count)
+				throw std::runtime_error("Empty native atlas vertex grid");
+			const vk::BufferCreateInfo info{
+			        .size = count * sizeof(wivrn::atlas_tile_grid::vertex),
+			        .usage = vk::BufferUsageFlagBits::eVertexBuffer,
+			        .sharingMode = vk::SharingMode::eExclusive};
+			const VmaAllocationCreateInfo alloc{
+			        .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT};
+			atlas_mesh_buffers[view] = buffer_allocation(device, info, alloc);
+			atlas_mesh_counts[view] = wivrn::atlas_tile_grid::emit(f.x, f.y,
+			        static_cast<wivrn::atlas_tile_grid::vertex *>(atlas_mesh_buffers[view].map()), count);
+			atlas_mesh_buffers[view].unmap();
+			atlas_mesh_foveation[view] = f;
+			atlas_mesh_extents[view] = input.atlas_extents[0];
+			spdlog::info("nxwarp atlas vertex grid eye {}: {}x{} source, {} vertices", view,
+			        wivrn::atlas_tile_grid::extent(f.x), wivrn::atlas_tile_grid::extent(f.y), atlas_mesh_counts[view]);
+		}
+
 
 		std::array image_info{
 		        vk::DescriptorImageInfo{
@@ -1092,8 +1157,16 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		command_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, *pipeline.pipeline);
 		command_buffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, *pipeline.layout, 0, pipeline.ds, {});
 		command_buffer.pushConstants<vert_pc>(*pipeline.layout, vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment, 0, pc);
-		command_buffer.bindVertexBuffers(0, vk::Buffer(buffer), vertices_size * view);
-		command_buffer.draw(uint32_t(drawn_vertices[view]), 1, 0, 0);
+		if (atlas_r8 && atlas_vertex_warp)
+		{
+			command_buffer.bindVertexBuffers(0, vk::Buffer(atlas_mesh_buffers[view]), vk::DeviceSize{0});
+			command_buffer.draw(atlas_mesh_counts[view], 1, 0, 0);
+		}
+		else
+		{
+			command_buffer.bindVertexBuffers(0, vk::Buffer(buffer), vertices_size * view);
+			command_buffer.draw(uint32_t(drawn_vertices[view]), 1, 0, 0);
+		}
 		command_buffer.endRenderPass();
 	}
 }

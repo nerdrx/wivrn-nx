@@ -32,6 +32,10 @@ class stream_defoveator
 	// Vertex buffer
 	buffer_allocation buffer;
 	size_t vertices_size = 0;
+	std::array<buffer_allocation, 2> atlas_mesh_buffers;
+	std::array<wivrn::to_headset::foveation_parameter, 2> atlas_mesh_foveation;
+	std::array<vk::Extent2D, 2> atlas_mesh_extents{};
+	std::array<uint32_t, 2> atlas_mesh_counts{};
 	// Vertices actually emitted per view this frame. Not a constant any more: with a
 	// lens mask the grid leaves cells out, so the draw count is whatever the emitter
 	// wrote rather than what the foveation implies.
@@ -97,6 +101,7 @@ private:
 	// [atlas prototype] whether the per-tile warp is compiled into the current
 	// pipelines, same specialization scheme as the two above.
 	int atlas_baked = 0;
+	bool atlas_vertex_warp = false;
 	static constexpr uint32_t kAtlasTiles = 17;
 	// The v1 configuration of ADR-0029: 1088x1088 per eye, 64x64 tiles, 17x17 = 289
 	// tiles. The atlas is the whole eye picture in the coded sample domain.

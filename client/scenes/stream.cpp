@@ -2330,7 +2330,9 @@ void scenes::stream::render(const XrFrameState & frame_state)
 				assert(b->semaphore_val);
 				semaphores.push_back(b->semaphore);
 				semaphore_vals.push_back(*b->semaphore_val);
-				wait_stages.push_back(vk::PipelineStageFlagBits::eFragmentShader);
+				// Atlas tile matrices may be consumed by the vertex warp path.
+				// Order both shader consumers after the decoder's snapshot writes.
+				wait_stages.push_back(vk::PipelineStageFlagBits::eVertexShader | vk::PipelineStageFlagBits::eFragmentShader);
 			}
 		}
 		submit_info.setWaitDstStageMask(wait_stages);

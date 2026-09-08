@@ -11,6 +11,49 @@ codec's own formats are not restated — `docs/TRANSPORT.md` (transport) and `do
 
 ---
 
+## Experimental atlas vertex warp
+
+Enable with `adb shell setprop debug.wivrn.atlas_vertex_warp 1`, then restart the
+client session. Reset to `0` to restore the default fragment warp. Desktop clients
+use `WIVRN_ATLAS_VERTEX_WARP=1`. The activation log is
+`nxwarp atlas vertex warp enabled`. This is an experimental switch, separate from
+the optional `debug.wivrn.atlas_dirty_catchup` decoder output cache.
+
+The native R8 path emits independent triangles split at every 64-source-pixel tile
+boundary and every foveation boundary. Each triangle uses one tile matrix. The
+vertex stage emits homogeneous coordinates; the fragment stage divides, clamps,
+samples Y/CbCr and performs the original colour conversion and fade. The mesh is
+cached until foveation changes. A 2160-pixel visible eye uses 6,936 vertices and
+the same 34 tile columns as its padded 2176-pixel allocation. Unsupported source
+extent/row-stride combinations are rejected by the experimental path.
+
+Decoder completion waits cover vertex and fragment readers. Ordinary codec
+streams keep the existing strip renderer. The experimental mesh conservatively
+draws all cells, including cells an optional lens mask could omit.
+
+Prototype ordered runs (warp/control/warp) measured 2.90/6.25/3.15 ms median
+render GPU window means. Cache-hit iterations affect that average; estimated
+noncached means were 3.29/6.30/3.20 ms. These are not per-frame p99 values and do
+not establish 240 fresh frames/s or motion-to-photon latency.
+[Evidence and screenshots](https://github.com/nerdrx/nx-warp/tree/main/bench/results/240fps-2026-09-08/atlas-vertex-warp)
+include the diagnostic APK provenance. The retained switch replaces prototype
+profile 3; image-breaking profiles 1 and 2 were removed.
+The final cleaned APK was checked with the switch on and off, reproducing
+3.10 and 6.30 ms respectively with the same full-resolution output.
+
+Geometry tests cover foveation boundaries, clipped and padded native extents,
+tile IDs, complete screen coverage, and insufficient buffer capacity. Run:
+
+```sh
+g++ -std=c++23 -O2 -Wall -Wextra -Werror -Iclient tests/atlas_tile_grid_test.cpp -o /tmp/atlas-grid-test
+/tmp/atlas-grid-test
+```
+
+Float32 model comparisons of homogeneous interpolation measured under 0.00055
+source-pixel difference on sampled mild-perspective transforms. This is a numeric
+check, not pixel-identical Vulkan output validation. Invalid tiles and near-zero
+projective denominators retain fragment checks.
+
 ## 1. The wire
 
 ### 1.1 `video_codec::nxwarp`
@@ -341,12 +384,17 @@ Named here rather than left to be discovered.
   prediction across frames is untested from this side.
 * **No hybrid mode.** `nxwarp_hybrid` and the `AMediaCodec` base layer are not built.
 * `recvmmsg`'s `num_messages` is still 20 (INTEGRATION.md 2.5 argues for 64).
-* The decoder has never run on a headset. The two ends are now connected in process:
+* Historical integration checkpoint: the two ends were first connected in process:
   `wivrn-nxwarp-e2e` drives the real `video_encoder_nxwarp` and the real client decoder
   through the real packet types over a lossy in-process link (see `docs/NXWARP-E2E.md`).
-  A live server-to-headset session has still not been run.
+  Live Pico sessions have since been measured; see the native atlas experiments above.
 
-## Where the latency is
+## Historical latency investigation
+
+The following observations predate the native-resolution atlas experiments above.
+`PxrMetric` values are runtime-reported estimates, not an independently measured
+physical motion-to-photon result. They must not be compared directly with the
+new mapped encode-to-selection measurements.
 
 Motion-to-photon on the Pico 4 sat at 41-56 ms while `stream_scale` took the client's
 decode wall from 25.7 ms to 11.2 ms and the frame rate from 34 to 58. The decode got

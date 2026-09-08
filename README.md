@@ -3,14 +3,30 @@
 
 WiVRn NX is a fork of WiVRn (master, `nx-patches` branch) focused on making the stream
 survive the real world — flaky Wi-Fi, slow games, sleeping controllers — and on looking good
-while doing it. Every feature that affects what the headset experiences has a toggle in the
-headset settings UI. The NX client and NX server must be used together (several features add
+while doing it. User-facing features have toggles in the headset settings UI;
+experimental codec paths also use the developer switches documented below.
+The NX client and NX server must be used together (several features add
 protocol fields; mismatched pairings are refused cleanly at handshake as an incompatible
 version), and both must be built from the same tree.
 
 Primary target and test hardware: **Pico 4** (regular, XR2 Gen 1: H.264 + HEVC decode, no AV1)
 with Pico Motion Trackers, on Linux. Everything except the Pico-specific fixes applies to any
 headset WiVRn supports.
+
+## NX Warp: native-resolution rendering experiment
+
+The optional atlas vertex-warp renderer moves each tile's homography from every
+fragment to a mesh split at tile and foveation boundaries. Homogeneous coordinates
+are interpolated before division, preserving the warp and colour conversion.
+On Pico 4 at **2160×2160 per eye**, ordered prototype runs measured **2.90 ms →
+6.25 ms (original control) → 3.15 ms** median render GPU window means. These are
+render-stage measurements, not frame-level percentiles or demonstrated 240 FPS.
+The final cleaned build reproduced **3.10 ms enabled / 6.30 ms disabled**.
+
+The feature is off by default and applies only to native R8 NX Warp atlas streams.
+Existing seams, ringing and motion trails remain. See the
+[activation and validation notes](docs/nxwarp.md#experimental-atlas-vertex-warp)
+and [raw measurements and screenshots](https://github.com/nerdrx/nx-warp/tree/main/bench/results/240fps-2026-09-08/atlas-vertex-warp).
 
 ## Fixes over upstream
 

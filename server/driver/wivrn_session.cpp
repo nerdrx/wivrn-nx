@@ -1659,7 +1659,7 @@ void wivrn_session::reconnect(std::stop_token stop)
 				});
 
 				connection->shutdown();
-				throw std::runtime_error("headset config incompatible with current session");
+				throw std::runtime_error(std::format("headset config incompatible with current session: {}", *refuse_conn));
 			}
 
 			if (warn_conn)

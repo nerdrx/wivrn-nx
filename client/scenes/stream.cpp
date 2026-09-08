@@ -50,6 +50,9 @@
 #include <ranges>
 #include <thread>
 #include <vulkan/vulkan_raii.hpp>
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 
 #include "wivrn_config.h"
 
@@ -177,6 +180,17 @@ static const std::array supported_color_formats = {
         vk::Format::eR8G8B8A8Srgb,
         vk::Format::eB8G8R8A8Srgb,
 };
+
+static bool atlas_unorm_render_enabled()
+{
+#ifdef __ANDROID__
+	char value[PROP_VALUE_MAX] = {};
+	return __system_property_get("debug.wivrn.atlas_unorm_render", value) > 0 && std::atoi(value) == 1;
+#else
+	const char * value = std::getenv("WIVRN_ATLAS_UNORM_RENDER");
+	return value && std::atoi(value) == 1;
+#endif
+}
 
 static const std::array supported_depth_formats{
         vk::Format::eD32Sfloat,
@@ -2813,7 +2827,8 @@ void scenes::stream::setup_reprojection_swapchain(uint32_t swapchain_width, uint
 
 	auto views = system.view_configuration_views(viewconfig);
 
-	swapchain = xr::swapchain(instance, session, device, swapchain_format, swapchain_width, swapchain_height, 1, views.size());
+	const bool mutable_alias = atlas_unorm_render_enabled() && application::get_hmd_traits().needs_srgb_conversion;
+	swapchain = xr::swapchain(instance, session, device, swapchain_format, swapchain_width, swapchain_height, 1, views.size(), mutable_alias);
 	spdlog::info("Created stream swapchain: {}x{}", swapchain.width(), swapchain.height());
 	for (auto view: views)
 	{
@@ -2829,7 +2844,8 @@ void scenes::stream::setup_reprojection_swapchain(uint32_t swapchain_width, uint
 	        physical_device,
 	        swapchain.images(),
 	        extent,
-	        swapchain.format());
+	        swapchain.format(), swapchain.mutable_format());
+	spdlog::info("Atlas mutable swapchain {}", swapchain.mutable_format() ? "enabled" : "unavailable");
 	// The pass must lay its viewport out with the same scale the swapchain and the
 	// layer rect were sized with, or the picture is cropped rather than scaled.
 	defoveator->set_output_scale(defoveate_scale_);

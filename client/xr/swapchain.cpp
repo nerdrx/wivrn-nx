@@ -30,13 +30,15 @@ xr::swapchain::swapchain(
         int32_t width,
         int32_t height,
         int sample_count,
-        uint32_t array_size) :
+        uint32_t array_size,
+        bool mutable_format) :
         width_(width),
         height_(height),
         sample_count_(sample_count),
         format_(format)
 {
 	assert(sample_count == 1);
+	const bool format_list_supported = inst.has_extension(XR_KHR_VULKAN_SWAPCHAIN_FORMAT_LIST_EXTENSION_NAME);
 
 	XrSwapchainUsageFlags usage_flags;
 
@@ -52,7 +54,28 @@ xr::swapchain::swapchain(
 			break;
 		default:
 			usage_flags = XR_SWAPCHAIN_USAGE_SAMPLED_BIT | XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+			if (mutable_format)
+				usage_flags |= XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT;
 			break;
+	}
+
+	XrVulkanSwapchainFormatListCreateInfoKHR format_list{
+	        .type = XR_TYPE_VULKAN_SWAPCHAIN_FORMAT_LIST_CREATE_INFO_KHR,
+	};
+	VkFormat view_formats[2]{};
+	const void *format_list_next = nullptr;
+	if (mutable_format && format_list_supported)
+	{
+		vk::Format alias = format == vk::Format::eR8G8B8A8Srgb ? vk::Format::eR8G8B8A8Unorm
+		                                                         : format == vk::Format::eB8G8R8A8Srgb ? vk::Format::eB8G8R8A8Unorm : vk::Format::eUndefined;
+		if (alias != vk::Format::eUndefined)
+		{
+			view_formats[0] = static_cast<VkFormat>(format);
+			view_formats[1] = static_cast<VkFormat>(alias);
+			format_list.viewFormatCount = 2;
+			format_list.viewFormats = view_formats;
+			format_list_next = &format_list;
+		}
 	}
 
 	XrSwapchainCreateInfo create_info{
@@ -65,10 +88,31 @@ xr::swapchain::swapchain(
 	        .height = (uint32_t)height,
 	        .faceCount = 1,
 	        .arraySize = array_size,
-	        .mipCount = 1,
+		.mipCount = 1,
 	};
+	create_info.next = format_list_next;
 
-	CHECK_XR(xrCreateSwapchain(s, &create_info, &id));
+	XrResult result = xrCreateSwapchain(s, &create_info, &id);
+	if (result != XR_SUCCESS && mutable_format)
+	{
+		if (format_list_next != nullptr)
+		{
+			spdlog::warn("XR mutable swapchain request rejected ({}); retrying without format list", static_cast<int>(result));
+			create_info.next = nullptr;
+			result = xrCreateSwapchain(s, &create_info, &id);
+		}
+		if (result != XR_SUCCESS)
+		{
+			spdlog::warn("Mutable XR swapchain unavailable ({}); using standard SRGB swapchain", static_cast<int>(result));
+			usage_flags &= ~XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT;
+			create_info.usageFlags = usage_flags;
+			CHECK_XR(xrCreateSwapchain(s, &create_info, &id));
+			mutable_format = false;
+		}
+	}
+	else
+		CHECK_XR(result);
+	mutable_format_ = (create_info.usageFlags & XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT) != 0;
 
 	auto images = details::enumerate<XrSwapchainImageVulkanKHR>(xrEnumerateSwapchainImages, id);
 

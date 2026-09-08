@@ -28,6 +28,16 @@ Existing seams, ringing and motion trails remain. See the
 [activation and validation notes](docs/nxwarp.md#experimental-atlas-vertex-warp)
 and [raw measurements and screenshots](https://github.com/nerdrx/nx-warp/tree/main/bench/results/240fps-2026-09-08/atlas-vertex-warp).
 
+An additional experimental UNORM render alias is available with
+`debug.wivrn.atlas_unorm_render=1` (desktop: `WIVRN_ATLAS_UNORM_RENDER=1`). It
+keeps the XR swapchain sRGB declaration, is atlas-only and off by default, and
+falls back when mutable-format support, alias creation, or neutral colour
+conditions are unavailable. A same-APK on/off/on test measured **2.7/3.2/2.6 ms**
+GPU window-mean medians at native resolution; this is not a 240-Hz result. See the [implementation notes](docs/nxwarp.md#experimental-atlas-unorm-render-alias).
+The measured v2 capture recorded no consistent end-to-end latency gain; its
+raw logs and screenshots are archived in
+[the atlas UNORM appendix](docs/bench/atlas-unorm-20260908/README.md).
+
 ## Fixes over upstream
 
 | | |

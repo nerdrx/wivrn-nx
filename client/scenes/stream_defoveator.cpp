@@ -244,7 +244,7 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 	// Fragment shader
 	auto specialization = make_specialization_constants(
 	        int32_t(alpha),
-	        VkBool32(application::get_hmd_traits().needs_srgb_conversion),
+	        VkBool32(application::get_hmd_traits().needs_srgb_conversion && !(mutable_alias && atlas_r8 && unorm_baked)),
 	        VkBool32(cas_full_baked),
 	        VkBool32(fsr_baked),
 	        int32_t(atlas_r8 ? 1 : atlas_baked),
@@ -309,7 +309,7 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 	        }},
 	        .DynamicStates = {vk::DynamicState::eViewport, vk::DynamicState::eScissor},
 	        .layout = *target.layout,
-	        .renderPass = *renderpass,
+	        .renderPass = (atlas_r8 && mutable_alias && unorm_baked) ? *renderpass_unorm : *renderpass,
 	        .subpass = 0,
 	};
 
@@ -336,11 +336,13 @@ stream_defoveator::stream_defoveator(
         vk::raii::PhysicalDevice & physical_device,
         std::vector<vk::Image> output_images_,
         vk::Extent2D output_extent,
-        vk::Format format) :
+        vk::Format format,
+        bool mutable_alias) :
         device(device),
         physical_device(physical_device),
-        output_images(std::move(output_images_)),
-	output_extent(output_extent)
+	output_images(std::move(output_images_)),
+	output_extent(output_extent),
+	mutable_alias(mutable_alias)
 {
 #ifdef __ANDROID__
 	char profile_value[PROP_VALUE_MAX] = {};
@@ -467,6 +469,45 @@ stream_defoveator::stream_defoveator(
 			fb_create_info.setAttachments(*output_image_views.back());
 
 			framebuffers.emplace_back(device, fb_create_info);
+		}
+	}
+	if (mutable_alias)
+	{
+		try
+		{
+		const vk::Format view_format = format == vk::Format::eR8G8B8A8Srgb ? vk::Format::eR8G8B8A8Unorm : vk::Format::eB8G8R8A8Unorm;
+		vk::AttachmentDescription unorm_attachment{
+		        .format = view_format, .samples = vk::SampleCountFlagBits::e1,
+		        .loadOp = vk::AttachmentLoadOp::eDontCare, .storeOp = vk::AttachmentStoreOp::eStore,
+		        .finalLayout = vk::ImageLayout::eColorAttachmentOptimal,
+		};
+		vk::AttachmentReference unorm_ref{.attachment = 0, .layout = vk::ImageLayout::eColorAttachmentOptimal};
+		vk::SubpassDescription unorm_subpass{.pipelineBindPoint = vk::PipelineBindPoint::eGraphics,
+		        .colorAttachmentCount = 1, .pColorAttachments = &unorm_ref};
+		vk::RenderPassCreateInfo unorm_info{.attachmentCount = 1, .pAttachments = &unorm_attachment,
+		        .subpassCount = 1, .pSubpasses = &unorm_subpass};
+			renderpass_unorm = vk::raii::RenderPass(device, unorm_info);
+		for (vk::Image image: output_images)
+			for (uint32_t view = 0; view < view_count; ++view)
+			{
+				output_image_views_unorm.emplace_back(device, vk::ImageViewCreateInfo{
+				        .image = image, .viewType = vk::ImageViewType::e2DArray, .format = view_format,
+				        .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor,
+				                .levelCount = 1, .baseArrayLayer = view, .layerCount = 1}});
+				vk::FramebufferCreateInfo fb{.renderPass = *renderpass_unorm, .width = output_extent.width,
+				        .height = output_extent.height, .layers = 1};
+				fb.setAttachments(*output_image_views_unorm.back());
+				framebuffers_unorm.emplace_back(device, fb);
+			}
+		spdlog::info("Atlas UNORM attachment views ready");
+		}
+		catch (const vk::SystemError & e)
+		{
+			spdlog::warn("UNORM XR view unavailable ({}); using SRGB render view", e.what());
+			framebuffers_unorm.clear();
+			output_image_views_unorm.clear();
+			renderpass_unorm = nullptr;
+			this->mutable_alias = false;
 		}
 	}
 }
@@ -820,7 +861,10 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 	// so nothing is still reading the old pipelines. They only ever flip from a settings
 	// toggle, a rare event.
 	const bool lowpoly = post.low_poly > 0;
-	if (cas_full_kernel != cas_full_baked or fsr != fsr_baked or atlas_prototype != atlas_baked or
+	const bool neutral_color = std::all_of(scale.begin(), scale.end(), [](float v) { return v == 1.f; }) &&
+	                            std::all_of(bias.begin(), bias.end(), [](float v) { return v == 0.f; });
+	const bool want_unorm = mutable_alias && neutral_color;
+	if (want_unorm != unorm_baked or cas_full_kernel != cas_full_baked or fsr != fsr_baked or atlas_prototype != atlas_baked or
 	    lowpoly != lowpoly_baked or post.low_poly_full != lowpoly_full_baked)
 	{
 		reset_pipelines();
@@ -829,6 +873,9 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		atlas_baked = atlas_prototype;
 		lowpoly_baked = lowpoly;
 		lowpoly_full_baked = post.low_poly_full;
+		unorm_baked = want_unorm;
+		if (mutable_alias)
+			spdlog::info("Atlas UNORM attachment path {}", unorm_baked ? "active" : "paused for color fade");
 	}
 
 	// [atlas prototype] the table has to exist before a descriptor can point at it, so
@@ -963,17 +1010,18 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 
 	for (size_t view = 0; view < view_count; ++view)
 	{
+		const auto & input = inputs[view];
+		const bool atlas_r8 = input.atlas_valid && input.atlas_table != nullptr && input.atlas_table_bytes != 0;
+		const bool use_unorm = unorm_baked && atlas_r8;
 		vk::RenderPassBeginInfo begin_info{
-		        .renderPass = *renderpass,
-		        .framebuffer = *framebuffers[destination * view_count + view],
+		        .renderPass = use_unorm ? *renderpass_unorm : *renderpass,
+		        .framebuffer = use_unorm ? *framebuffers_unorm[destination * view_count + view] : *framebuffers[destination * view_count + view],
 		        .renderArea = {
 		                .offset = {0, 0},
 		                .extent = output_extent,
 		        },
 		};
 
-		const auto & input = inputs[view];
-		const bool atlas_r8 = input.atlas_valid && input.atlas_table != nullptr && input.atlas_table_bytes != 0;
 		auto & pipeline = ensure_pipeline(view, input.sampler_rgb, input.sampler_a, atlas_r8);
 		if (atlas_r8 && atlas_vertex_warp &&
 		    (!atlas_mesh_buffers[view] || atlas_mesh_extents[view] != input.atlas_extents[0] ||

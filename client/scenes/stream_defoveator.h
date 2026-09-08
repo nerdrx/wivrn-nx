@@ -155,7 +155,12 @@ private:
 	std::vector<vk::Image> output_images;
 	std::vector<vk::raii::ImageView> output_image_views;
 	std::vector<vk::raii::Framebuffer> framebuffers;
+	std::vector<vk::raii::ImageView> output_image_views_unorm;
+	std::vector<vk::raii::Framebuffer> framebuffers_unorm;
+	vk::raii::RenderPass renderpass_unorm = nullptr;
 	vk::Extent2D output_extent;
+	bool mutable_alias = false;
+	bool unorm_baked = false;
 	float out_scale = 1.0f;
 
 	void ensure_vertices(size_t num_vertices);
@@ -257,7 +262,8 @@ public:
 	        vk::raii::PhysicalDevice & physical_device,
 	        std::vector<vk::Image> output_images,
 	        vk::Extent2D output_extent,
-	        vk::Format format);
+	        vk::Format format,
+	        bool mutable_alias = false);
 
 	stream_defoveator(const stream_defoveator &) = delete;
 

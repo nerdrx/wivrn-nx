@@ -54,6 +54,25 @@ source-pixel difference on sampled mild-perspective transforms. This is a numeri
 check, not pixel-identical Vulkan output validation. Invalid tiles and near-zero
 projective denominators retain fragment checks.
 
+## Experimental atlas UNORM render alias
+
+Enable with `adb shell setprop debug.wivrn.atlas_unorm_render 1`, then restart
+the client session. Desktop clients use `WIVRN_ATLAS_UNORM_RENDER=1`. This is
+off by default and applies only to native atlas frames. The XR swapchain keeps
+its declared sRGB format; when the runtime exposes a mutable format alias, the
+client requests a UNORM view and omits the cancelling linearize/re-encode pair
+only for neutral atlas scale/bias. Fades or other non-neutral colour work keep
+the normal conversions. The client first tries a format list plus mutable usage, then mutable usage
+alone; failed mutable usage or alias views fall back to ordinary sRGB.
+Non-neutral color conditions use the ordinary sRGB render pipeline.
+
+The v2 live capture is archived in
+[`docs/bench/atlas-unorm-20260908`](bench/atlas-unorm-20260908/README.md).
+It measured render GPU medians of 2.7/3.2/2.6 ms (on/off/on repeat), estimated
+noncached medians of 2.715/3.236/2.761 ms, and encode-to-selection p99 values
+of 16.689/17.221/24.469 ms. These short active-window measurements do not show
+a consistent end-to-end gain or establish 240-Hz presentation.
+
 ## 1. The wire
 
 ### 1.1 `video_codec::nxwarp`

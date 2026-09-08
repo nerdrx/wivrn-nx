@@ -40,6 +40,7 @@ private:
 	int32_t height_;
 	int sample_count_;
 	vk::Format format_;
+	bool mutable_format_ = false;
 
 	std::vector<vk::Image> images_;
 
@@ -53,7 +54,8 @@ public:
 	        int32_t width,
 	        int32_t height,
 	        int sample_count = 1,
-	        uint32_t array_size = 1);
+	        uint32_t array_size = 1,
+	        bool mutable_format = false);
 
 	int32_t width() const
 	{
@@ -83,6 +85,7 @@ public:
 	{
 		return format_;
 	}
+	bool mutable_format() const { return mutable_format_; }
 
 	int acquire();
 	bool wait(XrDuration timeout = XR_INFINITE_DURATION);

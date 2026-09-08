@@ -68,6 +68,7 @@
 #include "nxwarp_host.h"
 
 #include <nxvc/nxvc_vk.h>
+#include <nxvc/planar_direct.h>
 #include <nxvc/transport/aead.h>
 #include <nxvc/transport/receiver.h>
 
@@ -149,6 +150,10 @@ class nxwarp_decoder : public decoder
 	bool host_sync = false;
 	// Requested only after the stream header confirms the negotiated ATLAS tool.
 	bool atlas_view_active = false;
+	// Opt-in all-PLANAR direct graphics path. It is deliberately separate from nxvc:
+	// the ordinary decoder remains the fallback for every stream/frame it cannot prove.
+	bool planar_direct_active = false;
+	std::unique_ptr<nxvc::PlanarDirect> planar_direct;
 	bool atlas_direct_targets = false;
 	bool atlas_dirty_catchup = false;
 	uint64_t next_atlas_generation = 1;
@@ -694,7 +699,7 @@ private:
 	vk::raii::PhysicalDevice & physical_device;
 	uint32_t queue_family_index;
 	vk::raii::SamplerYcbcrConversion ycbcr_conversion;
-	vk::raii::Sampler sampler_;
+	vk::raii::Sampler sampler_ = nullptr;
 
 	vk::raii::CommandPool command_pool;
 	vk::CommandBuffer cmd;

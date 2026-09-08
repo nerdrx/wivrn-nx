@@ -40,6 +40,21 @@ raw logs and screenshots are archived in
 
 ## Fixes over upstream
 
+### Experimental NX Warp direct PLANAR path
+
+The Vulkan encoder can emit complete flat-region frames with `planar-gpu-flat=true`
+(`backend=vk`, `inter=true`, `planar=prefer`, atlas disabled). A matching Android
+client opts into direct RGBA rendering with
+`adb shell setprop debug.wivrn.nx.planar_direct 1`, followed by a reconnect.
+This deliberately trades fine texture for cheaper reconstruction. Mixed frames
+are rejected; the initial integration refreshes every tile.
+
+Earlier fast Pico results came from an **offscreen benchmark**, not the complete
+WiVRn streaming pipeline. Confirm the client logs
+`direct PLANAR RGBA8 graphics output enabled` and measure fresh-source updates
+before interpreting panel refresh as delivered FPS.
+[Contract and validation limits](https://github.com/nerdrx/nx-warp/blob/main/docs/integration/planar-direct.md).
+
 | | |
 |---|---|
 | **Controller standby teleport** *(toggle, default on)* | Upstream discards the OpenXR *tracked* flags server-side (the old `TODO keep the tracked flag` in `pose_list.cpp`), so a Pico controller entering its non-disableable auto-sleep jumps to a garbage pose in-game. NX freezes the device at its last tracked pose — reported valid, TRACKED cleared, velocities zeroed. Devices whose runtime never sets tracked bits (estimated body joints) keep upstream behaviour exactly, so full body tracking is unaffected. Toggle: headset (*Freeze sleeping controllers*), live and safe to flip mid-session; off restores upstream behaviour exactly — every valid pose is served and flagged tracked — while the NaN and sanitize guards stay in place either way. |

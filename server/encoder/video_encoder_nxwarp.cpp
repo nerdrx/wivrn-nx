@@ -490,6 +490,7 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	        // Resolved just below, once the headset's mask is in hand.
 	        .entropy = nxwarp_codec_config::entropy_t::rans,
 	        .effort = nxwarp_effort_from(settings.options),
+	        .planar_gpu_flat = option_bool(settings.options, "planar-gpu-flat", false),
 	        .intra_dir = option_bool(settings.options, "intra-dir", true),
 	        .preset = option_u32(settings.options, "preset", 1),
 	        .threads = option_u32(settings.options, "threads", 0),
@@ -535,6 +536,28 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 		throw std::runtime_error(
 		        "nxwarp: \"atlas\": \"auto\" needs client ATLAS and ATLAS_REBASE tools");
 	const bool client_has_lite = (client_tools & kNxvcToolEntropyLite) != 0;
+	const bool client_has_planar = (client_tools & kNxvcToolPlanar) != 0;
+	if (codec_cfg.planar_gpu_flat)
+	{
+		if (not nxwarp_backend_is_vk(settings))
+			throw std::runtime_error(
+			        "nxwarp: \"planar-gpu-flat\" needs \"backend\": \"vk\"");
+		if (not codec_cfg.inter)
+			throw std::runtime_error(
+			        "nxwarp: \"planar-gpu-flat\" needs \"inter\": true");
+		if (not client_has_planar)
+			throw std::runtime_error(std::format(
+			        "nxwarp: \"planar-gpu-flat\" needs the headset to advertise "
+			        "PLANAR (nxvc tool bit 35), but its mask is {:#x}", client_tools));
+		if (settings.options.count("planar") != 0 and
+		    nxwarp_planar_from(option_string(settings.options, "planar", "off")) ==
+		            nxwarp_codec_config::planar_t::off)
+			throw std::runtime_error(
+			        "nxwarp: \"planar-gpu-flat\" conflicts with \"planar\": \"off\"");
+		// The prototype is deliberately all-PLANAR and uses its R2/coarse body.
+		codec_cfg.planar = nxwarp_codec_config::planar_t::prefer;
+		U_LOG_I("nxwarp: \"planar-gpu-flat\" enabled (all-PLANAR GPU single-pass)");
+	}
 	const entropy_request entropy_req =
 	        nxwarp_entropy_from(option_string(settings.options, "entropy", "auto"));
 	switch (entropy_req)
@@ -661,12 +684,11 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 		const pl want = nxwarp_planar_from(
 		        option_string(settings.options, "planar", "rd"));
 		const bool explicit_ask = settings.options.count("planar") != 0;
-		const bool client_has_planar = (client_tools & kNxvcToolPlanar) != 0;
 		pl eff = want;
 		std::string note;
 		if (want != pl::off)
 		{
-			if (nxwarp_backend_is_vk(settings))
+			if (nxwarp_backend_is_vk(settings) and not codec_cfg.planar_gpu_flat)
 			{
 				if (explicit_ask)
 					throw std::runtime_error(std::format(
@@ -694,6 +716,13 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 				eff = pl::off;
 				note = "the client does not support planar tiles";
 			}
+		}
+		if (codec_cfg.planar_gpu_flat)
+		{
+			// GPU-flat is an all-PLANAR stream, regardless of the host-fit
+			// preference selected by the ordinary `planar` option.
+			eff = pl::prefer;
+			note.clear();
 		}
 		codec_cfg.planar = eff;
 		stats_planar_name = nxwarp_planar_name(eff);

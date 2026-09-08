@@ -220,11 +220,12 @@ struct nxwarp_codec_config
 	//   prefer taken wherever it is cheaper, distortion notwithstanding: the
 	//          low-polygon look as a setting, at 2 to 4 dB.
 	//
-	// TWO THINGS CAN STOP IT, and neither may be silent.  The Vulkan backend
-	// does not implement mode 5 at all, and a headset that does not advertise
-	// tool bit 35 would refuse the stream header outright -- a black screen,
-	// not a degraded picture.  video_encoder_nxwarp resolves both before the
-	// codec is built and reports what it did in `nxwarp_stream_stats`.
+	// TWO THINGS CAN STOP it, and neither may be silent.  The ordinary Vulkan
+	// image path does not implement mode 5; its explicit `planar-gpu-flat`
+	// path is the all-PLANAR single-pass exception.  A headset that does not
+	// advertise tool bit 35 would refuse the stream header outright -- a black
+	// screen, not a degraded picture.  video_encoder_nxwarp resolves both
+	// before the codec is built and reports what it did in `nxwarp_stream_stats`.
 	enum class planar_t
 	{
 		off = 0,
@@ -232,6 +233,10 @@ struct nxwarp_codec_config
 		prefer = 2,
 	};
 	planar_t planar = planar_t::rd;
+	// Explicit opt-in for the Vulkan encoder's all-PLANAR single-pass path.
+	// This is separate from `planar`: the path is a GPU implementation detail
+	// and is only valid for an inter stream whose client advertises PLANAR.
+	bool planar_gpu_flat = false;
 	// Encoder-side speed knobs; none of them changes how a stream decodes.
 	// Directional intra (tool 17): costs the CPU encoder most of its time at
 	// this resolution; off codes the DC-plane predictor only.

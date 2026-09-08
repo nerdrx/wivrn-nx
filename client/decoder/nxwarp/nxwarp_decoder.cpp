@@ -228,6 +228,29 @@ vk::raii::Sampler make_sampler(vk::raii::Device & device, vk::SamplerYcbcrConver
 	return vk::raii::Sampler(device, info.get());
 }
 
+vk::raii::Sampler make_rgba_sampler(vk::raii::Device & device)
+{
+	return vk::raii::Sampler(device, vk::SamplerCreateInfo{
+	        .magFilter = vk::Filter::eLinear,
+	        .minFilter = vk::Filter::eLinear,
+	        .mipmapMode = vk::SamplerMipmapMode::eNearest,
+	        .addressModeU = vk::SamplerAddressMode::eClampToEdge,
+	        .addressModeV = vk::SamplerAddressMode::eClampToEdge,
+	        .addressModeW = vk::SamplerAddressMode::eClampToEdge,
+	        .maxAnisotropy = 1,
+	});
+}
+
+bool planar_direct_requested()
+{
+#ifdef __ANDROID__
+	char value[PROP_VALUE_MAX] = {};
+	return __system_property_get("debug.wivrn.nx.planar_direct", value) > 0 && value[0] != '0';
+#else
+	return false;
+#endif
+}
+
 struct nxwarp_blit_handle : public wivrn::decoder::blit_handle
 {
 	std::atomic_bool & free;
@@ -289,8 +312,8 @@ nxwarp_decoder::nxwarp_decoder(vk::raii::Device & device,
                                          .ycbcrRange = vk::SamplerYcbcrRange::eItuFull,
                                          .chromaFilter = chroma_filter(),
                                  }),
-        sampler_(make_sampler(device, *ycbcr_conversion)),
-        command_pool(device, vk::CommandPoolCreateInfo{
+		sampler_(make_sampler(device, *ycbcr_conversion)),
+		command_pool(device, vk::CommandPoolCreateInfo{
                                      .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
                                      .queueFamilyIndex = vk_queue_family_index,
                              }),
@@ -399,16 +422,20 @@ void nxwarp_decoder::build_image_pool()
 		item.semaphore_val = 0;
 		item.free = true;
 
+		const auto output_format = planar_direct_active ? vk::Format::eR8G8B8A8Unorm : vk::Format::eG8B8R82Plane420Unorm;
+		const auto output_usage = planar_direct_active
+		        ? vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eSampled
+		        : vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst;
 		item.image = image_allocation(
 		        device,
 		        vk::ImageCreateInfo{
 		                .imageType = vk::ImageType::e2D,
-		                .format = vk::Format::eG8B8R82Plane420Unorm,
+		                .format = output_format,
 		                .extent = {.width = extent.width, .height = extent.height, .depth = 1},
 		                .mipLevels = 1,
 		                .arrayLayers = 1,
 		                .tiling = vk::ImageTiling::eOptimal,
-		                .usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst,
+		                .usage = output_usage,
 		        },
 		        {.usage = VMA_MEMORY_USAGE_AUTO},
 		        "nxwarp image");
@@ -417,10 +444,10 @@ void nxwarp_decoder::build_image_pool()
 		item.view_full = vk::raii::ImageView(
 		        device,
 		        vk::ImageViewCreateInfo{
-		                .pNext = &conv,
+		                .pNext = planar_direct_active ? nullptr : &conv,
 		                .image = item.image,
 		                .viewType = vk::ImageViewType::e2D,
-		                .format = vk::Format::eG8B8R82Plane420Unorm,
+		                .format = output_format,
 		                .subresourceRange = {
 		                        .aspectMask = vk::ImageAspectFlagBits::eColor,
 		                        .levelCount = 1,
@@ -559,6 +586,37 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 		nxvc_failed = true;
 		return false;
 	}
+	// The direct renderer is opt-in and only admissible for the exact stream shape it
+	// implements. Mixed frames are rejected by PlanarDirect; ordinary NXVC remains the
+	// path when the negotiated stream cannot use this backend.
+	planar_direct_active = planar_direct_requested() && si.bit_depth == 8 && si.chroma == 0 &&
+	                       si.color_transform == 0 && si.alpha == 0 &&
+	                       !(si.tools & (1ull << 31)) &&
+	                       (si.tools & (1ull << 35));
+	if (planar_direct_active)
+	{
+		try
+		{
+			planar_direct = std::make_unique<nxvc::PlanarDirect>(*physical_device, *device, ci.queue,
+			                                                    queue_family_index);
+			planar_direct->configure(header.data(), header.size());
+		}
+		catch (const std::exception & e)
+		{
+			spdlog::warn("nxwarp[{}]: direct PLANAR configuration rejected: {}", stream_index, e.what());
+			planar_direct.reset();
+			planar_direct_active = false;
+		}
+		if (planar_direct_active)
+		{
+			host_sync = true; // PlanarDirect is synchronous; publish only completed images.
+			atlas_view_active = false;
+			sampler_ = make_rgba_sampler(device);
+			spdlog::info("nxwarp[{}]: direct PLANAR RGBA8 graphics output enabled", stream_index);
+		}
+	}
+	if (not planar_direct_active)
+		sampler_ = make_sampler(device, *ycbcr_conversion);
 
 	// Every field here is fixed by the contract in server/encoder/nxwarp_packetize.h and
 	// video_encoder_nxwarp.cpp. They must agree exactly: the receiver derives its nonces,
@@ -630,8 +688,11 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 			              "wrong column",
 			              stream_index, si.width, extent.width);
 		extent.width = uint32_t(extent.width * si.eyes);
-		build_image_pool();
+		if (not planar_direct_active)
+			build_image_pool();
 	}
+	if (planar_direct_active)
+		build_image_pool();
 	// Release, so that a scene thread which reads eye_count() as 2 also sees the widened
 	// pool this decoder will publish from.
 	hdr_eyes.store(si.eyes ? si.eyes : 1, std::memory_order_release);
@@ -1382,6 +1443,64 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	// the queue segment ahead of it: the one number the dashboard had for nxwarp's
 	// decode was the one number it could not be.
 	job.fb.sent_to_decoder = host.now();
+	if (planar_direct_active)
+	{
+		const auto direct_start = std::chrono::steady_clock::now();
+		auto * item = get_free();
+		if (not item)
+		{
+			host.report_frame_not_held(stream_index, job.frame_id,
+			                           from_headset::nxwarp_frame_not_held::reason::backlog);
+			return;
+		}
+		bool accepted = true;
+		try
+		{
+			host.with_queue(stream_index, [&](vk::Queue) {
+				planar_direct->render(job.unit.data(), job.unit.size(), VkImage(item->image),
+				                      VkImageView(*item->view_full), extent.width, extent.height);
+			});
+		}
+		catch (const std::exception & e)
+		{
+			accepted = false;
+			spdlog::warn("nxwarp[{}]: direct PLANAR frame {} rejected: {}", stream_index,
+			             job.frame_id, e.what());
+		}
+		if (not accepted)
+		{
+			item->free = true;
+			host.report_frame_not_held(stream_index, job.frame_id,
+			                           from_headset::nxwarp_frame_not_held::reason::refused);
+			return;
+		}
+		const auto direct_ms = std::chrono::duration<double, std::milli>(
+		        std::chrono::steady_clock::now() - direct_start).count();
+		const auto previous_us = double(decode_us_report.load(std::memory_order_relaxed));
+		const auto next_us = previous_us > 0 ? previous_us * 0.8 + direct_ms * 1000.0 * 0.2
+		                                    : direct_ms * 1000.0;
+		decode_us_report.store(uint16_t(std::clamp(next_us, 0.0, 65535.0)),
+		                      std::memory_order_relaxed);
+		note_frame_held(job.frame_id);
+		host.on_frame_decoded(job.frame_id);
+		++frames_decoded;
+		// The positive held window is sent immediately: a later band deadline may not
+		// occur before the encoder chooses its next reference.
+		uint16_t ack_base = 0;
+		uint32_t ack_mask = 0;
+		read_held_ack(ack_base, ack_mask);
+		if (ack_mask)
+			host.send_feedback(stream_index, 0, {},
+			                   publish_decode_us(stream_index, decode_us_report.load(std::memory_order_relaxed)),
+			                   ack_base, ack_mask);
+		item->current_layout = vk::ImageLayout::eShaderReadOnlyOptimal;
+		auto handle = std::make_shared<nxwarp_blit_handle>(job.fb, job.view_info, *item->view_full,
+		                                                   item->image, extent, item->current_layout,
+		                                                   VK_NULL_HANDLE, item->semaphore_val, item->free);
+		handle->feedback.received_from_decoder = host.now();
+		host.publish(accumulator, std::move(handle));
+		return;
+	}
 	const auto t_iter0 = std::chrono::steady_clock::now();
 	size_t consumed = 0;
 	VkSemaphore dec_sem = VK_NULL_HANDLE;

@@ -270,21 +270,28 @@ public:
 		 * reaches here has already been checked by video_encoder_nxwarp; this
 		 * is the one place it crosses into nxvc. */
 		ci.snap_identity = c.inter ? c.snap_identity : 0;
+		// The all-PLANAR single-pass path is an explicit API option. It must not
+		// be selected through a process-global environment variable: a server can
+		// own several streams with different settings in one process.
+		if (c.planar_gpu_flat)
+		{
+#ifdef NXVC_VKE_PLANAR_GPU_FLAT
+			ci.planar = NXVC_VKE_PLANAR_GPU_FLAT;
+#else
+			throw std::runtime_error(
+			        "nxwarp: \"planar-gpu-flat\" needs an nxvc with "
+			        "NXVC_VKE_PLANAR_GPU_FLAT support");
+#endif
+		}
 
-		// The piecewise-planar tile mode has NO field here, because this
-		// encoder does not implement mode 5: nxvc's GPU decoder and GPU
-		// encoder both stop at the transform path, and docs/LOWPOLY-GPU-PLAN.md
-		// is the plan rather than the code.  video_encoder_nxwarp resolves the
-		// option to `off` for this backend before a config is built, so
-		// reaching here with a level set is a wiring mistake in THIS server,
-		// not a configuration a user can write -- and it is refused rather
-		// than dropped, because a silently ignored level is the exact failure
-		// this option exists to avoid.
-		if (c.planar != wivrn::nxwarp_codec_config::planar_t::off)
+		// The ordinary host-fit PLANAR mode is not available on this image path.
+		// The explicit GPU-flat path above is the only supported Vulkan PLANAR
+		// mode; video_encoder_nxwarp validates its opt-in and negotiation.
+		if (c.planar != wivrn::nxwarp_codec_config::planar_t::off &&
+		    !c.planar_gpu_flat)
 			throw std::runtime_error(
 			        "nxwarp: the Vulkan backend has no piecewise-planar tile "
-			        "mode; the option should have been resolved to \"off\" "
-			        "before the codec was built");
+			        "mode unless \"planar-gpu-flat\" is enabled");
 
 		// The entropy tool (stream bit 30).  Written out rather than cast for
 		// the same reason `coded_vectors` is, and passed unconditionally

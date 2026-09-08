@@ -55,8 +55,12 @@ before interpreting panel refresh as delivered FPS.
 
 ### Native-detail centre
 
-Use server options `planar-gpu-centre=true` and `planar-centre-quarter=true`
-instead of `planar-gpu-flat`, plus Android property
+Use server option `planar-gpu-centre=true` instead of `planar-gpu-flat` for mixed
+full-centre PLANAR streams. Optional `planar-centre-quarter=true` reduces the
+dense centre; optional `planar-centre-graduated=true` adds fine PLANAR cells near
+the centre, widening through 8, 16, and 32-pixel cells toward the periphery.
+These options require Vulkan, inter, 8-bit 4:2:0, atlas off, and headset
+PLANAR support, plus Android property
 `debug.wivrn.nx.planar_centre=1` before reconnecting. At 2176 × 2176 per eye,
 this codes a **512 × 512 centre at native pixel sampling**, with coarse PLANAR
 periphery. Omit the quarter option for a 1024 × 1024 centre at higher decode cost.
@@ -69,6 +73,11 @@ A matching live smoke test measured 54.27 fresh updates/s in short active window
 (37.65/s including an XR interruption), so the current centre mode trades cadence
 for detail. The linked evidence includes an actual Pico screenshot.
 [Pixel-detail comparison, timings and limitations](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-09/centre-detail).
+
+Graduated PLANAR falloff was tested at **10.206 ms mean decode**, against
+**10.213 ms** for the previous centre mode in a paired offscreen Pico test.
+A live smoke test averaged **53.39 fresh updates/s**, including startup.
+[Comparison images, sampling policy and limitations](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-09/graduated-centre).
 
 ## Fixes over upstream
 

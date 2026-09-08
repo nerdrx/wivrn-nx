@@ -492,6 +492,7 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	        .effort = nxwarp_effort_from(settings.options),
 	        .planar_gpu_flat = option_bool(settings.options, "planar-gpu-flat", false),
 	        .planar_gpu_centre = option_bool(settings.options, "planar-gpu-centre", false),
+	        .planar_centre_graduated = option_bool(settings.options, "planar-centre-graduated", false),
 	        .planar_centre_quarter = option_bool(settings.options, "planar-centre-quarter", false),
 	        .intra_dir = option_bool(settings.options, "intra-dir", true),
 	        .preset = option_u32(settings.options, "preset", 1),
@@ -556,6 +557,8 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	}
 	if (codec_cfg.planar_centre_quarter and not codec_cfg.planar_gpu_centre)
 		throw std::runtime_error("nxwarp: \"planar-centre-quarter\" requires \"planar-gpu-centre\": true");
+	if (codec_cfg.planar_centre_graduated and not codec_cfg.planar_gpu_centre)
+		throw std::runtime_error("nxwarp: \"planar-centre-graduated\" requires \"planar-gpu-centre\": true");
 	if (codec_cfg.planar_gpu_flat)
 	{
 		if (not nxwarp_backend_is_vk(settings))

@@ -198,6 +198,8 @@ public:
 			throw std::runtime_error("nxwarp: \"planar-centre-quarter\" needs an nxvc with NXVC_VKE_FLAG_CENTRE_QUARTER support");
 #endif
 		}
+		if (c.planar_centre_graduated)
+			ci.flags |= NXVC_VKE_FLAG_CENTRE_GRADUATED;
 
 		vk_phys = physical_device;
 		vk_dev = dev;

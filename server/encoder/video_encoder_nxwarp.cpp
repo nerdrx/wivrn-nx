@@ -491,6 +491,8 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	        .entropy = nxwarp_codec_config::entropy_t::rans,
 	        .effort = nxwarp_effort_from(settings.options),
 	        .planar_gpu_flat = option_bool(settings.options, "planar-gpu-flat", false),
+	        .planar_gpu_centre = option_bool(settings.options, "planar-gpu-centre", false),
+	        .planar_centre_quarter = option_bool(settings.options, "planar-centre-quarter", false),
 	        .intra_dir = option_bool(settings.options, "intra-dir", true),
 	        .preset = option_u32(settings.options, "preset", 1),
 	        .threads = option_u32(settings.options, "threads", 0),
@@ -537,6 +539,23 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 		        "nxwarp: \"atlas\": \"auto\" needs client ATLAS and ATLAS_REBASE tools");
 	const bool client_has_lite = (client_tools & kNxvcToolEntropyLite) != 0;
 	const bool client_has_planar = (client_tools & kNxvcToolPlanar) != 0;
+	if (codec_cfg.planar_gpu_flat and codec_cfg.planar_gpu_centre)
+		throw std::runtime_error("nxwarp: \"planar-gpu-flat\" and \"planar-gpu-centre\" are mutually exclusive");
+	if (codec_cfg.planar_gpu_centre)
+	{
+		if (not nxwarp_backend_is_vk(settings))
+			throw std::runtime_error("nxwarp: \"planar-gpu-centre\" needs \"backend\": \"vk\"");
+		if (not codec_cfg.inter)
+			throw std::runtime_error("nxwarp: \"planar-gpu-centre\" needs \"inter\": true");
+		if (codec_cfg.atlas != nxwarp_codec_config::atlas_t::off)
+			throw std::runtime_error("nxwarp: \"planar-gpu-centre\" requires \"atlas\": \"off\"");
+		if (not client_has_planar)
+			throw std::runtime_error("nxwarp: \"planar-gpu-centre\" needs headset PLANAR tool bit 35");
+		codec_cfg.planar = nxwarp_codec_config::planar_t::prefer;
+		U_LOG_I("nxwarp: \"planar-gpu-centre\" enabled (mixed centre/periphery stream)");
+	}
+	if (codec_cfg.planar_centre_quarter and not codec_cfg.planar_gpu_centre)
+		throw std::runtime_error("nxwarp: \"planar-centre-quarter\" requires \"planar-gpu-centre\": true");
 	if (codec_cfg.planar_gpu_flat)
 	{
 		if (not nxwarp_backend_is_vk(settings))
@@ -688,7 +707,8 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 		std::string note;
 		if (want != pl::off)
 		{
-			if (nxwarp_backend_is_vk(settings) and not codec_cfg.planar_gpu_flat)
+			if (nxwarp_backend_is_vk(settings) and
+			    not codec_cfg.planar_gpu_flat and not codec_cfg.planar_gpu_centre)
 			{
 				if (explicit_ask)
 					throw std::runtime_error(std::format(
@@ -717,9 +737,9 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 				note = "the client does not support planar tiles";
 			}
 		}
-		if (codec_cfg.planar_gpu_flat)
+		if (codec_cfg.planar_gpu_flat or codec_cfg.planar_gpu_centre)
 		{
-			// GPU-flat is an all-PLANAR stream, regardless of the host-fit
+			// GPU planar modes force the encoder preference, regardless of the host-fit
 			// preference selected by the ordinary `planar` option.
 			eff = pl::prefer;
 			note.clear();

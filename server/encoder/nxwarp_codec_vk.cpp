@@ -190,6 +190,14 @@ public:
 		ci.device = dev;
 		ci.queue = queue;
 		ci.queue_family = queue_family;
+		if (c.planar_centre_quarter)
+		{
+#ifdef NXVC_VKE_FLAG_CENTRE_QUARTER
+			ci.flags |= NXVC_VKE_FLAG_CENTRE_QUARTER;
+#else
+			throw std::runtime_error("nxwarp: \"planar-centre-quarter\" needs an nxvc with NXVC_VKE_FLAG_CENTRE_QUARTER support");
+#endif
+		}
 
 		vk_phys = physical_device;
 		vk_dev = dev;
@@ -283,12 +291,20 @@ public:
 			        "NXVC_VKE_PLANAR_GPU_FLAT support");
 #endif
 		}
+		if (c.planar_gpu_centre)
+		{
+#ifdef NXVC_VKE_PLANAR_GPU_CENTRE
+			ci.planar = NXVC_VKE_PLANAR_GPU_CENTRE;
+#else
+			throw std::runtime_error("nxwarp: \"planar-gpu-centre\" needs an nxvc with NXVC_VKE_PLANAR_GPU_CENTRE support");
+#endif
+		}
 
 		// The ordinary host-fit PLANAR mode is not available on this image path.
 		// The explicit GPU-flat path above is the only supported Vulkan PLANAR
 		// mode; video_encoder_nxwarp validates its opt-in and negotiation.
 		if (c.planar != wivrn::nxwarp_codec_config::planar_t::off &&
-		    !c.planar_gpu_flat)
+		    !c.planar_gpu_flat && !c.planar_gpu_centre)
 			throw std::runtime_error(
 			        "nxwarp: the Vulkan backend has no piecewise-planar tile "
 			        "mode unless \"planar-gpu-flat\" is enabled");

@@ -38,9 +38,7 @@ The measured v2 capture recorded no consistent end-to-end latency gain; its
 raw logs and screenshots are archived in
 [the atlas UNORM appendix](docs/bench/atlas-unorm-20260908/README.md).
 
-## Fixes over upstream
-
-### Experimental NX Warp direct PLANAR path
+## Experimental NX Warp direct PLANAR path
 
 The Vulkan encoder can emit complete flat-region frames with `planar-gpu-flat=true`
 (`backend=vk`, `inter=true`, `planar=prefer`, atlas disabled). A matching Android
@@ -54,6 +52,25 @@ WiVRn streaming pipeline. Confirm the client logs
 `direct PLANAR RGBA8 graphics output enabled` and measure fresh-source updates
 before interpreting panel refresh as delivered FPS.
 [Contract and validation limits](https://github.com/nerdrx/nx-warp/blob/main/docs/integration/planar-direct.md).
+
+### Native-detail centre
+
+Use server options `planar-gpu-centre=true` and `planar-centre-quarter=true`
+instead of `planar-gpu-flat`, plus Android property
+`debug.wivrn.nx.planar_centre=1` before reconnecting. At 2176 × 2176 per eye,
+this codes a **512 × 512 centre at native pixel sampling**, with coarse PLANAR
+periphery. Omit the quarter option for a 1024 × 1024 centre at higher decode cost.
+The matching client selects the mixed-frame decoder and disables unused pixel
+references. This is a fixed image-centre region, not eye-tracked foveation.
+
+Isolated Pico measurements average **10.83 ms decode**, with **13.92 ms p95**,
+for the smaller centre; sustained 90 Hz streaming is not established by that test.
+A matching live smoke test measured 54.27 fresh updates/s in short active windows
+(37.65/s including an XR interruption), so the current centre mode trades cadence
+for detail. The linked evidence includes an actual Pico screenshot.
+[Pixel-detail comparison, timings and limitations](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-09/centre-detail).
+
+## Fixes over upstream
 
 | | |
 |---|---|

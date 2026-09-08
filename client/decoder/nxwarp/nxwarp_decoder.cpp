@@ -251,6 +251,21 @@ bool planar_direct_requested()
 #endif
 }
 
+// The centre variant deliberately uses the ordinary NXVC decoder: its frames
+// contain dense centre tiles alongside PLANAR peripheral tiles, whereas the
+// direct renderer accepts only an all-PLANAR frame.  Keep this opt-in so an
+// existing direct-PLANAR session cannot accidentally be fed to the generic
+// path (or vice versa) by a stale headset property.
+bool planar_centre_requested()
+{
+#ifdef __ANDROID__
+	char value[PROP_VALUE_MAX] = {};
+	return __system_property_get("debug.wivrn.nx.planar_centre", value) > 0 && value[0] != '0';
+#else
+	return false;
+#endif
+}
+
 struct nxwarp_blit_handle : public wivrn::decoder::blit_handle
 {
 	std::atomic_bool & free;
@@ -526,6 +541,12 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 {
 	if (nxvc or nxvc_failed or header.empty())
 		return nxvc != nullptr;
+	// The mixed centre stream still uses the generic decoder, but its PLANAR
+	// Pass-B shader is opt-in in nxvc.  Set this before create(), which loads
+	// the pipelines; the shader is format-compatible with ordinary streams and
+	// the property is off by default.
+	if (planar_centre_requested())
+		setenv("NXVC_VKD_PLANAR_FLAT", "1", 1);
 
 	nxvc_vkd_create_info ci;
 	nxvc_vk_decoder_create_info_default(&ci);
@@ -540,6 +561,8 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 	// the reference-ring memory of an RGBA8 store.
 	ci.output_format = NXVC_VKD_OUT_YCBCR420;
 	ci.flags = 0;
+	if (planar_centre_requested())
+		ci.flags |= NXVC_VKD_FLAG_INDEPENDENT_TILES;
 
 	if (auto st = nxvc_vk_decoder_create(&ci, &nxvc); st != NXVC_VKD_OK)
 	{
@@ -589,7 +612,10 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 	// The direct renderer is opt-in and only admissible for the exact stream shape it
 	// implements. Mixed frames are rejected by PlanarDirect; ordinary NXVC remains the
 	// path when the negotiated stream cannot use this backend.
-	planar_direct_active = planar_direct_requested() && si.bit_depth == 8 && si.chroma == 0 &&
+	const bool centre_mode = planar_centre_requested() && (si.tools & (1ull << 35));
+	if (centre_mode)
+		spdlog::info("nxwarp[{}]: PLANAR centre mode requested; using generic mixed-frame decoder", stream_index);
+	planar_direct_active = planar_direct_requested() && !centre_mode && si.bit_depth == 8 && si.chroma == 0 &&
 	                       si.color_transform == 0 && si.alpha == 0 &&
 	                       !(si.tools & (1ull << 31)) &&
 	                       (si.tools & (1ull << 35));

@@ -237,6 +237,9 @@ struct nxwarp_codec_config
 	// This is separate from `planar`: the path is a GPU implementation detail
 	// and is only valid for an inter stream whose client advertises PLANAR.
 	bool planar_gpu_flat = false;
+	bool planar_gpu_centre = false;
+	// Optional quarter-sized centre region for GPU centre mode.
+	bool planar_centre_quarter = false;
 	// Encoder-side speed knobs; none of them changes how a stream decodes.
 	// Directional intra (tool 17): costs the CPU encoder most of its time at
 	// this resolution; off codes the DC-plane predictor only.

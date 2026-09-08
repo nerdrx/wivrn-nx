@@ -179,6 +179,12 @@ bool scenes::stream::try_seamless_reconnect()
 				// the new socket, so it goes out on the fresh session while no other
 				// thread can touch it, before the swap.
 				send_initial_control_packets(*fresh, guessed_fps);
+				// The descriptor may compare byte-for-byte equal to the old one;
+				// force setup() to replace decoders for the new server session.
+				{
+					std::lock_guard lock(decoder_mutex);
+					needs_decoder_reset = true;
+				}
 				network_session->adopt_primary(std::move(*fresh));
 				refresh_reconnect_watchdog();
 				// New sockets are live again: let send failures be fatal once more.

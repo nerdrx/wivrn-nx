@@ -251,6 +251,9 @@ private:
 
 	// --- Seamless reconnect (config.seamless_reconnect) -------------------------------
 	std::optional<reconnect_info> reconnect_target;
+	// The server sends the same description after a seamless reconnect, but its
+	// existing decoder state belongs to the old session and must be rebuilt.
+	bool needs_decoder_reset = false;
 	// The display refresh guess passed at creation, reused when re-sending the headset
 	// info on reconnect (only matters on headsets that cannot enumerate refresh rates).
 	float guessed_fps = 60;

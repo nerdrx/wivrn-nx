@@ -2670,8 +2670,9 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 	session.set_refresh_rate(description.refresh_rate);
 
 	std::unique_lock lock(decoder_mutex);
-	if (video_stream_description == description)
+	if (not needs_decoder_reset && video_stream_description == description)
 		return;
+	needs_decoder_reset = false;
 	spdlog::info("Creating decoders, size {}x{}", description.width, description.height);
 	video_stream_description = description;
 

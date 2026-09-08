@@ -1,0 +1,4 @@
+09-08 18:40:45.880 23787 26631 I WiVRn   : [2026-09-08 18:40:45.880] [WiVRn] [info] Creating decoders, size 2176x2176
+09-08 18:41:42.552 23787 26631 I WiVRn   : [2026-09-08 18:41:42.552] [WiVRn] [info] Seamless reconnect: primary path lost, holding the stream and re-handshaking
+09-08 18:42:02.371 23787 26631 I WiVRn   : [2026-09-08 18:42:02.371] [WiVRn] [info] Seamless reconnect: stream resumed
+09-08 18:42:02.429 23787 26631 I WiVRn   : [2026-09-08 18:42:02.429] [WiVRn] [info] Creating decoders, size 2176x2176

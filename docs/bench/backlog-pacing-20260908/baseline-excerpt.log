@@ -1,0 +1,2 @@
+ INFO [encode] nxwarp: stream 0 encoded 148 frames in 2.0 s: 2.6 ms/frame (max 3.7), 11305 B/frame vs 38031 target (-70%), QP 29.5 [22..52], controller allows 8.7 Mbit/s, paced to 30.6 fps (client decode 17.4 ms), 32 composited frame(s) not sent, binding: decode (decode 17.4 of 8.9 ms budget, floor +43)
+ INFO [encode] nxwarp: stream 0 the headset did not reconstruct 19 frame(s) since the last report; 19 of them cost an all-intra frame and 0 named a frame older than one already coded intra and cost nothing. Last was frame 6236, dropped by the worker backlog

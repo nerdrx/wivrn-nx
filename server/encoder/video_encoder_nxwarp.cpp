@@ -1356,7 +1356,7 @@ void wivrn::video_encoder_nxwarp::run_decode_rate_control()
 //
 // THE LAW. Slew a twentieth of the way to the target every composited frame, and jump
 // five percent slower than wherever it is now whenever the headset reports another frame
-// dropped by its decode stride.
+// dropped by its decode stride or worker backlog.
 //
 //   * a slew rather than a jump to the target, because the reported decode cost moves
 //     with the frame it measured: the first inter frames after pacing engages are three
@@ -1386,10 +1386,10 @@ void wivrn::video_encoder_nxwarp::run_pace_control()
 
 	const double target = double(decode_us) * 1e-6 * 1.1 + 0.001;
 
-	const uint64_t drops = stride_not_held.load(std::memory_order_relaxed);
-	if (drops != pace_stride_seen)
+	const uint64_t drops = overload_not_held.load(std::memory_order_relaxed);
+	if (drops != pace_overload_seen)
 	{
-		pace_stride_seen = drops;
+		pace_overload_seen = drops;
 		pace_interval = std::max(pace_interval * 1.05, target);
 	}
 	else
@@ -1688,7 +1688,7 @@ void wivrn::video_encoder_nxwarp::reset_stream()
 		pace_interval = pace_min_interval;
 	pace_have_last = false;
 	pace_diag_have_previous = false;
-	pace_stride_seen = stride_not_held.load(std::memory_order_relaxed);
+	pace_overload_seen = overload_not_held.load(std::memory_order_relaxed);
 	// Send it now rather than at the next period boundary: the new client decodes
 	// nothing at all until it arrives.
 	header_sent = false;
@@ -2907,8 +2907,9 @@ void wivrn::video_encoder_nxwarp::on_nxwarp_frame_not_held(
 		not_held_already_answered.fetch_add(1, std::memory_order_relaxed);
 		if (uint8_t(why) < not_held_by_reason.size())
 			not_held_by_reason[uint8_t(why)].fetch_add(1, std::memory_order_relaxed);
-		if (why == from_headset::nxwarp_frame_not_held::reason::stride)
-			stride_not_held.fetch_add(1, std::memory_order_relaxed);
+		if (why == from_headset::nxwarp_frame_not_held::reason::stride or
+		    why == from_headset::nxwarp_frame_not_held::reason::backlog)
+			overload_not_held.fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
 
@@ -2916,11 +2917,12 @@ void wivrn::video_encoder_nxwarp::on_nxwarp_frame_not_held(
 	last_not_held_why = uint8_t(why);
 	if (uint8_t(why) < not_held_by_reason.size())
 		not_held_by_reason[uint8_t(why)].fetch_add(1, std::memory_order_relaxed);
-	// The pace controller reads only the stride reason: it is the one that means "you
-	// are sending faster than I can decode". A hole is the link's, a codec refusal is
-	// the codec's, and slowing down for either would be answering a different question.
-	if (why == from_headset::nxwarp_frame_not_held::reason::stride)
-		stride_not_held.fetch_add(1, std::memory_order_relaxed);
+	// Both deliberate stride drops and worker backlog mean the decoder cannot keep
+	// up with arrivals. Treat either as overload, including reports already answered
+	// by a resync. Hole/refusal recovery remains independent of this pacing signal.
+	if (why == from_headset::nxwarp_frame_not_held::reason::stride or
+	    why == from_headset::nxwarp_frame_not_held::reason::backlog)
+		overload_not_held.fetch_add(1, std::memory_order_relaxed);
 	not_held_total.fetch_add(1, std::memory_order_relaxed);
 	// WHICH frame, not merely that one was lost. The codec walks ref_sel out to the
 	// newest frame that survives, and it can only do that if it is told the ids; a

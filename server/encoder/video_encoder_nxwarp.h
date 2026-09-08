@@ -392,13 +392,11 @@ class video_encoder_nxwarp : public video_encoder
 	static constexpr double pace_max_interval = 1.0 / 15.0;
 	std::chrono::steady_clock::time_point pace_last_sent{};
 	bool pace_have_last = false;
-	// Not-held reports whose reason was the decode stride, and the count the pace
-	// controller has already acted on. Only the stride: it is the one reason that
-	// means "you are sending faster than I can decode". A hole is the link's fault, a
-	// codec refusal is the codec's, and pacing down for either would be treating a
-	// different problem.
-	std::atomic<uint64_t> stride_not_held{0};
-	uint64_t pace_stride_seen = 0;
+	// Decoder-overload reports (stride or worker backlog), and the count the
+	// pacer has acted on. Network holes and codec refusals still require reference
+	// recovery, but do not independently prove that decode arrivals are too fast.
+	std::atomic<uint64_t> overload_not_held{0};
+	uint64_t pace_overload_seen = 0;
 
 	// Composited frames dropped by the pace, over the two-second report window and
 	// over the life of the stream.

@@ -1017,7 +1017,8 @@ void application::initialize_vulkan()
 	        vk::PhysicalDeviceMultiviewFeaturesKHR{
 	                .multiview = true,
 	        },
-	        vk::PhysicalDeviceIndexTypeUint8FeaturesEXT{},
+		vk::PhysicalDeviceIndexTypeUint8FeaturesEXT{},
+		vk::PhysicalDeviceFragmentDensityMapFeaturesEXT{},
 	        // The other half of what nxvc's Pass A declares. The 1.1 struct rather than
 	        // VkPhysicalDeviceVulkan11Features, which needs a 1.2 device: this one is
 	        // core in 1.1 and available as VK_KHR_16bit_storage below that, and the
@@ -1042,6 +1043,39 @@ void application::initialize_vulkan()
 
 	check_feature_flag(&vk::PhysicalDeviceTimelineSemaphoreFeaturesKHR::timelineSemaphore, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
 	check_feature_flag(&vk::PhysicalDeviceIndexTypeUint8FeaturesEXT::indexTypeUint8, VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME);
+	int fdm_mode = 0;
+#ifdef __ANDROID__
+	char fdm_value[PROP_VALUE_MAX] = {};
+	if (__system_property_get("debug.wivrn.nx.fdm", fdm_value) > 0)
+		fdm_mode = std::atoi(fdm_value);
+#else
+	if (const char * value = std::getenv("WIVRN_NX_FDM"))
+		fdm_mode = std::atoi(value);
+#endif
+	fdm_mode = std::clamp(fdm_mode, 0, 2);
+	if (!fdm_mode)
+		device_create_info.unlink<vk::PhysicalDeviceFragmentDensityMapFeaturesEXT>();
+	const bool fdm_supported = fdm_mode && check_feature_flag(
+	        &vk::PhysicalDeviceFragmentDensityMapFeaturesEXT::fragmentDensityMap,
+	        VK_EXT_FRAGMENT_DENSITY_MAP_EXTENSION_NAME);
+	fragment_density_map_mode = fdm_supported ? fdm_mode : 0;
+	if (fragment_density_map_mode)
+	{
+		auto available = vk_physical_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceFragmentDensityMapFeaturesEXT>()
+		                         .get<vk::PhysicalDeviceFragmentDensityMapFeaturesEXT>();
+		if (!available.fragmentDensityMapNonSubsampledImages)
+		{
+			fragment_density_map_mode = 0;
+			device_create_info.unlink<vk::PhysicalDeviceFragmentDensityMapFeaturesEXT>();
+			spdlog::warn("FDM requested but fragmentDensityMapNonSubsampledImages is unavailable");
+		}
+		else
+			device_create_info.get<vk::PhysicalDeviceFragmentDensityMapFeaturesEXT>().fragmentDensityMapNonSubsampledImages = true;
+	}
+	if (fdm_mode && !fragment_density_map_mode)
+		spdlog::warn("FDM requested but VK_EXT_fragment_density_map or fragmentDensityMap feature is unavailable");
+	if (fragment_density_map_mode)
+		spdlog::info("Vulkan fragment density map enabled");
 
 	// Not through check_feature_flag: that helper requires the feature's extension to be
 	// in the enabled list, and 16-bit storage is core since Vulkan 1.1, so on every

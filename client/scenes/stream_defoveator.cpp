@@ -359,6 +359,64 @@ stream_defoveator::stream_defoveator(
 	output_extent(output_extent),
 	mutable_alias(mutable_alias)
 {
+	// The map is deliberately app-owned: XR_FB_foveation_vulkan is a separate
+	// compositor feature and is not needed for a Vulkan render-pass attachment.
+	fragment_density_enabled = application::get_fragment_density_map_enabled();
+	if (fragment_density_enabled)
+	{
+		const auto props = physical_device.getFormatProperties(vk::Format::eR8G8Unorm);
+		const auto fdm = physical_device.getProperties2<vk::PhysicalDeviceProperties2, vk::PhysicalDeviceFragmentDensityMapPropertiesEXT>();
+		const auto & fp = fdm.template get<vk::PhysicalDeviceFragmentDensityMapPropertiesEXT>();
+		const bool format_ok = bool(props.optimalTilingFeatures & vk::FormatFeatureFlagBits::eFragmentDensityMapEXT);
+		if (!format_ok)
+		{
+			fragment_density_enabled = false;
+			spdlog::warn("FDM requested but RG8 format support is unavailable; using normal defoveation");
+		}
+		else
+		{
+			const uint32_t tw = std::max(1u, fp.minFragmentDensityTexelSize.width);
+			const uint32_t th = std::max(1u, fp.minFragmentDensityTexelSize.height);
+			const uint32_t mw = (output_extent.width + tw - 1) / tw;
+			const uint32_t mh = (output_extent.height + th - 1) / th;
+			fragment_density_image = image_allocation(device, vk::ImageCreateInfo{
+					.imageType = vk::ImageType::e2D, .format = vk::Format::eR8G8Unorm,
+					.extent = {mw, mh, 1}, .mipLevels = 1, .arrayLayers = 1,
+					.samples = vk::SampleCountFlagBits::e1,
+					.usage = vk::ImageUsageFlagBits::eFragmentDensityMapEXT | vk::ImageUsageFlagBits::eTransferDst,
+			}, VmaAllocationCreateInfo{.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE}, "stream FDM");
+			fragment_density_view = vk::raii::ImageView(device, vk::ImageViewCreateInfo{
+					.image = fragment_density_image, .viewType = vk::ImageViewType::e2D,
+					.format = vk::Format::eR8G8Unorm,
+					.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}});
+			std::vector<uint8_t> pixels(size_t(mw) * mh * 2, 255);
+			for (uint32_t y = 0; y < mh; ++y)
+				for (uint32_t x = 0; x < mw; ++x)
+				{
+					const float px = (x + .5f) * tw, py = (y + .5f) * th;
+					const float dx = std::abs(px - output_extent.width * .5f);
+					const float dy = std::abs(py - output_extent.height * .5f);
+					const uint8_t d = application::get_fragment_density_map_mode() == 2 ? 255 : (std::max(dx, dy) <= 512.f ? 255 : (std::max(dx, dy) <= 768.f ? 128 : 64));
+					const size_t i = (size_t(y) * mw + x) * 2;
+					pixels[i + 0] = pixels[i + 1] = d;
+				}
+			buffer_allocation staging(device, vk::BufferCreateInfo{.size = pixels.size(), .usage = vk::BufferUsageFlagBits::eTransferSrc},
+					VmaAllocationCreateInfo{.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT, .usage = VMA_MEMORY_USAGE_AUTO});
+			vk::resultCheck(static_cast<vk::Result>(vmaCopyMemoryToAllocation(vk_allocator::instance(), pixels.data(), staging, 0, pixels.size())), "FDM map upload");
+			vk::raii::CommandPool pool(device, vk::CommandPoolCreateInfo{.flags = vk::CommandPoolCreateFlagBits::eTransient, .queueFamilyIndex = application::get_vk_queue_family_index()});
+			auto cb = std::move(device.allocateCommandBuffers({.commandPool = *pool, .level = vk::CommandBufferLevel::ePrimary, .commandBufferCount = 1})[0]);
+			cb.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+			cb.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, vk::ImageMemoryBarrier{.dstAccessMask = vk::AccessFlagBits::eTransferWrite, .oldLayout = vk::ImageLayout::eUndefined, .newLayout = vk::ImageLayout::eTransferDstOptimal, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = fragment_density_image, .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}});
+			cb.copyBufferToImage(staging, fragment_density_image, vk::ImageLayout::eTransferDstOptimal, vk::BufferImageCopy{.imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1}, .imageExtent = {mw, mh, 1}});
+			cb.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eFragmentDensityProcessEXT, {}, {}, {}, vk::ImageMemoryBarrier{.srcAccessMask = vk::AccessFlagBits::eTransferWrite, .dstAccessMask = vk::AccessFlagBits::eFragmentDensityMapReadEXT, .oldLayout = vk::ImageLayout::eTransferDstOptimal, .newLayout = vk::ImageLayout::eFragmentDensityMapOptimalEXT, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = fragment_density_image, .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}});
+			cb.end();
+			auto q = application::get_queue().lock();
+			q->submit(vk::SubmitInfo{.commandBufferCount = 1, .pCommandBuffers = &*cb});
+			q->waitIdle();
+			spdlog::info("Static FDM enabled: {}x{} map, texel {}x{}", mw, mh, tw, th);
+		}
+	}
+
 #ifdef __ANDROID__
 	char profile_value[PROP_VALUE_MAX] = {};
 	const int profile_len = __system_property_get("debug.wivrn.atlas_vertex_warp", profile_value);
@@ -383,22 +441,32 @@ stream_defoveator::stream_defoveator(
 	        .attachment = 0,
 	        .layout = vk::ImageLayout::eColorAttachmentOptimal,
 	};
+	vk::AttachmentDescription density_attachment{
+	        .format = vk::Format::eR8G8Unorm, .samples = vk::SampleCountFlagBits::e1,
+	        .loadOp = vk::AttachmentLoadOp::eLoad, .storeOp = vk::AttachmentStoreOp::eDontCare,
+	        .initialLayout = vk::ImageLayout::eFragmentDensityMapOptimalEXT,
+	        .finalLayout = vk::ImageLayout::eFragmentDensityMapOptimalEXT};
+	vk::AttachmentReference density_ref{.attachment = 1, .layout = vk::ImageLayout::eFragmentDensityMapOptimalEXT};
 	vk::SubpassDescription subpass{
 	        .pipelineBindPoint = vk::PipelineBindPoint::eGraphics,
 	        .colorAttachmentCount = 1,
 	        .pColorAttachments = &color_ref,
 	};
 
-	vk::StructureChain renderpass_info{
-	        vk::RenderPassCreateInfo{
-	                .attachmentCount = 1,
-	                .pAttachments = &attachment,
-	                .subpassCount = 1,
-	                .pSubpasses = &subpass,
-	        },
-	};
-
-	renderpass = vk::raii::RenderPass(device, renderpass_info.get());
+	if (fragment_density_enabled)
+	{
+		std::array attachments{attachment, density_attachment};
+		vk::StructureChain renderpass_info{
+		        vk::RenderPassCreateInfo{.attachmentCount = 2, .pAttachments = attachments.data(), .subpassCount = 1, .pSubpasses = &subpass},
+		        vk::RenderPassFragmentDensityMapCreateInfoEXT{.fragmentDensityMapAttachment = density_ref},
+		};
+		renderpass = vk::raii::RenderPass(device, renderpass_info.get());
+	}
+	else
+	{
+		vk::RenderPassCreateInfo renderpass_info{.attachmentCount = 1, .pAttachments = &attachment, .subpassCount = 1, .pSubpasses = &subpass};
+		renderpass = vk::raii::RenderPass(device, renderpass_info);
+	}
 
 	std::array pool_sizes{
 	        vk::DescriptorPoolSize{
@@ -481,7 +549,11 @@ stream_defoveator::stream_defoveator(
 			        .height = output_extent.height,
 			        .layers = 1,
 			};
-			fb_create_info.setAttachments(*output_image_views.back());
+			std::array views{*output_image_views.back(), *fragment_density_view};
+			if (fragment_density_enabled)
+				fb_create_info.setAttachments(views);
+			else
+				fb_create_info.setAttachments(*output_image_views.back());
 
 			framebuffers.emplace_back(device, fb_create_info);
 		}
@@ -499,9 +571,20 @@ stream_defoveator::stream_defoveator(
 		vk::AttachmentReference unorm_ref{.attachment = 0, .layout = vk::ImageLayout::eColorAttachmentOptimal};
 		vk::SubpassDescription unorm_subpass{.pipelineBindPoint = vk::PipelineBindPoint::eGraphics,
 		        .colorAttachmentCount = 1, .pColorAttachments = &unorm_ref};
-		vk::RenderPassCreateInfo unorm_info{.attachmentCount = 1, .pAttachments = &unorm_attachment,
-		        .subpassCount = 1, .pSubpasses = &unorm_subpass};
+		if (fragment_density_enabled)
+		{
+			std::array attachments{unorm_attachment, density_attachment};
+			vk::StructureChain unorm_info{
+			        vk::RenderPassCreateInfo{.attachmentCount = 2, .pAttachments = attachments.data(), .subpassCount = 1, .pSubpasses = &unorm_subpass},
+			        vk::RenderPassFragmentDensityMapCreateInfoEXT{.fragmentDensityMapAttachment = density_ref},
+			};
+			renderpass_unorm = vk::raii::RenderPass(device, unorm_info.get());
+		}
+		else
+		{
+			vk::RenderPassCreateInfo unorm_info{.attachmentCount = 1, .pAttachments = &unorm_attachment, .subpassCount = 1, .pSubpasses = &unorm_subpass};
 			renderpass_unorm = vk::raii::RenderPass(device, unorm_info);
+		}
 		for (vk::Image image: output_images)
 			for (uint32_t view = 0; view < view_count; ++view)
 			{
@@ -511,7 +594,11 @@ stream_defoveator::stream_defoveator(
 				                .levelCount = 1, .baseArrayLayer = view, .layerCount = 1}});
 				vk::FramebufferCreateInfo fb{.renderPass = *renderpass_unorm, .width = output_extent.width,
 				        .height = output_extent.height, .layers = 1};
-				fb.setAttachments(*output_image_views_unorm.back());
+				std::array views{*output_image_views_unorm.back(), *fragment_density_view};
+				if (fragment_density_enabled)
+					fb.setAttachments(views);
+				else
+					fb.setAttachments(*output_image_views_unorm.back());
 				framebuffers_unorm.emplace_back(device, fb);
 			}
 		spdlog::info("Atlas UNORM attachment views ready");

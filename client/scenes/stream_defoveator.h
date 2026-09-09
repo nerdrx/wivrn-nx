@@ -156,6 +156,10 @@ private:
 	void ensure_motion_image(vk::raii::CommandBuffer & command_buffer, uint32_t width, uint32_t height);
 
 	// Destination images
+	// Static app-owned density map. Declared before framebuffers so it outlives them.
+	image_allocation fragment_density_image;
+	vk::raii::ImageView fragment_density_view = nullptr;
+	bool fragment_density_enabled = false;
 	std::vector<vk::Image> output_images;
 	std::vector<vk::raii::ImageView> output_image_views;
 	std::vector<vk::raii::Framebuffer> framebuffers;

@@ -108,6 +108,7 @@ private:
 	vk::raii::PhysicalDevice vk_physical_device = nullptr;
 	vk::raii::Device vk_device = nullptr;
 	uint32_t vk_queue_family_index;
+	int fragment_density_map_mode = 0;
 	thread_safe<vk::raii::Queue> vk_queue = nullptr;
 	// A SECOND queue from the same family, when the driver offers one, for work
 	// that must not queue behind the compositor's frame.  The Adreno 650 reports
@@ -480,6 +481,17 @@ public:
 	static const std::vector<const char *> & get_vk_device_extensions()
 	{
 		return instance().vk_device_extensions;
+	}
+
+	static bool get_fragment_density_map_enabled()
+	{
+		return instance().fragment_density_map_mode != 0;
+	}
+	static int get_fragment_density_map_mode() { return instance().fragment_density_map_mode; }
+
+	static uint32_t get_vk_queue_family_index()
+	{
+		return instance().vk_queue_family_index;
 	}
 
 	static configuration & get_config()

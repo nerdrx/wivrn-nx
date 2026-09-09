@@ -157,6 +157,9 @@ layout(constant_id = 7) const bool lowpoly_enable = false;
 // with a standalone probe running this very shader, per frame pair at 2176x1088 total:
 // 17-fetch +2.12 ms, 37-fetch +5.16 ms over a 0.32 ms base. Baked like cas_full_kernel.
 layout(constant_id = 8) const bool lowpoly_full_kernel = false;
+// Two-tap peripheral smoothing for coarse PLANAR cells. The host enables this
+// only for the mixed PLANAR centre mode; the default is fully compiled out.
+layout(constant_id = 10) const bool peripheral_smooth = false;
 
 // --- [atlas prototype] --------------------------------------------------------------
 //
@@ -942,7 +945,26 @@ void main()
 	}
 
 	vec4 colour = texture(rgb[0], uv);
-	if (lowpoly_enable && deband.y > 0.0)
+	// The protected centre is the fixed 512px square used by the mixed PLANAR
+	// stream. Start smoothing 64 source pixels outside it, then grow the diagonal
+	// radius from 4 to 16 source pixels over the next 256 pixels. Clamp every
+	// fetch to this eye's horizontal limits so the stereo seam is never sampled.
+	vec2 smooth_center = vec2((motion.w + deband.w) * 0.5, 0.5);
+	vec2 smooth_delta_px = abs(uv - smooth_center) * vec2(rgb_rect.zw) - vec2(256.0);
+	float smooth_distance = max(max(smooth_delta_px.x, smooth_delta_px.y), 0.0);
+	bool smooth_outer = peripheral_smooth && smooth_distance > 64.0;
+	if (smooth_outer)
+	{
+		vec2 texel = 1.0 / vec2(rgb_rect.zw);
+		float radius = mix(4.0, 16.0, smoothstep(64.0, 320.0, smooth_distance));
+		vec2 lo = vec2(motion.w, 0.5 * texel.y);
+		vec2 hi = vec2(deband.w, 1.0 - 0.5 * texel.y);
+		vec2 d = vec2(radius * 0.70710678) * texel;
+		vec3 filtered = (texture(rgb[0], clamp(uv + d, lo, hi)).rgb +
+		              texture(rgb[0], clamp(uv - d, lo, hi)).rgb) * 0.5;
+		colour.rgb = mix(colour.rgb, filtered, smoothstep(64.0, 192.0, smooth_distance));
+	}
+	else if (lowpoly_enable && deband.y > 0.0)
 	{
 		// Low poly takes over the sampling path: it already delivers hard edges, and
 		// running a sharpener over its flat regions would only re-introduce the halo

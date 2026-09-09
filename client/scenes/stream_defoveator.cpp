@@ -43,6 +43,19 @@
 #include <sys/system_properties.h>
 #endif
 
+static bool peripheral_smooth_requested()
+{
+#ifdef __ANDROID__
+	char smooth[PROP_VALUE_MAX] = {}, centre[PROP_VALUE_MAX] = {};
+	return __system_property_get("debug.wivrn.nx.peripheral_smooth", smooth) > 0 && smooth[0] != '0' &&
+	       __system_property_get("debug.wivrn.nx.planar_centre", centre) > 0 && centre[0] != '0';
+#else
+	const char * smooth = std::getenv("WIVRN_NX_PERIPHERAL_SMOOTH");
+	const char * centre = std::getenv("WIVRN_NX_PLANAR_CENTRE");
+	return smooth && smooth[0] != '0' && centre && centre[0] != '0';
+#endif
+}
+
 struct stream_defoveator::vertex
 {
 	// output image position
@@ -252,7 +265,8 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 		int32_t(view),
 		VkBool32(lowpoly_baked),
 		VkBool32(lowpoly_full_baked),
-		VkBool32(atlas_r8 && atlas_vertex_warp));
+		VkBool32(atlas_r8 && atlas_vertex_warp),
+		VkBool32(peripheral_smooth_baked));
 	auto fragment_shader = load_shader(device, atlas_r8 ? "reprojection_atlas_r8.frag" : "reprojection.frag");
 
 	vk::pipeline_builder pipeline_info{
@@ -864,8 +878,10 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 	const bool neutral_color = std::all_of(scale.begin(), scale.end(), [](float v) { return v == 1.f; }) &&
 	                            std::all_of(bias.begin(), bias.end(), [](float v) { return v == 0.f; });
 	const bool want_unorm = mutable_alias && neutral_color;
+	const bool want_peripheral_smooth = peripheral_smooth_requested() && atlas_prototype == 0;
 	if (want_unorm != unorm_baked or cas_full_kernel != cas_full_baked or fsr != fsr_baked or atlas_prototype != atlas_baked or
-	    lowpoly != lowpoly_baked or post.low_poly_full != lowpoly_full_baked)
+	    lowpoly != lowpoly_baked or post.low_poly_full != lowpoly_full_baked ||
+	    want_peripheral_smooth != peripheral_smooth_baked)
 	{
 		reset_pipelines();
 		cas_full_baked = cas_full_kernel;
@@ -873,6 +889,8 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		atlas_baked = atlas_prototype;
 		lowpoly_baked = lowpoly;
 		lowpoly_full_baked = post.low_poly_full;
+		peripheral_smooth_baked = want_peripheral_smooth;
+		spdlog::info("NX peripheral smoothing {}", peripheral_smooth_baked ? "active" : "off");
 		unorm_baked = want_unorm;
 		if (mutable_alias)
 			spdlog::info("Atlas UNORM attachment path {}", unorm_baked ? "active" : "paused for color fade");

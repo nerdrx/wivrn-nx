@@ -98,6 +98,9 @@ private:
 	// strength that already travels in post_processing.
 	bool lowpoly_baked = false;
 	bool lowpoly_full_baked = false;
+	// Optional two-tap smoothing for the coarse PLANAR periphery. Kept as a
+	// specialization constant so the default path is unchanged.
+	bool peripheral_smooth_baked = false;
 	// [atlas prototype] whether the per-tile warp is compiled into the current
 	// pipelines, same specialization scheme as the two above.
 	int atlas_baked = 0;

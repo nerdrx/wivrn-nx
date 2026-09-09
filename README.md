@@ -79,6 +79,18 @@ Graduated PLANAR falloff was tested at **10.206 ms mean decode**, against
 A live smoke test averaged **53.39 fresh updates/s**, including startup.
 [Comparison images, sampling policy and limitations](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-09/graduated-centre).
 
+### Optional peripheral smoothing
+
+`adb shell setprop debug.wivrn.nx.peripheral_smooth 1` enables a lightweight
+filter while the PLANAR centre property is enabled. Two diagonal linear samples
+soften peripheral block edges; their blend fades in outside the protected
+512-pixel centre. Samples clamp to each eye. The setting is off by default and
+can be disabled with the same property set to `0`. It targets the quarter-centre
+profile; for the optional 1024-pixel centre, disable peripheral smoothing because
+no 1024-pixel protected-region setting exists.
+The smoothed area bypasses sharpening and the heavier low-poly filter.
+[Live captures and measured cost](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-09/peripheral-smoothing).
+
 ## Fixes over upstream
 
 | | |

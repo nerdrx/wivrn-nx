@@ -497,3 +497,10 @@ if (WIVRN_BUILD_SERVER_LIBRARY)
 		DESTINATION ${CMAKE_INSTALL_LIBDIR}/wivrn
 		COMPONENT Runtime)
 endif()
+
+if (WIVRN_BUILD_TEST)
+	add_executable(wivrn-pace-rate-test
+		${CMAKE_SOURCE_DIR}/tests/pace_rate_test.cpp)
+	target_include_directories(wivrn-pace-rate-test PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}/encoder)
+endif()

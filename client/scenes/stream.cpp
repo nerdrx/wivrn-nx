@@ -2079,6 +2079,21 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		        .bleed_fade_distance = bleed_fade_distance,
 		};
 
+#ifdef __ANDROID__
+		// Measurement override: retain the configured appearance unless explicitly
+		// disabled. Read once per process; reconnect after changing the property.
+		static const bool disable_nx_postfx = [] {
+			char value[PROP_VALUE_MAX] = {};
+			return __system_property_get("debug.wivrn.nx.postfx", value) == 1 and value[0] == '0';
+		}();
+		if (disable_nx_postfx and video_stream_description and
+		    video_stream_description->codec[0] == wivrn::video_codec::nxwarp)
+		{
+			post.glow = 0;
+			post.deband = 0;
+		}
+#endif
+
 		// Whether this refresh can re-present the image already in the swapchain
 		// instead of drawing a new one. Its signature and the decision are taken under
 		// the motion lock, so the motion step folded into the signature is exactly the

@@ -43,16 +43,31 @@
 #include <sys/system_properties.h>
 #endif
 
-static bool peripheral_smooth_requested()
+static int peripheral_smooth_requested()
 {
 #ifdef __ANDROID__
 	char smooth[PROP_VALUE_MAX] = {}, centre[PROP_VALUE_MAX] = {};
-	return __system_property_get("debug.wivrn.nx.peripheral_smooth", smooth) > 0 && smooth[0] != '0' &&
-	       __system_property_get("debug.wivrn.nx.planar_centre", centre) > 0 && centre[0] != '0';
+	if (__system_property_get("debug.wivrn.nx.peripheral_smooth", smooth) <= 0 ||
+	    __system_property_get("debug.wivrn.nx.planar_centre", centre) <= 0 || centre[0] == '0')
+		return 0;
 #else
 	const char * smooth = std::getenv("WIVRN_NX_PERIPHERAL_SMOOTH");
 	const char * centre = std::getenv("WIVRN_NX_PLANAR_CENTRE");
-	return smooth && smooth[0] != '0' && centre && centre[0] != '0';
+	if (!smooth || !centre || centre[0] == '0')
+		return 0;
+#endif
+	return smooth[0] == '2' ? 2 : (smooth[0] != '0' ? 1 : 0);
+}
+
+static int lowpoly_tiny_requested()
+{
+#ifdef __ANDROID__
+	char value[PROP_VALUE_MAX] = {};
+	return __system_property_get("debug.wivrn.nx.kuwahara_fast", value) > 0
+	               ? std::clamp(value[0] - '0', 0, 3) : 0;
+#else
+	const char * value = std::getenv("WIVRN_NX_KUWAHARA_FAST");
+	return value ? std::clamp(value[0] - '0', 0, 3) : 0;
 #endif
 }
 
@@ -266,8 +281,9 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 		VkBool32(lowpoly_baked),
 		VkBool32(lowpoly_full_baked),
 	        VkBool32(atlas_r8 && atlas_vertex_warp),
-	        VkBool32(peripheral_smooth_baked),
-	        VkBool32(compact_centre));
+	        int32_t(peripheral_smooth_baked),
+	        VkBool32(compact_centre),
+		int32_t(lowpoly_tiny_baked));
 	auto fragment_shader = load_shader(device, atlas_r8 ? "reprojection_atlas_r8.frag" : "reprojection.frag");
 
 	vk::pipeline_builder pipeline_info{
@@ -963,13 +979,14 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 	// so nothing is still reading the old pipelines. They only ever flip from a settings
 	// toggle, a rare event.
 	const bool lowpoly = post.low_poly > 0;
+	const int lowpoly_tiny = lowpoly && !post.low_poly_full ? lowpoly_tiny_requested() : 0;
 	const bool neutral_color = std::all_of(scale.begin(), scale.end(), [](float v) { return v == 1.f; }) &&
 	                            std::all_of(bias.begin(), bias.end(), [](float v) { return v == 0.f; });
 	const bool want_unorm = mutable_alias && neutral_color;
-	const bool want_peripheral_smooth = peripheral_smooth_requested() && atlas_prototype == 0;
+	const int want_peripheral_smooth = atlas_prototype == 0 ? peripheral_smooth_requested() : 0;
 	const bool want_compact_centre = inputs[0].compact_centre || inputs[1].compact_centre;
 	if (want_compact_centre != compact_centre_baked or want_unorm != unorm_baked or cas_full_kernel != cas_full_baked or fsr != fsr_baked or atlas_prototype != atlas_baked or
-	    lowpoly != lowpoly_baked or post.low_poly_full != lowpoly_full_baked ||
+	    lowpoly != lowpoly_baked or post.low_poly_full != lowpoly_full_baked || lowpoly_tiny != lowpoly_tiny_baked ||
 	    want_peripheral_smooth != peripheral_smooth_baked)
 	{
 		reset_pipelines();
@@ -979,8 +996,9 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		compact_centre_baked = want_compact_centre;
 		lowpoly_baked = lowpoly;
 		lowpoly_full_baked = post.low_poly_full;
+		lowpoly_tiny_baked = lowpoly_tiny;
 		peripheral_smooth_baked = want_peripheral_smooth;
-		spdlog::info("NX peripheral smoothing {}", peripheral_smooth_baked ? "active" : "off");
+		spdlog::info("NX peripheral smoothing mode {}", peripheral_smooth_baked);
 		unorm_baked = want_unorm;
 		if (mutable_alias)
 			spdlog::info("Atlas UNORM attachment path {}", unorm_baked ? "active" : "paused for color fade");

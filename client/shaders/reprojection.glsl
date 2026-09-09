@@ -157,9 +157,13 @@ layout(constant_id = 7) const bool lowpoly_enable = false;
 // with a standalone probe running this very shader, per frame pair at 2176x1088 total:
 // 17-fetch +2.12 ms, 37-fetch +5.16 ms over a 0.32 ms base. Baked like cas_full_kernel.
 layout(constant_id = 8) const bool lowpoly_full_kernel = false;
-// Two-tap peripheral smoothing for coarse PLANAR cells. The host enables this
-// only for the mixed PLANAR centre mode; the default is fully compiled out.
-layout(constant_id = 10) const bool peripheral_smooth = false;
+// Optional low-poly approximations: 1 is eight-fetch 3x3, 2 is four-fetch
+// centre-reuse, 3 is a two-fetch directional hint; all are off by default.
+layout(constant_id = 12) const int lowpoly_tiny_kernel = 0;
+// Peripheral smoothing for coarse PLANAR cells. Mode 1 preserves the original
+// square boundary and two diagonal taps; mode 2 follows the encoder's rounded
+// tile-centre mask and uses four cardinal taps. The default is compiled out.
+layout(constant_id = 10) const int peripheral_smooth = 0;
 
 // --- [atlas prototype] --------------------------------------------------------------
 //
@@ -780,10 +784,76 @@ vec3 low_poly_full(vec2 uv)
 	return best_mean;
 }
 
+// Tiny kernel: two bilinear block means per quadrant, then choose the least
+// directional contrast. Nine total image reads including the caller's centre.
+vec3 low_poly_tiny(vec2 uv)
+{
+	vec2 texel = 1.0 / vec2(rgb_rect.zw);
+	vec3 best_mean = vec3(0.0);
+	float best_var = 3.4e38;
+	for (int q = 0; q < 4; ++q)
+	{
+		vec2 s = vec2(float((q & 1) * 2 - 1), float((q >> 1) * 2 - 1));
+		vec3 a = sample_rgb(uv + s * vec2(0.5, 2.5) * texel).rgb;
+		vec3 b = sample_rgb(uv + s * vec2(2.5, 0.5) * texel).rgb;
+		float delta = dot(a - b, vec3(0.299, 0.587, 0.114));
+		float var = delta * delta;
+		if (var < best_var)
+		{
+			best_var = var;
+			best_mean = (a + b) * 0.5;
+		}
+	}
+	return best_mean;
+}
+
+vec3 low_poly_four(vec2 uv, vec3 centre)
+{
+	vec2 texel = 1.0 / vec2(rgb_rect.zw);
+	vec3 best = centre;
+	float best_var = 3.4e38;
+	for (int q = 0; q < 4; ++q)
+	{
+		vec2 s = vec2(float((q & 1) * 2 - 1), float((q >> 1) * 2 - 1));
+		vec3 c = sample_rgb(uv + s * 1.5 * texel).rgb;
+		float delta = dot(c - centre, vec3(0.299, 0.587, 0.114));
+		float var = delta * delta;
+		if (var < best_var)
+		{
+			best_var = var;
+			best = (centre + c) * 0.5;
+		}
+	}
+	return best;
+}
+
+// Two-fetch directional approximation. This is explicitly a cheap edge hint,
+// not a full Kuwahara kernel.
+vec3 low_poly_two(vec2 uv, vec3 centre)
+{
+	vec2 texel = 1.0 / vec2(rgb_rect.zw);
+	vec2 lo = vec2(motion.w, 0.5 * texel.y);
+	vec2 hi = vec2(deband.w, 1.0 - 0.5 * texel.y);
+	vec3 a = sample_rgb(clamp(uv - vec2(1.5) * texel, lo, hi)).rgb;
+	vec3 b = sample_rgb(clamp(uv + vec2(1.5) * texel, lo, hi)).rgb;
+	float da = dot(a - centre, vec3(0.299, 0.587, 0.114));
+	float db = dot(b - centre, vec3(0.299, 0.587, 0.114));
+	return (centre + (da * da < db * db ? a : b)) * 0.5;
+}
+
 vec3 low_poly(vec2 uv, vec3 centre, float strength, float levels)
 {
-	vec3 region = lowpoly_full_kernel ? low_poly_full(uv)
-	                                  : low_poly_fast(uv);
+	vec3 region;
+	if (lowpoly_full_kernel)
+		region = low_poly_full(uv);
+	else if (lowpoly_tiny_kernel == 3)
+		region = low_poly_two(uv, centre);
+	else if (lowpoly_tiny_kernel == 2)
+		region = low_poly_four(uv, centre);
+	else if (lowpoly_tiny_kernel == 1)
+		region = low_poly_tiny(uv);
+	else
+		region = low_poly_fast(uv);
 
 	// Strength blends the region colour over the plain sample, so the slider runs from
 	// the untouched image to the fully flattened one rather than switching between them.
@@ -963,14 +1033,23 @@ void main()
 	}
 
 	vec4 colour = sample_rgb(uv);
-	// The protected centre is the fixed 512px square used by the mixed PLANAR
-	// stream. Start smoothing 64 source pixels outside it, then grow the diagonal
-	// radius from 4 to 16 source pixels over the next 256 pixels. Clamp every
-	// fetch to this eye's horizontal limits so the stereo seam is never sampled.
+	// Mode 1 protects the fixed 512px square used by the mixed PLANAR stream.
+	// Mode 2 protects exactly the rounded encoder tile mask: a 64px tile remains
+	// native when its centre is inside the 512px centre ellipse, while every
+	// peripheral tile is filtered, including the rounded corners. The mode 2
+	// bound follows the encoder's tile-centre policy; it has no temporal samples
+	// or lag.
 	vec2 smooth_center = vec2((motion.w + deband.w) * 0.5, 0.5);
 	vec2 smooth_delta_px = abs(uv - smooth_center) * vec2(rgb_rect.zw) - vec2(256.0);
-	float smooth_distance = max(max(smooth_delta_px.x, smooth_delta_px.y), 0.0);
-	bool smooth_outer = peripheral_smooth && smooth_distance > 64.0;
+	vec2 source_px = uv * vec2(rgb_rect.zw);
+	vec2 tile_center = (floor(source_px / 64.0) + 0.5) * 64.0;
+	float tile_radius = length(tile_center - smooth_center * vec2(rgb_rect.zw));
+	float smooth_distance = peripheral_smooth >= 2
+	                        ? max(tile_radius - 256.0, 0.0)
+	                        : max(max(smooth_delta_px.x, smooth_delta_px.y), 0.0);
+	bool smooth_outer = peripheral_smooth >= 2
+	                    ? tile_radius > 256.0
+	                    : peripheral_smooth > 0 && smooth_distance > 64.0;
 	if (smooth_outer)
 	{
 		vec2 texel = 1.0 / vec2(rgb_rect.zw);
@@ -978,9 +1057,23 @@ void main()
 		vec2 lo = vec2(motion.w, 0.5 * texel.y);
 		vec2 hi = vec2(deband.w, 1.0 - 0.5 * texel.y);
 		vec2 d = vec2(radius * 0.70710678) * texel;
-		vec3 filtered = (sample_rgb(clamp(uv + d, lo, hi)).rgb +
-		              sample_rgb(clamp(uv - d, lo, hi)).rgb) * 0.5;
-		colour.rgb = mix(colour.rgb, filtered, smoothstep(64.0, 192.0, smooth_distance));
+		vec3 filtered;
+		if (peripheral_smooth >= 2)
+		{
+			vec2 dx = vec2(radius * texel.x, 0.0);
+			vec2 dy = vec2(0.0, radius * texel.y);
+			filtered = (sample_rgb(clamp(uv + dx, lo, hi)).rgb +
+			            sample_rgb(clamp(uv - dx, lo, hi)).rgb +
+			            sample_rgb(clamp(uv + dy, lo, hi)).rgb +
+			            sample_rgb(clamp(uv - dy, lo, hi)).rgb) * 0.25;
+		}
+		else
+			filtered = (sample_rgb(clamp(uv + d, lo, hi)).rgb +
+			            sample_rgb(clamp(uv - d, lo, hi)).rgb) * 0.5;
+		float smooth_strength = peripheral_smooth >= 2
+		                      ? mix(0.35, 1.0, smoothstep(0.0, 192.0, smooth_distance))
+		                      : smoothstep(64.0, 192.0, smooth_distance);
+		colour.rgb = mix(colour.rgb, filtered, smooth_strength);
 	}
 	else if (lowpoly_enable && deband.y > 0.0)
 	{

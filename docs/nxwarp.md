@@ -477,3 +477,32 @@ decode stage reports 22.52 ms. The harness's own absolute numbers are not a late
 budget -- it has no runtime compositor and presents in a tight loop, so its queue and
 present stages are its own scheduling -- but the stage that can be checked against a known
 input checks out.
+
+## Peripheral filtering experiments (2026-09-10)
+
+For the compact 2176-pixel-per-eye mixed PLANAR profile,
+`debug.wivrn.nx.peripheral_smooth=2` filters all peripheral tiles using four
+cardinal samples in the existing presentation pass. Its protected region
+matches the encoder's rounded 512-pixel native-centre tile mask. Pair it with
+server `NXVC_PLANAR_ROUND=1`; mode 1 retains the old square/two-tap filter,
+and mode 0 disables smoothing. There is no temporal blend or extra pass.
+
+`debug.wivrn.nx.kuwahara_fast` selects an optional smaller low-poly kernel:
+
+| Value | Extra texture samples | Approximation |
+|---|---:|---|
+| 0 | 16 | Existing four samples per quadrant |
+| 1 | 8 | Two bilinear block means per quadrant |
+| 2 | 4 | Four neighbours scored against the shared centre |
+| 3 | 2 | Two opposing diagonal neighbours scored against the centre |
+
+The low-poly setting must also be enabled. The full-kernel option takes
+precedence; `debug.wivrn.nx.postfx=0` suppresses low-poly. Peripheral blur
+takes precedence over low-poly where its mask applies. Smaller kernels are
+not mathematically equivalent Kuwahara filters and may leave more block edges.
+Defaults remain unchanged. Desktop equivalents use `WIVRN_NX_` followed by
+`PERIPHERAL_SMOOTH` or `KUWAHARA_FAST`.
+
+Pico isolated RGBA measurements and source:
+[experiments](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-10).
+Those draw timings are not live NV12 or motion-to-photon latency.

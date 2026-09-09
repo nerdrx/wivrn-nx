@@ -105,6 +105,7 @@ private:
 	// pipelines, same specialization scheme as the two above.
 	int atlas_baked = 0;
 	bool atlas_vertex_warp = false;
+	bool compact_centre_baked = false;
 	static constexpr uint32_t kAtlasTiles = 17;
 	// The v1 configuration of ADR-0029: 1088x1088 per eye, 64x64 tiles, 17x17 = 289
 	// tiles. The atlas is the whole eye picture in the coded sample domain.
@@ -169,7 +170,7 @@ private:
 	void ensure_vertices(size_t num_vertices);
 	vertex * get_vertices(size_t view);
 
-	pipeline_t & ensure_pipeline(size_t view, vk::Sampler rgb, vk::Sampler a, bool atlas_r8);
+	pipeline_t & ensure_pipeline(size_t view, vk::Sampler rgb, vk::Sampler a, bool atlas_r8, bool compact_centre);
 
 public:
 	struct input
@@ -189,6 +190,7 @@ public:
 		vk::ImageView prev_rgb = nullptr;
 		vk::ImageLayout layout_prev_rgb = vk::ImageLayout::eGeneral;
 		bool atlas_valid = false;
+		bool compact_centre = false;
 		std::array<vk::ImageView, 3> atlas_views{};
 		std::array<vk::Extent2D, 3> atlas_extents{};
 		vk::Buffer atlas_table = nullptr;

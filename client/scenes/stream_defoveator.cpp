@@ -154,7 +154,7 @@ stream_defoveator::vertex * stream_defoveator::get_vertices(size_t view)
 	return reinterpret_cast<vertex *>(reinterpret_cast<uintptr_t>(buffer.map()) + view * vertices_size);
 }
 
-stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, vk::Sampler rgb, vk::Sampler a, bool atlas_r8)
+stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, vk::Sampler rgb, vk::Sampler a, bool atlas_r8, bool compact_centre)
 {
 	auto & target = atlas_r8 ? (a ? pipeline_atlas_r8_a[view] : pipeline_atlas_r8_rgb[view])
 	                         : (a ? pipeline_a[view] : pipeline_rgb[view]);
@@ -265,8 +265,9 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 		int32_t(view),
 		VkBool32(lowpoly_baked),
 		VkBool32(lowpoly_full_baked),
-		VkBool32(atlas_r8 && atlas_vertex_warp),
-		VkBool32(peripheral_smooth_baked));
+	        VkBool32(atlas_r8 && atlas_vertex_warp),
+	        VkBool32(peripheral_smooth_baked),
+	        VkBool32(compact_centre));
 	auto fragment_shader = load_shader(device, atlas_r8 ? "reprojection_atlas_r8.frag" : "reprojection.frag");
 
 	vk::pipeline_builder pipeline_info{
@@ -879,7 +880,8 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 	                            std::all_of(bias.begin(), bias.end(), [](float v) { return v == 0.f; });
 	const bool want_unorm = mutable_alias && neutral_color;
 	const bool want_peripheral_smooth = peripheral_smooth_requested() && atlas_prototype == 0;
-	if (want_unorm != unorm_baked or cas_full_kernel != cas_full_baked or fsr != fsr_baked or atlas_prototype != atlas_baked or
+	const bool want_compact_centre = inputs[0].compact_centre || inputs[1].compact_centre;
+	if (want_compact_centre != compact_centre_baked or want_unorm != unorm_baked or cas_full_kernel != cas_full_baked or fsr != fsr_baked or atlas_prototype != atlas_baked or
 	    lowpoly != lowpoly_baked or post.low_poly_full != lowpoly_full_baked ||
 	    want_peripheral_smooth != peripheral_smooth_baked)
 	{
@@ -887,6 +889,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		cas_full_baked = cas_full_kernel;
 		fsr_baked = fsr;
 		atlas_baked = atlas_prototype;
+		compact_centre_baked = want_compact_centre;
 		lowpoly_baked = lowpoly;
 		lowpoly_full_baked = post.low_poly_full;
 		peripheral_smooth_baked = want_peripheral_smooth;
@@ -1040,7 +1043,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		        },
 		};
 
-		auto & pipeline = ensure_pipeline(view, input.sampler_rgb, input.sampler_a, atlas_r8);
+		auto & pipeline = ensure_pipeline(view, input.sampler_rgb, input.sampler_a, atlas_r8, input.compact_centre);
 		if (atlas_r8 && atlas_vertex_warp &&
 		    (!atlas_mesh_buffers[view] || atlas_mesh_extents[view] != input.atlas_extents[0] ||
 		     atlas_mesh_foveation[view].x != foveation[view].x ||

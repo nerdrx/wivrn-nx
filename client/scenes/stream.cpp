@@ -1752,6 +1752,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 				if (blit_handle->atlas_valid && not atlas_layout_supported)
 					throw std::runtime_error("NX Warp atlas view dimensions/formats are unsupported by the R8 renderer");
 				images[v].atlas_valid = blit_handle->atlas_valid;
+				images[v].compact_centre = blit_handle->compact_centre;
 				if (images[v].atlas_valid)
 				{
 					for (size_t p = 0; p < images[v].atlas_views.size(); ++p)

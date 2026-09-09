@@ -185,6 +185,9 @@ layout(constant_id = 5) const int atlas_tiles = 17;
 // the defoveation pass already is; a single draw for both would index this from the
 // fragment's position instead and change nothing about the per-fragment cost.
 layout(constant_id = 6) const int atlas_eye = 0;
+// Compact centre storage: native 2176x2176 eye coordinates are packed to 928x928,
+// with a native 512px centre and 4:1 periphery on each axis.
+layout(constant_id = 11) const bool compact_centre = false;
 
 layout(set = 0, binding = 0) uniform sampler2D rgb[alpha + 1];
 // One cell per motion vector, covering the whole eye image, sampled with the
@@ -195,6 +198,21 @@ layout(set = 0, binding = 1) uniform sampler2D motion_field;
 // no usable previous frame, this is bound to rgb[0] itself and motion.z is zero, so the
 // mix below never runs and the output is byte identical to not having the feature.
 layout(set = 0, binding = 2) uniform sampler2D prev_rgb;
+
+vec2 compact_map_uv(vec2 uv)
+{
+	if (!compact_centre)
+		return uv;
+	float eye = float(atlas_eye);
+	vec2 p = uv * vec2(4352.0, 2176.0);
+	vec2 local = clamp(p - vec2(eye * 2176.0, 0.0), vec2(0.5), vec2(2175.5));
+	vec2 mapped = local * 0.25 + clamp(local - vec2(832.0), vec2(0.0), vec2(512.0)) * 0.75;
+	mapped = clamp(mapped, vec2(0.5), vec2(927.5));
+	return (mapped + vec2(eye * 928.0, 0.0)) / vec2(1856.0, 928.0);
+}
+
+vec4 sample_rgb(vec2 uv) { return texture(rgb[0], compact_map_uv(uv)); }
+vec4 sample_prev(vec2 uv) { return texture(prev_rgb, compact_map_uv(uv)); }
 
 // [atlas prototype] The atlas, in the decoder's own storage layout: the ring layout,
 // both eyes side by side with eye e at column e * pw, planes in the coded YCoCg-R domain
@@ -258,10 +276,10 @@ vec3 contrast_adaptive_sharpen(vec2 uv, vec3 e, float sharpness)
 	//   b
 	// d e f
 	//   h
-	vec3 b = texture(rgb[0], uv + vec2(0, -1) * texel).rgb;
-	vec3 d = texture(rgb[0], uv + vec2(-1, 0) * texel).rgb;
-	vec3 f = texture(rgb[0], uv + vec2(1, 0) * texel).rgb;
-	vec3 h = texture(rgb[0], uv + vec2(0, 1) * texel).rgb;
+	vec3 b = sample_rgb(uv + vec2(0, -1) * texel).rgb;
+	vec3 d = sample_rgb(uv + vec2(-1, 0) * texel).rgb;
+	vec3 f = sample_rgb(uv + vec2(1, 0) * texel).rgb;
+	vec3 h = sample_rgb(uv + vec2(0, 1) * texel).rgb;
 
 	// Soft min and max over the cross, which counts once (range [0, 1]).
 	vec3 mn = min(min(min(d, e), min(f, b)), h);
@@ -276,10 +294,10 @@ vec3 contrast_adaptive_sharpen(vec2 uv, vec3 e, float sharpness)
 		// a   c
 		//
 		// g   i
-		vec3 a = texture(rgb[0], uv + vec2(-1, -1) * texel).rgb;
-		vec3 c = texture(rgb[0], uv + vec2(1, -1) * texel).rgb;
-		vec3 g = texture(rgb[0], uv + vec2(-1, 1) * texel).rgb;
-		vec3 i = texture(rgb[0], uv + vec2(1, 1) * texel).rgb;
+		vec3 a = sample_rgb(uv + vec2(-1, -1) * texel).rgb;
+		vec3 c = sample_rgb(uv + vec2(1, -1) * texel).rgb;
+		vec3 g = sample_rgb(uv + vec2(-1, 1) * texel).rgb;
+		vec3 i = sample_rgb(uv + vec2(1, 1) * texel).rgb;
 
 		mn += min(min(min(mn, a), min(c, g)), i);
 		mx += max(max(max(mx, a), max(c, g)), i);
@@ -385,7 +403,7 @@ vec3 fsr_easu(vec2 uv)
 	//     i  j  k  l
 	//        n  o
 	// f/g/j/k are the four texels straddling the sample point.
-#define FSR_TAP(dx, dy) texture(rgb[0], (base + vec2(dx, dy)) * rcp_size).rgb
+#define FSR_TAP(dx, dy) sample_rgb((base + vec2(dx, dy)) * rcp_size).rgb
 	vec3 b = FSR_TAP(0.0, -1.0), c = FSR_TAP(1.0, -1.0);
 	vec3 e = FSR_TAP(-1.0, 0.0), f = FSR_TAP(0.0, 0.0), g = FSR_TAP(1.0, 0.0), h = FSR_TAP(2.0, 0.0);
 	vec3 i = FSR_TAP(-1.0, 1.0), j = FSR_TAP(0.0, 1.0), k = FSR_TAP(1.0, 1.0), l = FSR_TAP(2.0, 1.0);
@@ -454,10 +472,10 @@ vec3 fsr_rcas(vec2 uv, vec3 e, float sharpness)
 	//   b
 	// d e f
 	//   h
-	vec3 b = texture(rgb[0], uv + vec2(0, -1) * texel).rgb;
-	vec3 d = texture(rgb[0], uv + vec2(-1, 0) * texel).rgb;
-	vec3 f = texture(rgb[0], uv + vec2(1, 0) * texel).rgb;
-	vec3 h = texture(rgb[0], uv + vec2(0, 1) * texel).rgb;
+	vec3 b = sample_rgb(uv + vec2(0, -1) * texel).rgb;
+	vec3 d = sample_rgb(uv + vec2(-1, 0) * texel).rgb;
+	vec3 f = sample_rgb(uv + vec2(1, 0) * texel).rgb;
+	vec3 h = sample_rgb(uv + vec2(0, 1) * texel).rgb;
 
 	vec3 mn4 = min(min(b, d), min(f, h));
 	vec3 mx4 = max(max(b, d), max(f, h));
@@ -525,9 +543,9 @@ vec3 ambient_glow(vec3 base, vec2 uv, vec2 position, float strength, float margi
 	vec2 tangent = vertical_edge ? vec2(0.0, 1.0) : vec2(1.0, 0.0);
 
 	vec2 c = clamp(uv + pull * texel * r, lo, hi);
-	vec3 acc = texture(rgb[0], c).rgb;
-	acc += texture(rgb[0], clamp(c + tangent * texel * rt, lo, hi)).rgb;
-	acc += texture(rgb[0], clamp(c - tangent * texel * rt, lo, hi)).rgb;
+	vec3 acc = sample_rgb(c).rgb;
+	acc += sample_rgb(clamp(c + tangent * texel * rt, lo, hi)).rgb;
+	acc += sample_rgb(clamp(c - tangent * texel * rt, lo, hi)).rgb;
 	acc *= 1.0 / 3.0;
 
 	// Ramp the wash in over the margin and cap it with the configured strength, so the
@@ -600,9 +618,9 @@ vec3 bleed_edge_colour(vec2 uv, vec2 position, vec2 t)
 	vec2 tangent = vertical_edge ? vec2(0.0, 1.0) : vec2(1.0, 0.0);
 
 	vec2 c = clamp(uv, lo, hi);
-	vec3 acc = texture(rgb[0], c).rgb;
-	acc += texture(rgb[0], clamp(c + tangent * texel * rt, lo, hi)).rgb;
-	acc += texture(rgb[0], clamp(c - tangent * texel * rt, lo, hi)).rgb;
+	vec3 acc = sample_rgb(c).rgb;
+	acc += sample_rgb(clamp(c + tangent * texel * rt, lo, hi)).rgb;
+	acc += sample_rgb(clamp(c - tangent * texel * rt, lo, hi)).rgb;
 	return acc * (1.0 / 3.0);
 }
 
@@ -702,7 +720,7 @@ vec3 low_poly_fast(vec2 uv)
 			for (int i = 0; i < 2; ++i)
 			{
 				vec2 off = s * (vec2(0.5) + 2.0 * vec2(float(i), float(j)));
-				vec3 c = texture(rgb[0], uv + off * texel).rgb;
+				vec3 c = sample_rgb(uv + off * texel).rgb;
 				sum += c;
 				// Rec.601 luma, on the gamma encoded values the sampler
 				// returns, which is the perceptual space every other filter
@@ -744,7 +762,7 @@ vec3 low_poly_full(vec2 uv)
 		{
 			for (int i = 0; i < 3; ++i)
 			{
-				vec3 c = texture(rgb[0], uv + vec2(o + ivec2(i, j)) * texel).rgb;
+				vec3 c = sample_rgb(uv + vec2(o + ivec2(i, j)) * texel).rgb;
 				sum += c;
 				float l = dot(c, vec3(0.299, 0.587, 0.114));
 				ls += l;
@@ -944,7 +962,7 @@ void main()
 		return;
 	}
 
-	vec4 colour = texture(rgb[0], uv);
+	vec4 colour = sample_rgb(uv);
 	// The protected centre is the fixed 512px square used by the mixed PLANAR
 	// stream. Start smoothing 64 source pixels outside it, then grow the diagonal
 	// radius from 4 to 16 source pixels over the next 256 pixels. Clamp every
@@ -960,8 +978,8 @@ void main()
 		vec2 lo = vec2(motion.w, 0.5 * texel.y);
 		vec2 hi = vec2(deband.w, 1.0 - 0.5 * texel.y);
 		vec2 d = vec2(radius * 0.70710678) * texel;
-		vec3 filtered = (texture(rgb[0], clamp(uv + d, lo, hi)).rgb +
-		              texture(rgb[0], clamp(uv - d, lo, hi)).rgb) * 0.5;
+		vec3 filtered = (sample_rgb(clamp(uv + d, lo, hi)).rgb +
+		              sample_rgb(clamp(uv - d, lo, hi)).rgb) * 0.5;
 		colour.rgb = mix(colour.rgb, filtered, smoothstep(64.0, 192.0, smooth_distance));
 	}
 	else if (lowpoly_enable && deband.y > 0.0)
@@ -1017,7 +1035,7 @@ void main()
 	// stream that carries passthrough transparency is never blended, so a frame's
 	// transparent periphery cannot bleed into the next one's.
 	if (motion.z > 0.0)
-		colour.rgb = mix(colour.rgb, texture(prev_rgb, uv).rgb, motion.z);
+		colour.rgb = mix(colour.rgb, sample_prev(uv).rgb, motion.z);
 
 	if (alpha == 1)
 	{

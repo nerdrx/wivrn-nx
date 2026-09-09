@@ -266,6 +266,16 @@ bool planar_centre_requested()
 #endif
 }
 
+bool compact_centre_requested()
+{
+#ifdef __ANDROID__
+	char value[PROP_VALUE_MAX] = {};
+	return planar_centre_requested() && __system_property_get("debug.wivrn.nx.compact_centre", value) > 0 && value[0] != '0';
+#else
+	return false;
+#endif
+}
+
 bool borrowed_output_requested()
 {
 #ifdef __ANDROID__
@@ -353,6 +363,7 @@ nxwarp_decoder::nxwarp_decoder(vk::raii::Device & device,
                 .width = description.stream_size(stream_index).first,
                 .height = description.stream_size(stream_index).second,
         },
+        native_extent(extent),
         host(host),
         accumulator(accumulator)
 {
@@ -626,7 +637,10 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 	ci.flags = 0;
 	if (planar_centre_requested())
 		ci.flags |= NXVC_VKD_FLAG_INDEPENDENT_TILES;
+	if (compact_centre_requested())
+		ci.flags |= NXVC_VKD_FLAG_COMPACT_CENTRE;
 	independent_tiles_active = (ci.flags & NXVC_VKD_FLAG_INDEPENDENT_TILES) != 0;
+	compact_centre_active = (ci.flags & NXVC_VKD_FLAG_COMPACT_CENTRE) != 0;
 
 	if (auto st = nxvc_vk_decoder_create(&ci, &nxvc); st != NXVC_VKD_OK)
 	{
@@ -798,11 +812,22 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 			              "description says {} -- the right eye will be sampled from the "
 			              "wrong column",
 			              stream_index, si.width, extent.width);
-		extent.width = uint32_t(extent.width * si.eyes);
+		native_extent = extent;
+		native_extent.width *= si.eyes;
+		extent = native_extent;
+		if (compact_centre_active)
+			extent = {.width = 928u * si.eyes, .height = 928u};
 		if (not planar_direct_active)
 			rebuild_pool();
 	}
-	if (planar_direct_active || (borrowed_output_active && si.eyes <= 1))
+	else
+	{
+		native_extent = extent;
+		extent = native_extent;
+		if (compact_centre_active)
+			extent = {.width = 928u, .height = 928u};
+	}
+	if ((compact_centre_active && si.eyes <= 1) || planar_direct_active || (borrowed_output_active && si.eyes <= 1))
 		rebuild_pool();
 	if (borrowed_output_requested() && centre_mode)
 		spdlog::info("nxwarp[{}]: borrowed NV12 output {}", stream_index,
@@ -1609,7 +1634,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			                   ack_base, ack_mask);
 		item->current_layout = vk::ImageLayout::eShaderReadOnlyOptimal;
 		auto handle = std::make_shared<nxwarp_blit_handle>(job.fb, job.view_info, *item->view_full,
-		                                                   item->image, extent, item->current_layout,
+		                                                   item->image, native_extent, item->current_layout,
 		                                                   VK_NULL_HANDLE, item->semaphore_val, item->free);
 		handle->feedback.received_from_decoder = host.now();
 		host.publish(accumulator, std::move(handle));
@@ -2061,11 +2086,12 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	        job.view_info,
 	        *item->view_full,
 	        item->image,
-	        extent,
+	        native_extent,
 	        item->current_layout,
 	        *item->semaphore,
 	        item->semaphore_val,
 	        item->free);
+	handle->compact_centre = compact_centre_active;
 	(void)reserved.release(); // The blit handle now owns the pool reservation.
 	if (atlas_table_buffer != VK_NULL_HANDLE && atlas_table_bytes != 0)
 	{

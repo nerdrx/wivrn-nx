@@ -157,6 +157,7 @@ class nxwarp_decoder : public decoder
 	// the ordinary decoder remains the fallback for every stream/frame it cannot prove.
 	bool planar_direct_active = false;
 	bool borrowed_output_active = false;
+	bool compact_centre_active = false;
 	// Set from the actual decoder create flags; this permits publication of valid
 	// independent-tile frames without the reference-contiguity gate.
 	bool independent_tiles_active = false;
@@ -718,7 +719,9 @@ private:
 	bool have_ts = false;
 
 	uint8_t stream_index;
+	// `extent` is the pooled storage extent; handles retain native stream geometry.
 	vk::Extent2D extent;
+	vk::Extent2D native_extent;
 
 	std::array<image, image_count> image_pool;
 

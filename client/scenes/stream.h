@@ -385,6 +385,7 @@ private:
 	// one has ever been produced. Invalidated whenever the swapchain is (re)created.
 	defoveate_state defoveate_cache;
 	bool defoveate_cache_valid = false;
+	std::string capture_request_seen;
 
 	std::optional<audio> audio_handle;
 

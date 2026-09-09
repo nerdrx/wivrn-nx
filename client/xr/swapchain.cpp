@@ -21,6 +21,7 @@
 #include "application.h"
 #include "details/enumerate.h"
 #include "session.h"
+#include "render/image_writer.h"
 
 xr::swapchain::swapchain(
         xr::instance & inst,
@@ -37,6 +38,7 @@ xr::swapchain::swapchain(
         sample_count_(sample_count),
         format_(format)
 {
+	transfer_src_ = image_capture_request().has_value();
 	assert(sample_count == 1);
 	const bool format_list_supported = inst.has_extension(XR_KHR_VULKAN_SWAPCHAIN_FORMAT_LIST_EXTENSION_NAME);
 
@@ -54,6 +56,8 @@ xr::swapchain::swapchain(
 			break;
 		default:
 			usage_flags = XR_SWAPCHAIN_USAGE_SAMPLED_BIT | XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+			if (transfer_src_)
+				usage_flags |= XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT;
 			if (mutable_format)
 				usage_flags |= XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT;
 			break;
@@ -131,6 +135,7 @@ int xr::swapchain::acquire()
 
 	auto lock = application::get_queue().lock();
 	CHECK_XR(xrAcquireSwapchainImage(id, &acquire_info, &index));
+	acquired_image_ = int(index);
 
 	return index;
 }
@@ -155,4 +160,5 @@ void xr::swapchain::release()
 
 	auto lock = application::get_queue().lock();
 	CHECK_XR(xrReleaseSwapchainImage(id, &release_info));
+	acquired_image_ = -1;
 }

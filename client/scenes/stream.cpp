@@ -38,6 +38,7 @@
 #include "decoder/nxwarp/nxwarp_decoder.h"
 #include "decoder/decoder.h"
 #include "decoder/shard_accumulator.h"
+#include "render/image_writer.h"
 #include "inplace_vector.hpp"
 #include "is_finite.h"
 #include "spdlog/spdlog.h"
@@ -1388,6 +1389,7 @@ bool scenes::stream::jit_enabled()
 
 void scenes::stream::render(const XrFrameState & frame_state)
 {
+	const auto capture_request = image_capture_request();
 	// --- just-in-time display -------------------------------------------------
 	//
 	// xrWaitFrame has just returned, and on this device it describes a frame roughly
@@ -1891,6 +1893,8 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			}
 			if (not swapchain)
 				setup_reprojection_swapchain(max_width, max_height);
+			else if (capture_request and not swapchain.transfer_src())
+				setup_reprojection_swapchain(max_width, max_height);
 			else if (swapchain.width() < max_width or swapchain.height() < max_height)
 			{
 				// If the defoveated image is larger than the swapchain, try to reallocate one
@@ -2365,6 +2369,30 @@ void scenes::stream::render(const XrFrameState & frame_state)
 #if WIVRN_FEATURE_RENDERDOC
 		renderdoc_end(*vk_instance);
 #endif
+		if (not cache_hit and capture_request and *capture_request != capture_request_seen and swapchain.transfer_src())
+		{
+			try
+			{
+				auto capture_path = application::get_cache_path();
+#ifdef __ANDROID__
+				if (const char * external = application::native_app()->activity->externalDataPath)
+					capture_path = external;
+#endif
+				std::filesystem::create_directories(capture_path);
+				write_image_layers(device, queue, queue_family_index,
+				                   capture_path / ("nx_capture_" + *capture_request),
+				                   swapchain.acquired_image(), swapchain_format,
+				                   {uint32_t(swapchain.width()), uint32_t(swapchain.height())}, view_count);
+				capture_request_seen = *capture_request;
+				spdlog::info("Saved NX stream capture for request {} in {}", *capture_request,
+				             capture_path.native());
+			}
+			catch (const std::exception & e)
+			{
+				capture_request_seen = *capture_request;
+				spdlog::warn("Failed to save NX stream capture: {}", e.what());
+			}
+		}
 		// On a cache hit no swapchain image was acquired; the projection layer below
 		// re-references the one released by the last real render, which the runtime
 		// keeps as the layer's source until a new image is released.

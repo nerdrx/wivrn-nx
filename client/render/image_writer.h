@@ -21,7 +21,21 @@
 #include "utils/thread_safe.h"
 #include "vk/allocation.h"
 #include <filesystem>
+#include <optional>
+#include <string>
 #include <vulkan/vulkan.hpp>
+
+std::optional<std::string> image_capture_request();
+
+void write_image_layers(
+		vk::raii::Device & device,
+		thread_safe<vk::raii::Queue> & queue,
+		uint32_t queue_family_index,
+		const std::filesystem::path & path,
+		vk::Image image,
+		vk::Format format,
+		vk::Extent2D extent,
+		uint32_t array_layers);
 
 void write_image(
         vk::raii::Device & device,

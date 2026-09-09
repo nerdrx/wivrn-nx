@@ -41,8 +41,10 @@ private:
 	int sample_count_;
 	vk::Format format_;
 	bool mutable_format_ = false;
+	bool transfer_src_ = false;
 
 	std::vector<vk::Image> images_;
+	int acquired_image_ = -1;
 
 public:
 	swapchain() = default;
@@ -81,11 +83,17 @@ public:
 	{
 		return images_[i];
 	}
+	vk::Image acquired_image() const
+	{
+		assert(acquired_image_ >= 0);
+		return images_[size_t(acquired_image_)];
+	}
 	vk::Format format() const
 	{
 		return format_;
 	}
 	bool mutable_format() const { return mutable_format_; }
+	bool transfer_src() const { return transfer_src_; }
 
 	int acquire();
 	bool wait(XrDuration timeout = XR_INFINITE_DURATION);

@@ -37,6 +37,7 @@
 #include "wivrn_client.h"
 #include "wivrn_packets.h"
 #include "xr/space.h"
+#include <condition_variable>
 #include <mutex>
 #include <optional>
 #include <queue>
@@ -237,6 +238,9 @@ private:
 
 	// for frames inside accumulator images
 	std::mutex frames_mutex;
+	std::condition_variable frames_ready;
+	uint64_t ready_wait_attempts = 0, ready_wait_successes = 0, ready_wait_ns = 0;
+	uint64_t selection_older_than_available = 0;
 	std::array<std::shared_ptr<wivrn::shard_accumulator::blit_handle>, decoder_count> common_frame(XrTime display_time);
 
 	// Adaptive playout delay (config.dejitter). Fed one sample per arriving eye-zero frame

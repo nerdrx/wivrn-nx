@@ -892,6 +892,7 @@ void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_p
 		}
 	}
 
+	frames_ready.notify_all();
 	if (handle and not handle->feedback.blitted)
 	{
 		send_feedback(handle->feedback);
@@ -913,6 +914,40 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, scenes::stream::deco
 	if (decoders.empty())
 		return {};
 	std::unique_lock lock(frames_mutex);
+
+	// Experimental phase alignment: only wait when the joined-eye stream would
+	// repeat. Release frames_mutex while sleeping so decode publication can finish.
+	// A requested 4 ms cap and 12 ms deadline reserve prevent an unbounded playout delay.
+	static const int wait_us = [] {
+		const char * value = nullptr;
+#ifdef __ANDROID__
+		char property[PROP_VALUE_MAX] = {};
+		if (__system_property_get("debug.wivrn.nx.ready_wait_us", property) > 0)
+			value = property;
+#else
+		value = std::getenv("WIVRN_NX_READY_WAIT_US");
+#endif
+		return value ? std::clamp(std::atoi(value), 0, 4000) : 0;
+	}();
+	if (wait_us > 0 and eyes_in_one_stream() and last_selected_source_frame)
+	{
+		const auto newer_ready = [&] {
+			return std::ranges::any_of(decoders[0].latest_frames, [&](const auto & h) {
+				return h and h->feedback.frame_index > *last_selected_source_frame;
+			});
+		};
+		const auto allowance = std::min<int64_t>(int64_t(wait_us) * 1000,
+		                                       display_time - instance.now() - 12'000'000);
+		if (allowance > 0 and not newer_ready())
+		{
+			++ready_wait_attempts;
+			const auto start = std::chrono::steady_clock::now();
+			if (frames_ready.wait_for(lock, std::chrono::nanoseconds(allowance), newer_ready))
+				++ready_wait_successes;
+			ready_wait_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+			                         std::chrono::steady_clock::now() - start).count();
+		}
+	}
 
 	// The whole of the de-jitter buffer, on the reading side. Choosing the frame nearest
 	// `display_time - D` rather than nearest `display_time` is what holding frames for D
@@ -983,6 +1018,10 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, scenes::stream::deco
 
 		assert(*min);
 		auto frame_index = (*min)->feedback.frame_index;
+		if (std::ranges::any_of(common_frames, [frame_index](const auto * h) {
+			    return h and h->feedback.frame_index > frame_index;
+		    }))
+			++selection_older_than_available;
 		for (auto [i, decoder]: utils::enumerate(decoders))
 		{
 			// The views always, the alpha plane when one is being sent. The quad
@@ -2644,6 +2683,10 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		             g_rp.iters, secs, n / secs, g_rp.submitted, g_rp.new_source,
 		             g_rp.iters - g_rp.gated_out - g_rp.no_render, g_rp.no_render,
 		             g_rp.period_ms / n);
+		spdlog::info("render: ready wait attempts {} success {} total {:.3f} ms | selected older than available {}",
+		             ready_wait_attempts, ready_wait_successes, double(ready_wait_ns) / 1e6,
+		             selection_older_than_available);
+		ready_wait_attempts = ready_wait_successes = ready_wait_ns = selection_older_than_available = 0;
 		spdlog::info("render: selected source transitions forward {} backward {} repeat {}, greatest forward gap {}",
 		             g_rp.selected_forward, g_rp.selected_backward, g_rp.selected_repeat,
 		             g_rp.selected_max_gap);

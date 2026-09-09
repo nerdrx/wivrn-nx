@@ -412,7 +412,11 @@ stream_defoveator::stream_defoveator(
 					const float px = (x + .5f) * tw, py = (y + .5f) * th;
 					const float dx = std::abs(px - output_extent.width * .5f);
 					const float dy = std::abs(py - output_extent.height * .5f);
-					const uint8_t d = application::get_fragment_density_map_mode() == 2 ? 255 : (std::max(dx, dy) <= 512.f ? 255 : (std::max(dx, dy) <= 768.f ? 128 : 64));
+					const float edge = std::max(dx, dy);
+					const int mode = application::get_fragment_density_map_mode();
+					const uint8_t d = mode == 2 ? 255 :
+					                  edge <= 512.f ? 255 :
+					                  mode == 3 ? 64 : (edge <= 768.f ? 128 : 64);
 					const size_t i = (size_t(y) * mw + x) * 2;
 					pixels[i + 0] = pixels[i + 1] = d;
 				}

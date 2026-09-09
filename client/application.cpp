@@ -1062,7 +1062,7 @@ void application::initialize_vulkan()
 	if (const char * value = std::getenv("WIVRN_NX_FDM"))
 		fdm_mode = std::atoi(value);
 #endif
-	fdm_mode = std::clamp(fdm_mode, 0, 2);
+	fdm_mode = std::clamp(fdm_mode, 0, 3);
 	if (!fdm_mode)
 		device_create_info.unlink<vk::PhysicalDeviceFragmentDensityMapFeaturesEXT>();
 	const bool fdm_supported = fdm_mode && check_feature_flag(

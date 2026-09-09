@@ -67,6 +67,11 @@ periphery. Omit the quarter option for a 1024 × 1024 centre at higher decode co
 The matching client selects the mixed-frame decoder and disables unused pixel
 references. This is a fixed image-centre region, not eye-tracked foveation.
 
+Borrowed decoder output is separately opt-in with Android property
+`debug.wivrn.nx.borrowed_output=1`; changing it requires a reconnect. The
+three-frame Pico correctness probe and live copy/direct measurements
+are archived in the [borrowed-output evidence note](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-09/borrowed-output).
+
 Isolated Pico measurements average **10.83 ms decode**, with **13.92 ms p95**,
 for the smaller centre; sustained 90 Hz streaming is not established by that test.
 A matching live smoke test measured 54.27 fresh updates/s in short active windows

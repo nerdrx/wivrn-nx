@@ -138,6 +138,9 @@ class nxwarp_decoder : public decoder
 		buffer_allocation atlas_table;
 		nxvc_vkd_atlas_images atlas_snapshot{};
 		VkDeviceSize atlas_table_size = 0;
+		// UINT storage views of the same mutable NV12 image, for nxvc's optional
+		// borrowed-output path.  The normal sampled view remains view_full.
+		std::array<vk::raii::ImageView, 2> borrowed_output_views{nullptr, nullptr};
 		vk::raii::ImageView view_full = nullptr;
 		vk::ImageLayout current_layout = vk::ImageLayout::eUndefined;
 		std::atomic_bool free = true;
@@ -153,6 +156,10 @@ class nxwarp_decoder : public decoder
 	// Opt-in all-PLANAR direct graphics path. It is deliberately separate from nxvc:
 	// the ordinary decoder remains the fallback for every stream/frame it cannot prove.
 	bool planar_direct_active = false;
+	bool borrowed_output_active = false;
+	// Set from the actual decoder create flags; this permits publication of valid
+	// independent-tile frames without the reference-contiguity gate.
+	bool independent_tiles_active = false;
 	std::unique_ptr<nxvc::PlanarDirect> planar_direct;
 	bool atlas_direct_targets = false;
 	bool atlas_dirty_catchup = false;

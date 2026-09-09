@@ -266,6 +266,16 @@ bool planar_centre_requested()
 #endif
 }
 
+bool borrowed_output_requested()
+{
+#ifdef __ANDROID__
+	char value[PROP_VALUE_MAX] = {};
+	return __system_property_get("debug.wivrn.nx.borrowed_output", value) > 0 && value[0] != '0';
+#else
+	return false;
+#endif
+}
+
 struct nxwarp_blit_handle : public wivrn::decoder::blit_handle
 {
 	std::atomic_bool & free;
@@ -432,6 +442,7 @@ void nxwarp_decoder::build_image_pool()
 		// assignment below frees the old image at once, and a live VkImageView on a
 		// destroyed VkImage is a use-after-free the validation layers will not see
 		// until the next frame samples it. On the constructor's call this is a no-op.
+		item.borrowed_output_views = {nullptr, nullptr};
 		item.view_full = nullptr;
 		item.current_layout = vk::ImageLayout::eUndefined;
 		item.semaphore_val = 0;
@@ -440,8 +451,30 @@ void nxwarp_decoder::build_image_pool()
 		const auto output_format = planar_direct_active ? vk::Format::eR8G8B8A8Unorm : vk::Format::eG8B8R82Plane420Unorm;
 		const auto output_usage = planar_direct_active
 		        ? vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eSampled
-		        : vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst;
-		item.image = image_allocation(
+		        : vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst |
+		          (borrowed_output_active ? vk::ImageUsageFlagBits::eStorage : vk::ImageUsageFlags{});
+		if (borrowed_output_active)
+		{
+			const std::array<vk::Format, 5> formats{
+			        vk::Format::eG8B8R82Plane420Unorm, vk::Format::eR8Unorm,
+			        vk::Format::eR8G8Unorm, vk::Format::eR8Uint, vk::Format::eR8G8Uint};
+			vk::ImageFormatListCreateInfo format_list{.viewFormatCount = uint32_t(formats.size()), .pViewFormats = formats.data()};
+			vk::ImageCreateInfo image_info{};
+			image_info.pNext = &format_list;
+			image_info.flags = vk::ImageCreateFlagBits::eMutableFormat | vk::ImageCreateFlagBits::eExtendedUsage;
+			image_info.imageType = vk::ImageType::e2D;
+			image_info.format = output_format;
+			image_info.extent = {.width = extent.width, .height = extent.height, .depth = 1};
+			image_info.mipLevels = 1;
+			image_info.arrayLayers = 1;
+			image_info.tiling = vk::ImageTiling::eOptimal;
+			image_info.usage = output_usage;
+			item.image = image_allocation(device, image_info, {.usage = VMA_MEMORY_USAGE_AUTO},
+			                              "nxwarp borrowed NV12 image");
+		}
+		else
+		{
+			item.image = image_allocation(
 		        device,
 		        vk::ImageCreateInfo{
 		                .imageType = vk::ImageType::e2D,
@@ -451,15 +484,13 @@ void nxwarp_decoder::build_image_pool()
 		                .arrayLayers = 1,
 		                .tiling = vk::ImageTiling::eOptimal,
 		                .usage = output_usage,
-		        },
+	        },
 		        {.usage = VMA_MEMORY_USAGE_AUTO},
 		        "nxwarp image");
+		}
 
 		vk::SamplerYcbcrConversionInfo conv{.conversion = *ycbcr_conversion};
-		item.view_full = vk::raii::ImageView(
-		        device,
-		        vk::ImageViewCreateInfo{
-		                .pNext = planar_direct_active ? nullptr : &conv,
+		vk::ImageViewCreateInfo full_info{
 		                .image = item.image,
 		                .viewType = vk::ImageViewType::e2D,
 		                .format = output_format,
@@ -468,7 +499,39 @@ void nxwarp_decoder::build_image_pool()
 		                        .levelCount = 1,
 		                        .layerCount = 1,
 		                },
-		        });
+		};
+		if (borrowed_output_active)
+		{
+			vk::ImageViewUsageCreateInfo sampled_usage{.usage = vk::ImageUsageFlagBits::eSampled};
+			item.view_full = vk::raii::ImageView(
+			        device,
+			        vk::StructureChain<vk::ImageViewCreateInfo, vk::SamplerYcbcrConversionInfo,
+			                           vk::ImageViewUsageCreateInfo>{full_info, conv, sampled_usage}.get());
+		}
+		else
+		{
+			full_info.pNext = planar_direct_active ? nullptr : &conv;
+			item.view_full = vk::raii::ImageView(device, full_info);
+		}
+		if (borrowed_output_active)
+		{
+			for (int p = 0; p < 2; ++p)
+			{
+				const auto format = p == 0 ? vk::Format::eR8Uint : vk::Format::eR8G8Uint;
+				const auto aspect = p == 0 ? vk::ImageAspectFlagBits::ePlane0 : vk::ImageAspectFlagBits::ePlane1;
+				item.borrowed_output_views[p] = vk::raii::ImageView(
+				        device,
+				        vk::StructureChain{
+				                vk::ImageViewCreateInfo{
+				                        .image = item.image,
+				                        .viewType = vk::ImageViewType::e2D,
+				                        .format = format,
+				                        .subresourceRange = {aspect, 0, 1, 0, 1},
+				                },
+				                vk::ImageViewUsageCreateInfo{.usage = vk::ImageUsageFlagBits::eStorage},
+				        }.get());
+			}
+		}
 
 		// DECOUPLED DISPLAY takes this path on purpose.
 		//
@@ -563,6 +626,7 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 	ci.flags = 0;
 	if (planar_centre_requested())
 		ci.flags |= NXVC_VKD_FLAG_INDEPENDENT_TILES;
+	independent_tiles_active = (ci.flags & NXVC_VKD_FLAG_INDEPENDENT_TILES) != 0;
 
 	if (auto st = nxvc_vk_decoder_create(&ci, &nxvc); st != NXVC_VKD_OK)
 	{
@@ -615,6 +679,12 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 	const bool centre_mode = planar_centre_requested() && (si.tools & (1ull << 35));
 	if (centre_mode)
 		spdlog::info("nxwarp[{}]: PLANAR centre mode requested; using generic mixed-frame decoder", stream_index);
+	// Borrow the decoder's independent 4:2:0 stores directly into our compositor
+	// pool only for the validated mixed-centre stream.  All other streams retain the
+	// established decoder-owned-image plus copy path.
+	borrowed_output_active = borrowed_output_requested() && centre_mode && si.bit_depth == 8 && si.chroma == 0 &&
+	                         si.color_transform == 0 && si.alpha == 0 &&
+	                         !(si.tools & (1ull << 31));
 	planar_direct_active = planar_direct_requested() && !centre_mode && si.bit_depth == 8 && si.chroma == 0 &&
 	                       si.color_transform == 0 && si.alpha == 0 &&
 	                       !(si.tools & (1ull << 31)) &&
@@ -701,6 +771,21 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 	// width this stream needs and the copy in decode_unit -- which clamps to `extent` --
 	// would silently keep the left eye and throw the right one away. Widen the extent and
 	// rebuild the pool now, while the worker is provably idle (see build_image_pool).
+	const auto rebuild_pool = [&]() {
+		try
+		{
+			build_image_pool();
+		}
+		catch (const std::exception & e)
+		{
+			if (!borrowed_output_active)
+				throw;
+			spdlog::warn("nxwarp[{}]: borrowed NV12 pool unavailable ({}); using copy fallback",
+			             stream_index, e.what());
+			borrowed_output_active = false;
+			build_image_pool();
+		}
+	};
 	if (si.eyes > 1)
 	{
 		// The scene places view 1 at x == video_stream_description::width, which is the
@@ -715,10 +800,13 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 			              stream_index, si.width, extent.width);
 		extent.width = uint32_t(extent.width * si.eyes);
 		if (not planar_direct_active)
-			build_image_pool();
+			rebuild_pool();
 	}
-	if (planar_direct_active)
-		build_image_pool();
+	if (planar_direct_active || (borrowed_output_active && si.eyes <= 1))
+		rebuild_pool();
+	if (borrowed_output_requested() && centre_mode)
+		spdlog::info("nxwarp[{}]: borrowed NV12 output {}", stream_index,
+		             borrowed_output_active ? "enabled" : "unavailable; using copy fallback");
 	// Release, so that a scene thread which reads eye_count() as 2 also sees the widened
 	// pool this decoder will publish from.
 	hdr_eyes.store(si.eyes ? si.eyes : 1, std::memory_order_release);
@@ -1574,6 +1662,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	nxvc_vk_decoder_wait(nxvc, UINT64_MAX);
 	const auto t_decode0 = std::chrono::steady_clock::now();
 	bool direct_target = false;
+	bool borrowed_target = false;
 	auto release_reserved = [&](image * reserved) {
 #ifdef NXVC_VKD_ATLAS_BORROWED_TARGET
 		if (direct_target)
@@ -1582,6 +1671,12 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			(void)nxvc_vk_decoder_set_atlas_borrowed_target(nxvc, nullptr);
 		}
 #endif
+		if (borrowed_target)
+		{
+			nxvc_vk_decoder_wait(nxvc, UINT64_MAX);
+			(void)nxvc_vk_decoder_set_borrowed_output(nxvc, nullptr);
+			borrowed_target = false;
+		}
 		reserved->free = true;
 	};
 	std::unique_ptr<image, decltype(release_reserved)> reserved(nullptr, release_reserved);
@@ -1610,6 +1705,38 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		}
 	}
 #endif
+	if (borrowed_output_active)
+	{
+		reserved.reset(get_free());
+		if (reserved)
+		{
+			nxvc_vkd_output_images target{};
+			target.image[0] = target.image[1] = VkImage(reserved->image);
+			target.view[0] = VkImageView(*reserved->borrowed_output_views[0]);
+			target.view[1] = VkImageView(*reserved->borrowed_output_views[1]);
+			target.format[0] = VK_FORMAT_R8_UINT;
+			target.format[1] = VK_FORMAT_R8G8_UINT;
+			target.width[0] = extent.width;
+			target.height[0] = extent.height;
+			target.width[1] = extent.width / 2;
+			target.height[1] = extent.height / 2;
+			target.initial_layout = VkImageLayout(reserved->current_layout);
+			if (nxvc_vk_decoder_set_borrowed_output(nxvc, &target) == NXVC_VKD_OK)
+				borrowed_target = true;
+			else
+			{
+				spdlog::warn("nxwarp[{}]: borrowed NV12 output refused; using copy fallback", stream_index);
+				(void)nxvc_vk_decoder_set_borrowed_output(nxvc, nullptr);
+				reserved.reset();
+			}
+		}
+		else
+		{
+			// Do not leave the previous frame's borrowed target installed while
+			// falling back: that would overwrite an image still owned by the scene.
+			(void)nxvc_vk_decoder_set_borrowed_output(nxvc, nullptr);
+		}
+	}
 	auto t_qlocked = t_decode0;
 	host.with_queue(stream_index, [&](vk::Queue) {
 		// Inside the lambda, so it is after the lock was taken: everything before it
@@ -1654,6 +1781,10 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		host.report_frame_not_held(stream_index, job.frame_id, from_headset::nxwarp_frame_not_held::reason::refused);
 		return;
 	}
+	if (borrowed_target && reserved)
+		// NX has transitioned and written the borrowed image in its decode submit;
+		// keep the pool's tracked state truthful even if a later publication check fails.
+		reserved->current_layout = vk::ImageLayout::eGeneral;
 	// Band feedback may already have gone out before this worker finished decoding.
 	// Send an ACK-only packet so the encoder can observe the positive held window
 	// without inventing or replaying a transport receipt payload.  This is outside
@@ -1676,7 +1807,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	const auto t_submitted = std::chrono::steady_clock::now();
 
 	nxvc_vkd_images img{};
-	if (nxvc_vk_decoder_images(nxvc, &img) != NXVC_VKD_OK or img.count < 2)
+	if (not borrowed_target && (nxvc_vk_decoder_images(nxvc, &img) != NXVC_VKD_OK or img.count < 2))
 	{
 		// The decode was submitted, so the ring may well have advanced -- but a codec
 		// that will not hand back its images is one whose state cannot be reasoned
@@ -1757,7 +1888,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 
 	// Real atlas display reads only the snapshots below. Initialize the unused
 	// ordinary descriptor once per pool item, then avoid copying that picture.
-	if (!atlas_view_active || item->current_layout == vk::ImageLayout::eUndefined)
+	if (!borrowed_target && (!atlas_view_active || item->current_layout == vk::ImageLayout::eUndefined))
 	{
 		// nxvc leaves its output in GENERAL and overwrites it in place on the next frame; the
 		// copy below is what decouples the codec's own images from the pool of frames the
@@ -1827,6 +1958,22 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		// queue can actually express.
 		cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
 		                    vk::PipelineStageFlagBits::eAllCommands, {}, {}, {}, to_read);
+	}
+	else if (borrowed_target)
+	{
+		// nxvc writes the borrowed planes in GENERAL.  A single barrier submit makes
+		// the same pooled image legal for the compositor sampler; no plane copies occur.
+		const vk::ImageMemoryBarrier ready{
+		        .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
+		        .dstAccessMask = vk::AccessFlagBits::eShaderRead,
+		        .oldLayout = vk::ImageLayout::eGeneral,
+		        .newLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+		        .image = item->image,
+		        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+		};
+		item->current_layout = ready.newLayout;
+		cmd.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+		                    vk::PipelineStageFlagBits::eAllCommands, {}, {}, {}, ready);
 	}
 
 	if (atlas_view_active)
@@ -1937,7 +2084,8 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	const auto t_recorded = std::chrono::steady_clock::now();
 	device.resetFences(*fence);
 	host.with_queue(stream_index, [&](vk::Queue queue) {
-		const vk::PipelineStageFlags wait_stage = direct_target ? vk::PipelineStageFlagBits::eAllCommands : vk::PipelineStageFlagBits::eTransfer;
+		const vk::PipelineStageFlags wait_stage = (direct_target || borrowed_target)
+		        ? vk::PipelineStageFlagBits::eAllCommands : vk::PipelineStageFlagBits::eTransfer;
 		const uint64_t signal_val = ++item->semaphore_val;
 		std::array<vk::Semaphore, 1> wait{wait_sem};
 		std::array<vk::Semaphore, 1> signal{*item->semaphore};
@@ -2049,7 +2197,10 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			resync_ids.erase(resync_ids.begin(), it + 1);
 		}
 	}
-	const bool showable = not have_last_decoded or contiguous or at_resync;
+	// INDEPENDENT_TILES rejects predictive, skipped and concealed tiles before
+	// submission, so a successfully decoded frame needs no preceding frame ID.
+	// Withholding it after a backlog drop discards a complete, fresh picture.
+	const bool showable = independent_tiles_active || not have_last_decoded || contiguous || at_resync;
 
 	// The ring advanced for this frame whether or not it is shown, so it is the
 	// reference the next one is measured against, and it is part of the list a

@@ -1042,7 +1042,9 @@ void main()
 	vec2 smooth_delta_px = abs(uv - smooth_center) * vec2(rgb_rect.zw) - vec2(256.0);
 	vec2 source_px = uv * vec2(rgb_rect.zw);
 	vec2 tile_center = (floor(source_px / 64.0) + 0.5) * 64.0;
-	float tile_radius = length(tile_center - smooth_center * vec2(rgb_rect.zw));
+	vec2 tile_delta = tile_center - smooth_center * vec2(rgb_rect.zw);
+	float tile_radius_sq = dot(tile_delta, tile_delta);
+	float tile_radius = peripheral_smooth == 2 ? sqrt(tile_radius_sq) : 0.0;
 	float smooth_distance = peripheral_smooth >= 2
 	                        ? max(tile_radius - 256.0, 0.0)
 	                        : max(max(smooth_delta_px.x, smooth_delta_px.y), 0.0);
@@ -1050,13 +1052,16 @@ void main()
 	// Adjacent duplicate texels make the coordinate jumps colour-continuous.
 	// No extra texture reads: retain the ordinary sample for native tiles.
 	vec2 sample_uv = uv;
-	if (peripheral_smooth == 3 && compact_centre && tile_radius > 256.0)
+	if (peripheral_smooth == 3 && compact_centre && tile_radius_sq > 65536.0)
 	{
-		float cell = tile_radius * 0.88622692545 <= 512.0 ? 4.0 : 8.0;
 		vec2 local_delta = abs(source_px - smooth_center * vec2(rgb_rect.zw));
 		vec2 stride = mix(vec2(4.0), vec2(1.0), lessThan(local_delta, vec2(256.0)));
-		vec2 phase = (source_px - vec2(cell * 0.5)) / cell;
-		vec2 filtered_px = floor(phase) * cell + vec2(cell) + (fract(phase) - 0.5) * stride;
+		// Use squared radius and fractional phase: same cell interpolation,
+		// without a square root or reconstructing the cell's base coordinate.
+		float inv_cell = tile_radius_sq <= 333772.1072 ? 0.25 : 0.125;
+		vec2 phase = fract(source_px * inv_cell - 0.5);
+		vec2 cell_minus_stride = vec2(1.0 / inv_cell) - stride;
+		vec2 filtered_px = source_px + (vec2(0.5) - phase) * cell_minus_stride;
 		sample_uv = filtered_px / vec2(rgb_rect.zw);
 	}
 	vec4 colour = sample_rgb(sample_uv);

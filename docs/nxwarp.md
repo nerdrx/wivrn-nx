@@ -485,7 +485,12 @@ For the compact 2176-pixel-per-eye mixed PLANAR profile,
 cardinal samples in the existing presentation pass. Its protected region
 matches the encoder's rounded 512-pixel native-centre tile mask. Pair it with
 server `NXVC_PLANAR_ROUND=1`; mode 1 retains the old square/two-tap filter,
-and mode 0 disables smoothing. There is no temporal blend or extra pass.
+and mode 0 disables smoothing. Mode 2 was costly in the live motion trial
+(about 81 to 55 fresh updates/s) and is not the recommended profile.
+Mode 3 instead spreads the existing hardware bilinear interpolation over
+PLANAR cell transitions by remapping the single base sample. It requires the
+compact rounded wide-ring profile and adds no texture samples. Native tiles
+retain their original sampling coordinates. There is no temporal blend or extra pass.
 
 `debug.wivrn.nx.kuwahara_fast` selects an optional smaller low-poly kernel:
 

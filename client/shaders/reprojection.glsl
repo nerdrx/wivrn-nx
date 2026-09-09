@@ -1032,7 +1032,6 @@ void main()
 		return;
 	}
 
-	vec4 colour = sample_rgb(uv);
 	// Mode 1 protects the fixed 512px square used by the mixed PLANAR stream.
 	// Mode 2 protects exactly the rounded encoder tile mask: a 64px tile remains
 	// native when its centre is inside the 512px centre ellipse, while every
@@ -1047,9 +1046,23 @@ void main()
 	float smooth_distance = peripheral_smooth >= 2
 	                        ? max(tile_radius - 256.0, 0.0)
 	                        : max(max(smooth_delta_px.x, smooth_delta_px.y), 0.0);
-	bool smooth_outer = peripheral_smooth >= 2
+	// Mode 3 spreads the sampler's existing interpolation over a PLANAR cell.
+	// Adjacent duplicate texels make the coordinate jumps colour-continuous.
+	// No extra texture reads: retain the ordinary sample for native tiles.
+	vec2 sample_uv = uv;
+	if (peripheral_smooth == 3 && compact_centre && tile_radius > 256.0)
+	{
+		float cell = tile_radius * 0.88622692545 <= 512.0 ? 4.0 : 8.0;
+		vec2 local_delta = abs(source_px - smooth_center * vec2(rgb_rect.zw));
+		vec2 stride = mix(vec2(4.0), vec2(1.0), lessThan(local_delta, vec2(256.0)));
+		vec2 phase = (source_px - vec2(cell * 0.5)) / cell;
+		vec2 filtered_px = floor(phase) * cell + vec2(cell) + (fract(phase) - 0.5) * stride;
+		sample_uv = filtered_px / vec2(rgb_rect.zw);
+	}
+	vec4 colour = sample_rgb(sample_uv);
+	bool smooth_outer = peripheral_smooth == 2
 	                    ? tile_radius > 256.0
-	                    : peripheral_smooth > 0 && smooth_distance > 64.0;
+	                    : peripheral_smooth == 1 && smooth_distance > 64.0;
 	if (smooth_outer)
 	{
 		vec2 texel = 1.0 / vec2(rgb_rect.zw);

@@ -381,6 +381,7 @@ class video_encoder_nxwarp : public video_encoder
 		fixed,     // "pace": "<fps>" -- an explicit rate, whatever the headset says
 	};
 	pace_mode_t pace_mode = pace_mode_t::automatic;
+	bool pace_accumulate = false;
 	// Seconds between sent frames. Starts at the fastest the band allows, so a stream
 	// whose headset has not reported anything yet behaves exactly as it did before.
 	double pace_interval = 1.0 / 90.0;

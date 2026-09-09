@@ -58,5 +58,25 @@ int main()
 	      "nominal 61 fps budget exceeds allowance at admitted rate");
 	check(admitted * (76.3e6 / 8.0 / effective_admission_fps(90.0, 1.0 / 61.0)) * 8.0 <= 76.3e6 * 1.001,
 	      "effective admission budget stays within allowance");
+	for (double target : {45., 60., 71., 75., 90.})
+	{
+		std::chrono::steady_clock::time_point phase{};
+		unsigned accepted = 0;
+		for (unsigned tick = 1; tick <= 9000; ++tick)
+		{
+			const auto now = std::chrono::steady_clock::time_point{} +
+			        std::chrono::nanoseconds(uint64_t(tick) * 1000000000 / 90);
+			if (pace_accumulated_admit(now, 1. / target, phase))
+			{
+				++accepted;
+				check(!pace_accumulated_admit(now, 1. / target, phase), "no same-tick burst");
+			}
+		}
+		check(std::abs(double(accepted) / 100. - target) <= .02, "fractional target retained");
+		near(effective_admission_fps(90., 1. / target, true), target, "nominal accumulated budget");
+		const auto resumed = phase + std::chrono::seconds(2);
+		check(pace_accumulated_admit(resumed, 1. / target, phase), "resume after stall");
+		check(!pace_accumulated_admit(resumed + std::chrono::microseconds(1), 1. / target, phase), "stall leaves no catchup burst");
+	}
 	return failures ? 1 : 0;
 }

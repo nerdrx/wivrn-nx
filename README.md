@@ -96,6 +96,20 @@ no 1024-pixel protected-region setting exists.
 The smoothed area bypasses sharpening and the heavier low-poly filter.
 [Live captures and measured cost](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-09/peripheral-smoothing).
 
+## Adaptive peripheral update experiment
+
+The paired NX Warp encoder now avoids unused transforms in independent GPU
+PLANAR tiles. Optional `NXVC_PLANAR_CADENCE=1` caches peripheral fits while keeping
+the native centre fresh, with change-triggered extra refreshes. It remains an
+offline approximation: decoder skipping, historical tile poses and temporal
+blending are not implemented, so the live profile keeps caching disabled.
+[Measurements, motion stress checks and Pico captures](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-09/adaptive-planar).
+
+Server-only `NXWARP_PACE_ACCUMULATE=1` experiments with fractional frame admission
+and discards catch-up credit after stalls. Legacy admission remains the default.
+This addresses the observed gap between requested pacing and admitted frames;
+it is not a claim of halved physical latency.
+
 ## Fixes over upstream
 
 | | |

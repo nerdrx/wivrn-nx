@@ -512,6 +512,8 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 		codec_cfg.frame_held = false;
 	if (const char * v = std::getenv("NXWARP_PACE_DIAGNOSTICS"); v and v[0] == '1')
 		pace_diag_enabled = true;
+	if (const char * v = std::getenv("NXWARP_PACE_ACCUMULATE"); v and v[0] == '1')
+		pace_accumulate = true;
 
 	// "backend": "ref" (the default) is the CPU reference codec; "vk" is the
 	// Vulkan compute encoder, running on this server's own VkDevice. The
@@ -1104,7 +1106,7 @@ void wivrn::video_encoder_nxwarp::run_rate_control(size_t last_frame_bytes,
 	{
 		// Admission runs on compositor ticks with half-tick tolerance. Budget using
 		// the corresponding conservative admitted-rate bound.
-		fps = float(effective_admission_fps(composited_fps, pace_interval));
+		fps = float(effective_admission_fps(composited_fps, pace_interval, pace_accumulate));
 	}
 
 	// The byte target is the smaller of what the link will carry and what the
@@ -1444,10 +1446,11 @@ void wivrn::video_encoder_nxwarp::run_pace_control()
 // The admission test. A frame that arrives sooner than `pace_interval` since the last one
 // that was SENT is dropped here, before anything is spent on it.
 //
-// The last send is stamped at `now` rather than advanced by exactly one interval: the
+// By default, the last send is stamped at `now` rather than advanced by one interval: the
 // point is to space the frames the headset receives, and an encoder that fell behind for
 // a moment must not then send a burst to catch up on a schedule -- a burst is precisely
-// what overruns the decoder's queue of one.
+// what overruns the decoder's queue of one. The opt-in accumulator instead keeps
+// fractional phase and discards whole missed periods after a stall.
 bool wivrn::video_encoder_nxwarp::pace_admit(std::chrono::steady_clock::time_point now,
                                              int64_t display_time)
 {
@@ -1504,6 +1507,12 @@ bool wivrn::video_encoder_nxwarp::pace_admit(std::chrono::steady_clock::time_poi
 		fps = rc_fps;
 	const double tolerance = pace_admission_tolerance(double(fps));
 
+	if (pace_accumulate)
+	{
+		const bool admitted = pace_accumulated_admit(now, pace_interval, pace_last_sent);
+		observe(admitted);
+		return admitted;
+	}
 	if (std::chrono::duration<double>(now - pace_last_sent).count() < pace_interval - tolerance)
 	{
 		observe(false);

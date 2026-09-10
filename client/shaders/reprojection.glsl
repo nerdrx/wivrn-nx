@@ -160,6 +160,9 @@ layout(constant_id = 8) const bool lowpoly_full_kernel = false;
 // Optional low-poly approximations: 1 is eight-fetch 3x3, 2 is four-fetch
 // centre-reuse, 3 is a two-fetch directional hint; all are off by default.
 layout(constant_id = 12) const int lowpoly_tiny_kernel = 0;
+// Optional compile-out of neutral post-effect branches; host enables only when
+// all corresponding runtime parameters are exactly zero.
+layout(constant_id = 13) const bool static_post = false;
 // Peripheral smoothing for coarse PLANAR cells. Mode 1 preserves the original
 // square boundary and two diagonal taps; mode 2 follows the encoder's rounded
 // tile-centre mask and uses four cardinal taps. The default is compiled out.
@@ -909,7 +912,7 @@ void main()
 		}
 	}
 
-	if (motion.x > 0.0)
+	if (!static_post && motion.x > 0.0)
 	{
 		vec2 texel = 0.5 / vec2(rgb_rect.zw);
 		uv = clamp(uv + motion_offset(inUV.xy, inPosition), texel, 1.0 - texel);
@@ -1107,10 +1110,10 @@ void main()
 		// post.x carrying the FSR sharpness. The CAS path is never run while FSR is on, so
 		// the two never stack.
 		colour.rgb = fsr_easu(uv);
-		if (post.x > 0.0)
+		if (!static_post && post.x > 0.0)
 			colour.rgb = fsr_rcas(uv, colour.rgb, post.x);
 	}
-	else if (post.x > 0.0)
+	else if (!static_post && post.x > 0.0)
 	{
 		colour.rgb = contrast_adaptive_sharpen(uv, colour.rgb, post.x);
 	}
@@ -1119,7 +1122,7 @@ void main()
 	// (gamma) space and only to the colour channels: the alpha stream that carries
 	// passthrough transparency below is never touched, so the wash tints the virtual
 	// content near the edge without ever making transparent periphery opaque.
-	if (glow.x > 0.0)
+	if (!static_post && glow.x > 0.0)
 		colour.rgb = ambient_glow(colour.rgb, uv, inPosition, glow.x, glow.y);
 
 	// Edge bleed, second half: past the packed fade distance, decay the stretched edge into
@@ -1145,7 +1148,7 @@ void main()
 	// other effect in this pass works in, and on the colour channels only: the alpha
 	// stream that carries passthrough transparency is never blended, so a frame's
 	// transparent periphery cannot bleed into the next one's.
-	if (motion.z > 0.0)
+	if (!static_post && motion.z > 0.0)
 		colour.rgb = mix(colour.rgb, sample_prev(uv).rgb, motion.z);
 
 	if (alpha == 1)
@@ -1180,7 +1183,7 @@ void main()
 		outColor.rgb *= outColor.a;
 	}
 
-	if (post.y > 0.0)
+	if (!static_post && post.y > 0.0)
 	{
 		// Soft peripheral darkening, the center of the view is left untouched
 		outColor.rgb *= 1.0 - post.y * smoothstep(post.z, post.w, length(inPosition));
@@ -1195,7 +1198,7 @@ void main()
 	// erases it, and this keeps the cost to two ALU hashes with no texture taps and no
 	// gradient-detection kernel (uniform dither is invisible on flat areas and
 	// imperceptible on detailed ones, so the extra taps to gate it are not worth it).
-	if (deband.x > 0.0)
+	if (!static_post && deband.x > 0.0)
 	{
 		vec2 c = gl_FragCoord.xy;
 		float n = dither_noise(c) - dither_noise(c + vec2(37.0, 17.0));

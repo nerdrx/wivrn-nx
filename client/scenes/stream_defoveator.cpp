@@ -71,6 +71,17 @@ static int lowpoly_tiny_requested()
 #endif
 }
 
+static bool static_post_requested()
+{
+#ifdef __ANDROID__
+	char value[PROP_VALUE_MAX] = {};
+	return __system_property_get("debug.wivrn.nx.static_post", value) > 0 && value[0] != '0';
+#else
+	const char * value = std::getenv("WIVRN_NX_STATIC_POST");
+	return value && value[0] != '0';
+#endif
+}
+
 struct stream_defoveator::vertex
 {
 	// output image position
@@ -283,7 +294,8 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 	        VkBool32(atlas_r8 && atlas_vertex_warp),
 	        int32_t(peripheral_smooth_baked),
 	        VkBool32(compact_centre),
-		int32_t(lowpoly_tiny_baked));
+		int32_t(lowpoly_tiny_baked),
+		VkBool32(static_post_baked));
 	auto fragment_shader = load_shader(device, atlas_r8 ? "reprojection_atlas_r8.frag" : "reprojection.frag");
 
 	vk::pipeline_builder pipeline_info{
@@ -984,13 +996,21 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 	// toggle, a rare event.
 	const bool lowpoly = post.low_poly > 0;
 	const int lowpoly_tiny = lowpoly && !post.low_poly_full ? lowpoly_tiny_requested() : 0;
+	const bool neutral_post = post.sharpness == 0.f && post.vignette == 0.f &&
+	                          post.glow == 0.f && post.deband == 0.f && motion.step == 0.f &&
+	                          blend.weight == 0.f;
+	// Blend weights and motion steps can alternate every frame. Once an effect
+	// becomes active, retain the general shader for this defoveator's lifetime
+	// instead of rebuilding pipelines whenever those values return to zero.
+	static_post_disabled |= !neutral_post;
+	const bool static_post = static_post_requested() && !static_post_disabled;
 	const bool neutral_color = std::all_of(scale.begin(), scale.end(), [](float v) { return v == 1.f; }) &&
 	                            std::all_of(bias.begin(), bias.end(), [](float v) { return v == 0.f; });
 	const bool want_unorm = mutable_alias && neutral_color;
 	const int want_peripheral_smooth = atlas_prototype == 0 ? peripheral_smooth_requested() : 0;
 	const bool want_compact_centre = inputs[0].compact_centre || inputs[1].compact_centre;
 	if (want_compact_centre != compact_centre_baked or want_unorm != unorm_baked or cas_full_kernel != cas_full_baked or fsr != fsr_baked or atlas_prototype != atlas_baked or
-	    lowpoly != lowpoly_baked or post.low_poly_full != lowpoly_full_baked || lowpoly_tiny != lowpoly_tiny_baked ||
+	    lowpoly != lowpoly_baked or post.low_poly_full != lowpoly_full_baked || lowpoly_tiny != lowpoly_tiny_baked || static_post != static_post_baked ||
 	    want_peripheral_smooth != peripheral_smooth_baked)
 	{
 		reset_pipelines();
@@ -1001,7 +1021,9 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		lowpoly_baked = lowpoly;
 		lowpoly_full_baked = post.low_poly_full;
 		lowpoly_tiny_baked = lowpoly_tiny;
+		static_post_baked = static_post;
 		peripheral_smooth_baked = want_peripheral_smooth;
+		spdlog::info("NX static post {}", static_post_baked ? "compiled out" : "active");
 		spdlog::info("NX peripheral smoothing mode {}", peripheral_smooth_baked);
 		unorm_baked = want_unorm;
 		if (mutable_alias)

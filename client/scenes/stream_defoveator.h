@@ -99,6 +99,8 @@ private:
 	bool lowpoly_baked = false;
 	bool lowpoly_full_baked = false;
 	int lowpoly_tiny_baked = 0;
+	bool static_post_baked = false;
+	bool static_post_disabled = false;
 	// Optional two-tap smoothing for the coarse PLANAR periphery. Kept as a
 	// specialization constant so the default path is unchanged.
 	int peripheral_smooth_baked = 0;

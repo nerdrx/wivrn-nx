@@ -166,7 +166,9 @@ layout(constant_id = 13) const bool static_post = false;
 layout(constant_id = 14) const bool static_bleed = false;
 // Peripheral smoothing for coarse PLANAR cells. Mode 1 preserves the original
 // square boundary and two diagonal taps; mode 2 follows the encoder's rounded
-// tile-centre mask and uses four cardinal taps. The default is compiled out.
+// tile-centre mask and uses four cardinal taps. Modes 3 and 4 add the remap and
+// two diagonal taps respectively; mode 5 blends neighbouring packed texels.
+// The default is compiled out.
 layout(constant_id = 10) const int peripheral_smooth = 0;
 
 // --- [atlas prototype] --------------------------------------------------------------
@@ -1090,6 +1092,24 @@ void main()
 		colour.rgb = colour.rgb * 0.5 +
 		             (sample_rgb(clamp(sample_uv + d, lo, hi)).rgb +
 		              sample_rgb(clamp(sample_uv - d, lo, hi)).rgb) * 0.25;
+	}
+	// Four half-texel bilinear taps give binomial weights at texel centres.
+	// Work in packed texture coordinates so tap spacing follows actual retained
+	// pixels. Wide sparse taps instead produce visibly doubled block edges.
+	if (peripheral_smooth == 5 && compact_centre && tile_radius_sq > compact_radius * compact_radius)
+	{
+		float radial_distance = length(source_px - smooth_center * vec2(rgb_rect.zw));
+		float radial_t = smoothstep(compact_radius, sqrt(compact_fine_radius_sq), radial_distance);
+		vec2 packed_uv = compact_map_uv(sample_uv);
+		vec2 texel = 1.0 / vec2(textureSize(rgb[0], 0));
+		vec2 d = 0.5 * texel;
+		vec2 lo = vec2(float(atlas_eye) * 0.5, 0.0) + d;
+		vec2 hi = vec2(float(atlas_eye + 1) * 0.5, 1.0) - d;
+		vec3 filtered = (texture(rgb[0], clamp(packed_uv + vec2(d.x, d.y), lo, hi)).rgb +
+		                 texture(rgb[0], clamp(packed_uv + vec2(-d.x, d.y), lo, hi)).rgb +
+		                 texture(rgb[0], clamp(packed_uv + vec2(d.x, -d.y), lo, hi)).rgb +
+		                 texture(rgb[0], clamp(packed_uv - d, lo, hi)).rgb) * 0.25;
+		colour.rgb = mix(colour.rgb, filtered, radial_t);
 	}
 	bool smooth_outer = peripheral_smooth == 2
 	                    ? tile_radius > 256.0

@@ -56,7 +56,7 @@ static int peripheral_smooth_requested()
 	if (!smooth || !centre || centre[0] == '0')
 		return 0;
 #endif
-	return smooth[0] == '4' ? 4 : smooth[0] == '3' ? 3 : (smooth[0] == '2' ? 2 : (smooth[0] != '0' ? 1 : 0));
+	return smooth[0] == '5' ? 5 : smooth[0] == '4' ? 4 : smooth[0] == '3' ? 3 : (smooth[0] == '2' ? 2 : (smooth[0] != '0' ? 1 : 0));
 }
 
 static int lowpoly_tiny_requested()

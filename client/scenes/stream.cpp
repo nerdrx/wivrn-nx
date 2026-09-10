@@ -1254,13 +1254,14 @@ struct render_probe
 	uint64_t iters = 0, gated_out = 0, no_render = 0, cache_hits = 0, new_source = 0, submitted = 0;
 	uint64_t selected_forward = 0, selected_backward = 0, selected_repeat = 0, selected_max_gap = 0;
 	double period_ms = 0, fence_ms = 0, query_ms = 0, submit_ms = 0, blit_ms = 0;
+	double selection_to_defoveate_ms = 0, selection_to_defoveate_max_ms = 0;
 	double app_gpu_ms = 0;
 	// Just-in-time display, per report window. pose_age is the client's own
 	// motion-to-photon estimate (see stream.h); wake_slack is how much of the interval
 	// the runtime handed over in the first place, which is the ceiling on what the
 	// schedule could ever give back.
 	double pose_age_ms = 0, pose_age_max_ms = 0, wake_slack_ms = 0;
-	uint64_t pose_age_n = 0;
+	uint64_t pose_age_n = 0, selection_to_defoveate_n = 0;
 	int32_t out_w = 0, out_h = 0;
 	float sharpness = 0, glow = 0, vignette = 0, deband = 0;
 	float low_poly = 0, low_poly_levels = 0;
@@ -1667,6 +1668,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	// Search for frame with desired display time on all decoders
 	// If no such frame exists, use the latest frame for each decoder
 	current_blit_handles = common_frame(frame_state.predictedDisplayTime);
+	const auto selection_done = std::chrono::steady_clock::now();
 
 	// How stale the picture about to be drawn is: the refresh it is being drawn for,
 	// minus the display time the server stamped on the frame chosen for it. The pose in
@@ -2336,6 +2338,12 @@ void scenes::stream::render(const XrFrameState & frame_state)
 				int image_index = swapchain.acquire();
 				swapchain.wait();
 
+				// CPU interval includes acquisition/wait; only actual presentation calls count.
+				const double selection_to_defoveate = rp_ms(std::chrono::steady_clock::now() - selection_done);
+				g_rp.selection_to_defoveate_ms += selection_to_defoveate;
+				g_rp.selection_to_defoveate_max_ms = std::max(g_rp.selection_to_defoveate_max_ms, selection_to_defoveate);
+				++g_rp.selection_to_defoveate_n;
+
 				defoveator->defoveate(command_buffer,
 				                      foveation,
 				                      images,
@@ -2734,6 +2742,10 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		spdlog::info("render: per iteration fence {:.1f} (worst {:.1f}) | queries {:.1f} | submit {:.1f} | whole render() {:.1f} ms",
 		             g_rp.fence_ms / n, g_rp.worst_fence_ms, g_rp.query_ms / n,
 		             g_rp.submit_ms / n, g_rp.blit_ms / n);
+		spdlog::info("render: selection-to-defoveate CPU {:.3f} ms mean (max {:.3f}) over {} actual defoveate calls; not GPU/photon latency",
+		             g_rp.selection_to_defoveate_n ? g_rp.selection_to_defoveate_ms / double(g_rp.selection_to_defoveate_n) : 0.0,
+		             g_rp.selection_to_defoveate_max_ms,
+		             g_rp.selection_to_defoveate_n);
 		// --- just-in-time display --------------------------------------------
 		// The first line is the schedule: how much of the interval the runtime
 		// handed over, how much of it was slept, and what the sleep was cut short

@@ -163,6 +163,7 @@ layout(constant_id = 12) const int lowpoly_tiny_kernel = 0;
 // Optional compile-out of neutral post-effect branches; host enables only when
 // all corresponding runtime parameters are exactly zero.
 layout(constant_id = 13) const bool static_post = false;
+layout(constant_id = 14) const bool static_bleed = false;
 // Peripheral smoothing for coarse PLANAR cells. Mode 1 preserves the original
 // square boundary and two diagonal taps; mode 2 follows the encoder's rounded
 // tile-centre mask and uses four cardinal taps. The default is compiled out.
@@ -889,7 +890,7 @@ void main()
 	// block. floor() is the mode, fract() the distance.
 	float bleed_mode = floor(glow.w);
 	float bleed_fade = fract(glow.w);
-	bool in_bleed = glow.z > 0.0 && bleed_mode > 0.0 && max(bleed_t.x, bleed_t.y) > 0.0;
+	bool in_bleed = !static_bleed && glow.z > 0.0 && bleed_mode > 0.0 && max(bleed_t.x, bleed_t.y) > 0.0;
 	if (in_bleed)
 	{
 		// Stretch the edge outward. Done before the motion warp so a warped sample and

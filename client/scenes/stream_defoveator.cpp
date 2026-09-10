@@ -71,14 +71,14 @@ static int lowpoly_tiny_requested()
 #endif
 }
 
-static bool static_post_requested()
+static int static_post_requested()
 {
 #ifdef __ANDROID__
 	char value[PROP_VALUE_MAX] = {};
-	return __system_property_get("debug.wivrn.nx.static_post", value) > 0 && value[0] != '0';
+	return __system_property_get("debug.wivrn.nx.static_post", value) > 0 ? std::clamp(value[0] - '0', 0, 2) : 0;
 #else
 	const char * value = std::getenv("WIVRN_NX_STATIC_POST");
-	return value && value[0] != '0';
+	return value ? std::clamp(value[0] - '0', 0, 2) : 0;
 #endif
 }
 
@@ -295,7 +295,8 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 	        int32_t(peripheral_smooth_baked),
 	        VkBool32(compact_centre),
 		int32_t(lowpoly_tiny_baked),
-		VkBool32(static_post_baked));
+		VkBool32(static_post_baked),
+		VkBool32(static_bleed_baked));
 	auto fragment_shader = load_shader(device, atlas_r8 ? "reprojection_atlas_r8.frag" : "reprojection.frag");
 
 	vk::pipeline_builder pipeline_info{
@@ -1003,14 +1004,17 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 	// becomes active, retain the general shader for this defoveator's lifetime
 	// instead of rebuilding pipelines whenever those values return to zero.
 	static_post_disabled |= !neutral_post;
-	const bool static_post = static_post_requested() && !static_post_disabled;
+	const int static_post_mode = static_post_requested();
+	const bool static_post = static_post_mode > 0 && !static_post_disabled;
+	static_bleed_disabled |= post.bleed_margin != 0.f;
+	const bool static_bleed = static_post_mode > 1 && !static_bleed_disabled;
 	const bool neutral_color = std::all_of(scale.begin(), scale.end(), [](float v) { return v == 1.f; }) &&
 	                            std::all_of(bias.begin(), bias.end(), [](float v) { return v == 0.f; });
 	const bool want_unorm = mutable_alias && neutral_color;
 	const int want_peripheral_smooth = atlas_prototype == 0 ? peripheral_smooth_requested() : 0;
 	const bool want_compact_centre = inputs[0].compact_centre || inputs[1].compact_centre;
 	if (want_compact_centre != compact_centre_baked or want_unorm != unorm_baked or cas_full_kernel != cas_full_baked or fsr != fsr_baked or atlas_prototype != atlas_baked or
-	    lowpoly != lowpoly_baked or post.low_poly_full != lowpoly_full_baked || lowpoly_tiny != lowpoly_tiny_baked || static_post != static_post_baked ||
+	    lowpoly != lowpoly_baked or post.low_poly_full != lowpoly_full_baked || lowpoly_tiny != lowpoly_tiny_baked || static_post != static_post_baked || static_bleed != static_bleed_baked ||
 	    want_peripheral_smooth != peripheral_smooth_baked)
 	{
 		reset_pipelines();
@@ -1022,8 +1026,10 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		lowpoly_full_baked = post.low_poly_full;
 		lowpoly_tiny_baked = lowpoly_tiny;
 		static_post_baked = static_post;
+		static_bleed_baked = static_bleed;
 		peripheral_smooth_baked = want_peripheral_smooth;
 		spdlog::info("NX static post {}", static_post_baked ? "compiled out" : "active");
+		spdlog::info("NX static bleed {}", static_bleed_baked ? "compiled out" : "active");
 		spdlog::info("NX peripheral smoothing mode {}", peripheral_smooth_baked);
 		unorm_baked = want_unorm;
 		if (mutable_alias)

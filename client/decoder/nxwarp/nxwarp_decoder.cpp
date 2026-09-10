@@ -754,6 +754,12 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 	// second real AEAD would encrypt ciphertext. The NullAead is keyed and detects
 	// corruption but is NOT cryptography, and it is correct here only because of that
 	// outer layer. The constants match video_encoder_nxwarp.cpp byte for byte.
+#ifdef __ANDROID__
+	// Experimental, startup-only: the transport caches hardware selection on first use.
+	char sha2_property[PROP_VALUE_MAX] = {};
+	if (__system_property_get("debug.wivrn.nx.transport_sha2", sha2_property) > 0)
+		setenv("NXT_SHA256_ACCELERATE", sha2_property[0] == '1' ? "1" : "0", 1);
+#endif
 	aead = nxt::make_null_aead();
 	nxt::Key key{}, salt{};
 	for (size_t i = 0; i < key.size(); ++i)

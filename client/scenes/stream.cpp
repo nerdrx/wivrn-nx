@@ -48,6 +48,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <mutex>
+#include <numeric>
 #include <ranges>
 #include <thread>
 #include <vulkan/vulkan_raii.hpp>
@@ -1255,6 +1256,11 @@ struct render_probe
 	uint64_t selected_forward = 0, selected_backward = 0, selected_repeat = 0, selected_max_gap = 0;
 	double period_ms = 0, fence_ms = 0, query_ms = 0, submit_ms = 0, blit_ms = 0;
 	double selection_to_defoveate_ms = 0, selection_to_defoveate_max_ms = 0;
+	// Six contiguous source-to-refresh stages, sampled for the selected stream-0 frame.
+	// The first stage includes everything before the first packet; the last is signed
+	// lead to the predicted refresh. Repeats are intentionally included.
+	std::array<double, 6> source_offset_ms{};
+	uint64_t source_offset_n = 0, source_offset_invalid = 0;
 	double app_gpu_ms = 0;
 	// Just-in-time display, per report window. pose_age is the client's own
 	// motion-to-photon estimate (see stream.h); wake_slack is how much of the interval
@@ -1669,6 +1675,30 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	// If no such frame exists, use the latest frame for each decoder
 	current_blit_handles = common_frame(frame_state.predictedDisplayTime);
 	const auto selection_done = std::chrono::steady_clock::now();
+	const XrTime selection_now = instance.now();
+	if (const auto & h = current_blit_handles[0]; h and h->view_info.display_time and
+	    h->feedback.received_first_packet and h->feedback.received_last_packet and
+	    h->feedback.sent_to_decoder and h->feedback.received_from_decoder and
+	    h->feedback.received_first_packet <= h->feedback.received_last_packet and
+	    h->feedback.received_last_packet <= h->feedback.sent_to_decoder and
+	    h->feedback.sent_to_decoder <= h->feedback.received_from_decoder and
+	    h->feedback.received_from_decoder <= selection_now)
+	{
+		const auto & f = h->feedback;
+		const std::array<XrDuration, 6> stages{
+		        f.received_first_packet - h->view_info.display_time,
+		        f.received_last_packet - f.received_first_packet,
+		        f.sent_to_decoder - f.received_last_packet,
+		        f.received_from_decoder - f.sent_to_decoder,
+		        selection_now - f.received_from_decoder,
+		        frame_state.predictedDisplayTime - selection_now,
+		};
+		for (size_t i = 0; i < stages.size(); ++i)
+			g_rp.source_offset_ms[i] += double(stages[i]) / 1e6;
+		++g_rp.source_offset_n;
+	}
+	else
+		++g_rp.source_offset_invalid;
 
 	// How stale the picture about to be drawn is: the refresh it is being drawn for,
 	// minus the display time the server stamped on the frame chosen for it. The pose in
@@ -2767,6 +2797,15 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		             jit.lead_n ? double(jit.lead_total_ns) / 1e6 / double(jit.lead_n) : 0.0,
 		             double(jit.lead_min_ns) / 1e6,
 		             jit.missed_overrun, jit.missed_late, jit.missed_skipped);
+		spdlog::info("render: source->first {:.1f} ms | wire {:.1f} | queue {:.1f} | decode {:.1f} | decode->selection {:.1f} | selection->predicted {:.1f} | sum {:.1f} over {} selected frames ({} invalid)",
+		             g_rp.source_offset_n ? g_rp.source_offset_ms[0] / g_rp.source_offset_n : 0.0,
+		             g_rp.source_offset_n ? g_rp.source_offset_ms[1] / g_rp.source_offset_n : 0.0,
+		             g_rp.source_offset_n ? g_rp.source_offset_ms[2] / g_rp.source_offset_n : 0.0,
+		             g_rp.source_offset_n ? g_rp.source_offset_ms[3] / g_rp.source_offset_n : 0.0,
+		             g_rp.source_offset_n ? g_rp.source_offset_ms[4] / g_rp.source_offset_n : 0.0,
+		             g_rp.source_offset_n ? g_rp.source_offset_ms[5] / g_rp.source_offset_n : 0.0,
+		             g_rp.source_offset_n ? std::accumulate(g_rp.source_offset_ms.begin(), g_rp.source_offset_ms.end(), 0.0) / g_rp.source_offset_n : 0.0,
+		             g_rp.source_offset_n, g_rp.source_offset_invalid);
 		jit.reset_counters();
 		g_rp = {};
 		g_rp.since = rp_t0;

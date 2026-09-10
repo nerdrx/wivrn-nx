@@ -642,6 +642,11 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 	independent_tiles_active = (ci.flags & NXVC_VKD_FLAG_INDEPENDENT_TILES) != 0;
 	compact_centre_active = (ci.flags & NXVC_VKD_FLAG_COMPACT_CENTRE) != 0;
 #ifdef __ANDROID__
+	char large_centre[PROP_VALUE_MAX] = {};
+	compact_large_centre_active = compact_centre_active && native_extent.height == 2688 &&
+	    __system_property_get("debug.wivrn.nx.compact_large_centre", large_centre) > 0 && large_centre[0] == '1';
+	if (compact_large_centre_active)
+		ci.flags |= NXVC_VKD_FLAG_COMPACT_LARGE_CENTRE;
 	char flat64[PROP_VALUE_MAX] = {};
 	if (compact_centre_active && __system_property_get("debug.wivrn.nx.compact_flat64", flat64) > 0 && flat64[0] == '1')
 		ci.flags |= NXVC_VKD_FLAG_COMPACT_FLAT64;
@@ -2103,6 +2108,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	        item->semaphore_val,
 	        item->free);
 	handle->compact_centre = compact_centre_active;
+	handle->compact_large_centre = compact_large_centre_active;
 	(void)reserved.release(); // The blit handle now owns the pool reservation.
 	if (atlas_table_buffer != VK_NULL_HANDLE && atlas_table_bytes != 0)
 	{

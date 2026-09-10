@@ -158,6 +158,7 @@ class nxwarp_decoder : public decoder
 	bool planar_direct_active = false;
 	bool borrowed_output_active = false;
 	bool compact_centre_active = false;
+	bool compact_large_centre_active = false;
 	// Set from the actual decoder create flags; this permits publication of valid
 	// independent-tile frames without the reference-contiguity gate.
 	bool independent_tiles_active = false;

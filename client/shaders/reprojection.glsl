@@ -197,11 +197,12 @@ layout(constant_id = 6) const int atlas_eye = 0;
 // with a native 512px centre and 4:1 periphery on each axis.
 layout(constant_id = 11) const bool compact_centre = false;
 layout(constant_id = 15) const float compact_eye_size = 2176.0;
-#define compact_centre_size (compact_eye_size == 2688.0 ? 640.0 : 512.0)
+layout(constant_id = 16) const bool compact_large_centre = false;
+#define compact_centre_size (compact_eye_size == 2688.0 ? (compact_large_centre ? 1024.0 : 640.0) : 512.0)
 #define compact_outer_size ((compact_eye_size - compact_centre_size) * 0.5)
 #define compact_packed_size (compact_eye_size * 0.25 + compact_centre_size * 0.75)
 #define compact_radius (compact_centre_size * 0.5)
-#define compact_fine_radius_sq (compact_eye_size == 2688.0 ? (576.0 / 0.886226925452758) * (576.0 / 0.886226925452758) : 333772.1072)
+#define compact_fine_radius_sq (compact_eye_size == 2688.0 ? (compact_large_centre ? (768.0 / 0.886226925452758) * (768.0 / 0.886226925452758) : (576.0 / 0.886226925452758) * (576.0 / 0.886226925452758)) : 333772.1072)
 
 layout(set = 0, binding = 0) uniform sampler2D rgb[alpha + 1];
 // One cell per motion vector, covering the whole eye image, sampled with the
@@ -1063,7 +1064,7 @@ void main()
 	// Adjacent duplicate texels make the coordinate jumps colour-continuous.
 	// No extra texture reads: retain the ordinary sample for native tiles.
 	vec2 sample_uv = uv;
-	if (peripheral_smooth == 3 && compact_centre && tile_radius_sq > compact_radius * compact_radius)
+	if (peripheral_smooth >= 3 && compact_centre && tile_radius_sq > compact_radius * compact_radius)
 	{
 		vec2 local_delta = abs(source_px - smooth_center * vec2(rgb_rect.zw));
 		vec2 stride = mix(vec2(4.0), vec2(1.0), lessThan(local_delta, vec2(compact_radius)));
@@ -1076,6 +1077,20 @@ void main()
 		sample_uv = filtered_px / vec2(rgb_rect.zw);
 	}
 	vec4 colour = sample_rgb(sample_uv);
+	// Two extra spatial taps soften discontinuities between independently fitted
+	// peripheral tiles. Native centre tiles stay untouched; no history or pass.
+	if (peripheral_smooth == 4 && compact_centre && tile_radius_sq > compact_radius * compact_radius)
+	{
+		vec2 texel = 1.0 / vec2(rgb_rect.zw);
+		float radius = mix(2.0, 8.0, smoothstep(compact_radius * compact_radius,
+		                   compact_fine_radius_sq, tile_radius_sq));
+		vec2 d = vec2(radius) * texel;
+		vec2 lo = vec2(motion.w + 0.5 * texel.x, 0.5 * texel.y);
+		vec2 hi = vec2(deband.w - 0.5 * texel.x, 1.0 - 0.5 * texel.y);
+		colour.rgb = colour.rgb * 0.5 +
+		             (sample_rgb(clamp(sample_uv + d, lo, hi)).rgb +
+		              sample_rgb(clamp(sample_uv - d, lo, hi)).rgb) * 0.25;
+	}
 	bool smooth_outer = peripheral_smooth == 2
 	                    ? tile_radius > 256.0
 	                    : peripheral_smooth == 1 && smooth_distance > 64.0;

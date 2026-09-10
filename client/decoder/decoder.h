@@ -53,6 +53,7 @@ public:
 		// copy before renderer access and the free lifetime keeps it alive.
 		bool atlas_valid = false;
 		bool compact_centre = false;
+		bool compact_large_centre = false;
 		std::array<vk::ImageView, 3> atlas_image_views{};
 		std::array<vk::Image, 3> atlas_images{};
 		std::array<vk::Format, 3> atlas_formats{};

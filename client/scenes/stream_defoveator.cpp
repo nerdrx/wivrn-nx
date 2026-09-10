@@ -56,7 +56,7 @@ static int peripheral_smooth_requested()
 	if (!smooth || !centre || centre[0] == '0')
 		return 0;
 #endif
-	return smooth[0] == '3' ? 3 : (smooth[0] == '2' ? 2 : (smooth[0] != '0' ? 1 : 0));
+	return smooth[0] == '4' ? 4 : smooth[0] == '3' ? 3 : (smooth[0] == '2' ? 2 : (smooth[0] != '0' ? 1 : 0));
 }
 
 static int lowpoly_tiny_requested()
@@ -297,7 +297,8 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 		int32_t(lowpoly_tiny_baked),
 		VkBool32(static_post_baked),
 		VkBool32(static_bleed_baked),
-		float(compact_eye_size_baked));
+		float(compact_eye_size_baked),
+		VkBool32(compact_large_centre_baked));
 	auto fragment_shader = load_shader(device, atlas_r8 ? "reprojection_atlas_r8.frag" : "reprojection.frag");
 
 	vk::pipeline_builder pipeline_info{
@@ -1015,7 +1016,8 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 	const int want_peripheral_smooth = atlas_prototype == 0 ? peripheral_smooth_requested() : 0;
 	const bool want_compact_centre = inputs[0].compact_centre || inputs[1].compact_centre;
 	const uint32_t want_compact_eye_size = want_compact_centre ? inputs[0].rect_rgb.extent.height : 2176;
-	if (want_compact_eye_size != compact_eye_size_baked or want_compact_centre != compact_centre_baked or want_unorm != unorm_baked or cas_full_kernel != cas_full_baked or fsr != fsr_baked or atlas_prototype != atlas_baked or
+	const bool want_large_centre = inputs[0].compact_large_centre || inputs[1].compact_large_centre;
+	if (want_large_centre != compact_large_centre_baked or want_compact_eye_size != compact_eye_size_baked or want_compact_centre != compact_centre_baked or want_unorm != unorm_baked or cas_full_kernel != cas_full_baked or fsr != fsr_baked or atlas_prototype != atlas_baked or
 	    lowpoly != lowpoly_baked or post.low_poly_full != lowpoly_full_baked || lowpoly_tiny != lowpoly_tiny_baked || static_post != static_post_baked || static_bleed != static_bleed_baked ||
 	    want_peripheral_smooth != peripheral_smooth_baked)
 	{
@@ -1024,6 +1026,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		fsr_baked = fsr;
 		atlas_baked = atlas_prototype;
 		compact_centre_baked = want_compact_centre;
+		compact_large_centre_baked = want_large_centre;
 		compact_eye_size_baked = want_compact_eye_size;
 		lowpoly_baked = lowpoly;
 		lowpoly_full_baked = post.low_poly_full;

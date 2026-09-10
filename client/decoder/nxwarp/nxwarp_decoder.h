@@ -75,6 +75,21 @@
 namespace wivrn
 {
 
+enum class nxwarp_worker_phase : uint8_t
+{
+	idle,
+	preparing,
+	prior_core_wait,
+	reserve_pool,
+	core_submit,
+	core_fence_wait,
+	prior_copy_wait,
+	copy_submit,
+	copy_fence_wait,
+	handoff,
+	failed,
+};
+
 // Whether this build's nxvc breaks Pass B into its three dispatch segments.
 //
 // NXVC_VK_DECODER_PASSB_SEGMENTS is a macro because the six fields were APPENDED to
@@ -260,6 +275,17 @@ class nxwarp_decoder : public decoder
 	// controller does its own smoothing, and feeding it a figure that only moves twice
 	// a minute would make that loop as slow as the report interval.
 	std::atomic<uint16_t> decode_us_report = 0;
+	// Diagnostic-only worker location, sampled by the network thread's existing report.
+	// Relaxed ordering is sufficient: this is a best-effort stall breadcrumb.
+	std::atomic<nxwarp_worker_phase> worker_phase{nxwarp_worker_phase::idle};
+	struct worker_phase_reset
+	{
+		nxwarp_decoder * decoder;
+		~worker_phase_reset()
+		{
+			decoder->worker_phase.store(nxwarp_worker_phase::idle, std::memory_order_relaxed);
+		}
+	};
 
 	// --- what this headset HAS reconstructed --------------------------------
 	//

@@ -331,6 +331,25 @@ constexpr uint8_t kResyncPath = wivrn::to_headset::nxwarp_resync_path;
 namespace wivrn
 {
 
+static const char * nxwarp_worker_phase_name(nxwarp_worker_phase phase)
+{
+	switch (phase)
+	{
+	case nxwarp_worker_phase::idle: return "idle";
+	case nxwarp_worker_phase::preparing: return "preparing";
+	case nxwarp_worker_phase::prior_core_wait: return "prior-core-wait";
+	case nxwarp_worker_phase::reserve_pool: return "reserve-pool";
+	case nxwarp_worker_phase::core_submit: return "core-submit";
+	case nxwarp_worker_phase::core_fence_wait: return "core-fence-wait";
+	case nxwarp_worker_phase::prior_copy_wait: return "prior-copy-wait";
+	case nxwarp_worker_phase::copy_submit: return "copy-submit";
+	case nxwarp_worker_phase::copy_fence_wait: return "copy-fence-wait";
+	case nxwarp_worker_phase::handoff: return "handoff";
+	case nxwarp_worker_phase::failed: return "failed";
+	}
+	return "unknown";
+}
+
 nxwarp_decoder::nxwarp_decoder(vk::raii::Device & device,
                                vk::raii::PhysicalDevice & physical_device,
                                uint32_t vk_queue_family_index,
@@ -398,6 +417,7 @@ nxwarp_decoder::nxwarp_decoder(vk::raii::Device & device,
 		{
 			while (true)
 			{
+				worker_phase.store(nxwarp_worker_phase::idle, std::memory_order_relaxed);
 				auto job = jobs.pop();
 				jobs_pending--;
 				decode_unit(job);
@@ -408,6 +428,7 @@ nxwarp_decoder::nxwarp_decoder(vk::raii::Device & device,
 		}
 		catch (const std::exception & e)
 		{
+			worker_phase.store(nxwarp_worker_phase::failed, std::memory_order_relaxed);
 			spdlog::error("nxwarp decoder worker: {}", e.what());
 		}
 	});
@@ -1411,10 +1432,11 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 		const auto now = std::chrono::steady_clock::now();
 		if (now - net_since > std::chrono::seconds(2))
 		{
-			spdlog::info("nxwarp[{}] net: {} frames closed in {:.1f} s, {} with a hole, {} out-of-order datagrams, {} frames completed late, {} queued for the worker, {} decoded so far, {} stragglers dropped; last hole {}/{} chunks, first missing {}, short {}, chunk {} B",
+			spdlog::info("nxwarp[{}] net: {} frames closed in {:.1f} s, {} with a hole, {} out-of-order datagrams, {} frames completed late, {} queued for the worker, {} decoded so far, {} stragglers dropped; last hole {}/{} chunks, first missing {}, short {}, chunk {} B; worker phase {}",
 			             stream_index, closed - net_frames_mark, std::chrono::duration<double>(now - net_since).count(), net_holes,
 			             net_out_of_order, net_late_completed, jobs_pending.load(), frames_decoded.load(), stragglers_dropped,
-			             last_hole.present, last_hole.expected, last_hole.first_missing == UINT32_MAX ? -1 : int(last_hole.first_missing), last_hole.short_chunk, chunk);
+			             last_hole.present, last_hole.expected, last_hole.first_missing == UINT32_MAX ? -1 : int(last_hole.first_missing), last_hole.short_chunk, chunk,
+			             nxwarp_worker_phase_name(worker_phase.load(std::memory_order_relaxed)));
 			if (net_dg_n)
 				spdlog::info("nxwarp[{}] net: {:.3f} ms per datagram over {} datagrams ({:.2f} ms of every second)",
 				             stream_index, net_dg_ms / double(net_dg_n), net_dg_n,
@@ -1592,6 +1614,8 @@ void nxwarp_decoder::prepare_atlas_images(image & item, const nxvc_vkd_atlas_ima
 
 void nxwarp_decoder::decode_unit(decode_job & job)
 {
+	worker_phase_reset idle_guard{this};
+	worker_phase.store(nxwarp_worker_phase::preparing, std::memory_order_relaxed);
 	// The frame is handed to the decoder HERE -- off the bounded queue and onto the
 	// worker -- so this is what `sent_to_decoder` means. Stamping it at publish, as
 	// this did, made the reported decode interval zero and moved its whole cost into
@@ -1601,6 +1625,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	if (planar_direct_active)
 	{
 		const auto direct_start = std::chrono::steady_clock::now();
+		worker_phase.store(nxwarp_worker_phase::reserve_pool, std::memory_order_relaxed);
 		auto * item = get_free();
 		if (not item)
 		{
@@ -1611,6 +1636,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		bool accepted = true;
 		try
 		{
+			worker_phase.store(nxwarp_worker_phase::core_submit, std::memory_order_relaxed);
 			host.with_queue(stream_index, [&](vk::Queue) {
 				planar_direct->render(job.unit.data(), job.unit.size(), VkImage(item->image),
 				                      VkImageView(*item->view_full), extent.width, extent.height);
@@ -1648,6 +1674,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			host.send_feedback(stream_index, 0, {},
 			                   publish_decode_us(stream_index, decode_us_report.load(std::memory_order_relaxed)),
 			                   ack_base, ack_mask);
+		worker_phase.store(nxwarp_worker_phase::handoff, std::memory_order_relaxed);
 		item->current_layout = vk::ImageLayout::eShaderReadOnlyOptimal;
 		auto handle = std::make_shared<nxwarp_blit_handle>(job.fb, job.view_info, *item->view_full,
 		                                                   item->image, native_extent, item->current_layout,
@@ -1699,6 +1726,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	// before the next record: wait here, not at present time -- and outside
 	// the queue lock, since a host wait needs no queue and the render thread
 	// does.
+	worker_phase.store(nxwarp_worker_phase::prior_core_wait, std::memory_order_relaxed);
 	const auto t_wait0 = std::chrono::steady_clock::now();
 	nxvc_vk_decoder_wait(nxvc, UINT64_MAX);
 	const auto t_decode0 = std::chrono::steady_clock::now();
@@ -1708,12 +1736,14 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 #ifdef NXVC_VKD_ATLAS_BORROWED_TARGET
 		if (direct_target)
 		{
+			worker_phase.store(nxwarp_worker_phase::core_fence_wait, std::memory_order_relaxed);
 			nxvc_vk_decoder_wait(nxvc, UINT64_MAX);
 			(void)nxvc_vk_decoder_set_atlas_borrowed_target(nxvc, nullptr);
 		}
 #endif
 		if (borrowed_target)
 		{
+			worker_phase.store(nxwarp_worker_phase::core_fence_wait, std::memory_order_relaxed);
 			nxvc_vk_decoder_wait(nxvc, UINT64_MAX);
 			(void)nxvc_vk_decoder_set_borrowed_output(nxvc, nullptr);
 			borrowed_target = false;
@@ -1733,6 +1763,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		nxvc_vkd_atlas_images source{};
 		if (nxvc_vk_decoder_atlas_images(nxvc, &source) == NXVC_VKD_OK && source.image[0] && source.image[1])
 		{
+			worker_phase.store(nxwarp_worker_phase::reserve_pool, std::memory_order_relaxed);
 			reserved.reset(get_free());
 			if (reserved)
 			{
@@ -1748,6 +1779,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 #endif
 	if (borrowed_output_active)
 	{
+		worker_phase.store(nxwarp_worker_phase::reserve_pool, std::memory_order_relaxed);
 		reserved.reset(get_free());
 		if (reserved)
 		{
@@ -1779,6 +1811,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		}
 	}
 	auto t_qlocked = t_decode0;
+	worker_phase.store(nxwarp_worker_phase::core_submit, std::memory_order_relaxed);
 	host.with_queue(stream_index, [&](vk::Queue) {
 		// Inside the lambda, so it is after the lock was taken: everything before it
 		// is the wait for the one queue this whole process submits on.
@@ -1882,6 +1915,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		return;
 	}
 
+	worker_phase.store(nxwarp_worker_phase::reserve_pool, std::memory_order_relaxed);
 	auto item = reserved ? reserved.get() : get_free();
 	const auto t_got_free = std::chrono::steady_clock::now();
 	if (not item)
@@ -1897,6 +1931,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		return;
 	}
 
+	worker_phase.store(nxwarp_worker_phase::prior_copy_wait, std::memory_order_relaxed);
 	if (device.waitForFences(*fence, true, UINT64_MAX) != vk::Result::eSuccess)
 		spdlog::warn("nxwarp: waitForFences failed");
 	const auto t_fence_pre = std::chrono::steady_clock::now();
@@ -2121,10 +2156,14 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	// rather than the headset's normal path.
 	VkSemaphore wait_sem = dec_sem != VK_NULL_HANDLE ? dec_sem : bin_sem;
 	if (wait_sem == VK_NULL_HANDLE)
+	{
+		worker_phase.store(nxwarp_worker_phase::core_fence_wait, std::memory_order_relaxed);
 		nxvc_vk_decoder_wait(nxvc, UINT64_MAX);
+	}
 	const bool signal_on_queue = *item->semaphore != VK_NULL_HANDLE;
 
 	const auto t_recorded = std::chrono::steady_clock::now();
+	worker_phase.store(nxwarp_worker_phase::copy_submit, std::memory_order_relaxed);
 	device.resetFences(*fence);
 	host.with_queue(stream_index, [&](vk::Queue queue) {
 		const vk::PipelineStageFlags wait_stage = (direct_target || borrowed_target)
@@ -2161,6 +2200,8 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	const auto t_qsubmit = std::chrono::steady_clock::now();
 	// No semaphore to hand the render thread: make the copy complete before it can see
 	// the frame. One frame of pipelining lost, on the driver that gives no other choice.
+	if (not signal_on_queue)
+		worker_phase.store(nxwarp_worker_phase::copy_fence_wait, std::memory_order_relaxed);
 	if (not signal_on_queue and device.waitForFences(*fence, true, UINT64_MAX) != vk::Result::eSuccess)
 		spdlog::warn("nxwarp: waitForFences failed");
 	const auto t_fence_post = std::chrono::steady_clock::now();
@@ -2271,6 +2312,7 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	have_last_decoded = true;
 	host.on_frame_decoded(job.frame_id);
 
+	worker_phase.store(nxwarp_worker_phase::handoff, std::memory_order_relaxed);
 	if (not showable)
 		frames_withheld.fetch_add(1, std::memory_order_relaxed);
 	else

@@ -641,6 +641,11 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 		ci.flags |= NXVC_VKD_FLAG_COMPACT_CENTRE;
 	independent_tiles_active = (ci.flags & NXVC_VKD_FLAG_INDEPENDENT_TILES) != 0;
 	compact_centre_active = (ci.flags & NXVC_VKD_FLAG_COMPACT_CENTRE) != 0;
+#ifdef __ANDROID__
+	char flat64[PROP_VALUE_MAX] = {};
+	if (compact_centre_active && __system_property_get("debug.wivrn.nx.compact_flat64", flat64) > 0 && flat64[0] == '1')
+		ci.flags |= NXVC_VKD_FLAG_COMPACT_FLAT64;
+#endif
 
 	if (auto st = nxvc_vk_decoder_create(&ci, &nxvc); st != NXVC_VKD_OK)
 	{

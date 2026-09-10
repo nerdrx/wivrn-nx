@@ -1932,7 +1932,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			}
 			if (not swapchain)
 				setup_reprojection_swapchain(max_width, max_height);
-			else if (capture_request and not swapchain.transfer_src())
+			else if (capture_request and *capture_request != capture_request_seen and not swapchain.transfer_src())
 				setup_reprojection_swapchain(max_width, max_height);
 			else if (swapchain.width() < max_width or swapchain.height() < max_height)
 			{
@@ -2917,6 +2917,11 @@ void scenes::stream::setup_reprojection_swapchain(uint32_t swapchain_width, uint
 
 	const bool mutable_alias = atlas_unorm_render_enabled() && application::get_hmd_traits().needs_srgb_conversion;
 	swapchain = xr::swapchain(instance, session, device, swapchain_format, swapchain_width, swapchain_height, 1, views.size(), mutable_alias);
+	if (const auto capture = image_capture_request(); capture && !swapchain.transfer_src())
+	{
+		capture_request_seen = *capture;
+		spdlog::warn("NX capture {} unavailable; continuing normal presentation", *capture);
+	}
 	spdlog::info("Created stream swapchain: {}x{}", swapchain.width(), swapchain.height());
 	for (auto view: views)
 	{

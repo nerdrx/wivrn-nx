@@ -110,12 +110,20 @@ xr::swapchain::swapchain(
 			spdlog::warn("Mutable XR swapchain unavailable ({}); using standard SRGB swapchain", static_cast<int>(result));
 			usage_flags &= ~XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT;
 			create_info.usageFlags = usage_flags;
-			CHECK_XR(xrCreateSwapchain(s, &create_info, &id));
+			result = xrCreateSwapchain(s, &create_info, &id);
 			mutable_format = false;
 		}
 	}
-	else
-		CHECK_XR(result);
+	// Screenshot readback is optional. A runtime that rejects transfer usage
+	// must still get a chance to create a normal presentation swapchain.
+	if (result != XR_SUCCESS && (create_info.usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT))
+	{
+		spdlog::warn("XR capture swapchain unavailable ({}); retrying without readback", static_cast<int>(result));
+		create_info.usageFlags &= ~XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT;
+		result = xrCreateSwapchain(s, &create_info, &id);
+	}
+	CHECK_XR(result);
+	transfer_src_ = (create_info.usageFlags & XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT) != 0;
 	mutable_format_ = (create_info.usageFlags & XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT) != 0;
 
 	auto images = details::enumerate<XrSwapchainImageVulkanKHR>(xrEnumerateSwapchainImages, id);

@@ -196,6 +196,12 @@ layout(constant_id = 6) const int atlas_eye = 0;
 // Compact centre storage: native 2176x2176 eye coordinates are packed to 928x928,
 // with a native 512px centre and 4:1 periphery on each axis.
 layout(constant_id = 11) const bool compact_centre = false;
+layout(constant_id = 15) const float compact_eye_size = 2176.0;
+#define compact_centre_size (compact_eye_size == 2688.0 ? 640.0 : 512.0)
+#define compact_outer_size ((compact_eye_size - compact_centre_size) * 0.5)
+#define compact_packed_size (compact_eye_size * 0.25 + compact_centre_size * 0.75)
+#define compact_radius (compact_centre_size * 0.5)
+#define compact_fine_radius_sq (compact_eye_size == 2688.0 ? (576.0 / 0.886226925452758) * (576.0 / 0.886226925452758) : 333772.1072)
 
 layout(set = 0, binding = 0) uniform sampler2D rgb[alpha + 1];
 // One cell per motion vector, covering the whole eye image, sampled with the
@@ -212,12 +218,12 @@ vec2 compact_map_uv(vec2 uv)
 	if (!compact_centre)
 		return uv;
 	float eye = float(atlas_eye);
-	vec2 p = uv * vec2(4352.0, 2176.0);
+	vec2 p = uv * vec2(compact_eye_size * 2.0, compact_eye_size);
 	// The final mapped clamp already saturates both out-of-eye ranges.
-	vec2 local = p - vec2(eye * 2176.0, 0.0);
-	vec2 mapped = local * 0.25 + clamp(local - vec2(832.0), vec2(0.0), vec2(512.0)) * 0.75;
-	mapped = clamp(mapped, vec2(0.5), vec2(927.5));
-	return (mapped + vec2(eye * 928.0, 0.0)) / vec2(1856.0, 928.0);
+	vec2 local = p - vec2(eye * compact_eye_size, 0.0);
+	vec2 mapped = local * 0.25 + clamp(local - vec2(compact_outer_size), vec2(0.0), vec2(compact_centre_size)) * 0.75;
+	mapped = clamp(mapped, vec2(0.5), vec2(compact_packed_size - 0.5));
+	return (mapped + vec2(eye * compact_packed_size, 0.0)) / vec2(compact_packed_size * 2.0, compact_packed_size);
 }
 
 vec4 sample_rgb(vec2 uv) { return texture(rgb[0], compact_map_uv(uv)); }
@@ -1057,13 +1063,13 @@ void main()
 	// Adjacent duplicate texels make the coordinate jumps colour-continuous.
 	// No extra texture reads: retain the ordinary sample for native tiles.
 	vec2 sample_uv = uv;
-	if (peripheral_smooth == 3 && compact_centre && tile_radius_sq > 65536.0)
+	if (peripheral_smooth == 3 && compact_centre && tile_radius_sq > compact_radius * compact_radius)
 	{
 		vec2 local_delta = abs(source_px - smooth_center * vec2(rgb_rect.zw));
-		vec2 stride = mix(vec2(4.0), vec2(1.0), lessThan(local_delta, vec2(256.0)));
+		vec2 stride = mix(vec2(4.0), vec2(1.0), lessThan(local_delta, vec2(compact_radius)));
 		// Use squared radius and fractional phase: same cell interpolation,
 		// without a square root or reconstructing the cell's base coordinate.
-		float inv_cell = tile_radius_sq <= 333772.1072 ? 0.25 : 0.125;
+		float inv_cell = tile_radius_sq <= compact_fine_radius_sq ? 0.25 : 0.125;
 		vec2 phase = fract(source_px * inv_cell - 0.5);
 		vec2 cell_minus_stride = vec2(1.0 / inv_cell) - stride;
 		vec2 filtered_px = source_px + (vec2(0.5) - phase) * cell_minus_stride;

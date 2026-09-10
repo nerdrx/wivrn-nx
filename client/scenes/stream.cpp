@@ -345,6 +345,11 @@ void scenes::stream::send_initial_control_packets(wivrn_session & net, float gue
 
 			info.render_eye_width = view.recommendedImageRectWidth * config.resolution_scale;
 			info.render_eye_height = view.recommendedImageRectHeight * config.resolution_scale;
+#ifdef __ANDROID__
+			char test_size[PROP_VALUE_MAX] = {};
+			if (__system_property_get("debug.wivrn.nx.test_eye_size", test_size) > 0 && std::atoi(test_size) == 2688)
+				info.render_eye_width = info.render_eye_height = 2688;
+#endif
 		}
 
 		{

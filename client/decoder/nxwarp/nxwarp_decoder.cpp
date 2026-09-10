@@ -816,7 +816,7 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 		native_extent.width *= si.eyes;
 		extent = native_extent;
 		if (compact_centre_active)
-			extent = {.width = 928u * si.eyes, .height = 928u};
+			extent = {.width = (si.width == 2688 ? 1152u : 928u) * si.eyes, .height = (si.height == 2688 ? 1152u : 928u)};
 		if (not planar_direct_active)
 			rebuild_pool();
 	}
@@ -825,7 +825,7 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 		native_extent = extent;
 		extent = native_extent;
 		if (compact_centre_active)
-			extent = {.width = 928u, .height = 928u};
+			extent = {.width = (si.width == 2688 ? 1152u : 928u), .height = (si.height == 2688 ? 1152u : 928u)};
 	}
 	if ((compact_centre_active && si.eyes <= 1) || planar_direct_active || (borrowed_output_active && si.eyes <= 1))
 		rebuild_pool();

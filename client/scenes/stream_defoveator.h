@@ -111,6 +111,7 @@ private:
 	int atlas_baked = 0;
 	bool atlas_vertex_warp = false;
 	bool compact_centre_baked = false;
+	uint32_t compact_eye_size_baked = 2176;
 	static constexpr uint32_t kAtlasTiles = 17;
 	// The v1 configuration of ADR-0029: 1088x1088 per eye, 64x64 tiles, 17x17 = 289
 	// tiles. The atlas is the whole eye picture in the coded sample domain.

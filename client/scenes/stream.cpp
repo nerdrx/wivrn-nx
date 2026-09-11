@@ -31,6 +31,7 @@
 #include "stream.h"
 
 #include "utils/view_geometry.h"
+#include "utils/motion_pose.h"
 
 #include "application.h"
 #include "audio/audio.h"
@@ -882,6 +883,13 @@ void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_p
 			}
 			else
 			{
+				if (is_view(stream))
+				{
+					auto & history = decoders[stream].motion_pose_history;
+					history.emplace_back(handle->feedback.frame_index, handle->view_info);
+					if (history.size() > 32)
+						history.pop_front();
+				}
 				std::swap(handle, decoders[stream].latest_frames[handle->feedback.frame_index % decoders[stream].latest_frames.size()]);
 			}
 		}
@@ -1254,7 +1262,8 @@ struct render_probe
 	std::chrono::steady_clock::time_point last_call{};
 	uint64_t iters = 0, gated_out = 0, no_render = 0, cache_hits = 0, new_source = 0, submitted = 0;
 	uint64_t selected_forward = 0, selected_backward = 0, selected_repeat = 0, selected_max_gap = 0;
-	uint64_t motion_matched = 0, motion_active = 0;
+	uint64_t motion_matched = 0, motion_active = 0, motion_pose_applied = 0;
+	uint64_t motion_pose_unsafe = 0, motion_pose_missing = 0;
 	double motion_step_sum = 0;
 	double period_ms = 0, fence_ms = 0, query_ms = 0, submit_ms = 0, blit_ms = 0;
 	double selection_to_defoveate_ms = 0, selection_to_defoveate_max_ms = 0;
@@ -1678,9 +1687,10 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	current_blit_handles = common_frame(frame_state.predictedDisplayTime);
     // A motion field contains both eyes for one source frame. Never apply it
     // to a salvage pair whose independently decoded eyes have different IDs.
-    const bool motion_stereo_aligned = current_blit_handles[0] &&
-        (eyes_in_one_stream() || (current_blit_handles[1] &&
-         current_blit_handles[1]->feedback.frame_index == current_blit_handles[0]->feedback.frame_index));
+	const bool motion_stereo_aligned = current_blit_handles[0] &&
+	    (eyes_in_one_stream() || (current_blit_handles[1] &&
+	     current_blit_handles[1]->feedback.frame_index == current_blit_handles[0]->feedback.frame_index &&
+	     current_blit_handles[1]->view_info.display_time == current_blit_handles[0]->view_info.display_time));
 
 	const auto selection_done = std::chrono::steady_clock::now();
 	const XrTime selection_now = instance.now();
@@ -2171,6 +2181,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			// it, and the pass records commands rather than waiting on anything.
 			auto motion_lock = motion_field.lock();
 			stream_defoveator::motion_warp motion;
+			bool motion_pose_compensated = false;
 
 			if (config.motion_mode() == wivrn::motion_mode::headset and motion_stereo_aligned)
 			{
@@ -2190,6 +2201,76 @@ void scenes::stream::render(const XrFrameState & frame_state)
 					        handle.view_info.display_time,
 					        it->span_ns,
 					        constants::stream::motion_max_steps);
+
+					// Optical flow already contains the head motion from the exact
+					// predecessor to this frame. Move the submitted pose by the
+					// same step, but only when that predecessor is actually available
+					// in both eye decoder histories. A nearest frame is unsafe: decode
+					// stride and loss can make it a different interval.
+					if (motion.step > 0)
+					{
+						const auto eye_stream = [this, eyes_joined](size_t v) -> size_t {
+							return (eyes_joined or not is_view(v)) ? 0 : v;
+						};
+						using source_metadata = std::pair<uint64_t, to_headset::video_stream_data_shard::view_info_t>;
+						std::array<std::optional<source_metadata>, view_count> prev;
+						{
+							std::unique_lock frame_lock(frames_mutex);
+							for (size_t v = 0; v < view_count; ++v)
+							{
+								const XrTime target = handle.view_info.display_time - it->span_ns;
+								for (const auto & candidate: decoders[eye_stream(v)].motion_pose_history)
+									if (candidate.first < handle.feedback.frame_index and candidate.second.display_time == target)
+										prev[v] = candidate;
+							}
+						}
+						const XrTime predecessor_time = handle.view_info.display_time - it->span_ns;
+						bool usable = true;
+						const bool have_predecessor = std::ranges::all_of(prev, [](const auto & p) { return p.has_value(); });
+						for (size_t v = 0; usable and v < view_count; ++v)
+						{
+							const auto & cur = current_blit_handles[eye_stream(v)]->view_info;
+							usable = prev[v] and prev[v]->second.display_time == predecessor_time and
+							         cur.display_time == handle.view_info.display_time and
+							         motion_fov_valid(prev[v]->second.fov[v]) and motion_fov_valid(cur.fov[v]) and
+							         prev[v]->second.fov[v].angleLeft == cur.fov[v].angleLeft and
+							         prev[v]->second.fov[v].angleRight == cur.fov[v].angleRight and
+							         prev[v]->second.fov[v].angleUp == cur.fov[v].angleUp and
+							         prev[v]->second.fov[v].angleDown == cur.fov[v].angleDown and
+							         motion_pose_valid(prev[v]->second.pose[v]) and motion_pose_valid(cur.pose[v]);
+						}
+						for (size_t v = 1; usable and v < view_count; ++v)
+							usable = prev[v]->first == prev[0]->first;
+						if (usable)
+						{
+							const float u = 1.f + motion.step;
+							std::array<XrPosef, view_count> compensated_pose;
+							std::array<XrFovf, view_count> compensated_fov;
+							for (size_t v = 0; v < view_count; ++v)
+							{
+								const auto & cur = current_blit_handles[eye_stream(v)]->view_info;
+								compensated_pose[v] = motion_pose_extrapolate(prev[v]->second.pose[v], cur.pose[v], u);
+								compensated_fov[v] = cur.fov[v];
+								usable = usable and motion_pose_valid(compensated_pose[v]) and motion_fov_valid(compensated_fov[v]);
+							}
+							if (usable)
+							{
+								pose = compensated_pose;
+								fov = compensated_fov;
+								motion_pose_compensated = true;
+								++g_rp.motion_pose_applied;
+							}
+						}
+						if (not usable)
+						{
+							motion.field = nullptr;
+							motion.step = 0;
+							if (have_predecessor)
+								++g_rp.motion_pose_unsafe;
+							else
+								++g_rp.motion_pose_missing;
+						}
+					}
 				}
 			}
 
@@ -2219,6 +2300,9 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			// buffer has released, because pinning one starved the NX Warp image pool
 			// until the picture went black.
 			stream_defoveator::frame_blend blend;
+			// The ordinary blend uses both images at their original poses. Once
+			// the current image is pose-compensated, blending it with the old
+			// coordinates would create a stereo/pose ghost.
 			{
 				const uint64_t idx = current_blit_handles[0]
 				                             ? current_blit_handles[0]->feedback.frame_index
@@ -2313,6 +2397,8 @@ void scenes::stream::render(const XrFrameState & frame_state)
 
 					// Below a five hundredth the blend is not worth a second
 					// sampler, and rounding it to zero keeps the "off" path exact.
+					if (motion_pose_compensated)
+						weight = 0;
 					if (weight > 0.002f)
 					{
 						// Pinned only from here to the fence wait at the top of
@@ -2794,9 +2880,10 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		spdlog::info("render: per iteration fence {:.1f} (worst {:.1f}) | queries {:.1f} | submit {:.1f} | whole render() {:.1f} ms",
 		             g_rp.fence_ms / n, g_rp.worst_fence_ms, g_rp.query_ms / n,
 		             g_rp.submit_ms / n, g_rp.blit_ms / n);
-        spdlog::info("render: motion fields matched {} active {} mean active step {:.3f}",
-                     g_rp.motion_matched, g_rp.motion_active,
-                     g_rp.motion_active ? g_rp.motion_step_sum / g_rp.motion_active : 0.0);
+	        spdlog::info("render: motion fields matched {} active {} pose-applied {} pose-missing {} pose-unsafe {} mean active step {:.3f}",
+	                     g_rp.motion_matched, g_rp.motion_active,
+	                     g_rp.motion_pose_applied, g_rp.motion_pose_missing, g_rp.motion_pose_unsafe,
+	                     g_rp.motion_active ? g_rp.motion_step_sum / g_rp.motion_active : 0.0);
 		spdlog::info("render: selection-to-defoveate CPU {:.3f} ms mean (max {:.3f}) over {} actual defoveate calls; not GPU/photon latency",
 		             g_rp.selection_to_defoveate_n ? g_rp.selection_to_defoveate_ms / double(g_rp.selection_to_defoveate_n) : 0.0,
 		             g_rp.selection_to_defoveate_max_ms,
@@ -2901,6 +2988,8 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 	{
 		std::unique_lock frame_lock(frames_mutex);
 		dejitter.reset();
+		for (auto & decoder: decoders)
+			decoder.motion_pose_history.clear();
 		last_submitted_source_frame.reset();
 		last_selected_source_frame.reset();
 	}

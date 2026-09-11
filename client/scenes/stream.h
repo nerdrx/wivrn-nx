@@ -166,6 +166,9 @@ private:
 		std::unique_ptr<wivrn::shard_accumulator> decoder;
 		// latest frames, rolling buffer
 		std::array<std::shared_ptr<wivrn::shard_accumulator::blit_handle>, image_buffer_size> latest_frames;
+		// Metadata only: preserve motion endpoints without pinning decoder images.
+		using pose_metadata = std::pair<uint64_t, wivrn::to_headset::video_stream_data_shard::view_info_t>;
+		std::deque<pose_metadata> motion_pose_history;
 
 		std::shared_ptr<wivrn::shard_accumulator::blit_handle> frame(uint64_t id) const;
 		// The newest frame the rolling buffer still holds that is older than `before`,

@@ -92,6 +92,17 @@ static bool motion_cap_enabled()
 #endif
 }
 
+// Opt-in diagnostic; no per-frame logging in ordinary use.
+static bool motion_timeline_trace_enabled()
+{
+#ifdef __ANDROID__
+ char value[PROP_VALUE_MAX] = {};
+ return __system_property_get("debug.wivrn.nx.motion_trace", value) > 0 and value[0] == '1';
+#else
+ return false;
+#endif
+}
+
 // clang-format off
 static const std::unordered_map<std::string, device_id> device_ids = {
 	{"/user/hand/left/input/x/click",             device_id::X_CLICK},
@@ -1052,6 +1063,23 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, scenes::stream::deco
 				                                    return std::numeric_limits<XrTime>::max();
 			                                    return std::abs(frame->view_info.display_time - target);
 		                                    });
+
+#ifdef __ANDROID__
+		char past_property[PROP_VALUE_MAX] = {};
+		if (__system_property_get("debug.wivrn.nx.motion_past", past_property) > 0 and past_property[0] == '1' and
+		    application::get_config().motion_mode() == wivrn::motion_mode::headset and not alpha)
+		{
+			// Do not alternate future-dated unwarped images with past warped ones.
+			// Prefer the latest shared past source, bounded to two 60Hz intervals.
+			// Keep exact stereo matching. Diagnostic traces check for source rewinds.
+			auto past = common_frames.end();
+			for (auto it = common_frames.begin(); it != common_frames.end(); ++it)
+				if ((*it)->view_info.display_time <= target and target - (*it)->view_info.display_time <= 33'333'334 and
+				    (past == common_frames.end() or (*it)->view_info.display_time > (*past)->view_info.display_time))
+					past = it;
+			if (past != common_frames.end()) min = past;
+		}
+#endif
 
 		assert(*min);
 		auto frame_index = (*min)->feedback.frame_index;
@@ -2543,6 +2571,11 @@ void scenes::stream::render(const XrFrameState & frame_state)
 					warp_timeline_samples = 0;
 				}
 			}
+			if (motion_timeline_trace_enabled())
+				spdlog::info("warp timeline: display {} frame {} compositor {} anchor {} span {} step {:.6f} field {} cache {}",
+				             frame_state.predictedDisplayTime, current_blit_handles[0]->feedback.frame_index,
+				             current_blit_handles[0]->view_info.display_time, warp_anchor, warp_span,
+				             motion.step, motion.field != nullptr, cache_hit);
 			g_rp.cache_hits += cache_hit ? 1 : 0;
 			g_rp.out_w = extents[0].width;
 			g_rp.out_h = extents[0].height;

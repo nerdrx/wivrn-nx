@@ -132,6 +132,9 @@ ivec2 search(int level, ivec2 c, ivec2 base, int radius, int view)
 // three samples do not describe a minimum at all.
 float subtexel(uint a, uint b, uint c)
 {
+	// A perfect integer match cannot improve; fitting it adds spurious motion.
+	if (b == 0)
+		return 0.0;
 	float d = float(a) + float(c) - 2.0 * float(b);
 	if (d <= 0.0)
 		return 0.0;

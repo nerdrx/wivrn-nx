@@ -154,6 +154,9 @@ ivec2 search(const pyramid & current, const pyramid & previous, int level, ivec2
 
 float subtexel(uint32_t a, uint32_t b, uint32_t c)
 {
+	// A perfect integer match cannot improve; fitting it adds spurious motion.
+	if (b == 0)
+		return 0.0;
 	float d = float(a) + float(c) - 2.f * float(b);
 	if (d <= 0.f)
 		return 0.f;

@@ -1475,7 +1475,7 @@ bool scenes::stream::jit_enabled()
 
 void scenes::stream::render(const XrFrameState & frame_state)
 {
-	warp_timeline = {};
+	warp_timeline_pending = {};
 	const auto capture_request = image_capture_request();
 	// --- just-in-time display -------------------------------------------------
 	//
@@ -2207,7 +2207,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			auto motion_lock = motion_field.lock();
 			stream_defoveator::motion_warp motion;
 			bool motion_pose_compensated = false;
-			warp_timeline = {};
+			warp_timeline_pending = {};
 			XrTime warp_anchor = 0;
 			XrDuration warp_span = 0;
 			bool warp_source_clock = false;
@@ -2331,7 +2331,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			if (motion.field and warp_anchor > 0 and warp_span > 0 and
 			    frame_state.predictedDisplayTime >= warp_anchor)
 			{
-				warp_timeline = {instance.now(),
+				warp_timeline_pending = {instance.now(),
 				                 double(frame_state.predictedDisplayTime - warp_anchor) * 1e-6,
 				                 double(motion.step) * double(warp_span) * 1e-6,
 				                 warp_source_clock};
@@ -2518,7 +2518,31 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			cache_hit = reduce_gpu_load_enabled() and defoveate_cache_valid and
 			            not quad_info and state == defoveate_cache;
 
-			if (cache_hit) warp_timeline = {}; // No newly evaluated presentation pass.
+			if (cache_hit) warp_timeline_pending = {}; // No newly evaluated presentation pass.
+			// Publish a half-second mean of valid rendered samples. Missing samples
+			// neither become zero nor erase the last result; UI expires it after 2s.
+			if (warp_timeline_pending.recorded)
+			{
+				const auto & sample = warp_timeline_pending;
+				if (not warp_timeline_samples or
+				    sample.source_clock != warp_timeline_sum.source_clock or
+				    sample.recorded - warp_timeline_sum.recorded > 2'000'000'000)
+				{
+					warp_timeline_sum = {sample.recorded, 0, 0, sample.source_clock};
+					warp_timeline_samples = 0;
+				}
+				warp_timeline_sum.gap_ms += sample.gap_ms;
+				warp_timeline_sum.advance_ms += sample.advance_ms;
+				++warp_timeline_samples;
+				if (sample.recorded - warp_timeline_sum.recorded >= 500'000'000)
+				{
+					warp_timeline = {sample.recorded,
+					                 warp_timeline_sum.gap_ms / warp_timeline_samples,
+					                 warp_timeline_sum.advance_ms / warp_timeline_samples,
+					                 sample.source_clock};
+					warp_timeline_samples = 0;
+				}
+			}
 			g_rp.cache_hits += cache_hit ? 1 : 0;
 			g_rp.out_w = extents[0].width;
 			g_rp.out_h = extents[0].height;

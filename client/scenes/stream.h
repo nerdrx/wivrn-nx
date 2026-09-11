@@ -469,6 +469,9 @@ private:
 		bool source_clock = false;
 	};
 	warp_timeline_sample warp_timeline;
+	warp_timeline_sample warp_timeline_pending;
+	warp_timeline_sample warp_timeline_sum;
+	uint32_t warp_timeline_samples = 0;
 
 
 	// --- Transport page ---------------------------------------------------------------

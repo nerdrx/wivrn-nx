@@ -874,14 +874,14 @@ void scenes::stream::gui_performance_metrics()
 		                .c_str());
 
 		const auto & wt = warp_timeline;
-		if (wt.recorded and instance.now() - wt.recorded < 250'000'000)
+		if (wt.recorded and instance.now() - wt.recorded < 2'000'000'000)
 		{
 			ImGui::Text("Warp timeline: %.1f ms gap - %.1f ms advance = %.1f ms remaining",
 			            wt.gap_ms, wt.advance_ms, std::max(0.0, wt.gap_ms - wt.advance_ms));
 			ImGui::TextUnformatted(wt.source_clock ? "Clock: app requested display time" : "Clock: compositor display time");
 		}
 		else ImGui::TextUnformatted("Warp timeline estimate: unavailable");
-		ImGui::TextWrapped("Timeline estimates only, not measured motion-to-photon latency.");
+		ImGui::TextWrapped("Recent valid samples, averaged over 0.5s; expires after 2s. Not measured motion-to-photon latency.");
 
 		// Directly under the latency figure: what the panel is actually being shown and
 		// what the decoders are actually producing, then the NX Warp block. The same
@@ -1393,7 +1393,7 @@ void scenes::stream::gui_compact_view()
 		  tracking_control.lock()->motions_to_photons / 1'000'000.f,
 		  "ms");
 		const auto & wt = warp_timeline;
-		if (wt.recorded and instance.now() - wt.recorded < 250'000'000)
+		if (wt.recorded and instance.now() - wt.recorded < 2'000'000'000)
 		{
 			f(_S("Source timeline gap"), wt.gap_ms, "ms");
 			f(_S("Warp advance"), wt.advance_ms, "ms");
@@ -1406,8 +1406,8 @@ void scenes::stream::gui_compact_view()
 			ImGui::TextUnformatted("Unavailable");
 		}
 		ImGui::EndTable();
-		ImGui::TextWrapped("Timeline estimates only, not measured motion-to-photon latency.");
-		if (wt.recorded and instance.now() - wt.recorded < 250'000'000)
+		ImGui::TextWrapped("Recent valid samples, averaged over 0.5s; expires after 2s. Not measured motion-to-photon latency.");
+		if (wt.recorded and instance.now() - wt.recorded < 2'000'000'000)
 			ImGui::TextUnformatted(wt.source_clock ? "Clock: app requested display time" : "Clock: compositor display time");
 	}
 

@@ -1080,7 +1080,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 	        field ? field->width : std::max(motion_width, 1u),
 	        field ? field->height : std::max(motion_height, 1u));
 
-	if (not motion_ready or (field and field->frame_idx != motion_frame))
+	if (not motion_ready or (field and (field->frame_idx != motion_frame or field != motion_source)))
 	{
 		const size_t size = size_t(motion_width) * motion_height * view_count * 2;
 		if (field and size_t(field->width) * field->height * view_count * 2 == size)
@@ -1147,6 +1147,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 
 		motion_ready = true;
 		motion_frame = field ? field->frame_idx : uint64_t(-1);
+		motion_source = field;
 	}
 
 	for (size_t view = 0; view < view_count; ++view)

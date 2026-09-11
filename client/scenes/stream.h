@@ -378,6 +378,7 @@ private:
 		bool motion_on = false;
 		float motion_step = 0;
 		uint64_t motion_frame = uint64_t(-1);
+		bool motion_filtered = false;
 		// Frame smoothing: how much of the previous decoded frame is mixed in. Only ever
 		// non-zero on the refresh that first shows a new frame, which already differs by
 		// frame_index, but it belongs in the signature all the same.
@@ -457,6 +458,13 @@ private:
 	// Completed fields are retained briefly because decode/display can lag field
 	// delivery.  The presentation path still selects only the exact frame.
 	std::deque<wivrn::motion_field_data> motion_field_history;
+	// Optional same-pixel EMA state. It is render-thread owned and reset on a gap,
+	// metadata change, or a head-pose discontinuity.
+	wivrn::motion_field_data motion_ema_field;
+	uint64_t motion_ema_frame = uint64_t(-1);
+	XrTime motion_ema_span = 0;
+	XrTime motion_ema_source_time = 0;
+	bool motion_ema_active = false;
 	// When a complete field last arrived, and how many have. Only the Transport page reads
 	// them; the warp itself works off the assembler.
 	std::atomic<XrTime> motion_field_last = 0;

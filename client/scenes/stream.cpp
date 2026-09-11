@@ -59,6 +59,7 @@
 
 #include "wivrn_config.h"
 #include "utils/retained_frame_slot.h"
+#include "utils/motion_history.h"
 
 #ifdef __ANDROID__
 #include <sys/system_properties.h>
@@ -90,6 +91,17 @@ static bool motion_cap_enabled()
 #else
 	const char * value = std::getenv("WIVRN_NX_MOTION_CAP");
 	return value and std::strcmp(value, "1") == 0;
+#endif
+}
+
+static bool motion_history_ema_enabled()
+{
+#ifdef __ANDROID__
+ char value[PROP_VALUE_MAX] = {};
+ return __system_property_get("debug.wivrn.nx.motion_ema", value) > 0 and std::strcmp(value, "1") == 0;
+#else
+ const char * value = std::getenv("WIVRN_NX_MOTION_EMA");
+ return value and std::strcmp(value, "1") == 0;
 #endif
 }
 
@@ -2308,6 +2320,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 					        source_clock ? it->source_time_ns : handle.view_info.display_time,
 					        source_clock ? it->source_span_ns : it->span_ns,
 					        constants::stream::motion_max_steps);
+					const float uncapped_step = motion.step;
 					if (motion_cap_enabled())
 					{
 						static bool logged = false;
@@ -2364,6 +2377,42 @@ void scenes::stream::render(const XrFrameState & frame_state)
 						}
 						for (size_t v = 1; usable and v < view_count; ++v)
 							usable = prev[v]->first == prev[0]->first;
+
+                        // Filter total motion only while the source head poses are
+                        // nearly stationary. This is an approximate safeguard, not
+                        // a separation of object motion from head motion.
+                        bool stable_head = usable;
+                        for (size_t v = 0; stable_head and v < view_count; ++v)
+                            stable_head = motion_pose_delta_small(prev[v]->second.pose[v],
+                                current_blit_handles[eye_stream(v)]->view_info.pose[v]);
+                        const bool ema_enabled = motion_history_ema_enabled();
+                        if (motion_ema_frame != it->frame_idx)
+                        {
+                            const bool compatible = ema_enabled and stable_head and
+                                motion_ema_frame != uint64_t(-1) and it->frame_idx == motion_ema_frame + 1 and
+                                motion_ema_span > 0 and warp_span >= motion_ema_span / 2 and
+                                warp_span <= motion_ema_span * 2 and
+                                (motion_ema_source_time <= 0 or it->source_time_ns <= 0 or
+                                 (it->source_time_ns > motion_ema_source_time and
+                                  it->source_time_ns - motion_ema_source_time <= 100'000'000));
+                            motion_field_data filtered;
+                            motion_ema_active = compatible and motion_field_ema_blend(motion_ema_field, *it, filtered);
+                            motion_ema_field = motion_ema_active ? std::move(filtered) : *it;
+                            motion_ema_frame = it->frame_idx;
+                            motion_ema_span = stable_head and ema_enabled ? warp_span : 0;
+                            motion_ema_source_time = it->source_time_ns;
+                        }
+                        if (ema_enabled and stable_head and motion_ema_active)
+                        {
+                            motion.field = &motion_ema_field;
+                            motion.step = std::min(uncapped_step, float(22'222'222) / float(warp_span));
+                            static bool logged = false;
+                            if (not logged)
+                            {
+                                spdlog::info("motion EMA applied: alpha 0.5, horizon 22.22 ms, source {}", it->frame_idx);
+                                logged = true;
+                            }
+                        }
 						if (usable)
 						{
 							const float u = 1.f + motion.step;
@@ -2574,6 +2623,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			state.bleed_fade = post.bleed_fade_distance;
 			state.motion_on = motion.field != nullptr and motion.step > 0;
 			state.motion_step = motion.step;
+			state.motion_filtered = motion.field == &motion_ema_field;
 			state.motion_frame = motion.field ? motion.field->frame_idx : uint64_t(-1);
 			state.frame_blend = blend.weight;
 			state.gui_interactable = is_gui_interactable();
@@ -3110,6 +3160,10 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
         auto field = motion_field.lock();
         field->operator=(wivrn::motion_field_assembler{});
         motion_field_history.clear();
+        motion_ema_field = {};
+        motion_ema_frame = uint64_t(-1);
+        motion_ema_active = false;
+        motion_ema_span = motion_ema_source_time = 0;
     }
 
 	spdlog::info("Creating decoders, size {}x{}", description.width, description.height);

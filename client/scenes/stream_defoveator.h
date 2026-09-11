@@ -158,6 +158,7 @@ private:
 	uint32_t motion_height = 0;
 	// frame_idx of the field currently in the texture
 	uint64_t motion_frame = uint64_t(-1);
+	const wivrn::motion_field_data * motion_source = nullptr;
 	bool motion_ready = false;
 
 	void ensure_motion_image(vk::raii::CommandBuffer & command_buffer, uint32_t width, uint32_t height);

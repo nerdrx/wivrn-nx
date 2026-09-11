@@ -81,6 +81,17 @@ static bool motion_source_clock_enabled()
 #endif
 }
 
+static bool motion_cap_enabled()
+{
+#ifdef __ANDROID__
+	char value[PROP_VALUE_MAX] = {};
+	return __system_property_get("debug.wivrn.nx.motion_cap", value) > 0 and std::strcmp(value, "1") == 0;
+#else
+	const char * value = std::getenv("WIVRN_NX_MOTION_CAP");
+	return value and std::strcmp(value, "1") == 0;
+#endif
+}
+
 // clang-format off
 static const std::unordered_map<std::string, device_id> device_ids = {
 	{"/user/hand/left/input/x/click",             device_id::X_CLICK},
@@ -2217,6 +2228,19 @@ void scenes::stream::render(const XrFrameState & frame_state)
 					        source_clock ? it->source_time_ns : handle.view_info.display_time,
 					        source_clock ? it->source_span_ns : it->span_ns,
 					        constants::stream::motion_max_steps);
+					if (motion_cap_enabled())
+					{
+						static bool logged = false;
+						const XrDuration horizon = 11'111'111;
+						const XrDuration span = source_clock ? it->source_span_ns : it->span_ns;
+						const float original_step = motion.step;
+						motion.step = std::min(motion.step, float(horizon) / float(span));
+						if (not logged and motion.step < original_step)
+						{
+							spdlog::info("motion cap applied: horizon {} ns, span {} ns, step {:.4f} -> {:.4f}", horizon, span, original_step, motion.step);
+							logged = true;
+						}
+					}
 
 					// Optical flow already contains the head motion from the exact
 					// predecessor to this frame. Move the submitted pose by the

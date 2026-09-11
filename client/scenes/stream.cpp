@@ -58,6 +58,7 @@
 #endif
 
 #include "wivrn_config.h"
+#include "utils/retained_frame_slot.h"
 
 #ifdef __ANDROID__
 #include <sys/system_properties.h>
@@ -936,7 +937,18 @@ void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_p
 					if (history.size() > 32)
 						history.pop_front();
 				}
-				std::swap(handle, decoders[stream].latest_frames[handle->feedback.frame_index % retained_image_count()]);
+				auto & frames = decoders[stream].latest_frames;
+				if (retained_image_count() == 4)
+				{
+					std::array<std::optional<uint64_t>, image_buffer_size> ids{};
+					for (size_t i = 0; i < frames.size(); ++i)
+						if (frames[i]) ids[i] = frames[i]->feedback.frame_index;
+					if (auto slot = retained_frame_slot(ids, handle->feedback.frame_index))
+						std::swap(handle, frames[*slot]);
+					// A stale arrival remains in handle and follows normal dropped-frame feedback.
+				}
+				else
+					std::swap(handle, frames[handle->feedback.frame_index % retained_image_count()]);
 			}
 		}
 
@@ -1177,6 +1189,12 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, scenes::stream::deco
 
 std::shared_ptr<shard_accumulator::blit_handle> scenes::stream::accumulator_images::frame(uint64_t id) const
 {
+	if (retained_image_count() == 4)
+	{
+		for (const auto & frame : latest_frames)
+			if (frame and frame->feedback.frame_index == id) return frame;
+		return nullptr;
+	}
 	auto & frame = latest_frames[id % retained_image_count()];
 	if (frame and frame->feedback.frame_index != id)
 		return nullptr;

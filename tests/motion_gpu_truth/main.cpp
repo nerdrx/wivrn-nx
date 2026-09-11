@@ -135,6 +135,7 @@ int main(int argc, char ** argv)
 	const auto usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 	Img prev = image(c, W, H, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, usage), cur = image(c, W, H, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, usage), py0 = image(c, E, E, 2, L, VK_FORMAT_R32_SFLOAT, usage), py1 = image(c, E, E, 2, L, VK_FORMAT_R32_SFLOAT, usage), retained = image(c, W, H, 2, 1, VK_FORMAT_R8G8B8A8_UNORM, usage), out = image(c, W, H, 2, 1, VK_FORMAT_R8G8B8A8_UNORM, usage);
 	std::vector<uint8_t> a(W * H * 4), b(W * H * 4);
+	if (argc <= 4)
 	for (uint32_t y = 0; y < H; y++)
 		for (uint32_t x = 0; x < W; x++)
 		{
@@ -233,7 +234,23 @@ int main(int argc, char ** argv)
 		int32_t sz[2], g[2];
 		float t;
 	} wpc{{int32_t(W), int32_t(H)}, {G, G}, step};
-	c.oneShot([&](VkCommandBuffer cmd) {for(auto* im:{&py0,&py1,&out})barrier(cmd,im->im,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_GENERAL,im->layers,im->mips,0,VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT);vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,dp);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,dpl,0,1,&ds,0,nullptr);vkCmdPushConstants(cmd,dpl,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof dpc,&dpc);vkCmdDispatch(cmd,E/8,E/8,2);fullBarrier(cmd);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,dpl,0,1,&ds2,0,nullptr);vkCmdDispatch(cmd,E/8,E/8,2);fullBarrier(cmd);vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,ep);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,epl,0,1,&es,0,nullptr);vkCmdPushConstants(cmd,epl,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof epc,&epc);vkCmdDispatch(cmd,G,G,2);fullBarrier(cmd);vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,wp);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,wpl,0,1,&ws,0,nullptr);vkCmdPushConstants(cmd,wpl,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof wpc,&wpc);vkCmdDispatch(cmd,W/8,H/8,2);fullBarrier(cmd); });
+	c.oneShot([&](VkCommandBuffer cmd) {for(auto* im:{&py0,&py1,&out})barrier(cmd,im->im,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_GENERAL,im->layers,im->mips,0,VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT);vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,dp);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,dpl,0,1,&ds,0,nullptr);vkCmdPushConstants(cmd,dpl,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof dpc,&dpc);vkCmdDispatch(cmd,E/8,E/8,2);fullBarrier(cmd);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,dpl,0,1,&ds2,0,nullptr);vkCmdDispatch(cmd,E/8,E/8,2);fullBarrier(cmd);vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,ep);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,epl,0,1,&es,0,nullptr);vkCmdPushConstants(cmd,epl,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof epc,&epc);vkCmdDispatch(cmd,G,G,2);fullBarrier(cmd);
+	 VkMemoryBarrier readback{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+	 readback.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT; readback.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
+	 vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&readback,0,nullptr,0,nullptr);
+	 });
+	{ std::ofstream f("field.f32", std::ios::binary); f.write(static_cast<const char *>(field.mapped), G*G*2*2*sizeof(float)); }
+	if (const char *path = std::getenv("NX_MOTION_FIELD_OVERRIDE"))
+	{
+	 std::ifstream f(path, std::ios::binary | std::ios::ate);
+	 if (!f || f.tellg() != std::streamoff(G*G*2*2*sizeof(float))) return 2;
+	 f.seekg(0); f.read(static_cast<char *>(field.mapped), G*G*2*2*sizeof(float));
+	}
+	c.oneShot([&](VkCommandBuffer cmd) {
+	 VkMemoryBarrier host{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+	 host.srcAccessMask=VK_ACCESS_HOST_WRITE_BIT; host.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
+	 vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_HOST_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,1,&host,0,nullptr,0,nullptr);
+	vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,wp);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,wpl,0,1,&ws,0,nullptr);vkCmdPushConstants(cmd,wpl,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof wpc,&wpc);vkCmdDispatch(cmd,W/8,H/8,2);fullBarrier(cmd); });
 	float * fv = (float *)field.mapped;
 	for (unsigned j = 0; j < G; j++)
 	{

@@ -107,6 +107,8 @@ private:
 	std::atomic<float> requested_refresh_rate;
 	std::atomic<float> frame_rate;
 	wivrn::pacer pacer;
+	// Opt-in source pacing cap; panel refresh metadata stays unchanged.
+	bool nx_source_cap_60 = false;
 
 	layer_squasher squasher;
 	wivrn::foveation foveation;
@@ -323,6 +325,7 @@ private:
 	}
 
 	int acquire_image();
+	float effective_framerate(float normal_hz) const;
 
 	// One quad layer of the current layer stack, chosen to be streamed on its own
 	// instead of being composited into the eye images.

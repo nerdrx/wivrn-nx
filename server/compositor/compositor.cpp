@@ -577,7 +577,7 @@ bool compositor::fail_over_encoder(size_t idx, const std::string & reason)
 			encoder_bitrate = bitrate * conf.bitrate_multiplier;
 		}
 	}
-	replacement->set_framerate(frame_rate);
+	replacement->set_framerate(nx_source_cap_60 ? effective_framerate(frame_rate) : frame_rate.load());
 	replacement->set_pacing(pacing_enabled, pacing_window);
 	replacement->set_fec(fec_enabled);
 	replacement->set_fec_adaptive(fec_adaptive_enabled);
@@ -1655,6 +1655,14 @@ compositor::compositor(wivrn_session & session) :
         squasher(vk, render_extent(session.get_info())),
         foveation(vk, images[0].image.info().extent)
 {
+	const char * source_fps = std::getenv("WIVRN_NX_SOURCE_FPS");
+	nx_source_cap_60 = source_fps and source_fps[0] == '6' and source_fps[1] == '0' and source_fps[2] == '\0';
+	if (nx_source_cap_60)
+	{
+		pacer.set_frame_duration(U_TIME_1S_IN_NS / std::min(frame_rate.load(), 60.f));
+		U_LOG_I("compositor: WIVRN_NX_SOURCE_FPS=60 enabled (paced source rate; panel refresh metadata unchanged)");
+	}
+
 	comp_base * c_base = this;
 	// Ensure we can safely cast pointers
 	assert(intptr_t(&base) == intptr_t(this));
@@ -1763,6 +1771,8 @@ compositor::compositor(wivrn_session & session) :
 		if (not settings.enabled or i == quad_stream_idx)
 			continue;
 		encoders[i] = video_encoder::create(vk, settings, i);
+		if (nx_source_cap_60)
+			encoders[i]->set_framerate(effective_framerate(frame_rate));
 	}
 
 	// The quad layer stream is a bonus, not a requirement: a fourth encode session
@@ -1773,6 +1783,8 @@ compositor::compositor(wivrn_session & session) :
 		try
 		{
 			encoders[quad_stream_idx] = video_encoder::create(vk, settings[quad_stream_idx], quad_stream_idx);
+			if (nx_source_cap_60)
+				encoders[quad_stream_idx]->set_framerate(effective_framerate(frame_rate));
 			quad = std::make_unique<wivrn::quad_converter>(vk, settings[quad_stream_idx], images.size());
 			quad_allow_blended = configuration().quad_layers.allow_blended;
 
@@ -2073,7 +2085,7 @@ void compositor::set_framerate(float hz)
 	// frame_rate keeps the normal (commanded) rate so the panel refresh rate reported by
 	// get_display_refresh_rate stays correct; the pacer and encoders get the effective rate,
 	// which the emergency divider may have halved.
-	const float eff = hz / float(emergency_divider.load());
+	const float eff = effective_framerate(hz);
 	pacer.set_frame_duration(U_TIME_1S_IN_NS / eff);
 	for (auto & encoder: get_encoders())
 	{
@@ -2095,13 +2107,19 @@ void compositor::set_emergency_framerate(bool active)
 
 	// Re-apply the effective rate through the new divider. frame_rate (the normal rate) is
 	// untouched, so the panel refresh rate the application sees does not change.
-	const float eff = frame_rate.load() / float(divider);
+	const float eff = effective_framerate(frame_rate.load());
 	pacer.set_frame_duration(U_TIME_1S_IN_NS / eff);
 	for (auto & encoder: get_encoders())
 	{
 		if (encoder)
 			encoder->set_framerate(eff);
 	}
+}
+
+float compositor::effective_framerate(float normal_hz) const
+{
+	const float capped = nx_source_cap_60 ? std::min(normal_hz, 60.f) : normal_hz;
+	return capped / float(emergency_divider.load());
 }
 
 void compositor::update_tracking(const from_headset::tracking & tracking)

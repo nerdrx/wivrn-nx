@@ -158,6 +158,17 @@ int main(int argc, char ** argv)
 	  for(unsigned k=0; k<4; ++k)
 	   b[(y*W+x)*4+k]=a[(std::max(0,int(y)-int(DY))*W+std::max(0,int(x)-int(DX)))*4+k];
 	}
+	std::vector<uint8_t> explicit_truth;
+	if (argc > 6)
+	{
+	 auto load_frame = [&](const char *path, std::vector<uint8_t> &data) {
+	  std::ifstream f(path, std::ios::binary | std::ios::ate);
+	  if (!f || f.tellg() != std::streamoff(a.size())) return false;
+	  data.resize(a.size()); f.seekg(0);
+	  return bool(f.read(reinterpret_cast<char *>(data.data()), data.size()));
+	 };
+	 if (!load_frame(argv[5], b) || !load_frame(argv[6], explicit_truth)) return 2;
+	}
 	upload(c, prev, a, W, H);
 	upload(c, cur, b, W, H);
 	auto stereo = b;
@@ -238,7 +249,7 @@ int main(int argc, char ** argv)
 			pe += d * d;
 			pn++;
 		}
-	printf("pyramid l0 shifted RMSE=%g\n", sqrt(pe / pn));
+	if (explicit_truth.empty()) printf("pyramid l0 shifted RMSE=%g\n", sqrt(pe / pn));
 	c.destroyBuffer(pyrread);
 	Buffer read = c.createBuffer(W * H * 4 * 2, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 	c.oneShot([&](VkCommandBuffer cmd) {barrier(cmd,out.im,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,2,1,VK_ACCESS_SHADER_WRITE_BIT,VK_ACCESS_TRANSFER_READ_BIT);VkBufferImageCopy q{};q.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,2};q.imageExtent={W,H,1};vkCmdCopyImageToBuffer(cmd,out.im,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,read.buf,1,&q);VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};mb.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;mb.dstAccessMask=VK_ACCESS_HOST_READ_BIT;vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&mb,0,nullptr,0,nullptr); });
@@ -254,6 +265,9 @@ int main(int argc, char ** argv)
 				truth[o] = k == 3 ? 255 : encode(a[(sy * W + sx) * 4 + k]);
 				held[o] = k == 3 ? 255 : encode(held[o]);
 			}
+	if (!explicit_truth.empty())
+	 for (size_t i=0; i<truth.size(); ++i)
+	  truth[i] = i % 4 == 3 ? explicit_truth[i] : encode(explicit_truth[i]);
 	double err = 0, old = 0;
 	size_t n = 0;
 	for (unsigned eye = 0; eye < 2; eye++)

@@ -200,6 +200,7 @@ layout(constant_id = 6) const int atlas_eye = 0;
 layout(constant_id = 11) const bool compact_centre = false;
 layout(constant_id = 15) const float compact_eye_size = 2176.0;
 layout(constant_id = 16) const bool compact_large_centre = false;
+layout(constant_id = 17) const bool motion_blur = true;
 #define compact_centre_size (compact_eye_size == 2688.0 ? (compact_large_centre ? 1024.0 : 640.0) : 512.0)
 #define compact_outer_size ((compact_eye_size - compact_centre_size) * 0.5)
 #define compact_packed_size (compact_eye_size * 0.25 + compact_centre_size * 0.75)
@@ -1079,6 +1080,23 @@ void main()
 		sample_uv = filtered_px / vec2(rgb_rect.zw);
 	}
 	vec4 colour = sample_rgb(sample_uv);
+	// Tiny spatial motion-blur approximation. Keep alpha untouched. Restrict to
+	// ordinary opaque decoded images; atlas/compact mappings need separate proof.
+	if (motion_blur && !static_post && motion.x > 0.0 && atlas_mode == 0 && !compact_centre && alpha == 0)
+	{
+	 vec2 delta = motion_offset(inUV.xy, inPosition);
+	 vec2 pixels = delta * vec2(rgb_rect.zw);
+	 float distance_px = length(pixels);
+	 if (distance_px > 0.001)
+	 {
+	  vec2 offset = pixels / distance_px * min(1.5, distance_px * 0.1) / vec2(rgb_rect.zw);
+	  vec2 lo = 0.5 / vec2(rgb_rect.zw), hi = 1.0 - lo;
+	  colour.rgb = colour.rgb * 0.5
+	   + sample_rgb(clamp(sample_uv - offset, lo, hi)).rgb * 0.25
+	   + sample_rgb(clamp(sample_uv + offset, lo, hi)).rgb * 0.25;
+	 }
+	}
+
 	// Two extra spatial taps soften discontinuities between independently fitted
 	// peripheral tiles. Native centre tiles stay untouched; no history or pass.
 	if (peripheral_smooth == 4 && compact_centre && tile_radius_sq > compact_radius * compact_radius)

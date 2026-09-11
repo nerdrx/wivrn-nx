@@ -43,6 +43,18 @@
 #include <sys/system_properties.h>
 #endif
 
+// Read when creating the pipeline; reconnect after changing the debug override.
+static bool motion_blur_requested()
+{
+#ifdef __ANDROID__
+ char value[PROP_VALUE_MAX] = {};
+ return __system_property_get("debug.wivrn.nx.motion_blur", value) <= 0 || value[0] != '0';
+#else
+ const char *value = std::getenv("WIVRN_NX_MOTION_BLUR");
+ return !value || value[0] != '0';
+#endif
+}
+
 static int peripheral_smooth_requested()
 {
 #ifdef __ANDROID__
@@ -298,7 +310,8 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 		VkBool32(static_post_baked),
 		VkBool32(static_bleed_baked),
 		float(compact_eye_size_baked),
-		VkBool32(compact_large_centre_baked));
+		VkBool32(compact_large_centre_baked),
+		VkBool32(motion_blur_requested()));
 	auto fragment_shader = load_shader(device, atlas_r8 ? "reprojection_atlas_r8.frag" : "reprojection.frag");
 
 	vk::pipeline_builder pipeline_info{

@@ -100,20 +100,20 @@ ImPlotPoint getter(int index, void * data_)
 } // namespace
 
 // The user-facing name of a negotiated codec, shared by every place the GUI names one.
-static const char * codec_label(wivrn::video_codec c)
+static const char * codec_label(wivrn::video_codec c, bool nx_motion = false)
 {
 	switch (c)
 	{
 		case wivrn::video_codec::h264:
 			return "H.264";
 		case wivrn::video_codec::h265:
-			return "HEVC";
+			return nx_motion ? "NXVC Hybrid (HEVC)" : "HEVC";
 		case wivrn::video_codec::av1:
 			return "AV1";
 		case wivrn::video_codec::raw:
 			return "Raw";
 		case wivrn::video_codec::nxwarp:
-			return "NX Warp";
+			return "Native NXVC";
 	}
 	return "?";
 }
@@ -1319,7 +1319,7 @@ void scenes::stream::gui_transport()
 				if (not decoders[i].decoder)
 					continue;
 
-				const char * codec = codec_label(video_stream_description->codec[i]);
+				const char * codec = codec_label(video_stream_description->codec[i], is_view(i) and application::get_config().motion_mode() == wivrn::motion_mode::headset);
 
 				// A stream the server had to hand to x264 is the one thing on this
 				// page a user can act on, so it is the one thing coloured.
@@ -1951,7 +1951,7 @@ void scenes::stream::draw_gui(XrTime predicted_display_time, XrDuration predicte
 				// Transport page to learn whether the session is NX Warp or HEVC.
 				std::string subtitle = _("Live streaming performance.");
 				if (video_stream_description)
-					subtitle = fmt::format("{} {}", subtitle, fmt::format(_F("Video codec: {}."), codec_label(video_stream_description->codec[0])));
+					subtitle = fmt::format("{} {}", subtitle, fmt::format(_F("Video mode: {}."), codec_label(video_stream_description->codec[0], application::get_config().motion_mode() == wivrn::motion_mode::headset)));
 				wivrn::ui::page_header(_S("Statistics"), subtitle);
 			}
 			ImGui::BeginChild("plots", {0, 0});

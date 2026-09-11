@@ -1011,7 +1011,30 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	// describes what the application drew, never what was synthesized from it. They
 	// are still in eShaderReadOnlyOptimal here — the barriers above only concern the
 	// encoders' copy of the composited image.
-	update_motion_field(view_info.display_time, images[i].frame_index, live_src, live_src_rect, live_flip_y);
+	// Diagnostic only: preserve the application's layer timestamp separately from
+	// the compositor's predicted presentation timestamp. They are not interchangeable.
+	static const bool motion_time_trace = [] {
+		const char * value = std::getenv("WIVRN_NX_MOTION_TIME_TRACE");
+		return value and std::string_view(value) == "1";
+	}();
+	if (motion_time_trace and lone_layer >= 0 and lone_layer < int(layer_accum.layer_count) and
+	    (layer_accum.layers[lone_layer].data.type == XRT_LAYER_PROJECTION or
+	     layer_accum.layers[lone_layer].data.type == XRT_LAYER_PROJECTION_DEPTH))
+	{
+		const auto app_time = session.get_offset().to_headset(layer_accum.layers[lone_layer].data.timestamp);
+		U_LOG_I("motion clock: frame %llu new %d app_requested_display %lld compositor %lld delta_ms %.3f",
+		        (unsigned long long)images[i].frame_index, int(motion_new_frame),
+		        (long long)app_time, (long long)view_info.display_time,
+		        double(view_info.display_time - app_time) / 1e6);
+	}
+	XrTime source_time = 0;
+	if (lone_layer >= 0 and lone_layer < int(layer_accum.layer_count))
+	{
+		const auto type = layer_accum.layers[lone_layer].data.type;
+		if (type == XRT_LAYER_PROJECTION or type == XRT_LAYER_PROJECTION_DEPTH)
+			source_time = session.get_offset().to_headset(layer_accum.layers[lone_layer].data.timestamp);
+	}
+	update_motion_field(view_info.display_time, source_time, images[i].frame_index, live_src, live_src_rect, live_flip_y);
 	cmd.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *query_pool, 4);
 
 	bool mirrored = false;
@@ -1199,6 +1222,7 @@ void compositor::motion_begin()
 			motion.reset();
 		}
 		motion_previous_display_time = 0;
+		motion_previous_source_time = 0;
 		drop_retained_frame();
 		return;
 	}
@@ -1230,6 +1254,7 @@ void compositor::motion_begin()
 			return;
 		}
 		motion_previous_display_time = 0;
+		motion_previous_source_time = 0;
 	}
 
 	motion_mode_now = motion_mode::headset;
@@ -1376,6 +1401,7 @@ void compositor::motion_warp_commit(
 
 void compositor::update_motion_field(
         XrTime display_time,
+	XrTime source_time,
         uint64_t frame_index,
         std::array<vk::ImageView, 2> src,
         std::array<xrt_rect, 2> src_rect,
@@ -1388,6 +1414,9 @@ void compositor::update_motion_field(
 
 	const XrTime span = display_time - motion_previous_display_time;
 	const bool usable = motion_previous_display_time != 0 and span > 0 and span < motion_max_span;
+	const XrTime source_span = motion_previous_source_time > 0 and source_time > motion_previous_source_time
+	        ? source_time - motion_previous_source_time : 0;
+	const bool source_usable = source_time > 0 and motion_previous_source_time > 0 and source_span > 0 and source_span < 500'000'000;
 	// In server mode nothing goes on the wire and the vectors are consumed on the
 	// GPU, so the copy into host visible memory, and the send that follows it, are
 	// both skipped.
@@ -1400,6 +1429,8 @@ void compositor::update_motion_field(
 			motion_pending = true;
 			motion_frame_index = frame_index;
 			motion_span = span;
+			motion_source_time = source_usable ? source_time : 0;
+			motion_source_span = source_usable ? source_span : 0;
 		}
 		else
 		{
@@ -1409,6 +1440,7 @@ void compositor::update_motion_field(
 	}
 
 	motion_previous_display_time = display_time;
+	motion_previous_source_time = source_time;
 }
 
 void compositor::send_motion_field()
@@ -1422,6 +1454,8 @@ void compositor::send_motion_field()
 		auto field = motion->read_back();
 		field.frame_idx = motion_frame_index;
 		field.span_ns = motion_span;
+		field.source_time_ns = motion_source_time;
+		field.source_span_ns = motion_source_span;
 
 		// A whole field is larger than a datagram, so it goes out as several
 		// chunks, each carrying the full header.
@@ -2207,6 +2241,7 @@ void compositor::resume()
 	if (motion)
 		motion->reset();
 	motion_previous_display_time = 0;
+	motion_previous_source_time = 0;
 	motion_retained = false;
 	motion_retained_prev = false;
 	motion_retained_field = false;

@@ -82,6 +82,8 @@ motion_field_data make_field(uint16_t width, uint16_t height, uint64_t frame_idx
 	motion_field_data field{
 	        .frame_idx = frame_idx,
 	        .span_ns = 33'000'000,
+	        .source_time_ns = 2'000'000'000,
+	        .source_span_ns = 33'333'333,
 	        .width = width,
 	        .height = height,
 	        .scale = 0.125f,
@@ -94,7 +96,8 @@ motion_field_data make_field(uint16_t width, uint16_t height, uint64_t frame_idx
 
 bool same_field(const motion_field_data & a, const motion_field_data & b)
 {
-	return a.frame_idx == b.frame_idx and a.span_ns == b.span_ns and a.width == b.width and
+	return a.frame_idx == b.frame_idx and a.span_ns == b.span_ns and a.source_time_ns == b.source_time_ns and
+	       a.source_span_ns == b.source_span_ns and a.width == b.width and
 	       a.height == b.height and a.scale == b.scale and a.vectors == b.vectors;
 }
 
@@ -277,6 +280,16 @@ void test_losses_and_garbage()
 		assembler.add(bad);
 		CHECK(not assembler.complete());
 
+		bad = chunks[0];
+		bad.source_span_ns += 1;
+		assembler.add(bad);
+		CHECK(not assembler.complete());
+
+		bad = chunks[0];
+		bad.source_time_ns = 0;
+		assembler.add(bad);
+		CHECK(not assembler.complete());
+
 		// A grid whose cell count blows past MOTION_MAX_CELLS is refused before the
 		// field is ever allocated: a corrupt height must not drive a huge assign().
 		bad = chunks[0];
@@ -327,6 +340,9 @@ void test_warp_step()
 	// A field that spans nothing is not something to divide by
 	CHECK(motion_warp_step(frame + span, frame, 0, cap) == 0);
 	CHECK(motion_warp_step(frame + span, frame, -1, cap) == 0);
+	// Source metadata can intentionally put the application timestamp before the
+	// compositor display timestamp; the opt-in client path then advances from it.
+	CHECK(std::abs(motion_warp_step(frame + 75'000'000, frame - 25'000'000, 33'333'333, cap) - 3.f) < 1e-5);
 }
 
 // Part E ---------------------------------------------------------------------------

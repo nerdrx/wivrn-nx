@@ -155,10 +155,13 @@ private:
 	bool motion_unsafe = false;
 	// Headset time of the frame the current pyramid was built from
 	XrTime motion_previous_display_time = 0;
+	XrTime motion_previous_source_time = 0;
 	// A field was computed into the submission being waited on
 	bool motion_pending = false;
 	uint64_t motion_frame_index = 0;
 	XrTime motion_span = 0;
+	XrTime motion_source_time = 0;
+	XrTime motion_source_span = 0;
 
 	// What this commit is doing about motion smoothing, decided at the top of
 	// layer_commit by motion_begin() because the warp has to be recorded before the
@@ -360,6 +363,7 @@ private:
 	// application frame and while a mode is in force.
 	void update_motion_field(
 	        XrTime display_time,
+	        XrTime source_time,
 	        uint64_t frame_index,
 	        std::array<vk::ImageView, 2> src,
 	        std::array<xrt_rect, 2> src_rect,

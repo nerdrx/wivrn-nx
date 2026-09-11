@@ -38,6 +38,9 @@ struct motion_field_data
 	uint64_t frame_idx = uint64_t(-1);
 	// Interval it spans, in the headset time referential, strictly positive
 	XrTime span_ns = 0;
+	// Application source clock metadata; zero means unknown.
+	XrTime source_time_ns = 0;
+	XrTime source_span_ns = 0;
 	// Cells per eye
 	uint16_t width = 0;
 	uint16_t height = 0;
@@ -70,7 +73,7 @@ inline float motion_warp_step(XrTime now, XrTime frame_display_time, XrTime span
 	// config; a negative one would put 0 above the high bound. Treat it as no motion.
 	if (max_steps < 0)
 		return 0;
-	const double steps = double(now - frame_display_time) / double(span_ns);
+	const double steps = (double(now) - double(frame_display_time)) / double(span_ns);
 	return float(std::clamp<double>(steps, 0, max_steps));
 }
 
@@ -98,6 +101,8 @@ inline std::vector<to_headset::motion_field> split_motion_field(const motion_fie
 			chunks.push_back({
 			        .frame_idx = field.frame_idx,
 			        .span_ns = field.span_ns,
+			        .source_time_ns = field.source_time_ns,
+			        .source_span_ns = field.source_span_ns,
 			        .width = field.width,
 			        .height = field.height,
 			        .scale = field.scale,
@@ -156,9 +161,20 @@ public:
 			return;
 		if (chunk.vectors.size() != size_t(chunk.row_count) * chunk.width * 2)
 			return;
+		if (chunk.source_time_ns < 0 or chunk.source_span_ns < 0 or
+		    (chunk.source_time_ns == 0) != (chunk.source_span_ns == 0) or
+		    chunk.source_span_ns >= 500'000'000)
+			return;
 
 		const bool same_field = started and current.frame_idx == chunk.frame_idx and
 		                        current.width == chunk.width and current.height == chunk.height;
+		const bool metadata_matches = not started or
+		                              (current.span_ns == chunk.span_ns and
+		                               current.source_time_ns == chunk.source_time_ns and
+		                               current.source_span_ns == chunk.source_span_ns and
+		                               current.scale == chunk.scale);
+		if (same_field and not metadata_matches)
+			return;
 
 		if (not same_field)
 		{
@@ -168,6 +184,8 @@ public:
 
 			current.frame_idx = chunk.frame_idx;
 			current.span_ns = chunk.span_ns;
+			current.source_time_ns = chunk.source_time_ns;
+			current.source_span_ns = chunk.source_span_ns;
 			current.width = chunk.width;
 			current.height = chunk.height;
 			current.scale = chunk.scale;

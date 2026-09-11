@@ -1642,6 +1642,9 @@ struct motion_field
 	// of frame_idx minus the display time of the previous distinct application
 	// frame. Always strictly positive.
 	XrTime span_ns;
+	// Optional application source clock metadata. Zero means unknown.
+	XrTime source_time_ns;
+	XrTime source_span_ns;
 
 	// Cells per eye. The grid covers the whole eye image; cell (i, j) is centred at
 	// ((i + 0.5) / width, (j + 0.5) / height) in normalized coordinates of the

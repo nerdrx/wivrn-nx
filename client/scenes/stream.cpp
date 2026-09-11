@@ -69,6 +69,18 @@
 using namespace wivrn;
 using namespace beman::inplace_vector;
 
+static bool motion_source_clock_enabled()
+{
+#ifdef __ANDROID__
+	char value[PROP_VALUE_MAX] = {};
+	return __system_property_get("debug.wivrn.nx.motion_source_clock", value) > 0 and
+	       std::strcmp(value, "1") == 0;
+#else
+	const char * value = std::getenv("WIVRN_NX_MOTION_SOURCE_CLOCK");
+	return value and std::strcmp(value, "1") == 0;
+#endif
+}
+
 // clang-format off
 static const std::unordered_map<std::string, device_id> device_ids = {
 	{"/user/hand/left/input/x/click",             device_id::X_CLICK},
@@ -1264,6 +1276,7 @@ struct render_probe
 	uint64_t selected_forward = 0, selected_backward = 0, selected_repeat = 0, selected_max_gap = 0;
 	uint64_t motion_matched = 0, motion_active = 0, motion_pose_applied = 0;
 	uint64_t motion_pose_unsafe = 0, motion_pose_missing = 0;
+	uint64_t motion_source_clock_applied = 0;
 	double motion_step_sum = 0;
 	double period_ms = 0, fence_ms = 0, query_ms = 0, submit_ms = 0, blit_ms = 0;
 	double selection_to_defoveate_ms = 0, selection_to_defoveate_max_ms = 0;
@@ -2196,10 +2209,13 @@ void scenes::stream::render(const XrFrameState & frame_state)
 				if (it != motion_field_history.rend())
 				{
 					motion.field = &*it;
+					const bool source_clock = motion_source_clock_enabled() and
+					                         it->source_time_ns > 0 and it->source_span_ns > 0 and
+					                         it->source_span_ns < 500'000'000;
 					motion.step = motion_warp_step(
 					        frame_state.predictedDisplayTime,
-					        handle.view_info.display_time,
-					        it->span_ns,
+					        source_clock ? it->source_time_ns : handle.view_info.display_time,
+					        source_clock ? it->source_span_ns : it->span_ns,
 					        constants::stream::motion_max_steps);
 
 					// Optical flow already contains the head motion from the exact
@@ -2259,6 +2275,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 								fov = compensated_fov;
 								motion_pose_compensated = true;
 								++g_rp.motion_pose_applied;
+								if (source_clock) ++g_rp.motion_source_clock_applied;
 							}
 						}
 						if (not usable)
@@ -2880,6 +2897,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		spdlog::info("render: per iteration fence {:.1f} (worst {:.1f}) | queries {:.1f} | submit {:.1f} | whole render() {:.1f} ms",
 		             g_rp.fence_ms / n, g_rp.worst_fence_ms, g_rp.query_ms / n,
 		             g_rp.submit_ms / n, g_rp.blit_ms / n);
+		spdlog::info("render: source-clock pose shifts {}", g_rp.motion_source_clock_applied);
 	        spdlog::info("render: motion fields matched {} active {} pose-applied {} pose-missing {} pose-unsafe {} mean active step {:.3f}",
 	                     g_rp.motion_matched, g_rp.motion_active,
 	                     g_rp.motion_pose_applied, g_rp.motion_pose_missing, g_rp.motion_pose_unsafe,

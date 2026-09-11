@@ -2242,6 +2242,9 @@ void scenes::stream::render(const XrFrameState & frame_state)
 						}
 					}
 
+					// Keep this pose fraction equal to the applied image-warp fraction,
+					// even with the source clock: the field already includes head motion.
+					// Independently advancing the metadata pose would misdescribe the image.
 					// Optical flow already contains the head motion from the exact
 					// predecessor to this frame. Move the submitted pose by the
 					// same step, but only when that predecessor is actually available

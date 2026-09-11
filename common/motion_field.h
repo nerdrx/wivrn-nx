@@ -38,7 +38,8 @@ struct motion_field_data
 	uint64_t frame_idx = uint64_t(-1);
 	// Interval it spans, in the headset time referential, strictly positive
 	XrTime span_ns = 0;
-	// Application source clock metadata; zero means unknown.
+	// Application-requested display time and its interval, in headset time.
+	// These are not capture/encode completion timestamps; zero means unknown.
 	XrTime source_time_ns = 0;
 	XrTime source_span_ns = 0;
 	// Cells per eye

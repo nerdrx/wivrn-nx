@@ -64,7 +64,7 @@ public:
 		stalled,
 		shutdown,
 	};
-	static const size_t image_buffer_size = 3;
+	static const size_t image_buffer_size = 4; // Fourth slot is opt-in; see retained_image_count().
 
 	// Enough to rebuild a session to the same server from the network thread, without
 	// going back to the lobby: the address that actually connected, the port, and the

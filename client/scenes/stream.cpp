@@ -103,6 +103,18 @@ static bool motion_timeline_trace_enabled()
 #endif
 }
 
+static size_t retained_image_count()
+{
+ static const size_t count = []() -> size_t {
+#ifdef __ANDROID__
+  char value[PROP_VALUE_MAX] = {};
+  if (__system_property_get("debug.wivrn.nx.motion_retain4", value) > 0 and value[0] == '1') return 4;
+#endif
+  return 3;
+ }();
+ return count;
+}
+
 // clang-format off
 static const std::unordered_map<std::string, device_id> device_ids = {
 	{"/user/hand/left/input/x/click",             device_id::X_CLICK},
@@ -924,7 +936,7 @@ void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_p
 					if (history.size() > 32)
 						history.pop_front();
 				}
-				std::swap(handle, decoders[stream].latest_frames[handle->feedback.frame_index % decoders[stream].latest_frames.size()]);
+				std::swap(handle, decoders[stream].latest_frames[handle->feedback.frame_index % retained_image_count()]);
 			}
 		}
 
@@ -1081,6 +1093,20 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, scenes::stream::deco
 		}
 #endif
 
+		if (motion_timeline_trace_enabled())
+		{
+			size_t past_count = 0;
+			XrTime oldest = std::numeric_limits<XrTime>::max();
+			for (const auto * h : common_frames)
+			{
+				oldest = std::min(oldest, h->view_info.display_time);
+				past_count += h->view_info.display_time <= target;
+			}
+			spdlog::info("warp candidates: target {} count {} past {} oldest_offset_ms {:.3f} selected_offset_ms {:.3f} alpha {}",
+			             target, common_frames.size(), past_count, double(oldest-target)*1e-6,
+			             double((*min)->view_info.display_time-target)*1e-6, alpha);
+		}
+
 		assert(*min);
 		auto frame_index = (*min)->feedback.frame_index;
 		if (std::ranges::any_of(common_frames, [frame_index](const auto * h) {
@@ -1151,7 +1177,7 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, scenes::stream::deco
 
 std::shared_ptr<shard_accumulator::blit_handle> scenes::stream::accumulator_images::frame(uint64_t id) const
 {
-	auto & frame = latest_frames[id % latest_frames.size()];
+	auto & frame = latest_frames[id % retained_image_count()];
 	if (frame and frame->feedback.frame_index != id)
 		return nullptr;
 	return frame;

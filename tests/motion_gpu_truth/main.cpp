@@ -13,7 +13,11 @@ using namespace nxb;
 #ifndef MOTION_TRUTH_SIZE
 #define MOTION_TRUTH_SIZE 256
 #endif
-constexpr uint32_t W = MOTION_TRUTH_SIZE, H = W, E = W / 4, L = 3, G = W / 64;
+#ifndef MOTION_TRUTH_BLOCK
+#define MOTION_TRUTH_BLOCK 64
+#endif
+constexpr uint32_t W = MOTION_TRUTH_SIZE, H = W, E = W / 4, L = 3, G = W / MOTION_TRUTH_BLOCK;
+static_assert(MOTION_TRUTH_BLOCK >= 8 && W % MOTION_TRUTH_BLOCK == 0);
 static_assert(W >= 256 && W % 64 == 0);
 uint32_t DX = 8, DY = 4;
 struct Img

@@ -120,6 +120,7 @@ int main(int argc, char ** argv)
 		DX = std::stoul(argv[2]);
 		DY = std::stoul(argv[3]);
 	}
+	if (DX >= 96 || DY >= 96 || !std::isfinite(step)) return 2;
 	VkCtx c;
 	if (!c.create({}, {VK_KHR_FORMAT_FEATURE_FLAGS_2_EXTENSION_NAME}, false))
 		return 2;
@@ -215,8 +216,8 @@ int main(int argc, char ** argv)
 	auto pp = (float *)pyrread.mapped;
 	double pe = 0;
 	int pn = 0;
-	for (unsigned y = 8; y < E - 8; y++)
-		for (unsigned x = 8; x < E - 8; x++)
+	for (unsigned y = std::max(8u, DY / 4); y < E - 8; y++)
+		for (unsigned x = std::max(8u, DX / 4); x < E - 8; x++)
 		{
 			double d = pp[2 * E * E + y * E + x] - pp[(y - DY / 4) * E + x - DX / 4];
 			pe += d * d;
@@ -241,8 +242,8 @@ int main(int argc, char ** argv)
 	double err = 0, old = 0;
 	size_t n = 0;
 	for (unsigned eye = 0; eye < 2; eye++)
-		for (unsigned y = 64; y < H - 64; y++)
-			for (unsigned x = 64; x < W - 64; x++)
+		for (unsigned y = std::max(64u, 2 * DY); y < H - 64; y++)
+			for (unsigned x = std::max(64u, 2 * DX); x < W - 64; x++)
 				for (int k = 0; k < 3; k++)
 				{
 					size_t o = (y * W + x) * 4 + k;

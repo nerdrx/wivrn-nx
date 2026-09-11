@@ -1475,6 +1475,7 @@ bool scenes::stream::jit_enabled()
 
 void scenes::stream::render(const XrFrameState & frame_state)
 {
+	warp_timeline = {};
 	const auto capture_request = image_capture_request();
 	// --- just-in-time display -------------------------------------------------
 	//
@@ -2206,6 +2207,10 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			auto motion_lock = motion_field.lock();
 			stream_defoveator::motion_warp motion;
 			bool motion_pose_compensated = false;
+			warp_timeline = {};
+			XrTime warp_anchor = 0;
+			XrDuration warp_span = 0;
+			bool warp_source_clock = false;
 
 			if (config.motion_mode() == wivrn::motion_mode::headset and motion_stereo_aligned)
 			{
@@ -2223,6 +2228,9 @@ void scenes::stream::render(const XrFrameState & frame_state)
 					const bool source_clock = motion_source_clock_enabled() and
 					                         it->source_time_ns > 0 and it->source_span_ns > 0 and
 					                         it->source_span_ns < 500'000'000;
+					warp_anchor = source_clock ? it->source_time_ns : handle.view_info.display_time;
+					warp_span = source_clock ? it->source_span_ns : it->span_ns;
+					warp_source_clock = source_clock;
 					motion.step = motion_warp_step(
 					        frame_state.predictedDisplayTime,
 					        source_clock ? it->source_time_ns : handle.view_info.display_time,
@@ -2316,6 +2324,17 @@ void scenes::stream::render(const XrFrameState & frame_state)
 						}
 					}
 				}
+			}
+
+			// Sample only after caps and pose safety checks have finalized the warp.
+			// Invalid/future anchors stay unavailable rather than masquerading as zero latency.
+			if (motion.field and warp_anchor > 0 and warp_span > 0 and
+			    frame_state.predictedDisplayTime >= warp_anchor)
+			{
+				warp_timeline = {instance.now(),
+				                 double(frame_state.predictedDisplayTime - warp_anchor) * 1e-6,
+				                 double(motion.step) * double(warp_span) * 1e-6,
+				                 warp_source_clock};
 			}
 
 			if (motion.field) {
@@ -2499,6 +2518,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			cache_hit = reduce_gpu_load_enabled() and defoveate_cache_valid and
 			            not quad_info and state == defoveate_cache;
 
+			if (cache_hit) warp_timeline = {}; // No newly evaluated presentation pass.
 			g_rp.cache_hits += cache_hit ? 1 : 0;
 			g_rp.out_w = extents[0].width;
 			g_rp.out_h = extents[0].height;

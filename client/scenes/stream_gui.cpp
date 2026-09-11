@@ -869,9 +869,19 @@ void scenes::stream::gui_performance_metrics()
 	{
 		ImGui::TextUnformatted(
 		        fmt::format(
-		                _F("Estimated motion to photons latency: {}ms"),
+		                _F("Tracking prediction estimate: {}ms"),
 		                tracking_control.lock()->motions_to_photons / 1'000'000)
 		                .c_str());
+
+		const auto & wt = warp_timeline;
+		if (wt.recorded and instance.now() - wt.recorded < 250'000'000)
+		{
+			ImGui::Text("Warp timeline: %.1f ms gap - %.1f ms advance = %.1f ms remaining",
+			            wt.gap_ms, wt.advance_ms, std::max(0.0, wt.gap_ms - wt.advance_ms));
+			ImGui::TextUnformatted(wt.source_clock ? "Clock: app requested display time" : "Clock: compositor display time");
+		}
+		else ImGui::TextUnformatted("Warp timeline estimate: unavailable");
+		ImGui::TextWrapped("Timeline estimates only, not measured motion-to-photon latency.");
 
 		// Directly under the latency figure: what the panel is actually being shown and
 		// what the decoders are actually producing, then the NX Warp block. The same
@@ -1379,10 +1389,26 @@ void scenes::stream::gui_compact_view()
 		f(_S("Upload"), 8 * compact_bandwidth_tx * 1e-6, "Mbit/s");
 		f(_S("CPU time"), compact_cpu_time * 1000, "ms");
 		f(_S("GPU time"), compact_gpu_time * 1000, "ms");
-		f(_S("Motion to photon latency"),
+		f(_S("Tracking prediction estimate"),
 		  tracking_control.lock()->motions_to_photons / 1'000'000.f,
 		  "ms");
+		const auto & wt = warp_timeline;
+		if (wt.recorded and instance.now() - wt.recorded < 250'000'000)
+		{
+			f(_S("Source timeline gap"), wt.gap_ms, "ms");
+			f(_S("Warp advance"), wt.advance_ms, "ms");
+			f(_S("Remaining timeline gap"), std::max(0.0, wt.gap_ms - wt.advance_ms), "ms");
+		}
+		else
+		{
+			ImGui::TableNextRow(); ImGui::TableNextColumn();
+			ImGui::TextUnformatted("Warp timeline estimate"); ImGui::TableNextColumn();
+			ImGui::TextUnformatted("Unavailable");
+		}
 		ImGui::EndTable();
+		ImGui::TextWrapped("Timeline estimates only, not measured motion-to-photon latency.");
+		if (wt.recorded and instance.now() - wt.recorded < 250'000'000)
+			ImGui::TextUnformatted(wt.source_clock ? "Clock: app requested display time" : "Clock: compositor display time");
 	}
 
 	// Directly under the latency figure, outside the two-column table so the block keeps

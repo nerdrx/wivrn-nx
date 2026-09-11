@@ -461,6 +461,15 @@ private:
 	// them; the warp itself works off the assembler.
 	std::atomic<XrTime> motion_field_last = 0;
 	std::atomic<uint64_t> motion_field_count = 0;
+	// Render-thread telemetry: requested display-time arithmetic, not physical latency.
+	struct warp_timeline_sample {
+		XrTime recorded = 0;
+		double gap_ms = 0;
+		double advance_ms = 0;
+		bool source_clock = false;
+	};
+	warp_timeline_sample warp_timeline;
+
 
 	// --- Transport page ---------------------------------------------------------------
 	// Server side transport state, refreshed at wivrn::transport_status_interval while the

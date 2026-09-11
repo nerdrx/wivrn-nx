@@ -22,4 +22,6 @@ For independently rendered 3D frames, pass three linear RGBA8 paths: `motion_gpu
 
 Set `-DMOTION_TRUTH_BLOCK=32`, `16`, or `8` to compare denser vector grids without changing production defaults. At size 512 these are 16×16, 32×32 and 64×64 grids per eye (baseline 8×8). This changes vector spacing only: the pyramid and matching window stay fixed. It is not an 8px independent matching window.
 
-The fixture exports the measured stereo float vector field to `field.f32` before warping. `NX_MOTION_FIELD_OVERRIDE=/absolute/path/field.f32` substitutes a same-size normalized float32 field for CPU grouping experiments. GPU estimation still runs and the exported file remains the unmodified estimate. The override introduces host synchronization and is diagnostic only, not a production latency path.
+The fixture exports the measured stereo float vector field to `field.f32` before warping. `NX_MOTION_FIELD_OVERRIDE=/absolute/path/field.f32` substitutes a same-size normalized float32 field for CPU grouping experiments. With an override, GPU estimation and field export are skipped; the supplied field is consumed by the GPU warp. The override introduces host synchronization and is diagnostic only, not a production latency path.
+
+For per-pixel CPU inverse-map diagnostics, use `-DMOTION_TRUTH_SIZE=512 -DMOTION_TRUTH_BLOCK=1` with an override containing 512×512×2 eyes×2 components float32 values. This mode tests the production warp with an externally constructed field; it does not demonstrate a practical live 1px motion estimator. Dense vector printing is suppressed.

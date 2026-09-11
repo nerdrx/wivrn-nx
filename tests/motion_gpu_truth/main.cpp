@@ -17,7 +17,7 @@ using namespace nxb;
 #define MOTION_TRUTH_BLOCK 64
 #endif
 constexpr uint32_t W = MOTION_TRUTH_SIZE, H = W, E = W / 4, L = 3, G = W / MOTION_TRUTH_BLOCK;
-static_assert(MOTION_TRUTH_BLOCK >= 8 && W % MOTION_TRUTH_BLOCK == 0);
+static_assert(MOTION_TRUTH_BLOCK >= 1 && W % MOTION_TRUTH_BLOCK == 0);
 static_assert(W >= 256 && W % 64 == 0);
 uint32_t DX = 8, DY = 4;
 struct Img
@@ -234,12 +234,12 @@ int main(int argc, char ** argv)
 		int32_t sz[2], g[2];
 		float t;
 	} wpc{{int32_t(W), int32_t(H)}, {G, G}, step};
-	c.oneShot([&](VkCommandBuffer cmd) {for(auto* im:{&py0,&py1,&out})barrier(cmd,im->im,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_GENERAL,im->layers,im->mips,0,VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT);vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,dp);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,dpl,0,1,&ds,0,nullptr);vkCmdPushConstants(cmd,dpl,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof dpc,&dpc);vkCmdDispatch(cmd,E/8,E/8,2);fullBarrier(cmd);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,dpl,0,1,&ds2,0,nullptr);vkCmdDispatch(cmd,E/8,E/8,2);fullBarrier(cmd);vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,ep);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,epl,0,1,&es,0,nullptr);vkCmdPushConstants(cmd,epl,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof epc,&epc);vkCmdDispatch(cmd,G,G,2);fullBarrier(cmd);
+	c.oneShot([&](VkCommandBuffer cmd) {for(auto* im:{&py0,&py1,&out})barrier(cmd,im->im,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_GENERAL,im->layers,im->mips,0,VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT);vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,dp);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,dpl,0,1,&ds,0,nullptr);vkCmdPushConstants(cmd,dpl,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof dpc,&dpc);vkCmdDispatch(cmd,E/8,E/8,2);fullBarrier(cmd);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,dpl,0,1,&ds2,0,nullptr);vkCmdDispatch(cmd,E/8,E/8,2);fullBarrier(cmd);vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,ep);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,epl,0,1,&es,0,nullptr);vkCmdPushConstants(cmd,epl,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof epc,&epc);if (!std::getenv("NX_MOTION_FIELD_OVERRIDE")) vkCmdDispatch(cmd,G,G,2);fullBarrier(cmd);
 	 VkMemoryBarrier readback{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
 	 readback.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT; readback.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
 	 vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&readback,0,nullptr,0,nullptr);
 	 });
-	{ std::ofstream f("field.f32", std::ios::binary); f.write(static_cast<const char *>(field.mapped), G*G*2*2*sizeof(float)); }
+	if (!std::getenv("NX_MOTION_FIELD_OVERRIDE")) { std::ofstream f("field.f32", std::ios::binary); f.write(static_cast<const char *>(field.mapped), G*G*2*2*sizeof(float)); }
 	if (const char *path = std::getenv("NX_MOTION_FIELD_OVERRIDE"))
 	{
 	 std::ifstream f(path, std::ios::binary | std::ios::ate);
@@ -252,6 +252,7 @@ int main(int argc, char ** argv)
 	 vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_HOST_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,1,&host,0,nullptr,0,nullptr);
 	vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,wp);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,wpl,0,1,&ws,0,nullptr);vkCmdPushConstants(cmd,wpl,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof wpc,&wpc);vkCmdDispatch(cmd,W/8,H/8,2);fullBarrier(cmd); });
 	float * fv = (float *)field.mapped;
+	if (G <= 64)
 	for (unsigned j = 0; j < G; j++)
 	{
 		for (unsigned i = 0; i < G; i++)

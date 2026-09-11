@@ -188,6 +188,12 @@ std::pair<float, float> estimate_cell(
 	}
 
 	ivec2 c0{int(std::floor(centre_x)), int(std::floor(centre_y))};
+	ivec2 local = search(current, previous, 0, c0, {0, 0}, MOTION_RADIUS_FINE);
+	auto old_cost = sad(current, previous, 0, c0, v);
+	auto local_cost = sad(current, previous, 0, c0, local);
+	if (local_cost < old_cost or (local_cost == old_cost and
+	    std::abs(local.x) + std::abs(local.y) < std::abs(v.x) + std::abs(v.y)))
+		v = local;
 	const ivec2 offsets[5] = {{0, 0}, {-1, 0}, {1, 0}, {0, -1}, {0, 1}};
 	uint32_t cost[5];
 	for (int i = 0; i < 5; ++i)

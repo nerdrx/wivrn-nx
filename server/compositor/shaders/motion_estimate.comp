@@ -163,6 +163,16 @@ void main()
 
 	// Sub-texel refinement, on the level 0 cost surface around the winner
 	ivec2 c0 = ivec2(floor(centre));
+	// Coarse matching can lock onto a distant lookalike. Independently check
+	// small motion at full pyramid resolution before accepting that pull.
+	ivec2 local = search(0, c0, ivec2(0), MOTION_RADIUS_FINE, view);
+	if (gl_LocalInvocationIndex == 0) s_cost[0] = sad(0, c0, v, view);
+	if (gl_LocalInvocationIndex == 1) s_cost[1] = sad(0, c0, local, view);
+	barrier();
+	if (s_cost[1] < s_cost[0] ||
+	    (s_cost[1] == s_cost[0] && abs(local.x) + abs(local.y) < abs(v.x) + abs(v.y)))
+		v = local;
+	barrier();
 	if (gl_LocalInvocationIndex < 5)
 	{
 		const ivec2 offsets[5] = ivec2[5](

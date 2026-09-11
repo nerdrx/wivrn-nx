@@ -334,13 +334,17 @@ void scenes::stream::operator()(to_headset::motion_field && chunk)
 {
 	// A field arrives as several chunks; only a complete one is ever warped along.
 	auto field = motion_field.lock();
-	const bool was_complete = field->complete();
+	std::optional<uint64_t> previous_complete;
+	if (field->complete()) previous_complete = field->field().frame_idx;
 	field->add(chunk);
 
 	// Count the chunk that completed a field, not every chunk: a field the link tore in
 	// half is not one the warp can use, and the Transport page is there to show that.
-	if (field->complete() and not was_complete)
+	if (field->complete() and (!previous_complete or *previous_complete != field->field().frame_idx))
 	{
+		motion_field_history.push_back(field->field());
+		if (motion_field_history.size() > 8)
+			motion_field_history.pop_front();
 		motion_field_last = instance.now();
 		++motion_field_count;
 	}

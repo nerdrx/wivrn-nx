@@ -38,6 +38,7 @@
 #include "wivrn_packets.h"
 #include "xr/space.h"
 #include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <optional>
 #include <queue>
@@ -450,6 +451,9 @@ private:
 	// names, so a lost or late chunk just means no smoothing until the next
 	// application frame.
 	thread_safe<wivrn::motion_field_assembler> motion_field;
+	// Completed fields are retained briefly because decode/display can lag field
+	// delivery.  The presentation path still selects only the exact frame.
+	std::deque<wivrn::motion_field_data> motion_field_history;
 	// When a complete field last arrived, and how many have. Only the Transport page reads
 	// them; the warp itself works off the assembler.
 	std::atomic<XrTime> motion_field_last = 0;

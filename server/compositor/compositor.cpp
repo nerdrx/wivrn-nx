@@ -1174,8 +1174,24 @@ void compositor::motion_begin()
 		return;
 
 	const motion_mode wanted = effective_motion_mode(*session.get_settings());
+	// Opt-in probe for a full-frame hardware base layer: keep producing the motion
+	// field even while the application is meeting its own frame budget.  The
+	// normal gate remains unchanged, and all server/headset warper failure gates
+	// below still apply.
+	static const bool always_motion_field = [] {
+		const char * v = std::getenv("WIVRN_NX_ALWAYS_MOTION_FIELD");
+		return v && std::string_view(v) == "1";
+	}();
+	const bool force_headset_field = always_motion_field && wanted == motion_mode::headset;
+	static bool always_motion_field_logged = false;
+	if (force_headset_field && !app_behind && !motion_failed &&
+	    !always_motion_field_logged)
+	{
+		U_LOG_I("Motion smoothing forced on while application is on time (NX base-layer probe)");
+		always_motion_field_logged = true;
+	}
 
-	if (wanted == motion_mode::off or not app_behind or motion_failed)
+	if (wanted == motion_mode::off or (!app_behind && !force_headset_field) or motion_failed)
 	{
 		if (motion)
 		{

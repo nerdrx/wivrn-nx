@@ -304,12 +304,7 @@ public:
 	bool frame_smoothing = false;
 
 	// What goes on the wire for the two above
-	wivrn::motion_mode motion_mode() const
-	{
-		if (not motion_smoothing)
-			return wivrn::motion_mode::off;
-		return motion_smoothing_server ? wivrn::motion_mode::server : wivrn::motion_mode::headset;
-	}
+	wivrn::motion_mode motion_mode() const;
 
 	// Ask the server to stream one overlay panel (wlx-overlay-s, WayVR and the like)
 	// as a layer of its own instead of baking it into the eye images, and submit it

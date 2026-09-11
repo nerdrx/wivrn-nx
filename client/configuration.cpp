@@ -32,6 +32,7 @@
 
 #ifdef __ANDROID__
 #include "android/permissions.h"
+#include <sys/system_properties.h>
 #endif
 
 // If no refresh rate is configured, don't select a too high one
@@ -467,4 +468,20 @@ float configuration::get_default_stream_scale() const
 	if (check_feature(feature::eye_gaze))
 		return 0.3;
 	return 0.5;
+}
+
+// Non-persistent switch for controlled headset-warp experiments. An empty or
+// unknown value follows the user's saved setting.
+wivrn::motion_mode configuration::motion_mode() const
+{
+#ifdef __ANDROID__
+    char value[PROP_VALUE_MAX]{};
+    if (__system_property_get("debug.wivrn.nx.motion_mode", value) > 0) {
+        const std::string_view mode(value);
+        if (mode == "off") return wivrn::motion_mode::off;
+        if (mode == "headset") return wivrn::motion_mode::headset;
+    }
+#endif
+    if (not motion_smoothing) return wivrn::motion_mode::off;
+    return motion_smoothing_server ? wivrn::motion_mode::server : wivrn::motion_mode::headset;
 }

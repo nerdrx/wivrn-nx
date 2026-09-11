@@ -1254,6 +1254,8 @@ struct render_probe
 	std::chrono::steady_clock::time_point last_call{};
 	uint64_t iters = 0, gated_out = 0, no_render = 0, cache_hits = 0, new_source = 0, submitted = 0;
 	uint64_t selected_forward = 0, selected_backward = 0, selected_repeat = 0, selected_max_gap = 0;
+	uint64_t motion_matched = 0, motion_active = 0;
+	double motion_step_sum = 0;
 	double period_ms = 0, fence_ms = 0, query_ms = 0, submit_ms = 0, blit_ms = 0;
 	double selection_to_defoveate_ms = 0, selection_to_defoveate_max_ms = 0;
 	// Six contiguous source-to-refresh stages, sampled for the selected stream-0 frame.
@@ -1674,6 +1676,12 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	// Search for frame with desired display time on all decoders
 	// If no such frame exists, use the latest frame for each decoder
 	current_blit_handles = common_frame(frame_state.predictedDisplayTime);
+    // A motion field contains both eyes for one source frame. Never apply it
+    // to a salvage pair whose independently decoded eyes have different IDs.
+    const bool motion_stereo_aligned = current_blit_handles[0] &&
+        (eyes_in_one_stream() || (current_blit_handles[1] &&
+         current_blit_handles[1]->feedback.frame_index == current_blit_handles[0]->feedback.frame_index));
+
 	const auto selection_done = std::chrono::steady_clock::now();
 	const XrTime selection_now = instance.now();
 	if (const auto & h = current_blit_handles[0]; h and h->view_info.display_time and
@@ -1948,12 +1956,13 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	// frame on screen nothing changes. Server mode never gets here: the PC sends a
 	// genuinely new frame for every refresh, so there is nothing to redisplay.
 	bool motion_available = false;
-	if (application::get_config().motion_mode() == wivrn::motion_mode::headset and current_blit_handles[0])
+	if (application::get_config().motion_mode() == wivrn::motion_mode::headset and motion_stereo_aligned)
 	{
 		auto lock = motion_field.lock();
-		motion_available = lock->complete() and
-		                   lock->field().frame_idx == current_blit_handles[0]->feedback.frame_index and
-		                   lock->field().span_ns > 0;
+		const auto frame_idx = current_blit_handles[0]->feedback.frame_index;
+		motion_available = std::ranges::any_of(motion_field_history, [frame_idx](const auto & field) {
+			return field.frame_idx == frame_idx and field.span_ns > 0;
+		});
 	}
 
 	// Allow the headset to time warp if we are redisplaying a frame
@@ -2163,22 +2172,34 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			auto motion_lock = motion_field.lock();
 			stream_defoveator::motion_warp motion;
 
-			if (config.motion_mode() == wivrn::motion_mode::headset and motion_lock->complete() and current_blit_handles[0])
+			if (config.motion_mode() == wivrn::motion_mode::headset and motion_stereo_aligned)
 			{
-				const auto & field = motion_lock->field();
 				const auto & handle = *current_blit_handles[0];
 				// A field that does not name the frame on screen is stale: a lost
 				// chunk, a dropped frame or an IDR. Nothing to warp along then.
-				if (field.frame_idx == handle.feedback.frame_index and field.span_ns > 0)
+				const auto it = std::find_if(motion_field_history.rbegin(), motion_field_history.rend(),
+				                            [&handle](const auto & field) {
+					                            return field.frame_idx == handle.feedback.frame_index and
+					                                   field.span_ns > 0;
+				                            });
+				if (it != motion_field_history.rend())
 				{
-					motion.field = &field;
+					motion.field = &*it;
 					motion.step = motion_warp_step(
 					        frame_state.predictedDisplayTime,
 					        handle.view_info.display_time,
-					        field.span_ns,
+					        it->span_ns,
 					        constants::stream::motion_max_steps);
 				}
 			}
+
+			if (motion.field) {
+                ++g_rp.motion_matched;
+                if (motion.step > 0) {
+                    ++g_rp.motion_active;
+                    g_rp.motion_step_sum += motion.step;
+                }
+            }
 
 			// Frame smoothing. The decoded frame rate can sit far below the panel's
 			// (NX Warp on a Pico 4 runs at a fraction of 90 Hz), so one decoded frame is
@@ -2773,6 +2794,9 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		spdlog::info("render: per iteration fence {:.1f} (worst {:.1f}) | queries {:.1f} | submit {:.1f} | whole render() {:.1f} ms",
 		             g_rp.fence_ms / n, g_rp.worst_fence_ms, g_rp.query_ms / n,
 		             g_rp.submit_ms / n, g_rp.blit_ms / n);
+        spdlog::info("render: motion fields matched {} active {} mean active step {:.3f}",
+                     g_rp.motion_matched, g_rp.motion_active,
+                     g_rp.motion_active ? g_rp.motion_step_sum / g_rp.motion_active : 0.0);
 		spdlog::info("render: selection-to-defoveate CPU {:.3f} ms mean (max {:.3f}) over {} actual defoveate calls; not GPU/photon latency",
 		             g_rp.selection_to_defoveate_n ? g_rp.selection_to_defoveate_ms / double(g_rp.selection_to_defoveate_n) : 0.0,
 		             g_rp.selection_to_defoveate_max_ms,
@@ -2829,6 +2853,12 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 	if (not needs_decoder_reset && video_stream_description == description)
 		return;
 	needs_decoder_reset = false;
+    {
+        auto field = motion_field.lock();
+        field->operator=(wivrn::motion_field_assembler{});
+        motion_field_history.clear();
+    }
+
 	spdlog::info("Creating decoders, size {}x{}", description.width, description.height);
 	video_stream_description = description;
 

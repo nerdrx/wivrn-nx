@@ -10,7 +10,11 @@
 #include <vector>
 #include <vulkan/vulkan.h>
 using namespace nxb;
-constexpr uint32_t W = 256, H = 256, E = 64, L = 3, G = 4;
+#ifndef MOTION_TRUTH_SIZE
+#define MOTION_TRUTH_SIZE 256
+#endif
+constexpr uint32_t W = MOTION_TRUTH_SIZE, H = W, E = W / 4, L = 3, G = W / 64;
+static_assert(W >= 256 && W % 64 == 0);
 uint32_t DX = 8, DY = 4;
 struct Img
 {
@@ -143,6 +147,17 @@ int main(int argc, char ** argv)
 			b[q + 2] = v(sx * 3, sy * 2);
 			b[q + 3] = 255;
 		}
+	// Optional tightly packed linear RGBA8 source; previous/current/truth retain
+	// exactly the same translation convention as the synthetic fixture.
+	if (argc > 4)
+	{
+	 std::ifstream f(argv[4], std::ios::binary | std::ios::ate);
+	 if (!f || f.tellg() != std::streamoff(a.size())) return 2;
+	 f.seekg(0); f.read(reinterpret_cast<char *>(a.data()), a.size());
+	 for (unsigned y=0; y<H; ++y) for(unsigned x=0; x<W; ++x)
+	  for(unsigned k=0; k<4; ++k)
+	   b[(y*W+x)*4+k]=a[(std::max(0,int(y)-int(DY))*W+std::max(0,int(x)-int(DX)))*4+k];
+	}
 	upload(c, prev, a, W, H);
 	upload(c, cur, b, W, H);
 	auto stereo = b;
@@ -203,7 +218,7 @@ int main(int argc, char ** argv)
 		int32_t sz[2], g[2];
 		float t;
 	} wpc{{int32_t(W), int32_t(H)}, {G, G}, step};
-	c.oneShot([&](VkCommandBuffer cmd) {for(auto* im:{&py0,&py1,&out})barrier(cmd,im->im,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_GENERAL,im->layers,im->mips,0,VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT);vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,dp);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,dpl,0,1,&ds,0,nullptr);vkCmdPushConstants(cmd,dpl,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof dpc,&dpc);vkCmdDispatch(cmd,8,8,2);fullBarrier(cmd);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,dpl,0,1,&ds2,0,nullptr);vkCmdDispatch(cmd,8,8,2);fullBarrier(cmd);vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,ep);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,epl,0,1,&es,0,nullptr);vkCmdPushConstants(cmd,epl,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof epc,&epc);vkCmdDispatch(cmd,G,G,2);fullBarrier(cmd);vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,wp);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,wpl,0,1,&ws,0,nullptr);vkCmdPushConstants(cmd,wpl,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof wpc,&wpc);vkCmdDispatch(cmd,W/8,H/8,2);fullBarrier(cmd); });
+	c.oneShot([&](VkCommandBuffer cmd) {for(auto* im:{&py0,&py1,&out})barrier(cmd,im->im,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_GENERAL,im->layers,im->mips,0,VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT);vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,dp);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,dpl,0,1,&ds,0,nullptr);vkCmdPushConstants(cmd,dpl,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof dpc,&dpc);vkCmdDispatch(cmd,E/8,E/8,2);fullBarrier(cmd);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,dpl,0,1,&ds2,0,nullptr);vkCmdDispatch(cmd,E/8,E/8,2);fullBarrier(cmd);vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,ep);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,epl,0,1,&es,0,nullptr);vkCmdPushConstants(cmd,epl,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof epc,&epc);vkCmdDispatch(cmd,G,G,2);fullBarrier(cmd);vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,wp);vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,wpl,0,1,&ws,0,nullptr);vkCmdPushConstants(cmd,wpl,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof wpc,&wpc);vkCmdDispatch(cmd,W/8,H/8,2);fullBarrier(cmd); });
 	float * fv = (float *)field.mapped;
 	for (unsigned j = 0; j < G; j++)
 	{

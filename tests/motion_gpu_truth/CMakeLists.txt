@@ -25,3 +25,6 @@ target_include_directories(motion_gpu_truth PRIVATE ${BENCH_ROOT}/src/core)
 target_include_directories(motion_gpu_truth PRIVATE /usr/include ${BENCH_ROOT}/../../tools/Vulkan-Headers-1.4.309/include)
 target_link_libraries(motion_gpu_truth PRIVATE ${BENCH_ROOT}/build-host/libnxbench_core.a vulkan)
 target_compile_definitions(motion_gpu_truth PRIVATE SPV_DIR=\"${GEN}\")
+
+set(MOTION_TRUTH_SIZE 256 CACHE STRING "Square fixture size, multiple of 64")
+target_compile_definitions(motion_gpu_truth PRIVATE MOTION_TRUTH_SIZE=${MOTION_TRUTH_SIZE})

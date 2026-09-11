@@ -15,3 +15,5 @@ Previous image is at time 0, current at time 1 (shift D), target truth at time 2
 This is a 256×256 synthetic quality fixture on the host GPU, not Pico performance, live decoded HEVC, physical head movement or motion-to-photon latency. Partial coarse-level shifts can match incorrectly; preserve failures alongside successful cases. Quantized zero SAD does not establish a globally unique match. The current fixture prints evidence rather than imposing an overall pass gate.
 
 Large positive shifts must be below 96 pixels on either axis. Scoring excludes newly uncovered pixels using lower bounds max(64,2*DX), max(64,2*DY); the upper bound remains 192. Thus the scored area shrinks for shifts above 32 pixels. Pyramid diagnostics also clip their starting coordinates to avoid unsigned index underflow.
+
+Use CMake `-DMOTION_TRUTH_SIZE=512` for a larger image. The optional fourth argument is a file containing exactly size×size×4 bytes of linear RGBA8. Current and future frames are translated from that source. Convert sRGB photographs to linear bytes first; output readbacks are sRGB. The upper scoring bounds are size-64, not a fixed 192 in larger builds.

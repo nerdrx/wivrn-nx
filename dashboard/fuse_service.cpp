@@ -65,7 +65,9 @@ void FuseService::fail(const QString & message)
 	m_devices.clear();
 	m_tracking.clear();
 	m_calibration.clear();
+	m_alignment.clear();
 	m_calibrationCommand = {};
+	m_alignmentCommand = {};
 	m_controls.clear();
 	m_cameraControls.clear();
 	m_estimationControls.clear();
@@ -230,6 +232,19 @@ void FuseService::poll()
 		});
 		return;
 	}
+	if (m_connected && !m_alignmentCommand.isEmpty())
+	{
+		const auto command = m_alignmentCommand;
+		m_alignmentCommand = {};
+		request(QStringLiteral("/api/alignment"), command, [this](QJsonObject response, QString error, bool) {
+			if (!error.isEmpty() || response.value(QStringLiteral("ok")) != QJsonValue(true))
+				m_cameraError = error.isEmpty() ? QStringLiteral("Alignment request rejected.") : error;
+			else
+				m_cameraError.clear();
+			finish();
+		});
+		return;
+	}
 	if (m_connected && !m_estimationControls.isEmpty())
 	{
 		const auto it = m_estimationControls.cbegin();
@@ -296,9 +311,12 @@ void FuseService::poll()
 					                     && tracking.value(QStringLiteral("records")).isArray() ? tracking.toVariantMap() : QVariantMap();
 					request(QStringLiteral("/api/calibration"), {}, [this](QJsonObject value, QString error, bool) {
 						m_calibration = error.isEmpty() ? value.toVariantMap() : QVariantMap();
-						m_connected = true;
-						m_error.clear();
-						finish();
+						request(QStringLiteral("/api/alignment"), {}, [this](QJsonObject alignment, QString alignmentError, bool) {
+							m_alignment = alignmentError.isEmpty() ? alignment.toVariantMap() : QVariantMap();
+							m_connected = true;
+							m_error.clear();
+							finish();
+						});
 					});
 				});
 				return;
@@ -315,4 +333,17 @@ void FuseService::calibrationCommand(QString action, QString id, int columns, in
 	m_calibrationCommand = {{QStringLiteral("action"), action}, {QStringLiteral("id"), id},
 	                        {QStringLiteral("pattern"), QJsonArray{columns, rows}},
 	                        {QStringLiteral("square_mm"), squareMM}};
+}
+
+void FuseService::alignmentCommand(const QVariantMap & command)
+{
+	if (!m_connected || !m_alignmentCommand.isEmpty())
+		return;
+	const auto action = command.value(QStringLiteral("action")).toString();
+	const auto id = command.value(QStringLiteral("id")).toString();
+	const auto anchor = command.value(QStringLiteral("anchor")).toString();
+	if (id.isEmpty() || id.size() > 256 || (action != QStringLiteral("freeze") && action != QStringLiteral("sample") && action != QStringLiteral("solve") && action != QStringLiteral("reset"))
+	    || (anchor != QStringLiteral("head") && anchor != QStringLiteral("left_hand") && anchor != QStringLiteral("right_hand")))
+		return;
+	m_alignmentCommand = QJsonObject::fromVariantMap(command);
 }

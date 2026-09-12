@@ -87,6 +87,11 @@ ColumnLayout {
         cameraId: root.device.id || ""
         cameraReady: root.streaming && !root.estimating
     }
+    FuseAlignmentSetup {
+        Layout.fillWidth: true
+        cameraId: root.device.id || ""
+        cameraReady: root.streaming && !root.estimating
+    }
     Controls.Label {
         Layout.fillWidth: true
         visible: FuseService.devices.length > 1

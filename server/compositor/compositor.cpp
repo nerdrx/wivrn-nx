@@ -1238,9 +1238,10 @@ void compositor::motion_begin()
 			                .height = session.get_info().render_eye_height,
 			        });
 			U_LOG_IFL_I(log_level,
-			            "Motion smoothing active, %ux%u vectors per eye, %zu kiB of device memory",
+			            "Motion smoothing active, %ux%u vectors per eye, %u px cells, %zu kiB of device memory",
 			            motion->grid_width(),
 			            motion->grid_height(),
+			            motion->block_size(),
 			            motion->device_memory() / 1024);
 		}
 		catch (std::exception & e)

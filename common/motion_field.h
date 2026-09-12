@@ -79,6 +79,12 @@ inline float motion_warp_step(XrTime now, XrTime frame_display_time, XrTime span
 	return float(std::clamp<double>(steps, 0, max_steps));
 }
 
+// 8px cells at up to 4096 pixels per eye. Bound both dimensions: an entire
+// row must fit the datagram budget, and a malformed header must not allocate
+// unbounded memory. One full stereo field is at most 1 MiB.
+static constexpr uint16_t MOTION_MAX_GRID_SIDE = 512;
+static constexpr size_t MOTION_MAX_CELLS = size_t(MOTION_MAX_GRID_SIDE) * MOTION_MAX_GRID_SIDE;
+
 // Cuts a whole field into chunks of whole grid rows of one eye, each small enough for
 // one datagram. Every chunk repeats the header, so they are independent of each other
 // and of their order. Returns nothing for a field that has no cells.
@@ -86,7 +92,9 @@ inline std::vector<to_headset::motion_field> split_motion_field(const motion_fie
 {
 	std::vector<to_headset::motion_field> chunks;
 
-	if (field.width == 0 or field.height == 0 or field.vectors.size() != field.value_count())
+	if (field.width == 0 or field.height == 0 or
+	    field.width > MOTION_MAX_GRID_SIDE or field.height > MOTION_MAX_GRID_SIDE or
+	    field.vectors.size() != field.value_count())
 		return chunks;
 
 	const size_t row_values = size_t(field.width) * 2;
@@ -118,13 +126,6 @@ inline std::vector<to_headset::motion_field> split_motion_field(const motion_fie
 
 	return chunks;
 }
-
-// The estimator builds a grid of eye_pixels / MOTION_BLOCK_PX (= 64) cells per side, so
-// even an extravagant 8192 px-per-eye headset yields only a 128x128 grid. A corrupt
-// chunk can name any uint16 width/height, and current.vectors.assign(width*height*2*2)
-// below would then try to allocate hundreds of megabytes off a single bad datagram.
-// Refuse anything past this generous cap (16x the cells any real field carries).
-static constexpr size_t MOTION_MAX_CELLS = size_t(128) * 128;
 
 // Puts the chunks of a field back together. Only the newest field is worth anything —
 // the consumer drops one that does not name the frame it is displaying — so a chunk of
@@ -162,7 +163,8 @@ public:
 		if (chunk.width == 0 or chunk.height == 0 or chunk.row_count == 0 or chunk.view >= 2)
 			return;
 		// A whole field of this size must fit the cap, or the assign() below is an OOM
-		if (size_t(chunk.width) * chunk.height > MOTION_MAX_CELLS)
+		if (chunk.width > MOTION_MAX_GRID_SIDE or chunk.height > MOTION_MAX_GRID_SIDE or
+		    size_t(chunk.width) * chunk.height > MOTION_MAX_CELLS)
 			return;
 		if (size_t(chunk.row_offset) + chunk.row_count > chunk.height)
 			return;

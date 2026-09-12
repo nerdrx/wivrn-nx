@@ -106,7 +106,7 @@ void test_chunk_size()
 	std::printf("Part A: chunks fit in a datagram\n");
 
 	// The two ends of the range of grids real resolutions produce, plus a square one
-	for (auto [w, h]: {std::pair<uint16_t, uint16_t>{27, 29}, {32, 35}, {40, 40}})
+	for (auto [w, h]: {std::pair<uint16_t, uint16_t>{27, 29}, {32, 35}, {40, 40}, {272, 272}, {336, 336}, {512, 512}})
 	{
 		auto field = make_field(w, h, 100);
 		auto chunks = split_motion_field(field);
@@ -131,7 +131,7 @@ void test_chunk_size()
 		            largest);
 
 		CHECK(whole > receive_slot);
-		CHECK(largest < datagram_budget);
+		CHECK(largest + sizeof(uint64_t) < datagram_budget); // encrypted UDP counter
 		CHECK(largest < receive_slot);
 		// Every row of both eyes is sent exactly once
 		CHECK(rows == size_t(h) * 2);
@@ -179,6 +179,38 @@ void test_round_trip()
 	}
 
 	std::printf("  %zu chunks, 20 orders, all reassembled identically\n", received.size());
+}
+
+void test_dense_grid_round_trip()
+{
+    // Actual 100% Pico 2176px / 8px cells, plus supported maximum.
+    for (uint16_t side : {272, 512})
+    {
+        auto field = make_field(side, side, 9000);
+        auto chunks = split_motion_field(field);
+        CHECK(!chunks.empty());
+        if (side == 272) CHECK(chunks.size() == 272);
+        std::mt19937 rng(912);
+        std::shuffle(chunks.begin(), chunks.end(), rng);
+        motion_field_assembler assembler;
+        for (size_t i = 0; i + 1 < chunks.size(); ++i)
+            assembler.add(round_trip(chunks[i]));
+        CHECK(!assembler.complete());
+        assembler.add(round_trip(chunks.back()));
+        CHECK(assembler.complete());
+        CHECK(same_field(field, assembler.field()));
+    }
+    // Even a skinny grid cannot exceed a whole row's MTU or side limits.
+    for (auto [w,h] : {std::pair<uint16_t,uint16_t>{513,1},{1,513}})
+    {
+        auto oversized = make_field(w,h,9);
+        CHECK(split_motion_field(oversized).empty());
+        to_headset::motion_field chunk{.frame_idx=9,.span_ns=1,.width=w,.height=h,
+            .scale=0,.view=0,.row_offset=0,.row_count=1,.vectors=std::vector<int8_t>(size_t(w)*2)};
+        motion_field_assembler assembler;
+        assembler.add(chunk);
+        CHECK(!assembler.complete());
+    }
 }
 
 void test_losses_and_garbage()
@@ -394,6 +426,7 @@ int main()
 {
 	test_chunk_size();
 	test_round_trip();
+	test_dense_grid_round_trip();
 	test_losses_and_garbage();
 	test_warp_step();
 	test_mode_selection();

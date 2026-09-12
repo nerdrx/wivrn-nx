@@ -127,6 +127,10 @@ public:
 	{
 		return grid.height;
 	}
+	uint32_t block_size() const
+	{
+		return block_px;
+	}
 
 	// Device memory held by the estimator, for logging
 	size_t device_memory() const;
@@ -144,6 +148,7 @@ private:
 	vk_bundle & vk;
 
 	const vk::Extent2D eye_size;
+	const uint32_t block_px;
 	// Level 0 dimensions, a multiple of 1 << (MOTION_LEVELS - 1) so that every
 	// coarser level divides exactly
 	const vk::Extent2D level0;

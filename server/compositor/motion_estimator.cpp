@@ -24,7 +24,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <format>
+#include <string_view>
+#include <stdexcept>
 
 namespace
 {
@@ -61,10 +64,24 @@ vk::Extent2D level0_size(vk::Extent2D eye)
 	return {round(eye.width), round(eye.height)};
 }
 
-vk::Extent2D grid_size(vk::Extent2D eye)
+uint32_t motion_block_px()
 {
-	auto round = [](uint32_t x) {
-		return std::max<uint32_t>(1, (x + MOTION_BLOCK_PX / 2) / MOTION_BLOCK_PX);
+	const char * value = std::getenv("WIVRN_NX_MOTION_BLOCK_PX");
+	if (value)
+	{
+		const std::string_view text(value);
+		if (text == "8") return 8;
+		if (text == "16") return 16;
+		if (text == "32") return 32;
+		if (text == "64") return 64;
+	}
+	return MOTION_BLOCK_PX;
+}
+
+vk::Extent2D grid_size(vk::Extent2D eye, uint32_t block)
+{
+	auto round = [block](uint32_t x) {
+		return std::max<uint32_t>(1, (x + block / 2) / block);
 	};
 	return {round(eye.width), round(eye.height)};
 }
@@ -130,8 +147,9 @@ motion_estimator::pyramid motion_estimator::make_pyramid(int index)
 motion_estimator::motion_estimator(vk_bundle & bundle, vk::Extent2D eye) :
         vk(bundle),
         eye_size(eye),
+        block_px(motion_block_px()),
         level0(level0_size(eye)),
-        grid(grid_size(eye)),
+        grid(grid_size(eye, block_px)),
         source_sampler(nullptr),
         pyramid_sampler(nullptr),
         downsample_ds_layout(nullptr),
@@ -142,6 +160,9 @@ motion_estimator::motion_estimator(vk_bundle & bundle, vk::Extent2D eye) :
         estimate_pipeline(nullptr),
         descriptor_pool(nullptr)
 {
+	if (grid.width > MOTION_MAX_GRID_SIDE or grid.height > MOTION_MAX_GRID_SIDE)
+		throw std::runtime_error("Motion grid exceeds 512 cells per side; choose a larger block size");
+
 	// The composited views are resampled with a linear filter, the pyramids are
 	// only ever read with texelFetch
 	source_sampler = vk::raii::Sampler{

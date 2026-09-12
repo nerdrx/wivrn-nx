@@ -1358,6 +1358,16 @@ void scenes::stream::gui_transport()
 			                true);
 			ImGui::Dummy({0, 4});
 			stat(_("Fields received"), fmt::format("{}", uint64_t(motion_field_count)), t.text_muted);
+			uint16_t grid_width = 0, grid_height = 0;
+			{
+				auto lock = motion_field.lock();
+				if (not motion_field_history.empty())
+				{
+					grid_width = motion_field_history.back()->width;
+					grid_height = motion_field_history.back()->height;
+				}
+			}
+			stat(_("Received motion grid"), grid_width ? fmt::format("{} × {} / eye", grid_width, grid_height) : std::string("—"), t.text_muted);
 			stat(_("Last field"), last ? fmt::format("{:.0f} ms ago", age * 1e-6) : std::string("—"), t.text_muted);
 		}
 		wivrn::ui::end_card();

@@ -1672,7 +1672,8 @@ struct motion_field
 	// Most vector bytes in one chunk. Small enough that a chunk, header and stream
 	// framing included, stays well under any MTU worth worrying about and under the
 	// receive buffer the headset reads datagrams into.
-	static constexpr size_t max_chunk_bytes = 1024;
+	// Two rows of a 272-cell grid fit together, halving packets at 2176px/8.
+	static constexpr size_t max_chunk_bytes = 1120;
 
 	// Rows of one eye that fit in a single chunk, never zero
 	static constexpr uint16_t rows_per_chunk(uint16_t width)

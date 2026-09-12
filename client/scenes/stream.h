@@ -456,8 +456,8 @@ private:
 	// application frame.
 	thread_safe<wivrn::motion_field_assembler> motion_field;
 	// Completed fields are retained briefly because decode/display can lag field
-	// delivery.  The presentation path still selects only the exact frame.
-	std::deque<wivrn::motion_field_data> motion_field_history;
+	// delivery. Immutable ownership lets render keep one field after releasing lock.
+	std::deque<std::shared_ptr<const wivrn::motion_field_data>> motion_field_history;
 	// Optional same-pixel EMA state. It is render-thread owned and reset on a gap,
 	// metadata change, or a head-pose discontinuity.
 	wivrn::motion_field_data motion_ema_field;

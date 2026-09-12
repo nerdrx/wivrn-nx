@@ -342,7 +342,7 @@ void scenes::stream::operator()(to_headset::motion_field && chunk)
 	// half is not one the warp can use, and the Transport page is there to show that.
 	if (field->complete() and (!previous_complete or *previous_complete != field->field().frame_idx))
 	{
-		motion_field_history.push_back(field->field());
+		motion_field_history.push_back(std::make_shared<const wivrn::motion_field_data>(field->field()));
 		if (motion_field_history.size() > 8)
 			motion_field_history.pop_front();
 		motion_field_last = instance.now();

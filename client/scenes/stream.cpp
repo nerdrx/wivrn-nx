@@ -2080,7 +2080,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		auto lock = motion_field.lock();
 		const auto frame_idx = current_blit_handles[0]->feedback.frame_index;
 		motion_available = std::ranges::any_of(motion_field_history, [frame_idx](const auto & field) {
-			return field.frame_idx == frame_idx and field.span_ns > 0;
+			return field->frame_idx == frame_idx and field->span_ns > 0;
 		});
 	}
 
@@ -2273,9 +2273,8 @@ void scenes::stream::render(const XrFrameState & frame_state)
 #endif
 
 		// Whether this refresh can re-present the image already in the swapchain
-		// instead of drawing a new one. Its signature and the decision are taken under
-		// the motion lock, so the motion step folded into the signature is exactly the
-		// one a draw would use.
+		// instead of drawing a new one. Its signature and draw use the same immutable
+		// motion snapshot, without blocking network delivery during the pass.
 		bool cache_hit = false;
 		defoveate_state state;
 		{
@@ -2285,170 +2284,172 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			// interval: near zero for the refresh that first shows a frame, growing
 			// with every repeat until a new frame arrives or the cap is reached.
 			//
-			// The lock is held across the pass because it is where the field data is
-			// read from; it is only ever contended by the network thread replacing
-			// it, and the pass records commands rather than waiting on anything.
-			auto motion_lock = motion_field.lock();
 			stream_defoveator::motion_warp motion;
+			// Select immutable field under short lock. Keep it alive through this pass.
+			std::shared_ptr<const wivrn::motion_field_data> selected_field;
+			{
+				auto motion_lock = motion_field.lock();
+				if (config.motion_mode() == wivrn::motion_mode::headset and motion_stereo_aligned)
+				{
+					const auto frame_idx = current_blit_handles[0]->feedback.frame_index;
+					const auto it = std::find_if(motion_field_history.rbegin(), motion_field_history.rend(), [frame_idx](const auto & field) {
+						return field->frame_idx == frame_idx and field->span_ns > 0;
+					});
+					if (it != motion_field_history.rend())
+						selected_field = *it;
+				}
+			}
 			bool motion_pose_compensated = false;
 			warp_timeline_pending = {};
 			XrTime warp_anchor = 0;
 			XrDuration warp_span = 0;
 			bool warp_source_clock = false;
 
-			if (config.motion_mode() == wivrn::motion_mode::headset and motion_stereo_aligned)
+			if (selected_field)
 			{
 				const auto & handle = *current_blit_handles[0];
-				// A field that does not name the frame on screen is stale: a lost
-				// chunk, a dropped frame or an IDR. Nothing to warp along then.
-				const auto it = std::find_if(motion_field_history.rbegin(), motion_field_history.rend(),
-				                            [&handle](const auto & field) {
-					                            return field.frame_idx == handle.feedback.frame_index and
-					                                   field.span_ns > 0;
-				                            });
-				if (it != motion_field_history.rend())
+				const auto & field = *selected_field;
+				motion.field = &field;
+				const bool source_clock = motion_source_clock_enabled() and
+				                          field.source_time_ns > 0 and field.source_span_ns > 0 and
+				                          field.source_span_ns < 500'000'000;
+				warp_anchor = source_clock ? field.source_time_ns : handle.view_info.display_time;
+				warp_span = source_clock ? field.source_span_ns : field.span_ns;
+				warp_source_clock = source_clock;
+				motion.step = motion_warp_step(
+				        frame_state.predictedDisplayTime,
+				        source_clock ? field.source_time_ns : handle.view_info.display_time,
+				        source_clock ? field.source_span_ns : field.span_ns,
+				        constants::stream::motion_max_steps);
+				const float uncapped_step = motion.step;
+				if (motion_cap_enabled())
 				{
-					motion.field = &*it;
-					const bool source_clock = motion_source_clock_enabled() and
-					                         it->source_time_ns > 0 and it->source_span_ns > 0 and
-					                         it->source_span_ns < 500'000'000;
-					warp_anchor = source_clock ? it->source_time_ns : handle.view_info.display_time;
-					warp_span = source_clock ? it->source_span_ns : it->span_ns;
-					warp_source_clock = source_clock;
-					motion.step = motion_warp_step(
-					        frame_state.predictedDisplayTime,
-					        source_clock ? it->source_time_ns : handle.view_info.display_time,
-					        source_clock ? it->source_span_ns : it->span_ns,
-					        constants::stream::motion_max_steps);
-					const float uncapped_step = motion.step;
-					if (motion_cap_enabled())
+					static bool logged = false;
+					const XrDuration horizon = 11'111'111;
+					const XrDuration span = source_clock ? field.source_span_ns : field.span_ns;
+					const float original_step = motion.step;
+					motion.step = std::min(motion.step, float(horizon) / float(span));
+					if (not logged and motion.step < original_step)
 					{
-						static bool logged = false;
-						const XrDuration horizon = 11'111'111;
-						const XrDuration span = source_clock ? it->source_span_ns : it->span_ns;
-						const float original_step = motion.step;
-						motion.step = std::min(motion.step, float(horizon) / float(span));
-						if (not logged and motion.step < original_step)
+						spdlog::info("motion cap applied: horizon {} ns, span {} ns, step {:.4f} -> {:.4f}", horizon, span, original_step, motion.step);
+						logged = true;
+					}
+				}
+
+				// Keep this pose fraction equal to the applied image-warp fraction,
+				// even with the source clock: the field already includes head motion.
+				// Independently advancing the metadata pose would misdescribe the image.
+				// Optical flow already contains the head motion from the exact
+				// predecessor to this frame. Move the submitted pose by the
+				// same step, but only when that predecessor is actually available
+				// in both eye decoder histories. A nearest frame is unsafe: decode
+				// stride and loss can make it a different interval.
+				if (motion.step > 0)
+				{
+					const auto eye_stream = [this, eyes_joined](size_t v) -> size_t {
+						return (eyes_joined or not is_view(v)) ? 0 : v;
+					};
+					using source_metadata = std::pair<uint64_t, to_headset::video_stream_data_shard::view_info_t>;
+					std::array<std::optional<source_metadata>, view_count> prev;
+					{
+						std::unique_lock frame_lock(frames_mutex);
+						for (size_t v = 0; v < view_count; ++v)
 						{
-							spdlog::info("motion cap applied: horizon {} ns, span {} ns, step {:.4f} -> {:.4f}", horizon, span, original_step, motion.step);
+							const XrTime target = handle.view_info.display_time - field.span_ns;
+							for (const auto & candidate: decoders[eye_stream(v)].motion_pose_history)
+								if (candidate.first < handle.feedback.frame_index and candidate.second.display_time == target)
+									prev[v] = candidate;
+						}
+					}
+					const XrTime predecessor_time = handle.view_info.display_time - field.span_ns;
+					bool usable = true;
+					const bool have_predecessor = std::ranges::all_of(prev, [](const auto & p) { return p.has_value(); });
+					for (size_t v = 0; usable and v < view_count; ++v)
+					{
+						const auto & cur = current_blit_handles[eye_stream(v)]->view_info;
+						usable = prev[v] and prev[v]->second.display_time == predecessor_time and
+						         cur.display_time == handle.view_info.display_time and
+						         motion_fov_valid(prev[v]->second.fov[v]) and motion_fov_valid(cur.fov[v]) and
+						         prev[v]->second.fov[v].angleLeft == cur.fov[v].angleLeft and
+						         prev[v]->second.fov[v].angleRight == cur.fov[v].angleRight and
+						         prev[v]->second.fov[v].angleUp == cur.fov[v].angleUp and
+						         prev[v]->second.fov[v].angleDown == cur.fov[v].angleDown and
+						         motion_pose_valid(prev[v]->second.pose[v]) and motion_pose_valid(cur.pose[v]);
+					}
+					for (size_t v = 1; usable and v < view_count; ++v)
+						usable = prev[v]->first == prev[0]->first;
+
+					// Filter total motion only while the source head poses are
+					// nearly stationary. This is an approximate safeguard, not
+					// a separation of object motion from head motion.
+					bool stable_head = usable;
+					for (size_t v = 0; stable_head and v < view_count; ++v)
+						stable_head = motion_pose_delta_small(prev[v]->second.pose[v],
+						                                      current_blit_handles[eye_stream(v)]->view_info.pose[v]);
+					const bool ema_enabled = motion_history_ema_enabled();
+					if (not ema_enabled)
+					{
+						motion_ema_frame = uint64_t(-1);
+						motion_ema_span = 0;
+						motion_ema_active = false;
+					}
+					else if (motion_ema_frame != field.frame_idx)
+					{
+						const bool compatible = ema_enabled and stable_head and
+						                        motion_ema_frame != uint64_t(-1) and motion_history_contiguous(motion_ema_field, field) and
+						                        motion_ema_span > 0 and warp_span >= motion_ema_span / 2 and
+						                        warp_span <= motion_ema_span * 2 and
+						                        (motion_ema_source_time <= 0 or field.source_time_ns <= 0 or
+						                         (field.source_time_ns > motion_ema_source_time and
+						                          field.source_time_ns - motion_ema_source_time <= 100'000'000));
+						motion_field_data filtered;
+						motion_ema_active = compatible and motion_field_ema_blend(motion_ema_field, field, filtered);
+						motion_ema_field = motion_ema_active ? std::move(filtered) : field;
+						motion_ema_frame = field.frame_idx;
+						motion_ema_span = stable_head and ema_enabled ? warp_span : 0;
+						motion_ema_source_time = field.source_time_ns;
+					}
+					if (ema_enabled and stable_head and motion_ema_active)
+					{
+						motion.field = &motion_ema_field;
+						motion.step = std::min(uncapped_step, float(22'222'222) / float(warp_span));
+						static bool logged = false;
+						if (not logged)
+						{
+							spdlog::info("motion EMA applied: alpha 0.5, horizon 22.22 ms, source {}", field.frame_idx);
 							logged = true;
 						}
 					}
-
-					// Keep this pose fraction equal to the applied image-warp fraction,
-					// even with the source clock: the field already includes head motion.
-					// Independently advancing the metadata pose would misdescribe the image.
-					// Optical flow already contains the head motion from the exact
-					// predecessor to this frame. Move the submitted pose by the
-					// same step, but only when that predecessor is actually available
-					// in both eye decoder histories. A nearest frame is unsafe: decode
-					// stride and loss can make it a different interval.
-					if (motion.step > 0)
+					if (usable)
 					{
-						const auto eye_stream = [this, eyes_joined](size_t v) -> size_t {
-							return (eyes_joined or not is_view(v)) ? 0 : v;
-						};
-						using source_metadata = std::pair<uint64_t, to_headset::video_stream_data_shard::view_info_t>;
-						std::array<std::optional<source_metadata>, view_count> prev;
-						{
-							std::unique_lock frame_lock(frames_mutex);
-							for (size_t v = 0; v < view_count; ++v)
-							{
-								const XrTime target = handle.view_info.display_time - it->span_ns;
-								for (const auto & candidate: decoders[eye_stream(v)].motion_pose_history)
-									if (candidate.first < handle.feedback.frame_index and candidate.second.display_time == target)
-										prev[v] = candidate;
-							}
-						}
-						const XrTime predecessor_time = handle.view_info.display_time - it->span_ns;
-						bool usable = true;
-						const bool have_predecessor = std::ranges::all_of(prev, [](const auto & p) { return p.has_value(); });
-						for (size_t v = 0; usable and v < view_count; ++v)
+						const float u = 1.f + motion.step;
+						std::array<XrPosef, view_count> compensated_pose;
+						std::array<XrFovf, view_count> compensated_fov;
+						for (size_t v = 0; v < view_count; ++v)
 						{
 							const auto & cur = current_blit_handles[eye_stream(v)]->view_info;
-							usable = prev[v] and prev[v]->second.display_time == predecessor_time and
-							         cur.display_time == handle.view_info.display_time and
-							         motion_fov_valid(prev[v]->second.fov[v]) and motion_fov_valid(cur.fov[v]) and
-							         prev[v]->second.fov[v].angleLeft == cur.fov[v].angleLeft and
-							         prev[v]->second.fov[v].angleRight == cur.fov[v].angleRight and
-							         prev[v]->second.fov[v].angleUp == cur.fov[v].angleUp and
-							         prev[v]->second.fov[v].angleDown == cur.fov[v].angleDown and
-							         motion_pose_valid(prev[v]->second.pose[v]) and motion_pose_valid(cur.pose[v]);
+							compensated_pose[v] = motion_pose_extrapolate(prev[v]->second.pose[v], cur.pose[v], u);
+							compensated_fov[v] = cur.fov[v];
+							usable = usable and motion_pose_valid(compensated_pose[v]) and motion_fov_valid(compensated_fov[v]);
 						}
-						for (size_t v = 1; usable and v < view_count; ++v)
-							usable = prev[v]->first == prev[0]->first;
-
-                        // Filter total motion only while the source head poses are
-                        // nearly stationary. This is an approximate safeguard, not
-                        // a separation of object motion from head motion.
-                        bool stable_head = usable;
-                        for (size_t v = 0; stable_head and v < view_count; ++v)
-                            stable_head = motion_pose_delta_small(prev[v]->second.pose[v],
-                                current_blit_handles[eye_stream(v)]->view_info.pose[v]);
-                        const bool ema_enabled = motion_history_ema_enabled();
-                        if (not ema_enabled)
-                        {
-                            motion_ema_frame = uint64_t(-1);
-                            motion_ema_span = 0;
-                            motion_ema_active = false;
-                        }
-                        else if (motion_ema_frame != it->frame_idx)
-                        {
-                            const bool compatible = ema_enabled and stable_head and
-                                motion_ema_frame != uint64_t(-1) and motion_history_contiguous(motion_ema_field, *it) and
-                                motion_ema_span > 0 and warp_span >= motion_ema_span / 2 and
-                                warp_span <= motion_ema_span * 2 and
-                                (motion_ema_source_time <= 0 or it->source_time_ns <= 0 or
-                                 (it->source_time_ns > motion_ema_source_time and
-                                  it->source_time_ns - motion_ema_source_time <= 100'000'000));
-                            motion_field_data filtered;
-                            motion_ema_active = compatible and motion_field_ema_blend(motion_ema_field, *it, filtered);
-                            motion_ema_field = motion_ema_active ? std::move(filtered) : *it;
-                            motion_ema_frame = it->frame_idx;
-                            motion_ema_span = stable_head and ema_enabled ? warp_span : 0;
-                            motion_ema_source_time = it->source_time_ns;
-                        }
-                        if (ema_enabled and stable_head and motion_ema_active)
-                        {
-                            motion.field = &motion_ema_field;
-                            motion.step = std::min(uncapped_step, float(22'222'222) / float(warp_span));
-                            static bool logged = false;
-                            if (not logged)
-                            {
-                                spdlog::info("motion EMA applied: alpha 0.5, horizon 22.22 ms, source {}", it->frame_idx);
-                                logged = true;
-                            }
-                        }
 						if (usable)
 						{
-							const float u = 1.f + motion.step;
-							std::array<XrPosef, view_count> compensated_pose;
-							std::array<XrFovf, view_count> compensated_fov;
-							for (size_t v = 0; v < view_count; ++v)
-							{
-								const auto & cur = current_blit_handles[eye_stream(v)]->view_info;
-								compensated_pose[v] = motion_pose_extrapolate(prev[v]->second.pose[v], cur.pose[v], u);
-								compensated_fov[v] = cur.fov[v];
-								usable = usable and motion_pose_valid(compensated_pose[v]) and motion_fov_valid(compensated_fov[v]);
-							}
-							if (usable)
-							{
-								pose = compensated_pose;
-								fov = compensated_fov;
-								motion_pose_compensated = true;
-								++g_rp.motion_pose_applied;
-								if (source_clock) ++g_rp.motion_source_clock_applied;
-							}
+							pose = compensated_pose;
+							fov = compensated_fov;
+							motion_pose_compensated = true;
+							++g_rp.motion_pose_applied;
+							if (source_clock)
+								++g_rp.motion_source_clock_applied;
 						}
-						if (not usable)
-						{
-							motion.field = nullptr;
-							motion.step = 0;
-							if (have_predecessor)
-								++g_rp.motion_pose_unsafe;
-							else
-								++g_rp.motion_pose_missing;
-						}
+					}
+					if (not usable)
+					{
+						motion.field = nullptr;
+						motion.step = 0;
+						if (have_predecessor)
+							++g_rp.motion_pose_unsafe;
+						else
+							++g_rp.motion_pose_missing;
 					}
 				}
 			}

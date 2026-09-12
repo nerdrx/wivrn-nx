@@ -8,6 +8,14 @@ ColumnLayout {
     id: root
     readonly property var feed: FuseService.tracking || ({})
     readonly property var records: feed.records || []
+    readonly property var livePose: {
+        const joints = {};
+        for (const record of records) {
+            if ((Number(record.flags) & 0x11) === 0x11 && record.position && record.position.length === 3)
+                joints[record.joint] = {fused: record.position};
+        }
+        return {joints: joints};
+    }
     spacing: 10
     Controls.Label {
         text: i18n("WiVRn tracking feed · read only")
@@ -31,9 +39,23 @@ ColumnLayout {
         color: "#b6a9d2"
         text: i18n("These observations are separate from the simulation below. Generic trackers keep their indices until you assign body roles. Missing or old poses disappear from this view.")
     }
+    RowLayout {
+        Layout.fillWidth: true
+        Controls.Label { Layout.fillWidth: true; text: i18n("Received tracking positions"); color: "#efeaff" }
+        Controls.ComboBox { id: direction; model: [i18n("Front"), i18n("Side")]; Accessible.name: i18n("Live tracking view direction") }
+    }
+    FuseSkeleton {
+        Layout.fillWidth: true
+        Layout.preferredHeight: 300
+        liveTracking: true
+        connected: !!root.feed.connected
+        poseData: root.livePose
+        sideView: direction.currentIndex === 1
+    }
     Controls.Button {
         id: details
         checkable: true
+        checked: false
         text: checked ? i18n("Hide raw poses") : i18n("Inspect raw poses (%1)", root.records.length)
     }
     ColumnLayout {
@@ -41,9 +63,10 @@ ColumnLayout {
         Layout.fillWidth: true
         spacing: 8
         Repeater {
-            model: root.records
+            model: root.records.length
             delegate: Controls.Label {
-                required property var modelData
+                required property int index
+                readonly property var modelData: root.records[index] || ({})
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
                 color: modelData.position_valid ? "#d4bbff" : "#ffcd80"

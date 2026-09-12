@@ -10,12 +10,19 @@ ColumnLayout {
     property bool cameraReady: false
     property bool estimating: false
     property bool expanded: false
-    readonly property var shadow: FuseService.shadow || ({})
+    readonly property var shadowEnvelope: FuseService.shadow || ({})
+    readonly property var shadowSessions: shadowEnvelope.sessions || ({})
+    readonly property var shadow: shadowSessions[root.cameraId] || (shadowEnvelope.camera === root.cameraId ? shadowEnvelope : ({}))
     readonly property var calibration: FuseService.calibration || ({})
     readonly property var alignment: FuseService.alignment || ({})
     readonly property var joints: shadow.joints || []
-    readonly property var profile: alignment.profile || ({})
-    readonly property var lensProfile: calibration.profile || ({})
+    readonly property var profileSet: alignment.profiles || ({})
+    readonly property var lensProfileSet: calibration.profiles || ({})
+    readonly property var profile: Object.keys(profileSet).length > 0 ? (profileSet[root.cameraId] || ({}))
+        : ((alignment.camera === root.cameraId || !alignment.camera) ? (alignment.profile || ({})) : ({}))
+    readonly property var lensProfile: Object.keys(lensProfileSet).length > 0 ? (lensProfileSet[root.cameraId] || ({}))
+        : ((calibration.camera_id === root.cameraId || !calibration.camera_id) ? (calibration.profile || ({})) : ({}))
+    readonly property var shadowCameras: shadowEnvelope.cameras || []
     readonly property bool profileReady: !!profile.validated && !!lensProfile.validated &&
         (!profile.camera_id || profile.camera_id === root.cameraId) &&
         (!lensProfile.camera_id || lensProfile.camera_id === root.cameraId)
@@ -46,9 +53,9 @@ ColumnLayout {
     }
     Controls.Switch {
         visible: root.expanded
-        text: i18n("Preview anchored body · no VR output")
+        text: i18n("Preview anchored body")
         checked: !!root.shadow.enabled
-        enabled: (root.shadow.enabled || root.usable) && !FuseService.busy
+        enabled: root.shadow.enabled || root.usable
         onClicked: FuseService.setShadow(root.shadow.camera || root.cameraId, checked)
         Accessible.name: i18n("Enable anchored shadow body preview")
     }
@@ -61,6 +68,66 @@ ColumnLayout {
               : root.shadow.reason || (root.shadow.note || i18n("Shadow preview is ready."))
         color: root.shadow.reason ? "#ffcd80" : "#b6a9d2"
         wrapMode: Text.WordWrap
+    }
+    RowLayout {
+        visible: root.expanded
+        Layout.fillWidth: true
+        Controls.Label { text: i18n("Output mode"); color: "#b6a9d2" }
+        Controls.ComboBox {
+            id: outputMode
+            Layout.fillWidth: true
+            model: [i18n("Improve existing trackers"), i18n("Camera-only body tracking")]
+            currentIndex: FuseService.assistance.output_mode === "camera_only" ? 1 : 0
+            enabled: FuseService.connected && !FuseService.assistance.enabled
+                     && (currentIndex === 0 || !!FuseService.assistance.camera_tracker_capable)
+            onActivated: FuseService.setAssistanceMode(index === 1 ? "camera_only" : "assist")
+            Accessible.name: i18n("Body tracking output mode")
+        }
+    }
+    Controls.Label {
+        visible: root.expanded && !FuseService.assistance.camera_tracker_capable
+        Layout.fillWidth: true
+        text: i18n("Camera-only mode is unavailable until the launcher starts camera trackers. Change the launcher configuration, then reconnect the dashboard.")
+        color: "#ffcd80"
+        wrapMode: Text.WordWrap
+    }
+    Controls.Switch {
+        visible: root.expanded
+        text: FuseService.assistance.output_mode === "camera_only" ? i18n("Enable camera-only body tracking") : i18n("Apply camera corrections")
+        checked: !!FuseService.assistance.enabled
+        enabled: !!FuseService.assistance.enabled || (root.usable && !!root.shadow.available && FuseService.connected
+                 && (FuseService.assistance.output_mode !== "camera_only" || !!FuseService.assistance.camera_tracker_capable))
+        onClicked: FuseService.setAssistance(checked)
+        Accessible.name: FuseService.assistance.output_mode === "camera_only" ? i18n("Enable camera-only body tracking") : i18n("Apply camera corrections to Pico body tracking")
+    }
+    Controls.Label {
+        visible: root.expanded
+        Layout.fillWidth: true
+        text: FuseService.assistance.reason || (FuseService.assistance.output_mode === "camera_only"
+              ? i18n("Camera-only body tracking uses camera joints while preserving Pico head and controllers; stale camera data or camera loss falls back to Pico.")
+              : i18n("Pico body tracking is required. Head and controllers stay preserved; stale camera data or camera loss falls back to Pico."))
+        color: FuseService.assistance.reason ? "#ffcd80" : "#b6a9d2"
+        wrapMode: Text.WordWrap
+    }
+    ColumnLayout {
+        visible: root.expanded && root.shadowCameras.length > 0
+        Layout.fillWidth: true
+        Controls.Label { text: i18n("Camera output selection"); color: "#b6a9d2" }
+        Repeater {
+            model: root.shadowCameras.length
+            delegate: RowLayout {
+                required property int index
+                readonly property var modelData: root.shadowCameras[index] || ({})
+                Layout.fillWidth: true
+                Controls.CheckBox {
+                    text: i18n("Use this camera for output") + " · " + (modelData.name || modelData.id || "")
+                    checked: !!modelData.enabled
+                    enabled: FuseService.connected && !!modelData.id
+                    onClicked: FuseService.setShadow(modelData.id || "", checked)
+                    Accessible.name: i18n("Use %1 for body tracking output", modelData.name || modelData.id || "camera")
+                }
+            }
+        }
     }
     RowLayout {
         visible: root.expanded
@@ -115,19 +182,19 @@ ColumnLayout {
         Layout.fillWidth: true
         Controls.Button {
             text: root.shadow.recording ? i18n("Stop pose log") : i18n("Start pose log")
-            enabled: (root.shadow.recording || (!!root.shadow.enabled && Number(root.shadow.recorded_frames || 0) < 600)) && !FuseService.busy
-            onClicked: FuseService.shadowRecordingCommand(root.shadow.recording ? "stop" : "start")
+            enabled: root.shadow.recording || (!!root.shadow.enabled && Number(root.shadow.recorded_frames || 0) < 600)
+            onClicked: FuseService.shadowRecordingCommand(root.shadow.recording ? "stop" : "start", root.cameraId)
             Accessible.name: i18n("Shadow pose recording")
         }
         Controls.Button {
             text: i18n("Clear")
-            enabled: Number(root.shadow.recorded_frames || 0) > 0 && !FuseService.busy
-            onClicked: FuseService.shadowRecordingCommand("clear")
+            enabled: Number(root.shadow.recorded_frames || 0) > 0
+            onClicked: FuseService.shadowRecordingCommand("clear", root.cameraId)
         }
         Controls.Button {
             text: i18n("Download pose log")
             enabled: Number(root.shadow.recorded_frames || 0) > 0
-            onClicked: Qt.openUrlExternally(FuseService.serviceUrl + "/api/shadow/recording")
+            onClicked: Qt.openUrlExternally(FuseService.serviceUrl + "/api/shadow/recording?id=" + encodeURIComponent(root.cameraId))
         }
         Controls.Label {
             Layout.fillWidth: true
@@ -147,9 +214,10 @@ ColumnLayout {
             Controls.Label { Layout.fillWidth: true; text: i18n("Visibility"); color: "#b6a9d2" }
         }
         Repeater {
-            model: root.joints
+            model: root.joints.length
             delegate: RowLayout {
-                required property var modelData
+                required property int index
+                readonly property var modelData: root.joints[index] || ({})
                 Layout.fillWidth: true
                 Controls.Label { Layout.preferredWidth: root.width * .44; text: (modelData.joint || "").replace(/_/g," "); color: "#efeaff" }
                 Controls.Label { Layout.preferredWidth: root.width * .27; text: modelData.residual_m == null ? i18n("—") : Number(modelData.residual_m*100).toFixed(1); color: "#00e5ff" }

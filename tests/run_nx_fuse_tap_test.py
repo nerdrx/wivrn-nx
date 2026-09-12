@@ -44,8 +44,8 @@ def main():
         compile_fixture(binary)
         result = subprocess.run([str(binary), str(socket_path)], cwd=ROOT, check=True, capture_output=True, text=True)
         packets = [bytes.fromhex(line) for line in result.stdout.splitlines() if line]
-        assert len(packets) == 4, len(packets)
-        decoded = [tracking.decode_packet(packet) for packet in packets]
+        assert len(packets) == 5, len(packets)
+        decoded = [tracking.decode_packet(packet, now_ns=int.from_bytes(packet[16:24], "little")) for packet in packets]
         assert decoded[0]["route"] == "anchors"
         assert decoded[0]["sequence"] == 1
         assert decoded[0]["records"][0]["joint"] == "head"
@@ -56,6 +56,8 @@ def main():
         assert decoded[2]["records"][0]["joint"] == "generic_0"
         assert decoded[3]["generation"] != decoded[0]["generation"]
         assert decoded[3]["sequence"] == 4
+        assert decoded[4]["generation"] == decoded[3]["generation"]
+        assert decoded[4]["sequence"] == 6
     print("nx_fuse_tap cross-language wire test: OK")
 
 

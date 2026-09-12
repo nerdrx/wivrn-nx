@@ -16,7 +16,10 @@ Kirigami.ApplicationWindow {
     Shortcut { sequence: "Alt+3"; onActivated: root.navigate("FusePage.qml", 2) }
     Shortcut { sequence: "Alt+4"; onActivated: root.navigate("TroubleshootPage.qml", 3) }
     function navigate(page, index) {
-        root.pageStack.pop(null);
+        // Keep declarative initial page as stack root. pop(null) is version-dependent
+        // in Kirigami and can leave the stack without a usable overview page.
+        while (root.pageStack.depth > 1)
+            root.pageStack.pop();
         if (page) root.pageStack.push(Qt.resolvedUrl(page));
         destination = index;
     }

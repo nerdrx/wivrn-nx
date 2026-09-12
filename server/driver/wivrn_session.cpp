@@ -293,6 +293,16 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 			}
 		}
 	}
+	if (const char * env = std::getenv("NX_FUSE_CAMERA_TRACKERS"); env && std::strcmp(env, "1") == 0)
+	{
+		static constexpr std::array roles{uint16_t(10), uint16_t(14), uint16_t(15), uint16_t(16), uint16_t(17)};
+		static constexpr std::array names{"hip", "knee-left", "knee-right", "foot-left", "foot-right"};
+		for (size_t i = 0; i < roles.size() && static_xdev_count < std::size(static_xdevs); ++i)
+		{
+			nx_camera_trackers[i] = std::make_unique<nx_fuse_tracker>(roles[i], names[i], &hmd);
+			static_xdevs[static_xdev_count++] = nx_camera_trackers[i].get();
+		}
+	}
 
 #if WIVRN_FEATURE_SOLARXR
 	uint32_t num_devs = solarxr_device_create_xdevs(static_cast<xrt_device>(hmd).tracking_origin, &static_xdevs[static_xdev_count], ARRAY_SIZE(static_xdevs) - static_xdev_count);
@@ -740,6 +750,7 @@ void wivrn_session::operator()(const from_headset::tracking & tracking)
 	if (tracking.state_flags & from_headset::tracking::state_flags::recentered)
 	{
 		nx_tap.recenter();
+		nx_corrections.invalidate(nx_tap.current_generation());
 		U_LOG_I("recentering requested");
 		if (XRT_SUCCESS != xrt_space_overseer_recenter_local_spaces(space_overseer))
 			U_LOG_W("failed to recenter local spaces");
@@ -747,6 +758,18 @@ void wivrn_session::operator()(const from_headset::tracking & tracking)
 
 	auto offset = offset_est.get_offset();
 	nx_tap.emit_tracking(tracking, offset, nx_tap.current_generation());
+	nx_corrections.poll(nx_tap.current_generation());
+	if (!nx_camera_trackers.empty()) {
+		std::array<nx_fuse_corrections::camera_pose, 5> poses{};
+		uint64_t sample_ns = 0;
+		size_t n = nx_corrections.camera_snapshot(nx_tap.current_generation(), poses, &sample_ns);
+		static constexpr std::array roles{uint16_t(10), uint16_t(14), uint16_t(15), uint16_t(16), uint16_t(17)};
+		for (size_t i=0;i<roles.size();++i) {
+			size_t found = 0; while (found < n && poses[found].role != roles[i]) ++found;
+			if (found < n && nx_camera_trackers[i]) nx_camera_trackers[i]->publish(nx_tap.current_generation(), sample_ns, {poses[found].position.x, poses[found].position.y, poses[found].position.z}, {poses[found].orientation.x, poses[found].orientation.y, poses[found].orientation.z, poses[found].orientation.w});
+			else if (nx_camera_trackers[i]) nx_camera_trackers[i]->invalidate(nx_tap.current_generation());
+		}
+	}
 
 	if (offset)
 	{
@@ -815,6 +838,8 @@ void wivrn_session::operator()(from_headset::bd_body && body_tracking)
 
 	auto offset = offset_est.get_offset();
 	nx_tap.emit_bd(body_tracking, offset, nx_tap.current_generation());
+	nx_corrections.poll(nx_tap.current_generation());
+	nx_corrections.apply(body_tracking, nx_tap.current_generation());
 	body_tracker->update_tracking(body_tracking, offset);
 }
 void wivrn_session::operator()(from_headset::htc_body && body_tracking)

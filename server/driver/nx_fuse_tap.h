@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstdint>
+#include <string>
 
 namespace wivrn
 {
@@ -18,8 +19,13 @@ class nx_fuse_tap
 	static constexpr size_t datagram_size = header_size + max_records * record_size;
 
 	int socket_fd = -1;
+	std::string socket_path;
+	uint64_t reconnect_after_ns = 0;
 	uint64_t sequence = 1;
 	uint64_t generation = 1;
+
+	bool connect_socket();
+	void disconnect_socket();
 
 	void emit(uint8_t route, uint64_t generation, XrTime sample_time, const std::array<xrt_space_relation, max_records> & poses,
 	          const std::array<uint16_t, max_records> & roles, const std::array<uint16_t, max_records> & sources, size_t count,

@@ -121,6 +121,8 @@ if (WIVRN_BUILD_SERVER)
 			driver/bitrate_controller.cpp
 			driver/clock_offset.cpp
 			driver/nx_fuse_tap.cpp
+			driver/nx_fuse_corrections.cpp
+			driver/nx_fuse_tracker.cpp
 			driver/configuration.cpp
 			driver/hand_joints_list.cpp
 			driver/pose_list.cpp
@@ -285,6 +287,10 @@ if (WIVRN_BUILD_SERVER)
 		)
 
 	target_compile_definitions(wivrn-server PRIVATE JSON_DIAGNOSTICS=1)
+	# Keep direct server builds aligned with the OpenXR runtime they ship.
+	if (TARGET openxr_wivrn)
+		add_dependencies(wivrn-server openxr_wivrn)
+	endif()
 
 	configure_file(dist/wivrn.service.in wivrn.service)
 	install(FILES ${CMAKE_CURRENT_BINARY_DIR}/wivrn.service

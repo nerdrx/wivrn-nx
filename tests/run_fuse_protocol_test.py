@@ -22,6 +22,13 @@ class FakeFuse(http.server.ThreadingHTTPServer):
     def __init__(self):
         super().__init__(("127.0.0.1", 0), Handler)
         self.scenario = "valid"
+        self.shadow_posts = 0
+        self.shadow_enabled = False
+        self.assistance_enabled = False
+        self.estimation_enabled = False
+        self.automatic_running = False
+        self.camera_settings = {"width": 640, "height": 480, "fps": 15}
+        self.camera_sequence = 0
         self.lock = threading.Lock()
 
 
@@ -48,7 +55,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json({"ok": True})
             return
         if parsed.path == "/api/cameras":
-            self.send_json({"devices": []})
+            with self.server.lock:
+                sequence = self.server.camera_sequence
+                if self.server.scenario == "changing-devices":
+                    self.server.camera_sequence += 1
+                settings = dict(self.server.camera_settings)
+            self.send_json({"devices": [{"id": "cam-test", "name": "Test camera",
+                                          "streaming": False, "settings": settings,
+                                          "sequence": sequence}]})
+            return
+        if parsed.path == "/api/shadow":
+            self.send_json({"mode": "shadow", "enabled": self.server.shadow_enabled, "camera": "cam-test" if self.server.shadow_enabled else "", "available": False, "joints": [], "metrics": {}})
+            return
+        if parsed.path == "/api/assistance":
+            self.send_json({"mode": "assistance", "enabled": self.server.assistance_enabled, "available": True, "reason": "", "joints": [], "sent": 0})
+            return
+        if parsed.path == "/api/alignment":
+            self.send_json({"automatic": {"running": self.server.automatic_running},
+                            "estimation_received": self.server.estimation_enabled})
             return
         if parsed.path != "/api/state":
             self.send_error(404)
@@ -76,6 +100,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(payload)
             return
         self.send_json({"mode": "simulation", "joints": {}})
+
+    def do_POST(self):  # noqa: N802
+        if self.path not in ("/api/shadow", "/api/camera/settings", "/api/assistance", "/api/alignment", "/api/camera/estimation"):
+            self.send_error(404)
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        value = json.loads(self.rfile.read(length))
+        with self.server.lock:
+            if self.path == "/api/shadow" and self.server.scenario == "shadow-reject":
+                self.send_json({"ok": False})
+                return
+            if self.path == "/api/shadow":
+                self.server.shadow_posts += 1
+                self.server.shadow_enabled = bool(value["enabled"])
+            elif self.path == "/api/assistance":
+                self.server.assistance_enabled = bool(value["enabled"])
+            elif self.path == "/api/camera/estimation":
+                self.server.estimation_enabled = bool(value["enabled"])
+            elif self.path == "/api/alignment":
+                self.server.automatic_running = value["action"] == "auto_start"
+            else:
+                self.server.camera_settings = {key: value[key] for key in ("width", "height", "fps")}
+        self.send_json({"ok": True})
 
 
 def main():

@@ -29,7 +29,7 @@ FuseService::FuseService(QObject * parent) :
         m_port(servicePort())
 {
 	m_network.setProxy(QNetworkProxy::NoProxy);
-	m_poll.setInterval(200); // At most five state/camera cycles per second.
+	m_poll.setInterval(33); // Body and preview updates at up to 30 Hz; diagnostics at 5 Hz.
 	connect(&m_poll, &QTimer::timeout, this, &FuseService::poll);
 	m_kill.setSingleShot(true);
 	connect(&m_kill, &QTimer::timeout, this, [this] { m_process.kill(); });
@@ -62,21 +62,27 @@ bool FuseService::workerAvailable() const
 void FuseService::fail(const QString & message)
 {
 	m_connected = false;
-	m_state.clear();
-	m_devices.clear();
-	m_tracking.clear();
-	m_calibration.clear();
-	m_alignment.clear();
-	m_shadow.clear();
+	m_diagnostics.invalidate();
+	update(m_cameraChoices, QVariantList(), &FuseService::cameraChoicesChanged);
+	update(m_state, QVariantMap(), &FuseService::stateChanged);
+	update(m_devices, QVariantList(), &FuseService::devicesChanged);
+	update(m_tracking, QVariantMap(), &FuseService::trackingChanged);
+	update(m_calibration, QVariantMap(), &FuseService::calibrationChanged);
+	update(m_alignment, QVariantMap(), &FuseService::alignmentChanged);
+	update(m_shadow, QVariantMap(), &FuseService::shadowChanged);
+	update(m_assistance, QVariantMap(), &FuseService::assistanceChanged);
 	m_calibrationCommand = {};
 	m_lensImport = {};
 	m_alignmentCommand = {};
 	m_shadowCommand = {};
+	m_assistanceCommand = {};
 	m_shadowRecordingCommand = {};
+	m_cameraSettings = {};
 	m_controls.clear();
 	m_cameraControls.clear();
 	m_estimationControls.clear();
 	m_error = message;
+	m_cameraError.clear();
 	emit changed();
 }
 
@@ -266,8 +272,21 @@ void FuseService::poll()
 		const auto command = m_shadowCommand;
 		m_shadowCommand = {};
 		request(QStringLiteral("/api/shadow"), command, [this](QJsonObject response, QString error, bool) {
-			if (!error.isEmpty() || response.value(QStringLiteral("mode")) != QJsonValue(QStringLiteral("shadow")))
+			if (!error.isEmpty() || response.value(QStringLiteral("ok")) != QJsonValue(true))
 				m_cameraError = error.isEmpty() ? QStringLiteral("Shadow request rejected.") : error;
+			else
+				m_cameraError.clear();
+			finish();
+		});
+		return;
+	}
+	if (m_connected && !m_assistanceCommand.isEmpty())
+	{
+		const auto command = m_assistanceCommand;
+		m_assistanceCommand = {};
+		request(QStringLiteral("/api/assistance"), command, [this](QJsonObject response, QString error, bool) {
+			if (!error.isEmpty() || response.value(QStringLiteral("ok")) != QJsonValue(true))
+				m_cameraError = error.isEmpty() ? QStringLiteral("Camera assistance request rejected.") : error;
 			else
 				m_cameraError.clear();
 			finish();
@@ -283,6 +302,17 @@ void FuseService::poll()
 				m_cameraError = error.isEmpty() ? QStringLiteral("Shadow recording request rejected.") : error;
 			else
 				m_cameraError.clear();
+			finish();
+		});
+		return;
+	}
+	if (m_connected && !m_cameraSettings.isEmpty())
+	{
+		const auto command = m_cameraSettings;
+		m_cameraSettings = {};
+		request(QStringLiteral("/api/camera/settings"), command, [this](QJsonObject response, QString error, bool) {
+			m_cameraError = error.isEmpty() && response.value(QStringLiteral("ok")) == QJsonValue(true)
+			                      ? QString() : (error.isEmpty() ? QStringLiteral("Camera settings request rejected.") : error);
 			finish();
 		});
 		return;
@@ -341,27 +371,45 @@ void FuseService::poll()
 			finish();
 			return;
 		}
-		m_state = response.toVariantMap();
+		update(m_state, response.toVariantMap(), &FuseService::stateChanged);
 		request(QStringLiteral("/api/cameras"), {}, [this](QJsonObject cameras, QString error, bool) {
 			if (!error.isEmpty() || !cameras.value(QStringLiteral("devices")).isArray())
 				fail(error.isEmpty() ? QStringLiteral("Invalid camera inventory.") : error);
 			else
 			{
-				m_devices = cameras.value(QStringLiteral("devices")).toArray().toVariantList();
+				const auto devices = cameras.value(QStringLiteral("devices")).toArray().toVariantList();
+				QVariantList choices;
+				for (const auto & entry : devices)
+				{
+					const auto device = entry.toMap();
+					choices.append(QVariantMap{{"id", device.value("id")}, {"name", device.value("name")}});
+				}
+				update(m_devices, devices, &FuseService::devicesChanged);
+				update(m_cameraChoices, choices, &FuseService::cameraChoicesChanged);
 				request(QStringLiteral("/api/tracking"), {}, [this](QJsonObject tracking, QString error, bool) {
-					m_tracking = error.isEmpty() && tracking.value(QStringLiteral("read_only")) == QJsonValue(true)
-					                     && tracking.value(QStringLiteral("records")).isArray() ? tracking.toVariantMap() : QVariantMap();
+					update(m_tracking, error.isEmpty() && tracking.value(QStringLiteral("read_only")) == QJsonValue(true)
+					                     && tracking.value(QStringLiteral("records")).isArray() ? tracking.toVariantMap() : QVariantMap(), &FuseService::trackingChanged);
+					if (m_connected && m_diagnostics.isValid() && m_diagnostics.elapsed() < 200)
+					{
+						finish();
+						return;
+					}
+					m_diagnostics.start();
 					request(QStringLiteral("/api/calibration"), {}, [this](QJsonObject value, QString error, bool) {
-						m_calibration = error.isEmpty() ? value.toVariantMap() : QVariantMap();
+						update(m_calibration, error.isEmpty() ? value.toVariantMap() : QVariantMap(), &FuseService::calibrationChanged);
 						request(QStringLiteral("/api/alignment"), {}, [this](QJsonObject alignment, QString alignmentError, bool) {
-							m_alignment = alignmentError.isEmpty() ? alignment.toVariantMap() : QVariantMap();
+							update(m_alignment, alignmentError.isEmpty() ? alignment.toVariantMap() : QVariantMap(), &FuseService::alignmentChanged);
 							request(QStringLiteral("/api/shadow"), {}, [this](QJsonObject shadow, QString shadowError, bool) {
 								// Shadow is optional: older workers return 404 and remain usable.
-								m_shadow = shadowError.isEmpty() && shadow.value(QStringLiteral("mode")) == QJsonValue(QStringLiteral("shadow"))
-								             ? shadow.toVariantMap() : QVariantMap();
-								m_connected = true;
-								m_error.clear();
-								finish();
+								update(m_shadow, shadowError.isEmpty() && shadow.value(QStringLiteral("mode")) == QJsonValue(QStringLiteral("shadow"))
+								             ? shadow.toVariantMap() : QVariantMap(), &FuseService::shadowChanged);
+								request(QStringLiteral("/api/assistance"), {}, [this](QJsonObject assistance, QString assistanceError, bool) {
+									update(m_assistance, assistanceError.isEmpty() && assistance.value(QStringLiteral("mode")) == QJsonValue(QStringLiteral("assistance"))
+									             ? assistance.toVariantMap() : QVariantMap(), &FuseService::assistanceChanged);
+									m_connected = true;
+									m_error.clear();
+									finish();
+								});
 							});
 						});
 					});
@@ -412,7 +460,16 @@ void FuseService::alignmentCommand(const QVariantMap & command)
 	const auto action = command.value(QStringLiteral("action")).toString();
 	const auto id = command.value(QStringLiteral("id")).toString();
 	const auto anchor = command.value(QStringLiteral("anchor")).toString();
-	if (id.isEmpty() || id.size() > 256 || (action != QStringLiteral("freeze") && action != QStringLiteral("sample") && action != QStringLiteral("solve") && action != QStringLiteral("reset"))
+	if (id.isEmpty() || id.size() > 256)
+		return;
+	if (action == QStringLiteral("auto_start") || action == QStringLiteral("auto_stop"))
+	{
+		if (action == QStringLiteral("auto_start") && (!command.value(QStringLiteral("anchors")).canConvert<QVariantList>() || !command.value(QStringLiteral("offsets")).canConvert<QVariantMap>()))
+			return;
+		m_alignmentCommand = QJsonObject::fromVariantMap(command);
+		return;
+	}
+	if ((action != QStringLiteral("freeze") && action != QStringLiteral("sample") && action != QStringLiteral("solve") && action != QStringLiteral("reset"))
 	    || (anchor != QStringLiteral("head") && anchor != QStringLiteral("left_hand") && anchor != QStringLiteral("right_hand")))
 		return;
 	m_alignmentCommand = QJsonObject::fromVariantMap(command);
@@ -435,9 +492,43 @@ void FuseService::setShadow(QString id, bool enabled)
 	}
 }
 
-void FuseService::shadowRecordingCommand(QString action)
+void FuseService::shadowRecordingCommand(QString action, QString id)
 {
 	if (!m_connected || (action != QStringLiteral("start") && action != QStringLiteral("stop") && action != QStringLiteral("clear")) || !m_shadowRecordingCommand.isEmpty())
 		return;
 	m_shadowRecordingCommand = {{QStringLiteral("action"), action}};
+	if (!id.isEmpty() && id.size() <= 256)
+		m_shadowRecordingCommand.insert(QStringLiteral("id"), id);
+}
+
+void FuseService::setAssistance(bool enabled)
+{
+	if (!m_connected)
+		return;
+	m_assistanceCommand = {{QStringLiteral("enabled"), enabled}};
+}
+
+void FuseService::setAssistanceMode(QString mode)
+{
+	if (!m_connected || (mode != QStringLiteral("assist") && mode != QStringLiteral("camera_only")))
+		return;
+	m_assistanceCommand = {{QStringLiteral("output_mode"), mode}};
+}
+
+void FuseService::setCameraSettings(QString id, int width, int height, int fps)
+{
+	if (!m_connected || !m_cameraSettings.isEmpty() || id.isEmpty() || id.size() > 256
+	    || (width != 320 && width != 640 && width != 1280)
+	    || (height != 240 && height != 480 && height != 720)
+	    || (width == 320 && height != 240) || (width == 640 && height != 480)
+	    || (width == 1280 && height != 720) || (fps != 15 && fps != 30 && fps != 60))
+		return;
+	for (const auto & device : m_devices)
+		if (device.toMap().value(QStringLiteral("id")).toString() == id
+		    && !device.toMap().value(QStringLiteral("streaming")).toBool())
+		{
+			m_cameraSettings = {{QStringLiteral("id"), id}, {QStringLiteral("width"), width},
+			                    {QStringLiteral("height"), height}, {QStringLiteral("fps"), fps}};
+			return;
+		}
 }

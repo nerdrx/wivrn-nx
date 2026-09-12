@@ -70,6 +70,54 @@ int main(int argc, char ** argv)
 		require(service.error().isEmpty(), "Reconnect retained transport error");
 		require(service.state().value(QStringLiteral("mode")).toString() == QStringLiteral("simulation"), "Recovery returned wrong mode");
 		require(!service.busy(), "Recovered service remained busy");
+		service.setShadow(QStringLiteral("cam-test"), true);
+		until([&] { return service.shadow().value(QStringLiteral("enabled")).toBool(); }, "Shadow POST did not complete", 7000);
+		require(service.cameraError().isEmpty(), "Successful shadow {ok:true} response reported an error");
+		service.setAssistance(true);
+		until([&] { return service.assistance().value(QStringLiteral("enabled")).toBool(); }, "Assistance POST did not complete", 7000);
+        require(service.cameraError().isEmpty(), "Successful assistance {ok:true} response reported an error");
+        service.setEstimation(QStringLiteral("cam-test"), true);
+        service.alignmentCommand({{"action", "auto_start"}, {"id", "cam-test"},
+                                  {"anchors", QVariantList{QStringLiteral("head")}},
+                                  {"offsets", QVariantMap{{"head", QVariantList{0, 0, 0}}}}});
+        until([&] {
+            return service.alignment().value("automatic").toMap().value("running").toBool()
+                   && service.alignment().value("estimation_received").toBool();
+        }, "Queued estimation and automatic alignment must both complete", 7000);
+		service.setCameraSettings(QStringLiteral("cam-test"), 1280, 720, 30);
+		until([&] {
+			for (const auto & value : service.devices())
+				if (value.toMap().value(QStringLiteral("id")).toString() == QStringLiteral("cam-test"))
+					return value.toMap().value(QStringLiteral("settings")).toMap().value(QStringLiteral("width")).toInt() == 1280;
+			return false;
+		}, "Camera settings POST/GET reflection did not complete", 7000);
+		set_scenario(QStringLiteral("shadow-reject"));
+		service.setShadow(QStringLiteral("cam-test"), false);
+		until([&] { return !service.cameraError().isEmpty(); }, "Rejected shadow response was not surfaced", 7000);
+		set_scenario(QStringLiteral("malformed"));
+		until([&] { return !service.error().isEmpty(); }, "Disconnect after camera error timed out", 7000);
+		require(service.cameraError().isEmpty(), "Disconnect retained stale camera error");
+		set_scenario(QStringLiteral("valid"));
+		service.connectService();
+		until([&] { return service.connected(); }, "Reconnect after camera error timed out", 7000);
+
+		int stateChanged = 0, devicesChanged = 0, cameraChoicesChanged = 0, calibrationChanged = 0;
+		QObject::connect(&service, &FuseService::stateChanged, [&] { ++stateChanged; });
+		QObject::connect(&service, &FuseService::devicesChanged, [&] { ++devicesChanged; });
+		QObject::connect(&service, &FuseService::cameraChoicesChanged, [&] { ++cameraChoicesChanged; });
+		QObject::connect(&service, &FuseService::calibrationChanged, [&] { ++calibrationChanged; });
+		int completedPolls = 0;
+		QObject::connect(&service, &FuseService::changed, [&] { if (!service.busy()) ++completedPolls; });
+		until([&] { return completedPolls >= 5; }, "Repeated snapshot polls did not complete", 7000);
+		require(stateChanged == 0 && devicesChanged == 0 && cameraChoicesChanged == 0 && calibrationChanged == 0,
+		        "Identical snapshots emitted change signals");
+
+		set_scenario(QStringLiteral("changing-devices"));
+		completedPolls = 0;
+		devicesChanged = cameraChoicesChanged = 0;
+		until([&] { return completedPolls >= 5; }, "Changing snapshot polls did not complete", 7000);
+		require(devicesChanged > 0 && cameraChoicesChanged == 0,
+		        "Device detail changes did not isolate camera choices signal");
 		service.stopWorker();
 		return 0;
 	}

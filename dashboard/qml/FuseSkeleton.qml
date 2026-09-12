@@ -5,6 +5,7 @@ Rectangle {
     id: root
     property var poseData: ({})
     property bool observationsOnly: false
+    property bool liveTracking: false
     property bool sideView: false
     property bool connected: false
     readonly property var bones: [["head","neck"],["neck","hip"],["neck","left_shoulder"],["neck","right_shoulder"],["left_shoulder","left_elbow"],["left_elbow","left_hand"],["right_shoulder","right_elbow"],["right_elbow","right_hand"],["hip","left_knee"],["left_knee","left_foot"],["hip","right_knee"],["right_knee","right_foot"]]
@@ -14,9 +15,10 @@ Rectangle {
     color: "#070410"
     clip: true
     Accessible.role: Accessible.Graphic
-    Accessible.name: observationsOnly ? "Synthetic camera input projection. No real camera image." : "Simulated body output and baseline skeleton"
+    Accessible.name: liveTracking ? i18n("Live received tracking joints") : observationsOnly ? i18n("Synthetic camera input projection. No real camera image.") : i18n("Simulated body output and baseline skeleton")
     onPoseDataChanged: drawing.requestPaint()
     onObservationsOnlyChanged: drawing.requestPaint()
+    onLiveTrackingChanged: drawing.requestPaint()
     onSideViewChanged: drawing.requestPaint()
     onConnectedChanged: drawing.requestPaint()
 
@@ -47,12 +49,12 @@ Rectangle {
             var names = Object.keys(data);
             if (!names.length) {
                 c.fillStyle = "#b6a9d2"; c.font = "13px sans-serif"; c.textAlign = "center";
-                c.fillText(root.connected ? "No camera observations" : "Simulator disconnected", width/2,height/2);
+                c.fillText(root.liveTracking ? "No fresh tracked positions" : root.connected ? "No camera observations" : "Simulator disconnected", width/2,height/2);
                 return;
             }
             var scale = Math.min((height-80)/1.85,width/2.3);
             function project(p) { return [width/2+p[root.sideView?2:0]*scale,floor-p[1]*scale]; }
-            var fields = root.observationsOnly ? ["fused"] : ["pico","fused"];
+            var fields = root.observationsOnly || root.liveTracking ? ["fused"] : ["pico","fused"];
             for (var field of fields) {
                 c.strokeStyle = field === "pico" ? "#ae82e5" : root.observationsOnly ? "#ffcd80" : "#00e5ff";
                 c.fillStyle = c.strokeStyle;
@@ -77,7 +79,7 @@ Rectangle {
     }
     Text {
         anchors { left: parent.left; top: parent.top; margins: 16 }
-        text: root.observationsOnly ? "SYNTHETIC CAMERA · INPUT" : "SIMULATED BODY · OUTPUT"
+        text: root.liveTracking ? "LIVE TRACKING · RECEIVED" : root.observationsOnly ? "SYNTHETIC CAMERA · INPUT" : "SIMULATED BODY · OUTPUT"
         color: "#b6a9d2"
         font.pixelSize: 10
         font.letterSpacing: 1.5

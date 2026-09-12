@@ -29,7 +29,7 @@ ColumnLayout {
         Layout.fillWidth: true
         Controls.Button {
             text: i18n("Load lens profile…")
-            enabled: FuseService.connected && !FuseService.busy
+            enabled: FuseService.connected
             onClicked: lensFileDialog.open()
             Controls.ToolTip.visible: hovered
             Controls.ToolTip.text: i18n("Recheck lens calibration if camera or focus changes.")
@@ -88,7 +88,7 @@ ColumnLayout {
             }
             Controls.Button {
                 text: i18n("Capture board view")
-                enabled: root.cameraReady && !root.calibration.busy && !FuseService.busy
+                enabled: root.cameraReady && !root.calibration.busy
                 onClicked: FuseService.calibrationCommand("capture", root.cameraId, innerCols.value, innerRows.value, square.value)
             }
         }
@@ -96,12 +96,12 @@ ColumnLayout {
             Layout.fillWidth: true
             Controls.Button {
                 text: i18n("Solve (%1/6)", Number(root.calibration.count || 0))
-                enabled: root.cameraReady && Number(root.calibration.count || 0) >= 6 && !root.calibration.busy && !FuseService.busy
+                enabled: root.cameraReady && Number(root.calibration.count || 0) >= 6 && !root.calibration.busy
                 onClicked: FuseService.calibrationCommand("solve", root.cameraId, innerCols.value, innerRows.value, square.value)
             }
             Controls.Button {
                 text: i18n("Reset")
-                enabled: !root.calibration.busy && !FuseService.busy
+                enabled: !root.calibration.busy
                 onClicked: FuseService.calibrationCommand("reset", root.cameraId, innerCols.value, innerRows.value, square.value)
             }
             Controls.Label {
@@ -123,7 +123,7 @@ ColumnLayout {
         Controls.Button {
             visible: !!root.calibration.profile && !!root.calibration.profile.validated
             text: i18n("Download calibration profile")
-            onClicked: Qt.openUrlExternally(FuseService.serviceUrl + "/api/calibration/profile")
+                onClicked: Qt.openUrlExternally(FuseService.serviceUrl + "/api/calibration/profile?id=" + encodeURIComponent(root.cameraId))
         }
     }
 }

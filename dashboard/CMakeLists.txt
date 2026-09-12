@@ -28,6 +28,8 @@ add_executable(wivrn-dashboard
     firewall.cpp
     vulkan_info.cpp
     mirror_view.cpp
+    fuse_service.cpp
+    fuse_service.h
 )
 
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../dbus/io.github.wivrn.Server.xml PROPERTIES INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/wivrn_qdbus_types.h")
@@ -36,6 +38,9 @@ target_sources(wivrn-dashboard PRIVATE ${DBUS_INTERFACE_SRC})
 
 set_source_files_properties(../images/wivrn-nx.svg PROPERTIES QT_RESOURCE_ALIAS qml/wivrn.svg)
 qt_add_resources(wivrn-dashboard PREFIX "/" BASE .. FILES ../images/wivrn-nx.svg)
+set_source_files_properties(../images/wivrn-nx-small.svg PROPERTIES QT_RESOURCE_ALIAS qml/wivrn-small.svg)
+set_source_files_properties(../images/wivrn-nx-tray.svg PROPERTIES QT_RESOURCE_ALIAS qml/wivrn-tray.svg)
+qt_add_resources(wivrn-dashboard "nx-icons" PREFIX "/" BASE .. FILES ../images/wivrn-nx-small.svg ../images/wivrn-nx-tray.svg)
 
 # NX design language color scheme, applied app-locally from main.cpp
 qt_add_resources(wivrn-dashboard "nx-theme" PREFIX "/" FILES nx.colors)
@@ -51,6 +56,10 @@ qt_add_qml_module(wivrn-dashboard
         "QtMultimedia auto"
     QML_FILES
         qml/Main.qml
+        qml/FusePage.qml
+        qml/FuseSkeleton.qml
+        qml/FuseCameraView.qml
+        qml/FuseEstimateView.qml
         qml/NxBackground.qml
         qml/About.qml
         qml/ApkInstallPage.qml
@@ -86,6 +95,7 @@ target_link_libraries(wivrn-dashboard
     Qt6::QuickControls2
     Qt6::Multimedia
     Qt6::Widgets
+    Qt6::Network
     KF6::CoreAddons
     KF6::I18n
     KF6::I18nQml

@@ -45,6 +45,8 @@ static QString server_path()
 wivrn_server::wivrn_server(QObject * parent) :
         QObject(parent)
 {
+	if (qEnvironmentVariableIntValue("NX_DASHBOARD_PREVIEW") == 1)
+		return;
 	dbus_watcher.setConnection(QDBusConnection::sessionBus());
 	dbus_watcher.addWatchedService("io.github.wivrn.Server");
 
@@ -118,6 +120,8 @@ std::unique_ptr<QFile> get_server_log_file()
 
 void wivrn_server::start_server()
 {
+	if (qEnvironmentVariableIntValue("NX_DASHBOARD_PREVIEW") == 1)
+		return;
 	switch (serverStatus())
 	{
 		case Status::FailedToStart:

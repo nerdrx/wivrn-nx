@@ -11,12 +11,11 @@ import io.github.wivrn.wivrn
 
 Kirigami.ScrollablePage {
     id: settings
-    title: i18n("Settings")
+    title: i18n("Streaming")
 
     // transparent over the NX nebula, stock look otherwise
     background: Rectangle {
-        visible: !DashboardSettings.nx_theme
-        color: Kirigami.Theme.backgroundColor
+        color: DashboardSettings.nx_theme ? "#000000" : Kirigami.Theme.backgroundColor
     }
 
     flickable.interactive: false // Make sure the Kirigami.ScrollablePage does not eat the vertical mouse dragging events
@@ -25,9 +24,47 @@ Kirigami.ScrollablePage {
 
     ColumnLayout {
         id: column
-        anchors.fill: parent
+        spacing: 20
 
-        Kirigami.FormLayout {
+        Controls.Label {
+            text: i18n("STREAMING / CONFIGURATION")
+            color: DashboardSettings.nx_theme ? "#bc91ff" : Kirigami.Theme.highlightColor
+            font.pixelSize: 11
+            font.letterSpacing: 1.6
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+        }
+        Kirigami.Heading {
+            text: i18n("Tune your next session.")
+            level: 1
+            color: DashboardSettings.nx_theme ? "#efeaff" : Kirigami.Theme.textColor
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+        }
+        Controls.Label {
+            text: nxPreview ? i18n("Preview settings are separate from your normal dashboard. Streaming settings cannot be applied in preview mode.") : i18n("Encoding, connection behavior, and compatibility in one place. Use OK to save or Cancel to leave without saving.")
+            color: DashboardSettings.nx_theme ? "#b6a9d2" : Kirigami.Theme.disabledTextColor
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+        }
+        Controls.Frame {
+            Layout.fillWidth: true
+            padding: DashboardSettings.nx_theme ? 24 : 12
+            background: Rectangle {
+                radius: 6
+                gradient: Gradient {
+                    GradientStop { position: 0; color: DashboardSettings.nx_theme ? "#171022" : Kirigami.Theme.backgroundColor }
+                    GradientStop { position: 1; color: DashboardSettings.nx_theme ? "#090610" : Kirigami.Theme.backgroundColor }
+                }
+            }
+        contentItem: Kirigami.FormLayout {
+            Layout.fillWidth: true
+            Kirigami.Heading {
+                text: i18n("Encoding")
+                Kirigami.FormData.isSection: true
+                level: 2
+                color: DashboardSettings.nx_theme ? "#d4bbff" : Kirigami.Theme.textColor
+            }
 
             Kirigami.InlineMessage {
                 Layout.fillWidth: true
@@ -96,8 +133,11 @@ Kirigami.ScrollablePage {
                 }
             }
 
-            Kirigami.Separator {
+            Kirigami.Heading {
+                text: i18n("Session and devices")
                 Kirigami.FormData.isSection: true
+                level: 2
+                color: DashboardSettings.nx_theme ? "#d4bbff" : Kirigami.Theme.textColor
             }
 
             SelectGame {
@@ -130,14 +170,11 @@ Kirigami.ScrollablePage {
                 }
             }
 
-            Kirigami.Separator {
-                Kirigami.FormData.isSection: true
-            }
-
             Kirigami.Heading {
                 text: i18n("Advanced options")
-                level: 1
-                type: Kirigami.Heading.Type.Primary
+                Kirigami.FormData.isSection: true
+                level: 2
+                color: DashboardSettings.nx_theme ? "#d4bbff" : Kirigami.Theme.textColor
             }
             Controls.CheckBox {
                 id: show_system_checks
@@ -149,7 +186,7 @@ Kirigami.ScrollablePage {
                     text: i18n("NX look")
                 }
                 Kirigami.ContextualHelpButton {
-                    toolTipText: i18n("Deep-space color scheme with the drifting nebula background. Colors fully apply after the dashboard is restarted.")
+                    toolTipText: i18n("NX black and violet color scheme. Colors fully apply after the dashboard is restarted.")
                 }
             }
             RowLayout {
@@ -307,6 +344,8 @@ Kirigami.ScrollablePage {
                     onClicked: openvr_browse.open()
                 }
             }
+
+        }
 
         }
 

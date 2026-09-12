@@ -24,8 +24,8 @@ IntensityAmount=0
 IntensityEffect=0
 
 [Colors:Window]
-BackgroundNormal=13,9,24
-BackgroundAlternate=23,16,40
+BackgroundNormal=0,0,0
+BackgroundAlternate=18,12,34
 DecorationFocus=119,0,255
 DecorationHover=154,60,255
 ForegroundNormal=239,234,255
@@ -38,7 +38,7 @@ ForegroundNeutral=255,179,0
 ForegroundPositive=0,229,255
 
 [Colors:View]
-BackgroundNormal=23,16,40
+BackgroundNormal=12,8,24
 BackgroundAlternate=29,20,51
 DecorationFocus=119,0,255
 DecorationHover=154,60,255
@@ -95,7 +95,7 @@ ForegroundPositive=0,229,255
 
 [Colors:Complementary]
 BackgroundNormal=10,7,20
-BackgroundAlternate=23,16,40
+BackgroundAlternate=18,12,34
 DecorationFocus=119,0,255
 DecorationHover=154,60,255
 ForegroundNormal=239,234,255
@@ -108,8 +108,8 @@ ForegroundNeutral=255,179,0
 ForegroundPositive=0,229,255
 
 [Colors:Header]
-BackgroundNormal=16,11,28
-BackgroundAlternate=23,16,40
+BackgroundNormal=12,8,24
+BackgroundAlternate=18,12,34
 DecorationFocus=119,0,255
 DecorationHover=154,60,255
 ForegroundNormal=239,234,255

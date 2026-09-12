@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" role="img" aria-labelledby="title desc">
+  <title id="title">WiVRn NX</title>
+  <desc id="desc">White W-shaped headset visor on a flat violet pointy-top hexagon, simplified for small sizes.</desc>
+  <path d="M16 1 29 8.5v15L16 31 3 23.5v-15Z" fill="#7700ff"/>
+  <path d="M7 12 9 9h14l2 3-4 10h-2l-3-3-3 3h-2Zm3.5.5L12.5 18l3.5-4 3.5 4 2-5.5-.5-.5H11Z" fill="#fff" fill-rule="evenodd" transform="translate(0 .7)"/>
+</svg>

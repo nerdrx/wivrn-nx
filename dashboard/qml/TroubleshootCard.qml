@@ -1,85 +1,76 @@
+pragma ComponentBehavior: Bound
 import org.kde.kirigami as Kirigami
-
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Templates as T
-
-// Kirigami.Card {
-//     id: card
-//     property string title
-//     property alias details: label.text
-//
-//     banner.title: title
-//     contentItem: BetterLabel {
-// 	    id: label
-//     }
-// }
+import io.github.wivrn.wivrn
 
 Control {
-    // T.ItemDelegate {
     id: card
-    property alias title: label_title.text
+    property alias title: toggle.text
     property alias details: label_details.text
+    property alias expanded: toggle.checked
+    property list<T.Action> actions
+    padding: DashboardSettings.nx_theme ? 20 : Kirigami.Units.largeSpacing
+    leftPadding: padding
+    rightPadding: padding
+    topPadding: padding
+    bottomPadding: padding
+    implicitWidth: 480
+    implicitHeight: implicitContentHeight + topPadding + bottomPadding
 
-    Kirigami.Theme.inherit: false
-    // Kirigami.Theme.colorSet: Kirigami.Theme.View
-    Kirigami.Theme.colorSet: Kirigami.Theme.Button
-
-    property double expanded: 0
-    Behavior on expanded {
-        PropertyAnimation {
-            duration: Kirigami.Units.shortDuration
-            easing.type: Easing.InOutCubic
+    background: Rectangle {
+        radius: DashboardSettings.nx_theme ? 6 : Kirigami.Units.cornerRadius
+        border.width: toggle.activeFocus ? 2 : 0
+        border.color: DashboardSettings.nx_theme ? "#bc91ff" : Kirigami.Theme.highlightColor
+        gradient: Gradient {
+            GradientStop { position: 0; color: DashboardSettings.nx_theme ? (toggle.hovered ? "#201432" : "#171022") : Kirigami.Theme.alternateBackgroundColor }
+            GradientStop { position: 1; color: DashboardSettings.nx_theme ? "#090610" : Kirigami.Theme.backgroundColor }
         }
     }
-
-    implicitHeight: column.anchors.topMargin + label_title.implicitHeight + card.expanded * (column.spacing + label_details.implicitHeight + column.spacing + actionsToolBar.implicitHeight) + column.anchors.bottomMargin
-    implicitWidth: parent.width
-    clip: true
-
-    // background: Kirigami.ShadowedRectangle {
-    //     anchors.fill: parent
-    //     border.width: 1
-    //     border.color: Kirigami.ColorUtils.linearInterpolation(Kirigami.Theme.backgroundColor, Kirigami.Theme.textColor, Kirigami.Theme.frameContrast)
-    //     radius: Kirigami.Units.cornerRadius
-    // }
-
-    ColumnLayout {
-        id: column
-        anchors.fill: parent
-        anchors.margins: Kirigami.Units.smallSpacing
-
-        BetterLabel {
-            id: label_title
-            font.pixelSize: 20
-            Layout.preferredWidth: Math.min(implicitWidth, parent.width)
-            // Layout.fillWidth: true
-
-            MouseArea {
-                anchors.fill: parent
-                onClicked: card.expanded = 1 - card.expanded
-                cursorShape: Qt.PointingHandCursor
+    contentItem: ColumnLayout {
+        spacing: 16
+        AbstractButton {
+            id: toggle
+            Layout.fillWidth: true
+            checkable: true
+            focusPolicy: Qt.StrongFocus
+            Accessible.name: text
+            Accessible.description: checked ? i18n("Expanded. Activate to collapse.") : i18n("Collapsed. Activate to expand.")
+            Keys.onReturnPressed: event => { toggle.toggle(); event.accepted = true; }
+            Keys.onEnterPressed: event => { toggle.toggle(); event.accepted = true; }
+            contentItem: RowLayout {
+                spacing: 16
+                Label {
+                    text: toggle.text
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    font.pixelSize: 16
+                    font.weight: Font.DemiBold
+                    color: DashboardSettings.nx_theme ? "#efeaff" : Kirigami.Theme.textColor
+                }
+                Kirigami.Icon {
+                    source: toggle.checked ? "go-up-symbolic" : "go-down-symbolic"
+                    implicitWidth: 20
+                    implicitHeight: 20
+                    color: DashboardSettings.nx_theme ? "#bc91ff" : Kirigami.Theme.textColor
+                    Accessible.ignored: true
+                }
             }
         }
-
         BetterLabel {
             id: label_details
+            visible: toggle.checked
             Layout.fillWidth: true
+            color: DashboardSettings.nx_theme ? "#b6a9d2" : Kirigami.Theme.textColor
         }
-
         Kirigami.ActionToolBar {
-            id: actionsToolBar
+            visible: toggle.checked && card.actions.length > 0
+            Layout.fillWidth: true
             actions: card.actions
             position: ToolBar.Footer
             flat: false
         }
     }
-    /*
-    Rectangle {
-        anchors.fill: column
-        color: Qt.rgba(0, 0, 0.5, 0.5)
-    }*/
-
-    property list<T.Action> actions
 }

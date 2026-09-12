@@ -51,6 +51,10 @@ int main(int argc, char * argv[])
 
 	// Set aboutData as information about the app
 	KAboutData::setApplicationData(aboutData);
+	// Isolate preview preferences and avoid starting/attaching the VR service.
+	const bool preview = qEnvironmentVariableIntValue("NX_DASHBOARD_PREVIEW") == 1;
+	if (preview)
+		app.setApplicationName(QStringLiteral("wivrn-dashboard-preview"));
 
 #ifdef WIVRN_HAVE_KCOLORSCHEME
 	// NX design language: apply the deep-space color scheme app-locally, the
@@ -76,6 +80,7 @@ int main(int argc, char * argv[])
 	}
 
 	QQmlApplicationEngine engine;
+	engine.rootContext()->setContextProperty(QStringLiteral("nxPreview"), preview);
 
 	KLocalization::setupLocalizedContext(&engine);
 	engine.loadFromModule("io.github.wivrn.wivrn", "Main");

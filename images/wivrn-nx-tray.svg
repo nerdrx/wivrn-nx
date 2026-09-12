@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" role="img" aria-labelledby="title desc">
+  <title id="title">WiVRn NX</title>
+  <desc id="desc">A flat violet pointy-top hexagon with a transparent W-shaped headset visor cutout.</desc>
+  <!-- Even-odd geometry keeps the visor transparent under native icon tinting. -->
+  <path d="M16 1 29 8.5v15L16 31 3 23.5v-15ZM7 12.7l2-3h14l2 3-4 10h-2l-3-3-3 3h-2Zm3.5.5L12.5 18.7l3.5-4 3.5 4 2-5.5-.5-.5H11Z" fill="#7700ff" fill-rule="evenodd"/>
+</svg>

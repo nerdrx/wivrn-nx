@@ -38,6 +38,7 @@
 #include "wivrn_hmd.h"
 #include "wivrn_htc_face_tracker.h"
 #include "wivrn_ipc.h"
+#include "nx_fuse_tap.h"
 #include "wivrn_packets.h"
 #include "wivrn_uinput.h"
 #include "xrt/xrt_results.h"
@@ -129,6 +130,7 @@ class wivrn_session : public xrt_system_devices
 	std::optional<wivrn_fb_face2_tracker> fb_face2_tracker;
 	std::optional<wivrn_htc_face_tracker> htc_face_tracker;
 	std::optional<wivrn_body_tracker> body_tracker;
+	nx_fuse_tap nx_tap;
 	beman::inplace_vector::inplace_vector<wivrn_generic_tracker, from_headset::htc_body::max_tracked_poses> generic_trackers;
 	std::optional<wivrn_uinput> uinput_handler;
 	bool gamepad_connected = false; // network thread only

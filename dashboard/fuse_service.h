@@ -18,6 +18,8 @@ class FuseService : public QObject
 	QML_SINGLETON
 	Q_PROPERTY(QVariantMap state READ state NOTIFY changed)
 	Q_PROPERTY(QVariantList devices READ devices NOTIFY changed)
+	Q_PROPERTY(QVariantMap tracking READ tracking NOTIFY changed)
+	Q_PROPERTY(QVariantMap calibration READ calibration NOTIFY changed)
 	Q_PROPERTY(bool connected READ connected NOTIFY changed)
 	Q_PROPERTY(bool busy READ busy NOTIFY changed)
 	Q_PROPERTY(bool running READ running NOTIFY changed)
@@ -31,6 +33,8 @@ public:
 	~FuseService() override;
 	QVariantMap state() const { return m_state; }
 	QVariantList devices() const { return m_devices; }
+	QVariantMap tracking() const { return m_tracking; }
+	QVariantMap calibration() const { return m_calibration; }
 	bool connected() const { return m_connected; }
 	bool busy() const { return m_busy; }
 	bool running() const { return m_process.state() != QProcess::NotRunning; }
@@ -44,6 +48,7 @@ public:
 	Q_INVOKABLE void setControl(QString name, bool value);
 	Q_INVOKABLE void setCamera(QString id, bool enabled);
 	Q_INVOKABLE void setEstimation(QString id, bool enabled);
+	Q_INVOKABLE void calibrationCommand(QString action, QString id, int columns, int rows, double squareMM);
 
 signals:
 	void changed();
@@ -64,6 +69,9 @@ private:
 	const quint16 m_port;
 	QVariantMap m_state;
 	QVariantList m_devices;
+	QVariantMap m_tracking;
+	QVariantMap m_calibration;
+	QJsonObject m_calibrationCommand;
 	QMap<QString, bool> m_controls;
 	QMap<QString, bool> m_cameraControls;
 	QMap<QString, bool> m_estimationControls;

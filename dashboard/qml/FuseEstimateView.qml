@@ -78,4 +78,77 @@ ColumnLayout {
         wrapMode: Text.WordWrap
         color: "#b6a9d2"
     }
+    RowLayout {
+        Layout.fillWidth: true
+        Controls.Label {
+            Layout.fillWidth: true
+            text: i18n("Joint inspector")
+            color: "#efeaff"
+            font.pixelSize: 14
+        }
+        Controls.Label {
+            text: root.estimate.processing_ms !== undefined
+                  ? i18n("%1 ms model time", Number(root.estimate.processing_ms).toFixed(1))
+                  : i18n("Model time —")
+            color: "#b6a9d2"
+            Accessible.name: i18n("Pose model processing time")
+        }
+    }
+    Controls.ScrollView {
+        Layout.fillWidth: true
+        Layout.preferredHeight: Math.min(220, inspectorColumn.implicitHeight)
+        Layout.minimumHeight: 0
+        clip: true
+        Controls.ScrollBar.vertical.policy: Controls.ScrollBar.AsNeeded
+        Column {
+            id: inspectorColumn
+            width: parent.width
+            spacing: 2
+            Repeater {
+                model: root.points.length === 33 ? root.points.length : 0
+                delegate: Rectangle {
+                    required property int index
+                    width: inspectorColumn.width
+                    height: detailButton.checked ? 72 : 34
+                    color: index % 2 ? "#0c0912" : "#100b18"
+                    radius: 3
+                    border.color: "#261837"
+                    Controls.ToolButton {
+                        id: detailButton
+                        width: parent.width
+                        height: 34
+                        checkable: true
+                        text: {
+                            const landmark = (root.estimate.landmarks || [])[index] || {};
+                            const confidence = landmark.visibility === undefined ? "—" : Number(landmark.visibility).toFixed(2);
+                            return (landmark.name || i18n("Joint %1", index)) + "  ·  " + confidence;
+                        }
+                        horizontalPadding: 10
+                        Accessible.name: text
+                        Accessible.description: i18n("Expand joint coordinates")
+                    }
+                    Controls.Label {
+                        anchors.left: parent.left
+                        anchors.leftMargin: 12
+                        anchors.top: detailButton.bottom
+                        width: parent.width - 24
+                        height: 34
+                        visible: detailButton.checked
+                        verticalAlignment: Text.AlignVCenter
+                        color: "#b6a9d2"
+                        text: {
+                            const point = root.points[index] || [0, 0, 0];
+                            return i18n("Model metres · X %1  Y %2  Z %3", Number(point[0]).toFixed(3), Number(point[1]).toFixed(3), Number(point[2]).toFixed(3));
+                        }
+                    }
+                }
+            }
+            Controls.Label {
+                visible: root.points.length !== 33
+                text: i18n("No joint estimate to inspect")
+                color: "#b6a9d2"
+                padding: 10
+            }
+        }
+    }
 }

@@ -120,6 +120,7 @@ if (WIVRN_BUILD_SERVER)
 			driver/app_pacer.cpp
 			driver/bitrate_controller.cpp
 			driver/clock_offset.cpp
+			driver/nx_fuse_tap.cpp
 			driver/configuration.cpp
 			driver/hand_joints_list.cpp
 			driver/pose_list.cpp

@@ -9,6 +9,7 @@
 #include <QThread>
 #include <functional>
 #include <stdexcept>
+#include <iostream>
 
 static void require(bool condition, const char * message)
 {
@@ -74,7 +75,7 @@ int main(int argc, char ** argv)
 	}
 	catch (const std::exception & error)
 	{
-		qCritical("FAIL: %s", error.what());
+		std::cerr << "FAIL: " << error.what() << '\n';
 		return 1;
 	}
 }

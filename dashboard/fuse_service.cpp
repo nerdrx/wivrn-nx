@@ -63,6 +63,9 @@ void FuseService::fail(const QString & message)
 	m_connected = false;
 	m_state.clear();
 	m_devices.clear();
+	m_tracking.clear();
+	m_calibration.clear();
+	m_calibrationCommand = {};
 	m_controls.clear();
 	m_cameraControls.clear();
 	m_estimationControls.clear();
@@ -217,6 +220,16 @@ void FuseService::poll()
 		return;
 	m_busy = true;
 	emit changed();
+	if (m_connected && !m_calibrationCommand.isEmpty())
+	{
+		const auto command = m_calibrationCommand;
+		m_calibrationCommand = {};
+		request(QStringLiteral("/api/calibration"), command, [this](QJsonObject, QString error, bool) {
+			m_cameraError = error;
+			finish();
+		});
+		return;
+	}
 	if (m_connected && !m_estimationControls.isEmpty())
 	{
 		const auto it = m_estimationControls.cbegin();
@@ -278,10 +291,28 @@ void FuseService::poll()
 			else
 			{
 				m_devices = cameras.value(QStringLiteral("devices")).toArray().toVariantList();
-				m_connected = true;
-				m_error.clear();
+				request(QStringLiteral("/api/tracking"), {}, [this](QJsonObject tracking, QString error, bool) {
+					m_tracking = error.isEmpty() && tracking.value(QStringLiteral("read_only")) == QJsonValue(true)
+					                     && tracking.value(QStringLiteral("records")).isArray() ? tracking.toVariantMap() : QVariantMap();
+					request(QStringLiteral("/api/calibration"), {}, [this](QJsonObject value, QString error, bool) {
+						m_calibration = error.isEmpty() ? value.toVariantMap() : QVariantMap();
+						m_connected = true;
+						m_error.clear();
+						finish();
+					});
+				});
+				return;
 			}
 			finish();
 		});
 	});
+}
+
+void FuseService::calibrationCommand(QString action, QString id, int columns, int rows, double squareMM)
+{
+	if (!m_connected || (action != "capture" && action != "solve" && action != "reset"))
+		return;
+	m_calibrationCommand = {{QStringLiteral("action"), action}, {QStringLiteral("id"), id},
+	                        {QStringLiteral("pattern"), QJsonArray{columns, rows}},
+	                        {QStringLiteral("square_mm"), squareMM}};
 }

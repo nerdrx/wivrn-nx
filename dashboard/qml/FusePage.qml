@@ -58,7 +58,7 @@ Kirigami.ScrollablePage {
         spacing: 14
         FuseCameraView { Layout.fillWidth: true }
         SectionTitle { text: i18n("Synthetic camera input") }
-        Copy { text: i18n("Generated joint projection. No camera image, real depth estimate, or pose model is running.") }
+        Copy { text: i18n("This projection is synthetic and independent of the camera estimates above.") }
         FuseSkeleton { Layout.fillWidth: true; Layout.preferredHeight: 300; poseData: root.pose; connected: FuseService.connected; observationsOnly: true }
         Copy { text: i18n("Input observations → final body output. Z is a synthetic world coordinate in meters, not measured camera depth. Age uses the simulation clock.") }
         GridLayout {
@@ -91,18 +91,22 @@ Kirigami.ScrollablePage {
 
     ColumnLayout {
         spacing: 20
-        Controls.Label { text: i18n("BODY TRACKING LAB / SIMULATION"); color: "#bc91ff"; font.pixelSize: 11; font.letterSpacing: 1.6; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+        Controls.Label { text: i18n("BODY TRACKING LAB / OBSERVATION + SIMULATION"); color: "#bc91ff"; font.pixelSize: 11; font.letterSpacing: 1.6; Layout.fillWidth: true; wrapMode: Text.WordWrap }
         Controls.Label { text: i18n("A little more grounded."); color: root.ink; font.pixelSize: 30; font.weight: Font.DemiBold; Layout.fillWidth: true; wrapMode: Text.WordWrap }
-        Copy { text: i18n("Camera-assisted Pico tracking, or camera-only body tracking without wearable trackers. This native console currently controls a local simulation.") }
+        Copy { text: i18n("Inspect cameras and WiVRn tracking, calibrate camera lenses, and test assisted or camera-only fusion in a separate simulation.") }
         Flow {
             Layout.fillWidth: true
             spacing: 10
-            Controls.Button { text: i18n("Connect to simulator"); enabled: !FuseService.busy; onClicked: FuseService.connectService() }
-            Controls.Button { text: FuseService.running ? i18n("Worker running") : i18n("Start local simulator"); enabled: FuseService.workerAvailable && !FuseService.running && !FuseService.busy; onClicked: FuseService.startWorker() }
-            Controls.Button { text: FuseService.running ? i18n("Stop worker") : i18n("Disconnect simulator"); enabled: (FuseService.running || FuseService.connected) && !FuseService.busy; onClicked: FuseService.stopWorker() }
+            Controls.Button { text: i18n("Connect to Fuse"); enabled: !FuseService.busy; onClicked: FuseService.connectService() }
+            Controls.Button { text: FuseService.running ? i18n("Worker running") : i18n("Start local worker"); enabled: FuseService.workerAvailable && !FuseService.running && !FuseService.busy; onClicked: FuseService.startWorker() }
+            Controls.Button { text: FuseService.running ? i18n("Stop worker") : i18n("Disconnect from Fuse"); enabled: (FuseService.running || FuseService.connected) && !FuseService.busy; onClicked: FuseService.stopWorker() }
         }
-        Copy { text: FuseService.connected ? i18n("Connected · simulation only · no tracking data sent to VR") : i18n("Disconnected. Start the local simulator or connect to an existing instance."); color: FuseService.connected ? "#00e5ff" : "#ffcd80" }
+        Copy { text: FuseService.connected ? i18n("Connected to Fuse · observation tools ready · fusion output remains simulated") : i18n("Disconnected. Start the local worker or connect to an existing instance."); color: FuseService.connected ? "#00e5ff" : "#ffcd80" }
         Kirigami.InlineMessage { Layout.fillWidth: true; visible: FuseService.error.length > 0; text: FuseService.error; type: Kirigami.MessageType.Error }
+        Panel {
+            Layout.fillWidth: true
+            contentItem: FuseTrackingView {}
+        }
         GridLayout {
             Layout.fillWidth: true
             columns: root.wide ? 2 : 1

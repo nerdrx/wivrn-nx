@@ -82,6 +82,11 @@ ColumnLayout {
         visible: root.estimating
         estimate: root.device.estimate || ({})
     }
+    FuseLensSetup {
+        Layout.fillWidth: true
+        cameraId: root.device.id || ""
+        cameraReady: root.streaming && !root.estimating
+    }
     Controls.Label {
         Layout.fillWidth: true
         visible: FuseService.devices.length > 1

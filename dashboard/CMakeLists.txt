@@ -60,6 +60,8 @@ qt_add_qml_module(wivrn-dashboard
         qml/FuseSkeleton.qml
         qml/FuseCameraView.qml
         qml/FuseEstimateView.qml
+        qml/FuseLensSetup.qml
+        qml/FuseTrackingView.qml
         qml/NxBackground.qml
         qml/About.qml
         qml/ApkInstallPage.qml

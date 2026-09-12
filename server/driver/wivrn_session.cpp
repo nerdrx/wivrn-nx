@@ -739,12 +739,14 @@ void wivrn_session::operator()(const from_headset::tracking & tracking)
 	}
 	if (tracking.state_flags & from_headset::tracking::state_flags::recentered)
 	{
+		nx_tap.recenter();
 		U_LOG_I("recentering requested");
 		if (XRT_SUCCESS != xrt_space_overseer_recenter_local_spaces(space_overseer))
 			U_LOG_W("failed to recenter local spaces");
 	}
 
 	auto offset = offset_est.get_offset();
+	nx_tap.emit_tracking(tracking, offset, nx_tap.current_generation());
 
 	if (offset)
 	{
@@ -812,11 +814,13 @@ void wivrn_session::operator()(from_headset::bd_body && body_tracking)
 	assert(body_tracker);
 
 	auto offset = offset_est.get_offset();
+	nx_tap.emit_bd(body_tracking, offset, nx_tap.current_generation());
 	body_tracker->update_tracking(body_tracking, offset);
 }
 void wivrn_session::operator()(from_headset::htc_body && body_tracking)
 {
 	auto offset = offset_est.get_offset();
+	nx_tap.emit_htc(body_tracking, offset, nx_tap.current_generation());
 
 	for (auto [tracker, pose]: std::ranges::zip_view(generic_trackers, body_tracking.poses))
 		tracker.update_tracking(

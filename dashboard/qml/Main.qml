@@ -443,7 +443,7 @@ Kirigami.ApplicationWindow {
                     spacing: 10
                     Controls.Label { text: i18n("BODY TRACKING / NX FUSE"); color: "#b78aff"; font.pixelSize: 11; font.bold: true }
                     Kirigami.Heading { text: i18n("A second perspective."); level: 2 }
-                    Controls.Label { text: i18n("Explore camera assistance and camera-only body tracking in the native simulation lab. Live camera estimation and VR output are still in development."); Layout.fillWidth: true; wrapMode: Text.Wrap; color: Kirigami.Theme.disabledTextColor }
+                    Controls.Label { text: i18n("Inspect camera estimates, align cameras to your headset, and compare read-only body observations with raw tracking. Live VR correction is still in development."); Layout.fillWidth: true; wrapMode: Text.Wrap; color: Kirigami.Theme.disabledTextColor }
                     Controls.Button { text: i18n("Open Body Tracking"); highlighted: true; onClicked: root.navigate("FusePage.qml", 2) }
                 }
             }

@@ -1,6 +1,7 @@
 #include "fuse_service.h"
 
 #include <QFileInfo>
+#include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QNetworkReply>
@@ -66,8 +67,12 @@ void FuseService::fail(const QString & message)
 	m_tracking.clear();
 	m_calibration.clear();
 	m_alignment.clear();
+	m_shadow.clear();
 	m_calibrationCommand = {};
+	m_lensImport = {};
 	m_alignmentCommand = {};
+	m_shadowCommand = {};
+	m_shadowRecordingCommand = {};
 	m_controls.clear();
 	m_cameraControls.clear();
 	m_estimationControls.clear();
@@ -232,6 +237,17 @@ void FuseService::poll()
 		});
 		return;
 	}
+	if (m_connected && !m_lensImport.isEmpty())
+	{
+		const auto command = m_lensImport;
+		m_lensImport = {};
+		request(QStringLiteral("/api/calibration/profile"), command, [this](QJsonObject response, QString error, bool) {
+			m_cameraError = error.isEmpty() && response.value(QStringLiteral("ok")) == QJsonValue(true)
+			                      ? QString() : (error.isEmpty() ? QStringLiteral("Lens profile import rejected.") : error);
+			finish();
+		});
+		return;
+	}
 	if (m_connected && !m_alignmentCommand.isEmpty())
 	{
 		const auto command = m_alignmentCommand;
@@ -239,6 +255,32 @@ void FuseService::poll()
 		request(QStringLiteral("/api/alignment"), command, [this](QJsonObject response, QString error, bool) {
 			if (!error.isEmpty() || response.value(QStringLiteral("ok")) != QJsonValue(true))
 				m_cameraError = error.isEmpty() ? QStringLiteral("Alignment request rejected.") : error;
+			else
+				m_cameraError.clear();
+			finish();
+		});
+		return;
+	}
+	if (m_connected && !m_shadowCommand.isEmpty())
+	{
+		const auto command = m_shadowCommand;
+		m_shadowCommand = {};
+		request(QStringLiteral("/api/shadow"), command, [this](QJsonObject response, QString error, bool) {
+			if (!error.isEmpty() || response.value(QStringLiteral("mode")) != QJsonValue(QStringLiteral("shadow")))
+				m_cameraError = error.isEmpty() ? QStringLiteral("Shadow request rejected.") : error;
+			else
+				m_cameraError.clear();
+			finish();
+		});
+		return;
+	}
+	if (m_connected && !m_shadowRecordingCommand.isEmpty())
+	{
+		const auto command = m_shadowRecordingCommand;
+		m_shadowRecordingCommand = {};
+		request(QStringLiteral("/api/shadow/recording"), command, [this](QJsonObject response, QString error, bool) {
+			if (!error.isEmpty() || response.value(QStringLiteral("ok")) != QJsonValue(true))
+				m_cameraError = error.isEmpty() ? QStringLiteral("Shadow recording request rejected.") : error;
 			else
 				m_cameraError.clear();
 			finish();
@@ -313,9 +355,14 @@ void FuseService::poll()
 						m_calibration = error.isEmpty() ? value.toVariantMap() : QVariantMap();
 						request(QStringLiteral("/api/alignment"), {}, [this](QJsonObject alignment, QString alignmentError, bool) {
 							m_alignment = alignmentError.isEmpty() ? alignment.toVariantMap() : QVariantMap();
-							m_connected = true;
-							m_error.clear();
-							finish();
+							request(QStringLiteral("/api/shadow"), {}, [this](QJsonObject shadow, QString shadowError, bool) {
+								// Shadow is optional: older workers return 404 and remain usable.
+								m_shadow = shadowError.isEmpty() && shadow.value(QStringLiteral("mode")) == QJsonValue(QStringLiteral("shadow"))
+								             ? shadow.toVariantMap() : QVariantMap();
+								m_connected = true;
+								m_error.clear();
+								finish();
+							});
 						});
 					});
 				});
@@ -335,6 +382,29 @@ void FuseService::calibrationCommand(QString action, QString id, int columns, in
 	                        {QStringLiteral("square_mm"), squareMM}};
 }
 
+void FuseService::importLensProfile(QUrl url)
+{
+	if (!m_connected || !url.isLocalFile() || !m_lensImport.isEmpty())
+		return;
+	QFile file(url.toLocalFile());
+	if (!QFileInfo(file).isFile() || !file.open(QIODevice::ReadOnly) || file.size() > 32768)
+	{
+		m_cameraError = QStringLiteral("Lens profile must be a readable local JSON file under 32768 bytes.");
+		emit changed();
+		return;
+	}
+	QJsonParseError parseError;
+	const auto bytes = file.read(32769);
+	const auto doc = QJsonDocument::fromJson(bytes, &parseError);
+	if (bytes.size() > 32768 || parseError.error != QJsonParseError::NoError || !doc.isObject() || doc.object().isEmpty())
+	{
+		m_cameraError = QStringLiteral("Invalid lens profile JSON.");
+		emit changed();
+		return;
+	}
+	m_lensImport = doc.object();
+}
+
 void FuseService::alignmentCommand(const QVariantMap & command)
 {
 	if (!m_connected || !m_alignmentCommand.isEmpty())
@@ -346,4 +416,28 @@ void FuseService::alignmentCommand(const QVariantMap & command)
 	    || (anchor != QStringLiteral("head") && anchor != QStringLiteral("left_hand") && anchor != QStringLiteral("right_hand")))
 		return;
 	m_alignmentCommand = QJsonObject::fromVariantMap(command);
+}
+
+void FuseService::setShadow(QString id, bool enabled)
+{
+	if (!m_connected || id.isEmpty() || id.size() > 256)
+		return;
+	if (!enabled)
+	{
+		m_shadowCommand = {{QStringLiteral("id"), id}, {QStringLiteral("enabled"), false}};
+		return;
+	}
+	for (const auto & device : m_devices)
+		if (device.toMap().value(QStringLiteral("id")).toString() == id)
+		{
+			m_shadowCommand = {{QStringLiteral("id"), id}, {QStringLiteral("enabled"), enabled}};
+			return;
+	}
+}
+
+void FuseService::shadowRecordingCommand(QString action)
+{
+	if (!m_connected || (action != QStringLiteral("start") && action != QStringLiteral("stop") && action != QStringLiteral("clear")) || !m_shadowRecordingCommand.isEmpty())
+		return;
+	m_shadowRecordingCommand = {{QStringLiteral("action"), action}};
 }

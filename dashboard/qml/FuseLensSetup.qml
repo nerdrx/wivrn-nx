@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls as Controls
 import QtQuick.Layouts
+import QtQuick.Dialogs
 import io.github.wivrn.wivrn
 
 ColumnLayout {
@@ -23,6 +24,24 @@ ColumnLayout {
         text: i18n("Intrinsic camera calibration only. Results do not define a VR-space transform or body tracking.")
         color: "#b6a9d2"
         wrapMode: Text.WordWrap
+    }
+    RowLayout {
+        Layout.fillWidth: true
+        Controls.Button {
+            text: i18n("Load lens profile…")
+            enabled: FuseService.connected && !FuseService.busy
+            onClicked: lensFileDialog.open()
+            Controls.ToolTip.visible: hovered
+            Controls.ToolTip.text: i18n("Recheck lens calibration if camera or focus changes.")
+            Accessible.name: i18n("Load local lens calibration profile")
+        }
+        Controls.Label { Layout.fillWidth: true; text: i18n("Load saved lens geometry; recheck after camera or focus changes."); color: "#b6a9d2"; wrapMode: Text.WordWrap }
+    }
+    FileDialog {
+        id: lensFileDialog
+        title: i18n("Select lens profile")
+        nameFilters: [i18n("JSON files (*.json)"), i18n("All files (*)")]
+        onAccepted: FuseService.importLensProfile(selectedFile)
     }
     Controls.AbstractButton {
         id: toggle

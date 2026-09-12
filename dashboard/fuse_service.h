@@ -7,6 +7,7 @@
 #include <QTimer>
 #include <QJsonObject>
 #include <QMap>
+#include <QUrl>
 #include <functional>
 #include <QtQmlIntegration/qqmlintegration.h>
 
@@ -21,6 +22,7 @@ class FuseService : public QObject
 	Q_PROPERTY(QVariantMap tracking READ tracking NOTIFY changed)
 	Q_PROPERTY(QVariantMap calibration READ calibration NOTIFY changed)
 	Q_PROPERTY(QVariantMap alignment READ alignment NOTIFY changed)
+	Q_PROPERTY(QVariantMap shadow READ shadow NOTIFY changed)
 	Q_PROPERTY(bool connected READ connected NOTIFY changed)
 	Q_PROPERTY(bool busy READ busy NOTIFY changed)
 	Q_PROPERTY(bool running READ running NOTIFY changed)
@@ -37,6 +39,7 @@ public:
 	QVariantMap tracking() const { return m_tracking; }
 	QVariantMap calibration() const { return m_calibration; }
 	QVariantMap alignment() const { return m_alignment; }
+	QVariantMap shadow() const { return m_shadow; }
 	bool connected() const { return m_connected; }
 	bool busy() const { return m_busy; }
 	bool running() const { return m_process.state() != QProcess::NotRunning; }
@@ -51,7 +54,10 @@ public:
 	Q_INVOKABLE void setCamera(QString id, bool enabled);
 	Q_INVOKABLE void setEstimation(QString id, bool enabled);
 	Q_INVOKABLE void calibrationCommand(QString action, QString id, int columns, int rows, double squareMM);
+	Q_INVOKABLE void importLensProfile(QUrl url);
 	Q_INVOKABLE void alignmentCommand(const QVariantMap & command);
+	Q_INVOKABLE void setShadow(QString id, bool enabled);
+	Q_INVOKABLE void shadowRecordingCommand(QString action);
 
 signals:
 	void changed();
@@ -75,8 +81,12 @@ private:
 	QVariantMap m_tracking;
 	QVariantMap m_calibration;
 	QVariantMap m_alignment;
+	QVariantMap m_shadow;
 	QJsonObject m_calibrationCommand;
+	QJsonObject m_lensImport;
 	QJsonObject m_alignmentCommand;
+	QJsonObject m_shadowCommand;
+	QJsonObject m_shadowRecordingCommand;
 	QMap<QString, bool> m_controls;
 	QMap<QString, bool> m_cameraControls;
 	QMap<QString, bool> m_estimationControls;

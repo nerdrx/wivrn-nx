@@ -69,6 +69,45 @@ int main()
 	a.vectors = {127, -127, 0, 0};
 	assert(motion_field_ema_blend(a, b, out));
 	assert(out.vectors[0] == 0 and out.vectors[1] == 0);
+	// Extreme finite scales must not overflow the per-vector arithmetic.
+	a.scale = b.scale = std::numeric_limits<float>::max();
+	a.vectors = b.vectors = {127, -127, 0, 0};
+	assert(motion_field_ema_blend(a, b, out));
+	assert(out.vectors[0] == 127 and out.vectors[1] == -127);
+	a.span_ns = 1;
+	b.span_ns = 100;
+	assert(!motion_field_ema_blend(a, b, out));
+	a.span_ns = b.span_ns;
+	b.vectors.clear();
+	assert(!motion_field_ema_blend(a, b, out));
+	// Packet validation protects raw warp as well as the optional history path.
+	to_headset::motion_field chunk{};
+	chunk.width = chunk.height = chunk.row_count = 1;
+	chunk.span_ns = 16'666'667;
+	chunk.vectors = {0, 0};
+	for (float invalid : {-1.f, .251f, std::numeric_limits<float>::infinity(),
+	                      std::numeric_limits<float>::quiet_NaN()})
+	{
+		motion_field_assembler assembler;
+		chunk.scale = invalid;
+		chunk.view = 0; assembler.add(chunk);
+		chunk.view = 1; assembler.add(chunk);
+		assert(!assembler.complete());
+	}
+	chunk.scale = 0;
+	for (XrTime invalid : {XrTime(0), XrTime(-1), std::numeric_limits<XrTime>::max()})
+	{
+		motion_field_assembler assembler;
+		chunk.span_ns = invalid;
+		chunk.view = 0; assembler.add(chunk);
+		chunk.view = 1; assembler.add(chunk);
+		assert(!assembler.complete());
+	}
+	chunk.span_ns = 16'666'667;
+	motion_field_assembler stationary;
+	chunk.view = 0; stationary.add(chunk);
+	chunk.view = 1; stationary.add(chunk);
+	assert(stationary.complete());
 	// Identity poses pass; a small head turn is rejected.
 	assert(motion_pose_delta_small({.orientation = {0, 0, 0, 1}, .position = {0, 0, 0}},
 	                               {.orientation = {0, 0, 0, 1}, .position = {0, 0, 0}}));

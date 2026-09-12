@@ -2386,7 +2386,13 @@ void scenes::stream::render(const XrFrameState & frame_state)
                             stable_head = motion_pose_delta_small(prev[v]->second.pose[v],
                                 current_blit_handles[eye_stream(v)]->view_info.pose[v]);
                         const bool ema_enabled = motion_history_ema_enabled();
-                        if (motion_ema_frame != it->frame_idx)
+                        if (not ema_enabled)
+                        {
+                            motion_ema_frame = uint64_t(-1);
+                            motion_ema_span = 0;
+                            motion_ema_active = false;
+                        }
+                        else if (motion_ema_frame != it->frame_idx)
                         {
                             const bool compatible = ema_enabled and stable_head and
                                 motion_ema_frame != uint64_t(-1) and motion_history_contiguous(motion_ema_field, *it) and

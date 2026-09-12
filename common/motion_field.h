@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -152,6 +153,11 @@ public:
 
 	void add(const to_headset::motion_field & chunk)
 	{
+		// The estimator caps displacement at 0.25 eye widths. Zero is a
+		// valid stationary field; reject invalid arithmetic before allocation.
+		if (chunk.span_ns <= 0 or chunk.span_ns >= 500'000'000 or
+		    not std::isfinite(chunk.scale) or chunk.scale < 0 or chunk.scale > 0.25f)
+			return;
 		// Do not trust the sender's arithmetic
 		if (chunk.width == 0 or chunk.height == 0 or chunk.row_count == 0 or chunk.view >= 2)
 			return;

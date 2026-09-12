@@ -4,6 +4,7 @@
 #include "motion_pose.h"
 
 #include <cmath>
+#include <limits>
 
 namespace wivrn
 {
@@ -44,24 +45,27 @@ inline bool motion_field_ema_blend(const motion_field_data & previous,
                                    const motion_field_data & current,
                                    motion_field_data & result)
 {
-	if (previous.width != current.width or previous.height != current.height or
+	if (current.width == 0 or current.height == 0 or
+	    current.vectors.size() != current.value_count() or
+	    previous.width != current.width or previous.height != current.height or
 	    previous.vectors.size() != current.vectors.size() or current.scale <= 0 or
 	    previous.scale <= 0 or previous.span_ns <= 0 or current.span_ns <= 0 or
 	    not std::isfinite(previous.scale) or not std::isfinite(current.scale))
 		return false;
-	const float span_ratio = float(current.span_ns) / float(previous.span_ns);
-	if (not std::isfinite(span_ratio) or span_ratio <= 0)
+	const double history_range = double(previous.scale) * double(current.span_ns) / double(previous.span_ns);
+	const double range = 0.5 * (double(current.scale) + history_range);
+	if (not std::isfinite(range) or range > std::numeric_limits<float>::max() or float(range) <= 0)
 		return false;
-	// Keep the physical range representable when an older field used a larger
-	// scale or a longer interval; otherwise the EMA would silently clip motion.
+	// Normalize once. Bounded weights avoid per-vector division and overflow
+	// from multiplying a byte by a large but finite input scale.
+	const float old_weight = float(0.5 * history_range / float(range));
+	const float new_weight = float(0.5 * double(current.scale) / float(range));
 	result = current;
-	result.scale = 0.5f * current.scale + 0.5f * previous.scale * span_ratio;
+	result.scale = float(range);
 	for (size_t i = 0; i < current.vectors.size(); ++i)
 	{
-		const float old_value = float(previous.vectors[i]) * previous.scale * span_ratio;
-		const float new_value = float(current.vectors[i]) * current.scale;
-		const float blended = 0.5f * old_value + 0.5f * new_value;
-		const float quantized = std::round(blended / result.scale);
+		const float quantized = std::round(float(previous.vectors[i]) * old_weight +
+		                                   float(current.vectors[i]) * new_weight);
 		result.vectors[i] = int8_t(std::clamp(quantized, -127.f, 127.f));
 	}
 	return true;

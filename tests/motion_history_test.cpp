@@ -14,6 +14,23 @@ int main()
 	b.span_ns = 20;
 	b.scale = 2.f;
 	b.vectors = {20, -20, 40, -40};
+	// Skipped IDs are continuous only with the exact estimator predecessor.
+	a.source_time_ns = 1'000'000'000;
+	b.source_time_ns = 1'016'666'667;
+	b.source_span_ns = 16'666'667;
+	b.frame_idx = 4;
+	assert(motion_history_contiguous(a, b));
+	b.source_time_ns += 16'666'667;
+	assert(!motion_history_contiguous(a, b));
+	b.source_time_ns = a.source_time_ns;
+	assert(!motion_history_contiguous(a, b));
+	b.source_time_ns = 0;
+	assert(!motion_history_contiguous(a, b));
+	b.frame_idx = 2;
+	assert(motion_history_contiguous(a, b));
+	b.frame_idx = 1;
+	assert(!motion_history_contiguous(a, b));
+	b.frame_idx = 2;
 	motion_field_data out;
 	assert(motion_field_ema_blend(a, b, out));
 	// Span normalization makes a's 10-unit vector equivalent to 20 units here.
@@ -24,7 +41,20 @@ int main()
 	b.scale = 1.f;
 	b.vectors = {1, -1, 0, 0};
 	assert(motion_field_ema_blend(a, b, out));
-	assert(out.scale >= 8.f and out.vectors[0] > 60);
+	assert(out.scale == 4.5f and out.vectors[0] > 110);
+	// A past large motion must not permanently coarsen all later small vectors.
+	a.span_ns = b.span_ns;
+	a.scale = 1.f;
+	a.vectors = {127, -127, 0, 0};
+	b.scale = .001f;
+	b.vectors = {127, -127, 0, 0};
+	for (int i = 0; i < 16; ++i)
+	{
+		assert(motion_field_ema_blend(a, b, out));
+		a = out;
+	}
+	assert(out.scale < .0011f);
+	assert(std::abs(float(out.vectors[0]) * out.scale - .127f) < .003f);
 	// Invalid metadata never seeds history.
 	b.span_ns = 0;
 	assert(!motion_field_ema_blend(a, b, out));

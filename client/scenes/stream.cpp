@@ -2389,7 +2389,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
                         if (motion_ema_frame != it->frame_idx)
                         {
                             const bool compatible = ema_enabled and stable_head and
-                                motion_ema_frame != uint64_t(-1) and it->frame_idx == motion_ema_frame + 1 and
+                                motion_ema_frame != uint64_t(-1) and motion_history_contiguous(motion_ema_field, *it) and
                                 motion_ema_span > 0 and warp_span >= motion_ema_span / 2 and
                                 warp_span <= motion_ema_span * 2 and
                                 (motion_ema_source_time <= 0 or it->source_time_ns <= 0 or

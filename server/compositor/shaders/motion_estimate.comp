@@ -88,6 +88,23 @@ uint sad(int level, ivec2 c, ivec2 d, int view)
 	return cost;
 }
 
+// Reject the shortcut at the first unequal quantized sample. This bounds its
+// overhead on changing content without weakening the exact stationary test.
+bool stationary(ivec2 c, int view)
+{
+    ivec2 last = level_size(0) - 1;
+    for (int y = 0; y < MOTION_WINDOW; ++y)
+        for (int x = 0; x < MOTION_WINDOW; ++x)
+        {
+            ivec2 p = clamp(c + ivec2(x, y) - MOTION_WINDOW / 2, ivec2(0), last);
+            float a = texelFetch(current, ivec3(p, view), 0).r;
+            float b = texelFetch(previous, ivec3(p, view), 0).r;
+            if (uint(round(abs(a - b) * 255.0)) != 0)
+                return false;
+        }
+    return true;
+}
+
 // Exhaustive search of a (2 * radius + 1)^2 neighbourhood of `base`, cooperatively
 // over the work group. Candidates are ranked by a single packed key so that the
 // reduction order cannot change the outcome: lowest cost first, then the shortest
@@ -149,6 +166,21 @@ void main()
 	// Cell centre in level 0 texels. The grid covers the image exactly, so the cell
 	// centres the headset samples between are the ones matched here.
 	vec2 centre = (vec2(cell) + 0.5) / vec2(params.grid) * vec2(params.l0_size);
+
+	// A perfect stationary patch wins every later zero-cost tie as well.
+	// All lanes take the same exit after publishing the exact integer SAD.
+	if (gl_LocalInvocationIndex == 0)
+		s_cost[0] = stationary(ivec2(floor(centre)), view) ? 0 : 1;
+	barrier();
+	if (s_cost[0] == 0)
+	{
+		if (gl_LocalInvocationIndex == 0)
+		{
+			uint index = (uint(view) * uint(params.grid.y) + gl_WorkGroupID.y) * uint(params.grid.x) + gl_WorkGroupID.x;
+			result.vectors[index] = vec2(0);
+		}
+		return;
+	}
 
 	// Displacement, in level 0 texels, refined from the coarsest level down
 	ivec2 v = ivec2(0);

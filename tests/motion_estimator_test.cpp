@@ -168,13 +168,25 @@ std::pair<float, float> estimate_cell(
         const pyramid & current,
         const pyramid & previous,
         ivec2 cell,
-        ivec2 grid)
+        ivec2 grid,
+        bool stationary_shortcut = false)
 {
 	const int l0_width = current[0].width;
 	const int l0_height = current[0].height;
 
 	float centre_x = (cell.x + 0.5f) / float(grid.x) * float(l0_width);
 	float centre_y = (cell.y + 0.5f) / float(grid.y) * float(l0_height);
+
+	// A zero-cost zero-vector candidate wins the level-0 packed-key search:
+	// cost ties prefer shortest vector, then candidate index. Subtexel refinement
+	// also returns zero when centre cost is zero. This mirrors the proposed shader
+	// earlyout while retaining a selectable unmodified reference path.
+	if (stationary_shortcut)
+	{
+		ivec2 c0{int(std::floor(centre_x)), int(std::floor(centre_y))};
+		if (sad(current, previous, 0, c0, {0, 0}) == 0)
+			return {0, 0};
+	}
 
 	ivec2 v{0, 0};
 	for (int level = MOTION_LEVELS - 1; level >= 0; --level)
@@ -541,6 +553,40 @@ void test_flat_image()
 	CHECK(vy == 0);
 }
 
+void test_stationary_shortcut_equivalence()
+{
+	std::printf("stationary shortcut equivalence\n");
+	plane base = make_image(eye_width, eye_height, 31);
+
+	auto compare = [](const plane & previous_image, const plane & current_image, const char * name, bool expect_shortcut) {
+		pyramid previous = make_pyramid(previous_image, l0_width, l0_height);
+		pyramid current = make_pyramid(current_image, l0_width, l0_height);
+		int shortcut_cells = 0;
+		for (int j = 0; j < grid_height; ++j)
+			for (int i = 0; i < grid_width; ++i)
+			{
+				auto reference = estimate_cell(current, previous, {i, j}, {grid_width, grid_height});
+				auto shortcut = estimate_cell(current, previous, {i, j}, {grid_width, grid_height}, true);
+				CHECK(reference == shortcut);
+				ivec2 c{int(std::floor((i + 0.5f) / grid_width * l0_width)),
+				        int(std::floor((j + 0.5f) / grid_height * l0_height))};
+				if (sad(current, previous, 0, c, {0, 0}) == 0)
+					++shortcut_cells;
+			}
+		std::printf("  %s: %d shortcut cells\n", name, shortcut_cells);
+		if (expect_shortcut)
+			CHECK(shortcut_cells > 0);
+	};
+
+	compare(base, base, "static", true);
+	compare(base, shift(base, 13, -7), "translated", false);
+	const int seam = eye_width / 2;
+	compare(base, shift_by_region(base, [seam](int x, int y) {
+		return x < seam ? std::pair{0, 0} : std::pair{11, -5};
+	}), "mixed", true);
+	compare(base, shift(base, 0, 0), "edge", true);
+}
+
 } // namespace
 
 int main()
@@ -565,6 +611,8 @@ int main()
 	test_out_of_range();
 	std::printf("\n");
 	test_flat_image();
+	std::printf("\n");
+	test_stationary_shortcut_equivalence();
 
 	std::printf("\n%d checks, %d failures\n", checks, failures);
 	return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

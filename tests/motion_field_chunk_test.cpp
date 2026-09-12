@@ -94,6 +94,17 @@ motion_field_data make_field(uint16_t width, uint16_t height, uint64_t frame_idx
 	return field;
 }
 
+motion_field_data make_constant_field(uint16_t width, uint16_t height, uint64_t frame_idx)
+{
+	auto field = make_field(width, height, frame_idx);
+	for (size_t i = 0; i < field.vectors.size(); i += 2)
+	{
+		field.vectors[i] = 3;
+		field.vectors[i + 1] = -4;
+	}
+	return field;
+}
+
 bool same_field(const motion_field_data & a, const motion_field_data & b)
 {
 	return a.frame_idx == b.frame_idx and a.span_ns == b.span_ns and a.source_time_ns == b.source_time_ns and
@@ -211,6 +222,63 @@ void test_dense_grid_round_trip()
         assembler.add(chunk);
         CHECK(!assembler.complete());
     }
+}
+
+void test_rle_and_malformed_encoding()
+{
+	std::printf("Part C2: dense RLE and malformed encodings\n");
+	auto dense = make_constant_field(272, 272, 77);
+	auto dense_chunks = split_motion_field(dense);
+	CHECK(!dense_chunks.empty());
+	CHECK(std::all_of(dense_chunks.begin(), dense_chunks.end(), [](const auto & c) { return c.encoding == 1; }));
+	CHECK(std::all_of(dense_chunks.begin(), dense_chunks.end(), [](const auto & c) {
+		return c.vectors.size() < size_t(c.row_count) * c.width * 2;
+	}));
+	motion_field_assembler dense_assembler;
+	for (const auto & chunk : dense_chunks)
+		dense_assembler.add(round_trip(chunk));
+	CHECK(dense_assembler.complete());
+	CHECK(same_field(dense_assembler.field(), dense));
+
+	auto raw = make_field(16, 1, 78);
+	auto raw_chunks = split_motion_field(raw);
+	CHECK(raw_chunks.size() == 2);
+	CHECK(raw_chunks[0].encoding == 0);
+	CHECK(raw_chunks[0].vectors.size() == 32);
+
+	for (auto bad : {dense_chunks.front(), raw_chunks.front()})
+	{
+		bad.encoding = 2;
+		motion_field_assembler assembler;
+		assembler.add(bad);
+		CHECK(!assembler.complete());
+	}
+	// An overshooting count in a tiny field must not underflow the byte bound.
+	for (auto payload : {std::vector<int8_t>{int8_t(255), 3, -4},
+	                     std::vector<int8_t>{1,3,-4,1,3,-4}})
+	{
+	    auto bad = raw_chunks.front();
+	    bad.width=1; bad.encoding=1; bad.vectors=payload;
+	    motion_field_assembler tiny;
+	    tiny.add(bad);
+	    bad.view=1; tiny.add(bad);
+	    CHECK(!tiny.complete());
+	}
+	auto malformed = dense_chunks.front();
+	malformed.vectors = {0, 3, -4};
+	motion_field_assembler assembler;
+	assembler.add(malformed);
+	CHECK(!assembler.complete());
+	malformed.vectors = {int8_t(255), 3, -4};
+	assembler.add(malformed);
+	CHECK(!assembler.complete());
+	malformed.vectors.pop_back();
+	assembler.add(malformed);
+	CHECK(!assembler.complete());
+	for (const auto & chunk : dense_chunks)
+		assembler.add(chunk);
+	CHECK(assembler.complete());
+	CHECK(same_field(assembler.field(), dense));
 }
 
 void test_losses_and_garbage()
@@ -427,6 +495,7 @@ int main()
 	test_chunk_size();
 	test_round_trip();
 	test_dense_grid_round_trip();
+	test_rle_and_malformed_encoding();
 	test_losses_and_garbage();
 	test_warp_step();
 	test_mode_selection();

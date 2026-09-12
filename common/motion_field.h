@@ -22,10 +22,13 @@
 #include "wivrn_packets.h"
 
 #include <algorithm>
+#include <array>
+#include <span>
 #include <cstddef>
 #include <cmath>
 #include <cstdint>
 #include <vector>
+#include <utility>
 
 namespace wivrn
 {
@@ -85,6 +88,25 @@ inline float motion_warp_step(XrTime now, XrTime frame_display_time, XrTime span
 static constexpr uint16_t MOTION_MAX_GRID_SIDE = 512;
 static constexpr size_t MOTION_MAX_CELLS = size_t(MOTION_MAX_GRID_SIDE) * MOTION_MAX_GRID_SIDE;
 
+inline std::vector<int8_t> motion_rle_encode(const std::vector<int8_t> & raw)
+{
+	std::vector<int8_t> encoded;
+	encoded.reserve(raw.size());
+	for (size_t i = 0; i < raw.size();)
+	{
+		size_t count = 1;
+		while (count < 255 and i + 2 * count < raw.size() and
+		       raw[i + 2 * count] == raw[i] and raw[i + 2 * count + 1] == raw[i + 1])
+			++count;
+		encoded.push_back(int8_t(count));
+		encoded.push_back(raw[i]);
+		encoded.push_back(raw[i + 1]);
+		if (encoded.size() >= raw.size()) return {}; // Raw is already no larger.
+		i += 2 * count;
+	}
+	return encoded;
+}
+
 // Cuts a whole field into chunks of whole grid rows of one eye, each small enough for
 // one datagram. Every chunk repeats the header, so they are independent of each other
 // and of their order. Returns nothing for a field that has no cells.
@@ -108,6 +130,9 @@ inline std::vector<to_headset::motion_field> split_motion_field(const motion_fie
 			const auto first = field.vectors.begin() +
 			                   ptrdiff_t((size_t(view) * field.height + row) * row_values);
 
+			auto raw = std::vector<int8_t>(first, first + ptrdiff_t(size_t(rows) * row_values));
+			auto rle = motion_rle_encode(raw);
+			const bool use_rle = not rle.empty() and rle.size() < raw.size();
 			chunks.push_back({
 			        .frame_idx = field.frame_idx,
 			        .span_ns = field.span_ns,
@@ -119,7 +144,8 @@ inline std::vector<to_headset::motion_field> split_motion_field(const motion_fie
 			        .view = view,
 			        .row_offset = row,
 			        .row_count = rows,
-			        .vectors = std::vector<int8_t>(first, first + ptrdiff_t(size_t(rows) * row_values)),
+				.vectors = use_rle ? std::move(rle) : std::move(raw),
+				.encoding = uint8_t(use_rle),
 			});
 		}
 	}
@@ -168,7 +194,38 @@ public:
 			return;
 		if (size_t(chunk.row_offset) + chunk.row_count > chunk.height)
 			return;
-		if (chunk.vectors.size() != size_t(chunk.row_count) * chunk.width * 2)
+		const size_t expected = size_t(chunk.row_count) * chunk.width * 2;
+		if (expected == 0 or expected > to_headset::motion_field::max_chunk_bytes or
+		    chunk.vectors.size() > to_headset::motion_field::max_chunk_bytes)
+			return;
+		std::array<int8_t, to_headset::motion_field::max_chunk_bytes> decoded_storage;
+		std::span<const int8_t> decoded = chunk.vectors;
+		if (chunk.encoding == 0)
+		{
+			if (chunk.vectors.size() != expected)
+				return;
+		}
+		else if (chunk.encoding == 1)
+		{
+			if (chunk.vectors.size() % 3 != 0)
+				return;
+			size_t cursor = 0;
+			for (size_t i = 0; i < chunk.vectors.size(); i += 3)
+			{
+				const unsigned count = uint8_t(chunk.vectors[i]);
+				if (count == 0 or size_t(2 * count) > expected - cursor)
+					return;
+				for (unsigned n = 0; n < count; ++n)
+				{
+					decoded_storage[cursor++] = chunk.vectors[i + 1];
+					decoded_storage[cursor++] = chunk.vectors[i + 2];
+				}
+			}
+			if (cursor != expected)
+				return;
+			decoded = std::span<const int8_t>(decoded_storage.data(), expected);
+		}
+		else
 			return;
 		if (chunk.source_time_ns < 0 or chunk.source_span_ns < 0 or
 		    (chunk.source_time_ns == 0) != (chunk.source_span_ns == 0) or
@@ -208,7 +265,7 @@ public:
 		for (uint16_t j = 0; j < chunk.row_count; ++j)
 		{
 			const size_t row = size_t(chunk.view) * current.height + chunk.row_offset + j;
-			std::copy_n(chunk.vectors.begin() + ptrdiff_t(size_t(j) * row_values),
+			std::copy_n(decoded.begin() + ptrdiff_t(size_t(j) * row_values),
 			            row_values,
 			            current.vectors.begin() + ptrdiff_t(row * row_values));
 			if (not rows[row])

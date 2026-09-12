@@ -1664,10 +1664,12 @@ struct motion_field
 	uint16_t row_offset;
 	uint16_t row_count;
 
-	// Two components (x, y) per cell, row major, for this chunk's rows only:
+	// Raw encoding: two components (x, y) per cell, row major, for this chunk's rows only:
 	// index = ((j - row_offset) * width + i) * 2, so the size is row_count * width
 	// * 2. Values are in [-127, 127].
 	std::vector<int8_t> vectors;
+	// 0 = raw x,y bytes; 1 = (run length, x, y) records.
+	uint8_t encoding = 0;
 
 	// Most vector bytes in one chunk. Small enough that a chunk, header and stream
 	// framing included, stays well under any MTU worth worrying about and under the

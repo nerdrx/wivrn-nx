@@ -1370,6 +1370,7 @@ struct render_probe
 	uint64_t iters = 0, gated_out = 0, no_render = 0, cache_hits = 0, new_source = 0, submitted = 0;
 	uint64_t selected_forward = 0, selected_backward = 0, selected_repeat = 0, selected_max_gap = 0;
 	uint64_t motion_matched = 0, motion_active = 0, motion_pose_applied = 0;
+	uint64_t gpu_submissions = 0, cached_submissions_skipped = 0;
 	uint64_t motion_pose_unsafe = 0, motion_pose_missing = 0;
 	uint64_t motion_source_clock_applied = 0;
 	double motion_step_sum = 0;
@@ -1753,6 +1754,10 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		}
 	}
 
+	// Each completed submission contributes its timestamps exactly once. A cached
+	// re-presentation below may submit no GPU work at all.
+	query_pool_filled = false;
+
 	g_rp.query_ms += rp_ms(std::chrono::steady_clock::now() - rp_query0);
 	// The client's OWN pass, on the device: what the defoveate/reprojection submission
 	// costs the GPU. Against the two decodes measured next to it this is the whole
@@ -1773,6 +1778,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 
 	// Keep a reference to the resources needed to blit the images until vkWaitForFences
 
+	bool image_transitions_recorded = false;
 	command_buffer.resetQueryPool(*query_pool, 0, size_gpu_timestamps);
 	command_buffer.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, *query_pool, 0);
 
@@ -1908,6 +1914,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			};
 
 			command_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eAllCommands, {}, {}, {}, barrier);
+			image_transitions_recorded = true;
 			blit_handle->current_layout = vk::ImageLayout::eGeneral;
 		}
 
@@ -2036,6 +2043,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			};
 
 			command_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eAllCommands, {}, {}, {}, barrier);
+			image_transitions_recorded = true;
 			handle->current_layout = vk::ImageLayout::eGeneral;
 		}
 
@@ -2775,36 +2783,47 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		command_buffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *query_pool, 1);
 
 		command_buffer.end();
-		vk::SubmitInfo submit_info;
-		submit_info.setCommandBuffers(*command_buffer);
-
-		inplace_vector<vk::Semaphore, decoder_count> semaphores;
-		inplace_vector<uint64_t, decoder_count> semaphore_vals;
-		inplace_vector<vk::PipelineStageFlags, decoder_count> wait_stages;
-		for (auto b: current_blit_handles)
+		// The runtime can reuse the last released projection image without another
+		// Vulkan submission. Still submit any recorded decoder image transitions:
+		// their software layout has already advanced and must match the device.
+		if (not cache_hit or image_transitions_recorded)
 		{
-			if (b and b->semaphore)
-			{
-				assert(b->semaphore_val);
-				semaphores.push_back(b->semaphore);
-				semaphore_vals.push_back(*b->semaphore_val);
-				// Atlas tile matrices may be consumed by the vertex warp path.
-				// Order both shader consumers after the decoder's snapshot writes.
-				wait_stages.push_back(vk::PipelineStageFlagBits::eVertexShader | vk::PipelineStageFlagBits::eFragmentShader);
-			}
-		}
-		submit_info.setWaitDstStageMask(wait_stages);
-		submit_info.setWaitSemaphores(semaphores);
-		vk::TimelineSemaphoreSubmitInfo sem_info{
-		        .waitSemaphoreValueCount = uint32_t(semaphore_vals.size()),
-		        .pWaitSemaphoreValues = semaphore_vals.data(),
-		};
-		submit_info.pNext = &sem_info;
+			vk::SubmitInfo submit_info;
+			submit_info.setCommandBuffers(*command_buffer);
 
-		device.resetFences(*fence);
-		const auto rp_sub0 = std::chrono::steady_clock::now();
-		queue.lock()->submit(submit_info, *fence);
-		g_rp.submit_ms += rp_ms(std::chrono::steady_clock::now() - rp_sub0);
+			inplace_vector<vk::Semaphore, decoder_count> semaphores;
+			inplace_vector<uint64_t, decoder_count> semaphore_vals;
+			inplace_vector<vk::PipelineStageFlags, decoder_count> wait_stages;
+			for (auto b: current_blit_handles)
+			{
+				if (b and b->semaphore)
+				{
+					assert(b->semaphore_val);
+					semaphores.push_back(b->semaphore);
+					semaphore_vals.push_back(*b->semaphore_val);
+					// Atlas tile matrices may be consumed by the vertex warp path.
+					// Order both shader consumers after the decoder's snapshot writes.
+					wait_stages.push_back(vk::PipelineStageFlagBits::eVertexShader | vk::PipelineStageFlagBits::eFragmentShader);
+				}
+			}
+			submit_info.setWaitDstStageMask(wait_stages);
+			submit_info.setWaitSemaphores(semaphores);
+			vk::TimelineSemaphoreSubmitInfo sem_info{
+			        .waitSemaphoreValueCount = uint32_t(semaphore_vals.size()),
+			        .pWaitSemaphoreValues = semaphore_vals.data(),
+			};
+			submit_info.pNext = &sem_info;
+
+			device.resetFences(*fence);
+			const auto rp_sub0 = std::chrono::steady_clock::now();
+			queue.lock()->submit(submit_info, *fence);
+			g_rp.submit_ms += rp_ms(std::chrono::steady_clock::now() - rp_sub0);
+			query_pool_filled = true;
+			++g_rp.gpu_submissions;
+		}
+		else
+			++g_rp.cached_submissions_skipped;
+
 #if WIVRN_FEATURE_RENDERDOC
 		renderdoc_end(*vk_instance);
 #endif
@@ -3099,6 +3118,8 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		spdlog::info("render: shader path sharpness {:.2f} fsr {} alpha {} motion {} blend {} glow {:.2f} vignette {:.2f} deband {:.2f} lowpoly {:.2f} levels {:.0f} full-kernel {}",
 		             g_rp.sharpness, g_rp.fsr, g_rp.use_alpha, g_rp.motion_on, g_rp.blend_on,
 		             g_rp.glow, g_rp.vignette, g_rp.deband, g_rp.low_poly, g_rp.low_poly_levels, g_rp.low_poly_full);
+		spdlog::info("render: {} GPU submissions, {} cached refreshes without GPU submission",
+		             g_rp.gpu_submissions, g_rp.cached_submissions_skipped);
 		spdlog::info("render: per iteration fence {:.1f} (worst {:.1f}) | queries {:.1f} | submit {:.1f} | whole render() {:.1f} ms",
 		             g_rp.fence_ms / n, g_rp.worst_fence_ms, g_rp.query_ms / n,
 		             g_rp.submit_ms / n, g_rp.blit_ms / n);
@@ -3146,7 +3167,6 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		g_rp.since = rp_t0;
 	}
 
-	query_pool_filled = true;
 }
 
 void scenes::stream::exit()

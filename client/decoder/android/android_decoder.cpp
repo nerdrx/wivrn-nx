@@ -24,6 +24,7 @@
 #include <android/hardware_buffer.h>
 #include <cassert>
 #include <cctype>
+#include <chrono>
 #include <magic_enum.hpp>
 #include <media/NdkImage.h>
 #include <media/NdkImageReader.h>
@@ -33,6 +34,7 @@
 #include <ranges>
 #include <spdlog/spdlog.h>
 #include <string>
+#include <sys/system_properties.h>
 #include <thread>
 #include <vulkan/vulkan.hpp>
 #include <vulkan/vulkan_android.h>
@@ -117,6 +119,8 @@ decoder::decoder(
         stream_index(stream_index), device(device), weak_scene(weak_scene), accumulator(accumulator)
 {
 	spdlog::info("hbm_mutex.native_handle() = {}", (void *)hbm_mutex.native_handle());
+	char trace[PROP_VALUE_MAX] = {};
+	latency_trace = __system_property_get("debug.wivrn.nx.decode_trace", trace) == 1 and trace[0] == '1';
 
 	auto [width, height] = description.stream_size(stream_index);
 
@@ -245,6 +249,18 @@ decoder::~decoder()
 
 	if (worker.joinable())
 		worker.join();
+
+	// Worker counters are stable after join; never log in the output-release path.
+	if (latency_trace)
+	{
+		spdlog::info("decode queue stream {}: {} output callbacks, mean {:.3f} ms, max {:.3f} ms",
+		             stream_index, output_queue_samples,
+		             output_queue_samples ? double(output_queue_ns) / output_queue_samples / 1e6 : 0.0,
+		             double(output_queue_max_ns) / 1e6);
+		std::unique_lock lock(hbm_mutex);
+		spdlog::info("decode buffers stream {}: {} cached mappings, {} property queries",
+		             stream_index, hardware_buffer_cache_hits, hardware_buffer_queries);
+	}
 
 	spdlog::info("decoder::~decoder");
 }
@@ -443,6 +459,16 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 
 	std::unique_lock lock(hbm_mutex);
 
+	// Imported VkDeviceMemory retains this AHardwareBuffer, so a cached pointer
+	// cannot be recycled. Its intrinsic format/extent do not change. Query the
+	// driver only for new buffers; the miss path still handles format changes.
+	if (auto it = hardware_buffer_map.find(hardware_buffer); it != hardware_buffer_map.end())
+	{
+		if (latency_trace) ++hardware_buffer_cache_hits;
+		return it->second;
+	}
+	if (latency_trace) ++hardware_buffer_queries;
+
 	AHardwareBuffer_Desc buffer_desc{};
 	AHardwareBuffer_describe(hardware_buffer, &buffer_desc);
 
@@ -456,10 +482,6 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 		hardware_buffer_map.clear();
 		// TODO tell the reprojector to recreate the pipeline
 	}
-
-	auto it = hardware_buffer_map.find(hardware_buffer);
-	if (it != hardware_buffer_map.end())
-		return it->second;
 
 	vk::StructureChain img_info{
 	        vk::ImageCreateInfo{
@@ -570,7 +592,8 @@ void decoder::on_media_input_available(AMediaCodec * media_codec, void * userdat
 void decoder::on_media_output_available(AMediaCodec * media_codec, void * userdata, int32_t index, AMediaCodecBufferInfo * bufferInfo)
 {
 	auto self = (decoder *)userdata;
-	self->jobs.push([=]() {
+	// Keep the ordinary job's small capture unchanged when tracing is disabled.
+	auto release_output = [media_codec, index]() {
 		auto status = AMediaCodec_releaseOutputBuffer(media_codec, index, true);
 		// will trigger on_image_available through ImageReader
 		if (status != AMEDIA_OK)
@@ -578,7 +601,21 @@ void decoder::on_media_output_available(AMediaCodec * media_codec, void * userda
 			              int(status),
 			              std::string(magic_enum::enum_name(status)).c_str());
 		return false;
-	});
+	};
+	if (self->latency_trace)
+	{
+		const auto queued_at = std::chrono::steady_clock::now();
+		self->jobs.push([self, queued_at, release_output]() {
+			const auto delay = std::chrono::duration_cast<std::chrono::nanoseconds>(
+			        std::chrono::steady_clock::now() - queued_at).count();
+			++self->output_queue_samples;
+			self->output_queue_ns += delay;
+			self->output_queue_max_ns = std::max(self->output_queue_max_ns, uint64_t(delay));
+			return release_output();
+		});
+	}
+	else
+		self->jobs.push(std::move(release_output));
 }
 
 static bool hardware_accelerated(AMediaCodec * media_codec)

@@ -98,6 +98,9 @@ private:
 	utils::sync_queue<input_buffer> input_buffers;
 	input_buffer current_input_buffer; // Only accessed in network thread
 	utils::sync_queue<std::function<bool(void)>> jobs;
+	bool latency_trace = false; // Startup-only; counters read after the worker joins.
+	uint64_t output_queue_samples = 0, output_queue_ns = 0, output_queue_max_ns = 0;
+	uint64_t hardware_buffer_cache_hits = 0, hardware_buffer_queries = 0; // hbm_mutex
 
 	struct frame_info
 	{

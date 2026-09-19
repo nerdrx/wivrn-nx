@@ -915,12 +915,11 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		// covers the same group whichever path carried it, which is exactly what
 		// lets the headset rebuild a lost UDP shard from copies that arrived over
 		// the tunnel.
+		std::span<const uint8_t> fec_blob;
 		if (fec_active)
-		{
-			fec_group.add(shard, on_primary);
-			if (fec_group.block_full())
-				send_parity();
-		}
+			fec_blob = fec_group.add(shard, on_primary);
+		if (fec_active and fec_group.block_full())
+			send_parity();
 
 		// What the headset may ask to have sent again. Deliberately outside the FEC
 		// gate — a shard is worth remembering whether or not a parity covers it — and
@@ -929,12 +928,16 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		// answering that over Wi-Fi would spend the lossy path's bandwidth on a shard
 		// already in flight over the other. The blob is the same encoding the parity
 		// scheme uses, so a retransmission is a decode_blob and nothing more.
-		if (history.enabled() and not control)
+		if (history.enabled() and not control and on_primary)
 		{
-			fec::encode_blob(shard, history_blob);
-			history.push(shard.frame_idx, shard.shard_idx, history_blob, on_primary);
+			if (fec_active)
+				history.push(shard.frame_idx, shard.shard_idx, fec_blob, on_primary);
+			else
+			{
+				fec::encode_blob(shard, history_blob);
+				history.push(shard.frame_idx, shard.shard_idx, history_blob, on_primary);
+			}
 		}
-
 		++shard.shard_idx;
 		shard.view_info.reset();
 		begin = next;

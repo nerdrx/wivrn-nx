@@ -312,7 +312,9 @@ public:
 		return count >= size_t(k) * d;
 	}
 
-	void add(const data_shard & shard, bool on_primary = true)
+	// Borrows the scratch blob; take() preserves it. Copy before the next add(),
+	// reset(), or destruction if the bytes need to outlive that operation.
+	std::span<const uint8_t> add(const data_shard & shard, bool on_primary = true)
 	{
 		// A block that was left half drained, or one this shard does not continue,
 		// is over: the indices a parity would name would not be the ones it covers.
@@ -332,6 +334,7 @@ public:
 		g.sizes.push_back(uint16_t(scratch.size()));
 		g.on_primary = g.on_primary or on_primary;
 		++count;
+		return scratch;
 	}
 
 	// Next parity shard the open block still owes, or nothing once it owes none —

@@ -52,6 +52,26 @@ uvec3 expand565(uint p)
 	             (b << 3u) | (b >> 2u));
 }
 
+uvec4 fitPalette(uvec3 samples[64], uvec3 a, uvec3 b, out uint totalError)
+{
+	uvec4 selectors = uvec4(0u);
+	totalError = 0u;
+	for (uint i = 0u; i < 64u; ++i) {
+		uint selected = 0u, best = 0xffffffffu;
+		for (uint q = 0u; q < 4u; ++q) {
+			uvec3 p = ((3u - q) * a + q * b + 1u) / 3u;
+			uvec3 d = uvec3(abs(int(samples[i].r) - int(p.r)),
+			                abs(int(samples[i].g) - int(p.g)),
+			                abs(int(samples[i].b) - int(p.b)));
+			uint error = d.r * d.r + d.g * d.g + d.b * d.b;
+			if (error < best) { best = error; selected = q; }
+		}
+		totalError += best;
+		selectors[i / 16u] |= selected << (2u * (i % 16u));
+	}
+	return selectors;
+}
+
 void main()
 {
 	uint id = gl_GlobalInvocationID.x;
@@ -100,18 +120,49 @@ void main()
 	uint p1 = pack565(hi);
 	uvec3 a = expand565(p0), b = expand565(p1);
 	words[j.w] = p0 | (p1 << 16u);
-	uvec4 selectors = uvec4(0u);
-	for (uint i = 0u; i < 64u; ++i) {
-		uint selected = 0u, best = 0xffffffffu;
-		for (uint q = 0u; q < 4u; ++q) {
-			uvec3 p = ((3u - q) * a + q * b + 1u) / 3u;
-			uvec3 d = uvec3(abs(int(samples[i].r) - int(p.r)),
-			                abs(int(samples[i].g) - int(p.g)),
-			                abs(int(samples[i].b) - int(p.b)));
-			uint error = d.r * d.r + d.g * d.g + d.b * d.b;
-			if (error < best) { best = error; selected = q; }
+	uint baselineError;
+	uvec4 selectors = fitPalette(samples, a, b, baselineError);
+	// RGB-box corners may not occur in the image (red + green gives black/white).
+	// Also fit actual sample endpoints along the widest channel. Keep this palette
+	// only when its quantized RGB error is strictly lower; wire/decoder stay identical.
+	uvec3 range = hi - lo;
+	uint axis = range.g > range.r ? 1u : 0u;
+	if (range.b > range[axis]) axis = 2u;
+	uvec3 actualLo = samples[0], actualHi = samples[0];
+	for (uint i = 1u; i < 64u; ++i) {
+		if (samples[i][axis] < actualLo[axis]) actualLo = samples[i];
+		if (samples[i][axis] > actualHi[axis]) actualHi = samples[i];
+	}
+	uint candidate0 = pack565(actualLo), candidate1 = pack565(actualHi);
+	if (candidate0 != p0 || candidate1 != p1) {
+		uint candidateError;
+		uvec4 candidate = fitPalette(samples, expand565(candidate0), expand565(candidate1), candidateError);
+		if (candidateError < baselineError) {
+			words[j.w] = candidate0 | (candidate1 << 16u);
+			selectors = candidate;
+			baselineError = candidateError;
 		}
-		selectors[i / 16u] |= selected << (2u * (i % 16u));
+	}
+	// One least-squares refinement along the selected palette line. This spends
+	// host GPU work to fit mixed edges without changing the client representation.
+	float aa = 0.0, ab = 0.0, bb = 0.0;
+	vec3 ax = vec3(0.0), bx = vec3(0.0);
+	for (uint i = 0u; i < 64u; ++i) {
+		float t = float((selectors[i / 16u] >> (2u * (i % 16u))) & 3u);
+		float u = 3.0 - t;
+		aa += u * u; ab += u * t; bb += t * t;
+		ax += 3.0 * u * vec3(samples[i]); bx += 3.0 * t * vec3(samples[i]);
+	}
+	float determinant = aa * bb - ab * ab;
+	if (determinant > 0.0) {
+		uint refined0 = pack565(uvec3(round(clamp((ax * bb - bx * ab) / determinant, 0.0, 255.0))));
+		uint refined1 = pack565(uvec3(round(clamp((bx * aa - ax * ab) / determinant, 0.0, 255.0))));
+		uint refinedError;
+		uvec4 refined = fitPalette(samples, expand565(refined0), expand565(refined1), refinedError);
+		if (refinedError < baselineError) {
+			words[j.w] = refined0 | (refined1 << 16u);
+			selectors = refined;
+		}
 	}
 	words[j.w + 1u] = selectors.x;
 	words[j.w + 2u] = selectors.y;

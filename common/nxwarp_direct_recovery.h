@@ -23,7 +23,8 @@ struct partial_recovery_result
 // frame unit (the 16-byte NXDF header, without the transport length prefix).
 inline std::optional<partial_recovery_result> recover_partial(
 	layout l, std::span<const std::vector<uint8_t>> slots, size_t chunk_bytes,
-	std::span<const uint8_t> previous, uint32_t max_retained_tiles = UINT32_MAX)
+	std::span<const uint8_t> previous, uint32_t max_retained_tiles = UINT32_MAX,
+	bool require_stable_neighbors = false)
 {
 	if (!l.valid() || slots.empty() || chunk_bytes < 4 || previous.empty())
 		return {};
@@ -83,6 +84,7 @@ inline std::optional<partial_recovery_result> recover_partial(
 	struct tile { uint32_t descriptor; uint32_t count; bool fresh; };
 	std::vector<tile> tiles;
 	tiles.reserve(l.tile_count());
+	uint32_t unavailable_tiles = 0;
 	for (uint32_t i = 0; i < l.tile_count(); ++i)
 	{
 		const uint32_t d = word_at(20 + size_t(i) * 4), mode = d >> 30;
@@ -97,7 +99,51 @@ inline std::optional<partial_recovery_result> recover_partial(
 		if (offset % 5 || uint64_t(offset) + n > words)
 			return {};
 		const size_t block = 4 + table_bytes + size_t(offset) * 4;
-		tiles.push_back({d, n, available(block, size_t(n) * 4)});
+		const bool fresh = available(block, size_t(n) * 4);
+		// Refuse excessive damage before allocating or copying any output blocks.
+		if (!fresh && ++unavailable_tiles > max_retained_tiles)
+			return {};
+		tiles.push_back({d, n, fresh});
+	}
+
+	if (require_stable_neighbors && unavailable_tiles)
+	{
+		// Missing motion is unknowable. Refuse a patch when any received neighbor
+		// changed, rather than joining visibly different ages across its boundary.
+		auto unchanged = [&](uint32_t i) {
+			const uint32_t d = tiles[i].descriptor, prior = read32(old->descriptors, size_t(i) * 4);
+			if ((d >> 30) != (prior >> 30)) return false;
+			if ((d >> 30) == 3) return d == prior;
+			const size_t start = 4 + table_bytes + size_t(d & 0x3fffffffu) * 4;
+			const uint8_t * expected = old->blocks.data() + size_t(prior & 0x3fffffffu) * 4;
+			const size_t bytes = size_t(tiles[i].count) * 4;
+			for (size_t copied = 0; copied < bytes;)
+			{
+				const size_t at = start + copied, within = at % chunk_bytes;
+				const size_t take = std::min(bytes - copied, chunk_bytes - within);
+				if (std::memcmp(slots[at / chunk_bytes].data() + within, expected + copied, take)) return false;
+				copied += take;
+			}
+			return true;
+		};
+		const int eye_cols = int(l.width / 32), cols = eye_cols * int(l.eyes), rows = int(l.height / 32);
+		for (uint32_t i = 0; i < tiles.size(); ++i)
+		{
+			if (tiles[i].fresh) continue;
+			if ((tiles[i].descriptor >> 30) != (read32(old->descriptors, size_t(i) * 4) >> 30)) return {};
+			const int x = int(i) % cols, y = int(i) / cols;
+			const int eye_begin = x / eye_cols * eye_cols;
+			bool observed_neighbor = false;
+			for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx)
+			{
+				if ((!dx && !dy) || x + dx < eye_begin || x + dx >= eye_begin + eye_cols || y + dy < 0 || y + dy >= rows) continue;
+				const uint32_t neighbor = uint32_t((y + dy) * cols + x + dx);
+				if (!tiles[neighbor].fresh) continue;
+				observed_neighbor = true;
+				if (!unchanged(neighbor)) return {};
+			}
+			if (!observed_neighbor) return {};
+		}
 	}
 
 	partial_recovery_result result;

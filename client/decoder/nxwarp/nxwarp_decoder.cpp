@@ -973,7 +973,7 @@ bool nxwarp_decoder::on_direct_stream_header(std::span<const uint8_t> header)
 	char recovery[PROP_VALUE_MAX] = {};
 	direct_partial_recovery = __system_property_get("debug.wivrn.nx.partial_direct", recovery) > 0 && recovery[0] == '1';
 #endif
-	spdlog::info("nxwarp[{}]: partial direct recovery {} (at most 10% retained tiles, history at most 50 ms)",
+	spdlog::info("nxwarp[{}]: partial direct recovery {} (at most 10% retained tiles, history at most 50 ms, stable-neighbor guard)",
 	             stream_index, direct_partial_recovery);
 	native_extent = {.width = direct_layout.width * direct_layout.eyes, .height = direct_layout.height};
 	extent = native_extent;
@@ -1515,7 +1515,7 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 		{
 			++direct_recovery_attempts;
 			const auto started = std::chrono::steady_clock::now();
-			auto recovered = nxwarp_direct::recover_partial(direct_layout, f.slots, chunk, direct_history, direct_layout.tile_count() / 10);
+			auto recovered = nxwarp_direct::recover_partial(direct_layout, f.slots, chunk, direct_history, direct_layout.tile_count() / 10, true);
 			direct_recovery_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 			if (recovered)
 			{

@@ -182,3 +182,27 @@ the experiment is not enabled for normal use. Clear the property and reconnect
 to disable it.
 
 [Evidence and plots](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-22/partial-recovery).
+
+### Motion guard and cheaper refusal (2026-09-22)
+
+The opt-in client now requires received neighbors around every retained tile to
+match complete history exactly in mode and block content. Neighbor checks stay
+inside each eye. If any observed neighbor changed, or none can be observed, the
+patch is refused and the viewer keeps its prior complete picture. A changed
+mode for the missing tile also refuses recovery. This avoids splicing stale
+patches into known changing boundaries; motion entirely inside a missing region
+remains unknowable. No universal edge or comfort guarantee is claimed.
+
+A deterministic moving-edge test exercises the real recovery helper and a CPU
+equivalent of the presentation shader's block indexing. Both comparison paths
+receive identical complete frames and lose identical chunks. Guarded recovery
+refuses every camera-pan repair in this test; the whole-frame fallback preserves
+line continuity at the cost of temporal freshness. Synthetic animations compare
+the current decoded target, whole-frame hold, unguarded and guarded recovery.
+
+Excessive damage is now rejected before output allocation/copy. Three alternating
+Pico CPU benchmark pairs measured 0.969 to 0.263 ms per refusal (73% less) on a
+full-quality 2176×2176 stereo payload. Successful unguarded helper time was
+1.478 versus 1.483 ms. This isolates helper work; it is not a live FPS result.
+
+[Motion clips, limitations and measurements](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-22/recovery-motion).

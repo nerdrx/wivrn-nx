@@ -86,5 +86,26 @@ int main()
 	for (size_t i = 2; i < changed.size(); ++i) changed[i].clear();
 	assert(!recover_partial(l, changed, 16, old_swapped));
 
+	// Motion guard: a static received neighbor permits reuse; changed neighbor
+	// blocks refuse the patch. Cross-eye adjacency is not evidence of stability.
+	const bytes stable = frame(1u << 30, (1u << 30) | 20, 40);
+	assert(recover_partial(l, chunks(stable, 16, 2), 16, stable, 1, true));
+	bytes moving_neighbor = stable;
+	moving_neighbor[24 + 20 * 4] ^= 1;
+	assert(!recover_partial(l, chunks(moving_neighbor, 16, 2), 16, stable, 1, true));
+	assert(!recover_partial(layout{32,32,2}, chunks(stable,16,2),16,stable,1,true));
+
+	// Production layout is row-major across the side-by-side eyes, matching
+	// make_plan and the presentation shader. Do not cross the stereo seam.
+	const layout stereo{64,64,2};
+	bytes stereo_old=frame_header(8,40);
+	for(uint32_t i=0;i<8;i++) put(stereo_old,(2u<<30)|i*5);
+	for(uint32_t i=0;i<40;i++) put(stereo_old,1000+i);
+	bytes stereo_new=stereo_old;
+	stereo_new[16+8*4+2*20]^=1; // Neighbor across the eye seam is irrelevant.
+	assert(recover_partial(stereo,chunks(stereo_new,4,18),4,stereo_old,1,true));
+	stereo_new[16+8*4+5*20]^=1; // Same-eye neighbor on next row must reject.
+	assert(!recover_partial(stereo,chunks(stereo_new,4,18),4,stereo_old,1,true));
+
 	std::puts("direct block partial recovery: ok");
 }

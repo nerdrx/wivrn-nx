@@ -53,6 +53,24 @@ static void check_plan(layout l, unsigned bitrate)
 
 int main()
 {
+	// Smaller full-detail centre, identical eye layouts, valid byte budgets.
+	const layout stereo{2176, 2176, 2};
+	const auto top = make_plan(stereo, 0);
+	unsigned full = 0;
+	for (unsigned y = 0; y < 68; ++y)
+		for (unsigned x = 0; x < 68; ++x)
+		{
+			const auto left = top.descriptors[y * 136 + x] >> 30;
+			assert(left == top.descriptors[y * 136 + x + 68] >> 30);
+			full += left == 0;
+		}
+	assert(full > 380 && full < 460); // About 9% full detail at the top layout.
+	for (unsigned rate: {80'000'000u, 160'000'000u, 200'000'000u, 500'000'000u})
+	{
+		auto chosen = select_plan(stereo, rate, 90);
+		assert(chosen.bytes() <= rate / (8.0 * 90 * 1.25));
+	}
+
 	constexpr uint32_t sizes[] = {64, 1088, 2048, 4096};
 	for (uint32_t width: sizes)
 		for (uint32_t height: sizes)

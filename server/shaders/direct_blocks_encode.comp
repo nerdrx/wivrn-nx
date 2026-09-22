@@ -73,6 +73,11 @@ void main()
 		return;
 	}
 
+	// Widen only coarse peripheral footprints on the host. Keep the same
+	// source-read count and wire format; the headset does no extra filtering.
+	vec2 jobCentre = vec2(float(ox) + 4.0 * float(step), float(j.y) + 4.0 * float(step));
+	float radius = length(jobCentre / vec2(pc.width, pc.height) * 2.0 - 1.0);
+	float spread = step > 1u ? 1.0 + smoothstep(0.65, 1.0, radius) : 1.0;
 	uvec3 lo = uvec3(255u), hi = uvec3(0u);
 	uvec3 samples[64];
 	for (uint yy = 0u; yy < 8u; ++yy)
@@ -80,7 +85,12 @@ void main()
 			vec3 c = vec3(0.0);
 			for (uint sy = 0u; sy < step; ++sy)
 				for (uint sx = 0u; sx < step; ++sx)
-					c += yuv(ox + xx * step + sx, j.y + yy * step + sy, layer);
+					{
+					vec2 centre = vec2(ox + xx * step, j.y + yy * step) + float(step) * 0.5;
+					vec2 delta = (vec2(sx, sy) + 0.5 - float(step) * 0.5) * spread;
+					ivec2 source = clamp(ivec2(floor(centre + delta)), ivec2(0), ivec2(pc.width, pc.height) - 1);
+					c += yuv(uint(source.x), uint(source.y), layer);
+				}
 			uvec3 q = rgb8(c / float(step * step));
 			samples[yy * 8u + xx] = q;
 			lo = min(lo, q);

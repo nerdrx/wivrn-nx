@@ -32,7 +32,7 @@ inline plan make_plan(layout l, unsigned quality)
 			if (quality < 16)
 			{
 				float scale = 1.0f - float(quality) / 16;
-				mode = r < 0.42f * scale ? 0 : r < 0.72f * scale ? 1
+				mode = r < 0.34f * scale ? 0 : r < 0.64f * scale ? 1
 				                                                 : 2;
 			}
 			else

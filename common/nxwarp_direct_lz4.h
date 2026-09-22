@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstring>
 #include <lz4.h>
+#include <lz4hc.h>
 
 namespace wivrn::nxwarp_direct
 {
@@ -14,7 +15,8 @@ inline bool is_lz4(std::span<const uint8_t> b)
 }
 // Returns the original span unless complete envelope savings reach 5%.
 // Caller owns both raw input and reusable output until transport copies them.
-inline std::span<const uint8_t> compress_lz4(std::span<const uint8_t> raw, std::vector<uint8_t> & out)
+inline std::span<const uint8_t> compress_lz4_impl(std::span<const uint8_t> raw, std::vector<uint8_t> & out,
+                                                  int hc_level)
 {
 	out.clear();
 	if (raw.size() < 16 || raw.size() > layout{4096, 4096, 2}.max_frame_bytes())
@@ -28,10 +30,13 @@ inline std::span<const uint8_t> compress_lz4(std::span<const uint8_t> raw, std::
 		const uint32_t n = std::min<size_t>(lz4_chunk_bytes, raw.size() - pos);
 		const size_t header = out.size();
 		out.resize(header + 12 + LZ4_compressBound(n));
-		const int packed = LZ4_compress_default(reinterpret_cast<const char *>(raw.data() + pos),
-		                                        reinterpret_cast<char *>(out.data() + header + 12),
-		                                        n,
-		                                        LZ4_compressBound(n));
+		const int packed = hc_level < 0
+			? LZ4_compress_default(reinterpret_cast<const char *>(raw.data() + pos),
+			                       reinterpret_cast<char *>(out.data() + header + 12), n,
+			                       LZ4_compressBound(n))
+			: LZ4_compress_HC(reinterpret_cast<const char *>(raw.data() + pos),
+			                  reinterpret_cast<char *>(out.data() + header + 12), n,
+			                  LZ4_compressBound(n), hc_level);
 		const bool compressed = packed > 0 && uint32_t(packed) < n;
 		const uint32_t stored = compressed ? uint32_t(packed) : n;
 		if (!compressed)
@@ -46,6 +51,16 @@ inline std::span<const uint8_t> compress_lz4(std::span<const uint8_t> raw, std::
 		out.resize(header + 12 + stored);
 	}
 	return out.size() * 100 <= raw.size() * 95 ? std::span<const uint8_t>(out) : raw;
+}
+inline std::span<const uint8_t> compress_lz4(std::span<const uint8_t> raw, std::vector<uint8_t> & out)
+{
+	return compress_lz4_impl(raw, out, -1);
+}
+// Opt-in high-compression variant. The wire format and fallback threshold match compress_lz4.
+inline std::span<const uint8_t> compress_lz4_hc(std::span<const uint8_t> raw, std::vector<uint8_t> & out,
+                                                int level = LZ4HC_CLEVEL_MIN)
+{
+	return compress_lz4_impl(raw, out, std::clamp(level, LZ4HC_CLEVEL_MIN, LZ4HC_CLEVEL_MAX));
 }
 inline bool decompress_lz4(layout l, std::span<const uint8_t> b, std::vector<uint8_t> & out)
 {

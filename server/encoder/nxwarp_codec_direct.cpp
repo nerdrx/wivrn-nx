@@ -8,6 +8,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <map>
 #include <stdexcept>
 #include <tuple>
@@ -48,6 +49,7 @@ class direct_codec final : public nxwarp_codec
 	std::map<std::pair<VkImage, uint32_t>, std::array<VkImageView, 2>> views;
 	std::vector<uint8_t> header;
 	bool lz4_enabled = false;
+	bool lz4_hc = false;
 	std::vector<uint8_t> compressed, cached_raw;
 	std::vector<uint8_t> frame;
 	std::unique_ptr<direct_codec> safety_codec;
@@ -135,6 +137,8 @@ public:
 	direct_codec(const nxwarp_codec_config & c, VkPhysicalDevice p, VkDevice d, VkQueue q, uint32_t f) :
 	        geometry{c.width, c.height, c.eyes}, source_width(c.source_width ? c.source_width : c.width), source_height(c.source_height ? c.source_height : c.height), physical(p), device(d), queue(q), family(f), header(nxwarp_direct::stream_header(geometry, c.trusted_lan, c.direct_lz4, c.safety)), lz4_enabled(c.direct_lz4), safety_enabled(c.safety)
 	{
+		const char * hc = std::getenv("NX_DIRECT_LZ4_HC");
+		lz4_hc = hc && std::strcmp(hc, "1") == 0;
 		if (header.empty())
 			throw std::runtime_error("NX direct: eye geometry must be multiples of 32, <=4096");
 		if (safety_enabled)
@@ -328,7 +332,7 @@ public:
 			if (!lz4_enabled) return raw;
 			cached_raw.resize(raw.size());
 			std::memcpy(cached_raw.data(), raw.data(), raw.size());
-			return nxwarp_direct::compress_lz4(cached_raw, compressed);
+			return (lz4_hc ? nxwarp_direct::compress_lz4_hc(cached_raw, compressed) : nxwarp_direct::compress_lz4(cached_raw, compressed));
 		}
 		std::span<const uint8_t> safety_wire = safety_raw;
 		std::span<const uint8_t> detail_wire = raw;
@@ -340,7 +344,7 @@ public:
 			safety_wire = safety_raw;
 			cached_raw.resize(raw.size());
 			std::memcpy(cached_raw.data(), raw.data(), raw.size());
-			detail_wire = nxwarp_direct::compress_lz4(cached_raw, detail_compressed);
+			detail_wire = (lz4_hc ? nxwarp_direct::compress_lz4_hc(cached_raw, detail_compressed) : nxwarp_direct::compress_lz4(cached_raw, detail_compressed));
 		}
 		frame.clear();
 		frame.reserve(32 + safety_wire.size() + detail_wire.size());

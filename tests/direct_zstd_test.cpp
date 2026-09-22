@@ -13,14 +13,16 @@ int main()
 	std::vector<uint8_t> raw(120000, 0x5a), packed, decoded;
 	for (uint32_t i = 0; i < raw.size(); i += 4096)
 		raw[i] = uint8_t(i);
-	const auto wire = compress_zstd(raw, packed);
-	assert(wire.data() == packed.data() && wire.size() < raw.size());
+	const auto packed_view = compress_zstd(raw, packed);
+	assert(packed_view.data() == packed.data() && packed_view.size() < raw.size());
+	// Later compression reuses packed; keep corruption fixtures independent.
+	const std::vector<uint8_t> wire(packed_view.begin(), packed_view.end());
 	assert(is_zstd(wire));
 	assert(decompress_zstd(l, wire, decoded) && decoded == raw);
 
 	std::mt19937 rng(7);
 	std::vector<uint8_t> incompressible(120000);
-	for (auto & byte : incompressible)
+	for (auto & byte: incompressible)
 		byte = uint8_t(rng());
 	const auto fallback = compress_zstd(incompressible, packed);
 	assert(fallback.data() == incompressible.data() && fallback.size() == incompressible.size());

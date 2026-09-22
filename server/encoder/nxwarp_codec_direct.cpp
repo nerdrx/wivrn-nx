@@ -2,15 +2,17 @@
  * Direct RGB blocks: GPU-only source processing, independent frames.
  */
 #include "nxwarp_codec.h"
+#include "nxwarp_compression_credit.h"
+#include "nxwarp_direct_admission.h"
 #include "nxwarp_direct_layout.h"
 #include "nxwarp_direct_lz4.h"
 #include "nxwarp_direct_native.h"
 #include "nxwarp_direct_zstd.h"
-#include <cstdlib>
 #include "wivrn-server_shaders.h"
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <stdexcept>
@@ -25,12 +27,16 @@ void check(VkResult r, const char * what)
 	if (r != VK_SUCCESS)
 		throw std::runtime_error(std::string("NX direct: ") + what + " (" + std::to_string(r) + ")");
 }
-nxwarp_direct::layout direct_geometry(const nxwarp_codec_config & c) {
- nxwarp_direct::layout l{c.width,c.height,c.eyes,c.direct_native_center};
- auto enabled=[](const char* name){const auto v=std::getenv(name);return v && std::strcmp(v,"1")==0;};
- l.packed_native=!enabled("NX_DIRECT_NATIVE_RGB888");
- l.zstd=l.native_center && enabled("NX_DIRECT_ZSTD");
- return l;
+nxwarp_direct::layout direct_geometry(const nxwarp_codec_config & c)
+{
+	nxwarp_direct::layout l{c.width, c.height, c.eyes, c.direct_native_center};
+	auto enabled = [](const char * name) {
+		const auto v = std::getenv(name);
+		return v && std::strcmp(v, "1") == 0;
+	};
+	l.packed_native = enabled("NX_DIRECT_NATIVE_RGB565") && !enabled("NX_DIRECT_NATIVE_RGB888");
+	l.zstd = l.native_center && enabled("NX_DIRECT_ZSTD");
+	return l;
 }
 class direct_codec final : public nxwarp_codec
 {
@@ -63,15 +69,29 @@ class direct_codec final : public nxwarp_codec
 	std::vector<uint8_t> compressed, cached_raw, native_frame, zstd_compressed;
 	std::span<const uint32_t> native_pixels;
 	float native_radius = 0;
- std::span<const uint8_t> pack_detail(std::span<const uint8_t> raw,std::vector<uint8_t>& out,bool hc) {
-  auto fast=hc ? nxwarp_direct::compress_lz4_hc(raw,out) : nxwarp_direct::compress_lz4(raw,out);
-  if(geometry.zstd) {
-   auto dense=nxwarp_direct::compress_zstd(raw,zstd_compressed);
-   if(dense.size()*100 <= fast.size()*90) return dense;
-  }
-  return fast;
- }
-	size_t native_extra() const { return geometry.native_center ? nxwarp_direct::native_center_extra(native_radius, geometry.packed_native) : 0u; }
+	bool credit_enabled = false, plan_dirty = false;
+	nxwarp_direct::compression_credit credit;
+	std::span<const uint8_t> pack_detail(std::span<const uint8_t> raw, std::vector<uint8_t> & out, bool hc)
+	{
+		auto fast = hc ? nxwarp_direct::compress_lz4_hc(raw, out) : nxwarp_direct::compress_lz4(raw, out);
+		if (geometry.zstd)
+		{
+			auto dense = nxwarp_direct::compress_zstd(raw, zstd_compressed);
+			if (dense.size() * 100 <= fast.size() * 90)
+				return dense;
+		}
+		return fast;
+	}
+	std::span<const uint8_t> finish_frame(std::span<const uint8_t> wire)
+	{
+		if (wire_admission)
+			admission.settle(int64_t(std::ceil(wire.size() * 8.0 * 1.25 * 1e9 / total_target)));
+		return wire;
+	}
+	size_t native_extra() const
+	{
+		return geometry.native_center ? nxwarp_direct::native_center_extra(native_radius, geometry.packed_native) : 0u;
+	}
 	std::vector<uint8_t> frame;
 	std::unique_ptr<direct_codec> safety_codec;
 	bool safety_enabled = false;
@@ -80,7 +100,8 @@ class direct_codec final : public nxwarp_codec
 	uint32_t target = 0;
 	uint32_t total_target = 0;
 	float refresh = 90;
-	int64_t next_due = 0;
+	nxwarp_direct::frame_admission admission;
+	bool wire_admission = false;
 	bool submitted = false;
 
 	void allocate(buffer & b, VkDeviceSize bytes)
@@ -121,15 +142,19 @@ class direct_codec final : public nxwarp_codec
 	}
 	void update_plan()
 	{
-		native_radius = geometry.native_center ? nxwarp_direct::native_center_radius(target, refresh) : 0.f;
+		const uint32_t quality_target = uint32_t(double(target) * (credit_enabled ? credit.value() : 1.0));
+		native_radius = geometry.native_center ? nxwarp_direct::native_center_radius(quality_target, refresh) : 0.f;
 		const auto reserved = uint32_t(std::ceil(native_extra() * 8.0 * 1.25 * refresh));
-		plan = nxwarp_direct::select_plan(geometry, target > reserved ? target - reserved : 1u, refresh);
+		plan = nxwarp_direct::select_plan(geometry, quality_target > reserved ? quality_target - reserved : 1u, refresh);
 		tile_info.resize(geometry.tile_count());
 		for (uint32_t i = 0; i < tile_info.size(); i++)
 			tile_info[i] = {.index = i, .qp = 0, .mode = 0, .res_level = uint8_t(plan.descriptors[i] >> 30), .ref_delta = 3};
 		std::memcpy(jobs.mapped, plan.jobs.data(), plan.jobs.size() * sizeof(plan.jobs[0]));
 	}
-	size_t planned_bytes() const { return plan.bytes() + native_extra(); }
+	size_t planned_bytes() const
+	{
+		return plan.bytes() + native_extra();
+	}
 	std::array<VkImageView, 2> image_views(VkImage image, uint32_t layers)
 	{
 		auto key = std::make_pair(image, layers);
@@ -161,6 +186,10 @@ public:
 	        geometry{direct_geometry(c)}, source_width(c.source_width ? c.source_width : c.width), source_height(c.source_height ? c.source_height : c.height), physical(p), device(d), queue(q), family(f), header(nxwarp_direct::stream_header(geometry, c.trusted_lan, c.direct_lz4, c.safety)), lz4_enabled(c.direct_lz4), safety_enabled(c.safety)
 	{
 		lz4_hc = false;
+		const char * wire_env = std::getenv("NX_DIRECT_WIRE_ADMISSION");
+		wire_admission = lz4_enabled && (!wire_env || std::strcmp(wire_env, "0") != 0);
+		const char * credit_env = std::getenv("NX_DIRECT_COMPRESSION_CREDIT");
+		credit_enabled = geometry.native_center && geometry.zstd && credit_env && std::strcmp(credit_env, "1") == 0;
 		if (c.direct_native_center && (!c.safety || !c.direct_lz4 || c.eyes != 2 || c.width < 256 || c.height < 256))
 			throw std::runtime_error("NX direct native centre requires paired LZ4 safety stream >=256 pixels");
 		if (header.empty())
@@ -182,7 +211,10 @@ public:
 			safety_codec = std::make_unique<direct_codec>(sc, p, d, q, f);
 		}
 	}
-	void set_native_center(std::span<const uint32_t> pixels) override { native_pixels = pixels; }
+	void set_native_center(std::span<const uint32_t> pixels) override
+	{
+		native_pixels = pixels;
+	}
 	void set_lz4_hc(bool enabled) override
 	{
 		lz4_hc = enabled;
@@ -262,6 +294,7 @@ public:
 		fps = std::isfinite(fps) ? std::clamp(fps, 1.f, 240.f) : 90.f;
 		if (bps == total_target && fps == refresh)
 			return;
+		const bool refresh_changed = fps != refresh;
 		total_target = bps;
 		refresh = fps;
 		if (safety_codec)
@@ -271,22 +304,29 @@ public:
 			bps -= safety_bps;
 		}
 		target = bps;
+		if (refresh_changed)
+			credit.reset();
+		else
+			credit.budget_changed();
+		plan_dirty = false;
 		update_plan();
-		next_due = 0;
+		admission.reset();
 	}
 	bool admit_frame(int64_t now) override
 	{
+		if (plan_dirty)
+		{
+			update_plan();
+			plan_dirty = false;
+		}
 		const auto lz4_overhead = [](size_t n) {
 			return size_t(16) + ((n + nxwarp_direct::lz4_chunk_bytes - 1) / nxwarp_direct::lz4_chunk_bytes) * 12;
 		};
 		const size_t safety_bytes = safety_codec ? safety_codec->planned_bytes() : 0;
-		const size_t raw_bytes = planned_bytes() + safety_bytes + (safety_codec ? 32 : 0);
+		const size_t raw_bytes = size_t(std::ceil(planned_bytes() / (credit_enabled ? credit.value() : 1.0))) + safety_bytes + (safety_codec ? 32 : 0);
 		const size_t wire_overhead = lz4_enabled ? lz4_overhead(planned_bytes()) + (safety_codec ? lz4_overhead(safety_bytes) : 0) : 0;
 		int64_t interval = int64_t(std::ceil((raw_bytes + wire_overhead) * 8.0 * 1.25 * 1e9 / total_target));
-		if (now < next_due)
-			return false;
-		next_due = std::max(next_due, now - interval) + interval;
-		return true;
+		return admission.admit(now, interval);
 	}
 	std::span<const uint8_t> stream_header() const override
 	{
@@ -313,7 +353,8 @@ public:
 	}
 	std::string description() const override
 	{
-		if(geometry.zstd) return "NX direct RGB blocks + adaptive LZ4/Zstd (independent frames)";
+		if (geometry.zstd)
+			return "NX direct RGB blocks + adaptive LZ4/Zstd (independent frames)";
 		return lz4_enabled ? "NX direct RGB blocks + LZ4 (64 KiB chunks, 5% minimum saving)" : "NX direct RGB blocks v1 (GPU source, independent frames)";
 	}
 	std::span<const uint8_t> encode_image(VkImage image, uint32_t layer) override
@@ -322,6 +363,11 @@ public:
 	}
 	std::span<const uint8_t> encode_image_pair(VkImage image, uint32_t left, uint32_t right, uint64_t) override
 	{
+		if (plan_dirty)
+		{
+			update_plan();
+			plan_dirty = false;
+		}
 		const bool use_hc = lz4_hc.load();
 		if (submitted)
 			throw std::runtime_error("NX direct: unfinished GPU work");
@@ -361,19 +407,22 @@ public:
 		check(vkWaitForFences(device, 1, &fence, VK_TRUE, 1'000'000'000), "encode timeout");
 		submitted = false;
 		std::span<const uint8_t> raw{static_cast<const uint8_t *>(output.mapped), plan.bytes()};
-		if (lz4_enabled || geometry.native_center) {
+		if (lz4_enabled || geometry.native_center)
+		{
 			cached_raw.assign(raw.begin(), raw.end());
 			raw = cached_raw;
 		}
-		if (geometry.native_center) {
+		if (geometry.native_center)
+		{
 			if (native_pixels.size() != 2u * 256u * 256u)
 				throw std::runtime_error("NX direct native centre source missing");
 			raw = nxwarp_direct::native_center_frame(geometry, raw, native_pixels, native_frame, native_radius);
 		}
 		if (!safety_codec)
 		{
-			if (!lz4_enabled) return raw;
-			return pack_detail(raw, compressed, use_hc);
+			if (!lz4_enabled)
+				return finish_frame(raw);
+			return finish_frame(pack_detail(raw, compressed, use_hc));
 		}
 		std::span<const uint8_t> safety_wire = safety_raw;
 		std::span<const uint8_t> detail_wire = raw;
@@ -387,12 +436,16 @@ public:
 		}
 		frame.clear();
 		frame.reserve(32 + safety_wire.size() + detail_wire.size());
-		for (uint32_t v: {uint32_t(0x5344584e), 1u, safety_codec->geometry.width, safety_codec->geometry.height,
-		                  geometry.eyes, uint32_t(safety_wire.size()), uint32_t(detail_wire.size()), 0u})
+		for (uint32_t v: {uint32_t(0x5344584e), 1u, safety_codec->geometry.width, safety_codec->geometry.height, geometry.eyes, uint32_t(safety_wire.size()), uint32_t(detail_wire.size()), 0u})
 			nxwarp_direct::append32(frame, v);
 		frame.insert(frame.end(), safety_wire.begin(), safety_wire.end());
 		frame.insert(frame.end(), detail_wire.begin(), detail_wire.end());
-		return frame;
+		if (credit_enabled && credit.observe(raw.size(), detail_wire.size(), frame.size(), double(total_target) / (8.0 * 1.25 * refresh)))
+		{
+			// Keep this frame's tile metadata intact until the next admission/encode.
+			plan_dirty = true;
+		}
+		return finish_frame(frame);
 	}
 };
 } // namespace

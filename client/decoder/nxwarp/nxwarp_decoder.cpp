@@ -953,10 +953,11 @@ bool nxwarp_decoder::on_direct_stream_header(std::span<const uint8_t> header)
 		spdlog::error("nxwarp[{}]: invalid NXDB stream header", stream_index);
 		return false;
 	}
+	const bool trusted_lan = nxwarp_direct::read32(header, 4) == 2;
 	if (direct_block_active)
 	{
 		const bool same = parsed->width == direct_layout.width && parsed->height == direct_layout.height &&
-		                  parsed->eyes == direct_layout.eyes;
+		                  parsed->eyes == direct_layout.eyes && trusted_lan == direct_trusted_lan;
 		if (!same)
 			spdlog::error("nxwarp[{}]: changed NXDB geometry/version rejected", stream_index);
 		return same;
@@ -965,6 +966,7 @@ bool nxwarp_decoder::on_direct_stream_header(std::span<const uint8_t> header)
 		return false;
 	direct_layout = *parsed;
 	direct_block_active = true;
+	direct_trusted_lan = trusted_lan;
 	native_extent = {.width = direct_layout.width * direct_layout.eyes, .height = direct_layout.height};
 	extent = native_extent;
 	sampler_ = make_rgba_sampler(device);
@@ -980,7 +982,7 @@ bool nxwarp_decoder::on_direct_stream_header(std::span<const uint8_t> header)
 	cfg.layers = 1;
 	cfg.mtu = 1280;
 	cfg.caps = nxt::kCapFec | nxt::kCapPoseHdr | nxt::kCapRleFeedback;
-	aead = nxt::make_null_aead();
+	aead = trusted_lan ? nxt::make_trusted_lan_aead() : nxt::make_null_aead();
 	nxt::Key key{}, salt{};
 	for (size_t i = 0; i < key.size(); ++i) { key[i] = uint8_t(i); salt[i] = uint8_t(0xA0 + i); }
 	receiver = std::make_unique<nxt::Receiver>(cfg, aead.get(), key, salt);
@@ -1046,10 +1048,9 @@ void nxwarp_decoder::push_datagram(to_headset::nxwarp_datagram && dg)
 	{
 		newest_frame = frame_id;
 		seen_any_frame = true;
+		// Only a newer frame moves the window floor; other packets cannot evict anything.
+		evict_below_window();
 	}
-
-	// A newer frame beyond the window closes the frames that have fallen out of it.
-	evict_below_window();
 
 	// A datagram for a frame that has already been closed -- retired, or now below the
 	// window floor -- can no longer change any outcome. Dropping it is what keeps

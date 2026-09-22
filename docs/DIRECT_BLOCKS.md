@@ -96,3 +96,27 @@ controller tests passed, and the server rebuilt successfully. A virtual-clock
 those cuts; the severe case first stepped to 400 Mbit/s. The recovery test
 requires actual upward progress and bounds each increase. These are simulated
 feedback results, not a new live Pico measurement.
+
+## Trusted-LAN packet mode
+
+Set `"trusted-lan":"true"` in the direct encoder options to replace the inner
+SHA-256 counter-mode encryption and tag with plaintext plus CRC32. This is an
+explicit speed/security tradeoff: CRC detects accidental corruption, but it is
+not authentication and does not prevent a malicious sender from forging packets.
+WiVRn's outer connection settings are unchanged. Never use this transport mode
+as a standalone secure network protocol.
+
+The NXDB stream header advertises version 2 for this mode; packed frame syntax
+remains version 1. Updated clients accept versions 1 and 2, while older clients
+reject version 2. Repeated headers cannot change the mode of an existing decoder.
+All length, geometry, tile-index and output-buffer bounds checks remain enabled.
+The default remains version 1 with the previous inner transport.
+
+The receive path also retains payload scratch buffers across packets, reads tile
+directories without allocating a temporary list, and avoids copying previous
+frame metadata. Window eviction runs only when the newest frame advances.
+
+The isolated Pico transport benchmark measured approximately 12.74 ms per frame
+with legacy SHA framing versus 2.90 ms with trusted-LAN CRC framing (4.39×).
+This excludes sockets, GPU work and display; live 500 Mbit/s delivery remains
+unproven. [Workload, raw results and graph](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-22/packet-cost).

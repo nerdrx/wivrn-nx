@@ -479,6 +479,7 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	        .eyes = stereo_eyes,
 	        .base_qp = current_qp,
 	        .inter = option_bool(settings.options, "inter", false),
+	        .trusted_lan = option_bool(settings.options, "trusted-lan", false),
 	        // "stereo-compose": "layers" (the default) or "blit". See
 	        // nxwarp_codec_config::eye_layers -- identical bitstream either way,
 	        // and "layers" is a full-frame device blit per frame cheaper.
@@ -501,6 +502,8 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	};
 	const std::string backend = option_string(settings.options, "backend", "ref");
 	const bool direct_backend = backend == "direct";
+	if (codec_cfg.trusted_lan && !direct_backend)
+		throw std::runtime_error("nxwarp: trusted-lan requires the direct backend");
 	if (direct_backend)
 	{
 		if (codec_cfg.inter)
@@ -924,15 +927,12 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	stream_cfg.caps = nxt::kCapFec | nxt::kCapPoseHdr | nxt::kCapRleFeedback;
 	stream_cfg.frame_period_us = settings.fps > 0 ? uint32_t(1'000'000.f / settings.fps) : 11111;
 
-	// nxvc_transport never generates or exchanges keys: the integration supplies
-	// them. WiVRn's own stream socket is already authenticated and encrypted end
-	// to end (crypto_handshake, per-datagram in-place decryption on the client),
-	// and this transport rides inside it, so a second AEAD layer would encrypt
-	// ciphertext. The NullAead is keyed and detects corruption but is NOT
-	// cryptography; it is correct here only because of that outer layer, and
-	// wiring nxt's AEAD to the session key is the right follow-up if the datagrams
-	// ever leave WiVRn's socket.
-	aead = nxt::make_null_aead();
+	// The legacy inner wrapper uses fixed integration keys. Trusted-LAN mode replaces
+	// its SHA encryption/tag work with CRC; neither mode changes WiVRn's outer socket.
+	// The NXDB stream version selects the same wrapper on the client.
+	aead = codec_cfg.trusted_lan ? nxt::make_trusted_lan_aead() : nxt::make_null_aead();
+	if (codec_cfg.trusted_lan)
+		U_LOG_I("nxwarp: trusted-LAN CRC transport; no inner encryption or authentication");
 	for (size_t i = 0; i < session_key.size(); ++i)
 	{
 		session_key[i] = uint8_t(i);

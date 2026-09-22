@@ -42,19 +42,20 @@ inline bool is_stream(std::span<const uint8_t> b)
 {
 	return b.size() >= 4 && read32(b, 0) == stream_magic;
 }
-inline std::vector<uint8_t> stream_header(layout l)
+// Stream v2 explicitly selects trusted-LAN CRC transport; packed frames remain v1.
+inline std::vector<uint8_t> stream_header(layout l, bool trusted_lan = false)
 {
 	if (!l.valid())
 		return {};
 	std::vector<uint8_t> b;
 	b.reserve(32);
-	for (uint32_t v: {stream_magic, version, l.width, l.height, l.eyes, l.tile_count(), l.max_block_words(), l.max_frame_bytes()})
+	for (uint32_t v: {stream_magic, trusted_lan ? 2u : version, l.width, l.height, l.eyes, l.tile_count(), l.max_block_words(), l.max_frame_bytes()})
 		append32(b, v);
 	return b;
 }
 inline std::optional<layout> parse_stream(std::span<const uint8_t> b)
 {
-	if (b.size() != 32 || !is_stream(b) || read32(b, 4) != version)
+	if (b.size() != 32 || !is_stream(b) || (read32(b, 4) != version && read32(b, 4) != 2))
 		return {};
 	layout l{read32(b, 8), read32(b, 12), read32(b, 16)};
 	if (!l.valid() || read32(b, 20) != l.tile_count() || read32(b, 24) != l.max_block_words() || read32(b, 28) != l.max_frame_bytes())

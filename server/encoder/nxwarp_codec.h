@@ -67,6 +67,7 @@ struct nxwarp_codec_config
 	// ring. Off makes every frame all-intra, which is the safe default for a
 	// first end-to-end bring-up because it needs no client reference state.
 	bool inter = false;
+	bool trusted_lan = false; // Direct backend only: CRC transport without inner encryption.
 	// How a paired stream's two eyes reach E0. "layers" (the default) points the
 	// encoder at the two ARRAY LAYERS the compositor already keeps them in,
 	// which is what NXVC_VKE_IMAGE_EYE_LAYERS is for; "blit" copies them into

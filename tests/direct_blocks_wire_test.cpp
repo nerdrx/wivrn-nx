@@ -7,10 +7,12 @@ int main()
 	layout l{32, 32, 1};
 	auto h = stream_header(l);
 	assert(parse_stream(h));
+	assert(parse_stream(stream_header(l, true)));
+	assert(read32(stream_header(l, true), 4) == 2);
 	for (size_t n = 0; n < h.size(); ++n)
 		assert(!parse_stream(std::span(h).first(n)));
 	auto bad = h;
-	bad[4] = 2;
+	bad[4] = 99;
 	assert(!parse_stream(bad));
 	assert(stream_header({4097, 32, 1}).empty());
 	assert(stream_header({32, 32, 3}).empty());

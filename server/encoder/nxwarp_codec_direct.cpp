@@ -124,7 +124,7 @@ class direct_codec final : public nxwarp_codec
 
 public:
 	direct_codec(const nxwarp_codec_config & c, VkPhysicalDevice p, VkDevice d, VkQueue q, uint32_t f) :
-	        geometry{c.width, c.height, c.eyes}, physical(p), device(d), queue(q), family(f), header(nxwarp_direct::stream_header(geometry))
+	        geometry{c.width, c.height, c.eyes}, physical(p), device(d), queue(q), family(f), header(nxwarp_direct::stream_header(geometry, c.trusted_lan))
 	{
 		if (header.empty())
 			throw std::runtime_error("NX direct: eye geometry must be multiples of 32, <=4096");

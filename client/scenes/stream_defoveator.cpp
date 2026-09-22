@@ -1384,6 +1384,13 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		                   eye_x_limits(input.rect_rgb, foveation[view])[1]},
 		};
 
+		// Direct storage can carry a smaller safety picture. Keep the vertex UV
+		// geometry at native size; only the direct fragment lookup uses coded size.
+		if (direct)
+		{
+			pc.motion[0] = float(input.direct_extent.width ? input.direct_extent.width : input.rect_rgb.extent.width);
+			pc.motion[1] = float(input.direct_extent.height ? input.direct_extent.height : input.rect_rgb.extent.height);
+		}
 		device.updateDescriptorSets(descriptor_writes, {});
 
 		command_buffer.beginRenderPass(begin_info, vk::SubpassContents::eInline);

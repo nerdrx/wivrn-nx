@@ -28,7 +28,7 @@ vec3 srgb_linear(vec3 c) {
     return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
 }
 vec3 sample_block(uvec2 p) {
-    uint cols = (uint(max(rgb_rect.z, 1)) + 31u) / 32u;
+    uint cols = (uint(max(motion.x, 1.0)) + 31u) / 32u;
     uint d = tiles.tile[(p.y / 32u) * cols + p.x / 32u];
     uint mode = d >> 30u;
     if (mode == 3u)
@@ -45,7 +45,7 @@ vec3 sample_block(uvec2 p) {
 }
 void main() {
     vec2 uv = clamp(inUV.xy, vec2(0), vec2(0.999999));
-    vec3 c = sample_block(uvec2(uv * vec2(rgb_rect.zw)));
+    vec3 c = sample_block(uvec2(uv * motion.xy));
     if (do_srgb) c = srgb_linear(c);
     outColor = vec4(c * scale.rgb + bias.rgb, 1.0);
 }

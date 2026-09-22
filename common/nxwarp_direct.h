@@ -42,21 +42,22 @@ inline bool is_stream(std::span<const uint8_t> b)
 {
 	return b.size() >= 4 && read32(b, 0) == stream_magic;
 }
-// Versions 1/2: raw; 3/4: optional LZ4 units. Even versions use trusted-LAN CRC.
+// Versions 1/2: raw; 3/4: optional LZ4; 5/6: safety prefix and optional LZ4.
+// Even versions use trusted-LAN CRC.
 // Packed NXDF frames remain v1. Older clients reject unsupported stream versions.
-inline std::vector<uint8_t> stream_header(layout l, bool trusted_lan = false, bool lz4 = false)
+inline std::vector<uint8_t> stream_header(layout l, bool trusted_lan = false, bool lz4 = false, bool safety = false)
 {
 	if (!l.valid())
 		return {};
 	std::vector<uint8_t> b;
 	b.reserve(32);
-	for (uint32_t v: {stream_magic, (lz4 ? 3u : 1u) + (trusted_lan ? 1u : 0u), l.width, l.height, l.eyes, l.tile_count(), l.max_block_words(), l.max_frame_bytes()})
+	for (uint32_t v: {stream_magic, (safety ? 5u : lz4 ? 3u : 1u) + (trusted_lan ? 1u : 0u), l.width, l.height, l.eyes, l.tile_count(), l.max_block_words(), l.max_frame_bytes()})
 		append32(b, v);
 	return b;
 }
 inline std::optional<layout> parse_stream(std::span<const uint8_t> b)
 {
-	if (b.size() != 32 || !is_stream(b) || (read32(b, 4) < 1 || read32(b, 4) > 4))
+	if (b.size() != 32 || !is_stream(b) || (read32(b, 4) < 1 || read32(b, 4) > 6))
 		return {};
 	layout l{read32(b, 8), read32(b, 12), read32(b, 16)};
 	if (!l.valid() || read32(b, 20) != l.tile_count() || read32(b, 24) != l.max_block_words() || read32(b, 28) != l.max_frame_bytes())

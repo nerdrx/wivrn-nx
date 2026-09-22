@@ -62,6 +62,8 @@ public:
 		vk::DeviceSize atlas_table_bytes = 0;
 		// Optional NX direct-block payload. Buffers are snapshots owned by decoder pool item.
 		bool direct_valid = false;
+		bool direct_safety = false;
+		vk::Extent2D direct_extent{};
 		vk::Buffer direct_tiles = nullptr;
 		vk::DeviceSize direct_tiles_bytes = 0;
 		vk::Buffer direct_blocks = nullptr;

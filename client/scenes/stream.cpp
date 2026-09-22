@@ -60,6 +60,7 @@
 #include "wivrn_config.h"
 #include "utils/retained_frame_slot.h"
 #include "utils/motion_history.h"
+#include "nx_safety_selection.h"
 
 #ifdef __ANDROID__
 #include <sys/system_properties.h>
@@ -833,9 +834,17 @@ bool scenes::stream::views_ready() const
 		if (not is_view(i) or not decoders[i].decoder)
 			continue;
 		if (decoders[i].empty())
+		{
+			if (i == 0 && eyes_in_one_stream() && safety_available.load(std::memory_order_relaxed))
+			{
+				any = true;
+				continue;
+			}
 			return false;
+		}
 		any = true;
 	}
+
 	return any;
 }
 
@@ -906,7 +915,7 @@ void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_p
 			// session (the base layer takes the stream-1 slot, never this one); the
 			// role test is here so that a stream which is NOT a displayed picture can
 			// never end up pacing the display.
-			if (stream == 0 and is_view(stream))
+			if (stream == 0 and is_view(stream) and not handle->direct_safety)
 				dejitter.sample(handle->feedback.received_from_decoder, handle->view_info.display_time);
 
 			// Publish the newest COMPLETE frame for the render thread, which reads
@@ -919,7 +928,7 @@ void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_p
 			// Inside the lock, which is what makes the single-producer requirement
 			// hold: two decode threads can be here at once, and the ring does not
 			// serialise publishers itself.
-			if (stream == 0 and is_view(stream))
+			if (stream == 0 and is_view(stream) and not handle->direct_safety)
 				complete_ring.publish(latest_complete{
 				        .frame_id = handle->feedback.frame_index,
 				        .display_time = handle->view_info.display_time,
@@ -929,9 +938,21 @@ void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_p
 			// One decoded frame on this stream, for the frame rate readout. Monotonic
 			// and never reset: the render thread differences it over a rolling window.
 			// Counted for every stream, base included: it is a decode that happened.
-			decoded_frames[stream].fetch_add(1, std::memory_order_relaxed);
+			if (!handle->direct_safety) decoded_frames[stream].fetch_add(1, std::memory_order_relaxed);
 
-			if (is_base(stream))
+			if (handle->direct_safety && stream == 0 && is_view(stream))
+			{
+				// Safety frames never enter the sharp primary ring. Keep newest complete
+				// safety outside it; common_frame decides when it may be presented.
+				if (not latest_safety_handle || handle->view_info.display_time > latest_safety_handle->view_info.display_time ||
+				    (handle->view_info.display_time == latest_safety_handle->view_info.display_time &&
+				     handle->feedback.frame_index > latest_safety_handle->feedback.frame_index))
+					{
+					std::swap(latest_safety_handle, handle);
+					safety_available.store(true, std::memory_order_relaxed);
+				}
+			}
+			else if (is_base(stream))
 			{
 				// The hybrid base layer. It is NOT put in the rolling buffer, which
 				// is what keeps it out of common_frame(), out of the reprojection
@@ -977,7 +998,7 @@ void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_p
 	}
 
 	frames_ready.notify_all();
-	if (handle and not handle->feedback.blitted)
+	if (handle and not handle->direct_safety and not handle->feedback.blitted)
 	{
 		send_feedback(handle->feedback);
 	}
@@ -1090,6 +1111,12 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, scenes::stream::deco
 		}
 	}
 	std::array<std::shared_ptr<shard_accumulator::blit_handle>, decoder_count> result;
+	if (common_frames.empty() && eyes_in_one_stream() && !alpha && latest_safety_handle &&
+	    latest_safety_handle->direct_valid && latest_safety_handle->direct_safety)
+	{
+		result[0] = latest_safety_handle;
+		return result;
+	}
 	if (not common_frames.empty())
 	{
 		auto min = std::ranges::min_element(common_frames,
@@ -1107,9 +1134,38 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, scenes::stream::deco
 			min = std::ranges::max_element(common_frames, std::ranges::less{},
 			                              [](auto frame) { return frame->feedback.frame_index; });
 
+		// Safety payload is paired only for the single stereo direct stream. It never
+		// competes with alpha or independently joined eyes.
+		const bool safety_pair = eyes_in_one_stream() && !alpha && latest_safety_handle &&
+		                         latest_safety_handle->direct_valid && latest_safety_handle->direct_safety &&
+		                         std::ranges::all_of(common_frames, [](auto frame) { return frame->direct_valid; });
+		if (safety_pair)
+		{
+			const auto selected = nx_safety::select(
+			        (*min)->view_info.display_time,
+			        latest_safety_handle->view_info.display_time,
+			        safety_last_presented_source_time.value_or(0),
+			        std::max(uint64_t(display_time > safety_primary_last_presented_at ? display_time - safety_primary_last_presented_at : 0),
+			                 uint64_t(safety_repeated_refreshes + 1) * uint64_t(std::max<XrDuration>(display_time_period, 0))),
+			        uint64_t(std::max<XrDuration>(display_time_period, 0)),
+			        bool(safety_last_presented_handle));
+			if (selected == nx_safety::choice::safety)
+			{
+				result[0] = latest_safety_handle;
+				return result;
+			}
+			if (selected == nx_safety::choice::hold && safety_last_presented_handle && safety_last_presented_source_time &&
+			    (*min)->view_info.display_time <= *safety_last_presented_source_time)
+			{
+				// Keep presenting the exact safety handle already shown until a strictly newer primary returns.
+				result[0] = safety_last_presented_handle;
+				return result;
+			}
+		}
+
 #ifdef __ANDROID__
 		char past_property[PROP_VALUE_MAX] = {};
-		if (__system_property_get("debug.wivrn.nx.motion_past", past_property) > 0 and past_property[0] == '1' and
+		if (!safety_pair && __system_property_get("debug.wivrn.nx.motion_past", past_property) > 0 and past_property[0] == '1' and
 		    application::get_config().motion_mode() == wivrn::motion_mode::headset and not alpha)
 		{
 			// Do not alternate future-dated unwarped images with past warped ones.
@@ -1807,7 +1863,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	// Search for frame with desired display time on all decoders
 	// If no such frame exists, use the latest frame for each decoder
 	current_blit_handles = common_frame(frame_state.predictedDisplayTime);
-    // A motion field contains both eyes for one source frame. Never apply it
+	// A motion field contains both eyes for one source frame. Never apply it
     // to a salvage pair whose independently decoded eyes have different IDs.
 	const bool motion_stereo_aligned = current_blit_handles[0] &&
 	    (eyes_in_one_stream() || (current_blit_handles[1] &&
@@ -1996,6 +2052,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 					images[v].atlas_table_bytes = blit_handle->atlas_table_bytes;
 				}
 				images[v].direct_valid = blit_handle->direct_valid;
+				images[v].direct_extent = blit_handle->direct_extent;
 				images[v].direct_tiles = blit_handle->direct_tiles;
 				images[v].direct_tiles_bytes = blit_handle->direct_tiles_bytes;
 				images[v].direct_blocks = blit_handle->direct_blocks;
@@ -2996,6 +3053,35 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		// One frame the render thread actually presented, for the frame rate readout.
 		++displayed_frames;
 		++g_rp.submitted;
+	if (eyes_in_one_stream() && current_blit_handles[0] && current_blit_handles[0]->direct_valid)
+	{
+		const auto source_time = current_blit_handles[0]->view_info.display_time;
+		if (current_blit_handles[0]->direct_safety != bool(safety_last_presented_handle))
+			spdlog::info("NX safety: {} at source {} frame {} after {:.3f} ms primary hold",
+			             current_blit_handles[0]->direct_safety ? "fallback" : "detail",
+			             source_time, current_blit_handles[0]->feedback.frame_index,
+			             safety_primary_last_presented_at ? double(frame_state.predictedDisplayTime - safety_primary_last_presented_at) * 1e-6 : 0.0);
+		if (current_blit_handles[0]->direct_safety)
+		{
+			// Safety presentation does not reset primary hold. A returning primary
+			// must still be newer than this timestamp to avoid rewinding.
+			safety_last_presented_source_time = source_time;
+			safety_last_presented_handle = current_blit_handles[0];
+		}
+		else
+		{
+			if (!safety_last_primary_source_time || *safety_last_primary_source_time != source_time)
+			{
+				safety_primary_last_presented_at = frame_state.predictedDisplayTime;
+				safety_repeated_refreshes = 0;
+			}
+			else safety_repeated_refreshes = std::min(2u, safety_repeated_refreshes + 1);
+			safety_last_primary_source_time = source_time;
+			safety_last_presented_source_time = source_time;
+			safety_last_presented_handle.reset();
+		}
+	}
+
 		// Count a source frame only when its projection layer was actually submitted.
 		// The high-water mark spans reporting windows, while this window count resets
 		// with the rest of the render probe.
@@ -3057,7 +3143,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 
 		for (const auto & handle: current_blit_handles)
 		{
-			if (handle)
+			if (handle && !handle->direct_safety)
 			{
 				auto & packet = packets.emplace_back();
 				wivrn_session::control_socket_t::serialize(packet, feedbacks.emplace_back(handle->feedback));
@@ -3251,6 +3337,13 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 			decoder.motion_pose_history.clear();
 		last_submitted_source_frame.reset();
 		last_selected_source_frame.reset();
+		latest_safety_handle.reset();
+		safety_available.store(false, std::memory_order_relaxed);
+		safety_repeated_refreshes = 0;
+		safety_last_presented_handle.reset();
+		safety_primary_last_presented_at = 0;
+		safety_last_primary_source_time.reset();
+		safety_last_presented_source_time.reset();
 	}
 
 	for (const auto & [stream_index, item]: utils::enumerate(decoders))

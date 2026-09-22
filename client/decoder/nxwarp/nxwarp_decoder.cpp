@@ -1,3 +1,4 @@
+#include "nxwarp_direct_safety.h"
 /*
  * WiVRn VR streaming — NX Warp codec
  *
@@ -473,6 +474,7 @@ void nxwarp_decoder::build_image_pool()
 {
 	for (auto & item: image_pool)
 	{
+		if (!direct_safety && &item >= image_pool.data() + image_count) break;
 		item.direct_tiles = buffer_allocation{};
 		item.direct_blocks = buffer_allocation{};
 		// The view must go before the image it was made from: on a rebuild the
@@ -957,12 +959,13 @@ bool nxwarp_decoder::on_direct_stream_header(std::span<const uint8_t> header)
 		return false;
 	}
 	const uint32_t direct_version = nxwarp_direct::read32(header, 4);
-	const bool trusted_lan = direct_version == 2 || direct_version == 4;
+	const bool trusted_lan = direct_version % 2 == 0;
 	const bool lz4 = direct_version >= 3;
+	const bool safety = direct_version >= 5;
 	if (direct_block_active)
 	{
 		const bool same = parsed->width == direct_layout.width && parsed->height == direct_layout.height &&
-		                  parsed->eyes == direct_layout.eyes && trusted_lan == direct_trusted_lan && lz4 == direct_lz4;
+		                  parsed->eyes == direct_layout.eyes && trusted_lan == direct_trusted_lan && lz4 == direct_lz4 && safety == direct_safety;
 		if (!same)
 			spdlog::error("nxwarp[{}]: changed NXDB geometry/version rejected", stream_index);
 		return same;
@@ -973,7 +976,11 @@ bool nxwarp_decoder::on_direct_stream_header(std::span<const uint8_t> header)
 	direct_block_active = true;
 	direct_trusted_lan = trusted_lan;
 	direct_lz4 = lz4;
+	direct_safety = safety;
 #ifdef __ANDROID__
+	char loss_test[PROP_VALUE_MAX] = {};
+	direct_safety_loss_test = safety && __system_property_get("debug.wivrn.nx.safety_loss_test", loss_test) > 0 && loss_test[0] == '1';
+	if (direct_safety_loss_test) spdlog::warn("NX safety: synthetic detail loss enabled, 30 of every 180 source frames");
 	char recovery[PROP_VALUE_MAX] = {};
 	direct_partial_recovery = __system_property_get("debug.wivrn.nx.partial_direct", recovery) > 0 && recovery[0] == '1';
 #endif
@@ -1142,6 +1149,14 @@ void nxwarp_decoder::push_datagram(to_headset::nxwarp_datagram && dg)
 		const uint32_t idx = cfg.tile_index(t.row, t.col);
 		if (idx >= target->slots.size())
 			continue;
+		// Opt-in diagnostic: lose only detail chunks in a repeatable burst. This is
+		// deliberately not a claim about recovering a total radio outage.
+		if (direct_safety_loss_test && target->frame_id % 180 >= 60 && target->frame_id % 180 < 90 &&
+		    !target->slots.empty() && target->slots[0].size() >= 36)
+		{
+			const auto sh = nxwarp_direct::parse_safety_header(direct_layout, std::span<const uint8_t>(target->slots[0]).subspan(4));
+			if (sh && size_t(idx) * chunk >= 4 + sh->prefix_bytes()) continue;
+		}
 		// The receiver's spans point into scratch it reuses on the next call, so the
 		// bytes have to be taken now.
 		auto & slot = target->slots[idx];
@@ -1222,6 +1237,28 @@ void nxwarp_decoder::push_datagram(to_headset::nxwarp_datagram && dg)
 			w.complete = true;
 	}
 
+	// Publish a complete safety prefix before waiting for the detail tail. Do not
+	// retire the frame: complete detail can still replace it without a second pose.
+	if (direct_safety && jobs_pending.load() < max_queued_frames)
+		for (auto & w: window)
+		{
+			if (!w.used || w.complete || w.safety_queued || !w.have_view_info) continue;
+			auto prefix = nxwarp_direct::recover_safety_prefix(direct_layout, w.slots, chunk);
+			if (prefix.empty()) continue;
+			decode_job job;
+			job.frame_id = w.frame_id;
+			job.unit = std::move(prefix);
+			job.fb = w.fb;
+			job.fb.received_last_packet = host.now();
+			job.view_info = w.view_info;
+			job.have_view_info = true;
+			job.safety = true;
+			w.safety_queued = true;
+			jobs_pending++;
+			jobs.push(std::move(job));
+			break; // Bound per-datagram work and do not crowd the detail queue.
+		}
+
 	// A complete frame goes to the worker as soon as every older frame has been closed,
 	// so the worker sees frames in frame order.
 	close_complete_prefix();
@@ -1301,6 +1338,7 @@ nxwarp_decoder::inflight_frame * nxwarp_decoder::frame_slot(uint16_t frame_id, u
 	free_slot->frame_id = frame_id;
 	free_slot->have_last_run = false;
 	free_slot->complete = false;
+	free_slot->safety_queued = false;
 	free_slot->reordered = false;
 	free_slot->path_id = path_id;
 	free_slot->fb = from_headset::feedback{};
@@ -1514,6 +1552,16 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 	auto unit = nxwarp_wire::reassemble(cfg, f.slots, chunk, direct_block_active);
 	const bool had_hole = unit.empty();
 	bool concealed = false;
+	bool safety = false;
+	if (unit.empty() && direct_safety && f.have_view_info && !f.safety_queued)
+	{
+		unit = nxwarp_direct::recover_safety_prefix(direct_layout, f.slots, chunk);
+		if (!unit.empty())
+		{
+			safety = concealed = true;
+			host.report_frame_lost(f.fb);
+		}
+	}
 	if (direct_block_active && direct_partial_recovery && f.have_view_info)
 	{
 		if (unit.empty() && !direct_history.empty() && host.now() >= direct_history_time &&
@@ -1676,6 +1724,7 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 	job.view_info = f.view_info;
 	job.have_view_info = f.have_view_info;
 	job.concealed = concealed;
+	job.safety = safety;
 	// The network delivers at the server's rate; the worker decodes at whatever
 	// rate this device manages. When the device cannot keep up, a queued frame is
 	// nothing but latency the user will wear -- 90 fps arriving against a 57 ms
@@ -1718,7 +1767,7 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 		// them on the way past rather than the count being incremented blindly.
 		std::vector<uint16_t> discarded;
 		jobs.drop_until([&discarded](const decode_job & j) {
-			discarded.push_back(j.frame_id);
+			if (!j.safety) discarded.push_back(j.frame_id);
 			return false;
 		});
 		frames_dropped_late += jobs_pending.exchange(0);
@@ -1772,10 +1821,27 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	if (direct_block_active)
 	{
 		std::span<const uint8_t> payload{job.unit.data(), job.unit.size()};
+		auto coded_layout = direct_layout;
+		if (direct_safety)
+		{
+			const auto h = nxwarp_direct::parse_safety_header(direct_layout, payload);
+			if (!h || payload.size() != (job.safety ? h->prefix_bytes() : h->total_bytes()))
+			{
+				host.report_frame_not_held(stream_index, job.frame_id, from_headset::nxwarp_frame_not_held::reason::refused);
+				return;
+			}
+			if (job.safety)
+			{
+				coded_layout = h->low;
+				payload = payload.subspan(nxwarp_direct::safety_header_bytes, h->safety_bytes);
+			}
+			else payload = payload.subspan(h->prefix_bytes(), h->detail_bytes);
+		}
+		const size_t coded_input_bytes = payload.size();
 		if (nxwarp_direct::is_lz4(payload))
 		{
 			const auto started = std::chrono::steady_clock::now();
-			if (!direct_lz4 || !nxwarp_direct::decompress_lz4(direct_layout, payload, direct_unpacked))
+			if (!direct_lz4 || !nxwarp_direct::decompress_lz4(coded_layout, payload, direct_unpacked))
 			{
 				host.report_frame_not_held(stream_index, job.frame_id, from_headset::nxwarp_frame_not_held::reason::refused);
 				return;
@@ -1787,13 +1853,13 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		else if (direct_lz4) ++direct_lz4_raw_frames;
 		if (direct_lz4)
 		{
-			direct_lz4_input_bytes += job.unit.size();
+			direct_lz4_input_bytes += coded_input_bytes;
 			direct_lz4_output_bytes += payload.size();
 			if ((direct_lz4_frames + direct_lz4_raw_frames) % 180 == 0)
 				spdlog::info("nxwarp[{}]: LZ4 {} compressed / {} raw units, {} wire / {} unpacked bytes, {:.3f} ms total decompression",
 				        stream_index, direct_lz4_frames, direct_lz4_raw_frames, direct_lz4_input_bytes, direct_lz4_output_bytes, direct_lz4_ms);
 		}
-		const auto frame = nxwarp_direct::parse_frame(direct_layout, payload);
+		const auto frame = nxwarp_direct::parse_frame(coded_layout, payload);
 		if (!frame)
 		{
 			spdlog::warn("nxwarp[{}]: direct-block frame rejected by bounds/size validation", stream_index);
@@ -1842,14 +1908,16 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		                                                   item->image, native_extent, item->current_layout,
 		                                                   VK_NULL_HANDLE, item->semaphore_val, item->free);
 		handle->direct_valid = true;
+		handle->direct_safety = job.safety;
+		handle->direct_extent = vk::Extent2D{coded_layout.width * coded_layout.eyes, coded_layout.height};
 		handle->direct_tiles = vk::Buffer(item->direct_tiles);
 		handle->direct_tiles_bytes = tile_bytes;
 		handle->direct_blocks = vk::Buffer(item->direct_blocks);
 		handle->direct_blocks_bytes = vk::DeviceSize(direct_layout.max_block_words()) * 4;
 		handle->feedback.received_from_decoder = host.now();
-		if (!job.concealed)
+		if (!job.concealed && !job.safety)
 			note_frame_held(job.frame_id);
-		else
+		else if (job.concealed)
 			host.report_frame_not_held(stream_index, job.frame_id, from_headset::nxwarp_frame_not_held::reason::hole);
 		++frames_decoded;
 		host.on_frame_decoded(job.frame_id);
@@ -2830,6 +2898,7 @@ nxwarp_decoder::image * nxwarp_decoder::get_free()
 {
 	for (auto & item: image_pool)
 	{
+		if (!direct_safety && &item >= image_pool.data() + image_count) break;
 		if (item.free.exchange(false))
 			return &item;
 	}

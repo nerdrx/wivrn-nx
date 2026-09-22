@@ -16,12 +16,14 @@ layout(push_constant) uniform DirectPc {
 	uint jobCount;
 	uint leftLayer;
 	uint rightLayer;
+	uint sourceWidth;
+	uint sourceHeight;
 } pc;
 
 vec3 yuv(uint x, uint y, uint layer)
 {
-	x = min(x, pc.width - 1u);
-	y = min(y, pc.height - 1u);
+	x = min(x, pc.sourceWidth - 1u);
+	y = min(y, pc.sourceHeight - 1u);
 	uint yy = imageLoad(luma, ivec3(int(x), int(y), int(layer))).r;
 	uvec4 cc = imageLoad(chroma, ivec3(int(x / 2u), int(y / 2u), int(layer)));
 	float yf = float(yy) / 255.0;
@@ -86,8 +88,19 @@ void main()
 	if (step == 0u) {
 		vec3 mean = vec3(0.0);
 		for (uint yy = 0u; yy < 32u; ++yy)
-			for (uint xx = 0u; xx < 32u; ++xx)
-				mean += yuv(ox + xx, j.y + yy, layer);
+			for (uint xx = 0u; xx < 32u; ++xx) {
+				ivec2 source;
+				if (pc.sourceWidth == pc.width && pc.sourceHeight == pc.height)
+					source = ivec2(ox + xx, j.y + yy);
+				else {
+					vec2 source_f = (vec2(ox + xx, j.y + yy) + 0.5) *
+					                vec2(pc.sourceWidth, pc.sourceHeight) /
+					                vec2(pc.width, pc.height) - 0.5;
+					source = clamp(ivec2(floor(source_f)), ivec2(0),
+					                    ivec2(pc.sourceWidth, pc.sourceHeight) - 1);
+				}
+				mean += yuv(uint(source.x), uint(source.y), layer);
+			}
 		uvec3 c = rgb8(mean / 1024.0);
 		words[j.w] = (3u << 30u) | (c.r << 16u) | (c.g << 8u) | c.b;
 		return;
@@ -108,7 +121,16 @@ void main()
 					{
 					vec2 centre = vec2(ox + xx * step, j.y + yy * step) + float(step) * 0.5;
 					vec2 delta = (vec2(sx, sy) + 0.5 - float(step) * 0.5) * spread;
-					ivec2 source = clamp(ivec2(floor(centre + delta)), ivec2(0), ivec2(pc.width, pc.height) - 1);
+					ivec2 source;
+					if (pc.sourceWidth == pc.width && pc.sourceHeight == pc.height)
+						source = clamp(ivec2(floor(centre + delta)), ivec2(0),
+					                      ivec2(pc.sourceWidth, pc.sourceHeight) - 1);
+					else {
+						vec2 source_f = (centre + delta + 0.5) * vec2(pc.sourceWidth, pc.sourceHeight) /
+						                vec2(pc.width, pc.height) - 0.5;
+						source = clamp(ivec2(floor(source_f)), ivec2(0),
+						                    ivec2(pc.sourceWidth, pc.sourceHeight) - 1);
+					}
 					c += yuv(uint(source.x), uint(source.y), layer);
 				}
 			uvec3 q = rgb8(c / float(step * step));

@@ -551,6 +551,15 @@ private:
 
 	// Keep a reference to the resources needed to blit the images until vkWaitForFences
 	std::array<std::shared_ptr<wivrn::shard_accumulator::blit_handle>, decoder_count> current_blit_handles;
+	// Complete NX safety frame kept outside primary ring; it may be selected only after
+	// primary has been presented unchanged for the selector hold threshold.
+	std::shared_ptr<wivrn::shard_accumulator::blit_handle> latest_safety_handle;
+	std::atomic<bool> safety_available = false;
+	uint32_t safety_repeated_refreshes = 0;
+	std::shared_ptr<wivrn::shard_accumulator::blit_handle> safety_last_presented_handle;
+	XrTime safety_primary_last_presented_at = 0;
+	std::optional<uint64_t> safety_last_primary_source_time;
+	std::optional<uint64_t> safety_last_presented_source_time;
 
 	// --- Frame smoothing (config.frame_smoothing) --------------------------------------
 	// The eye images the pass is sampling as the previous frame, pinned for exactly one

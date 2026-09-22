@@ -24,6 +24,7 @@ void check(VkResult r, const char * what)
 class direct_codec final : public nxwarp_codec
 {
 	nxwarp_direct::layout geometry;
+	uint32_t source_width, source_height;
 	VkPhysicalDevice physical;
 	VkDevice device;
 	VkQueue queue;
@@ -48,9 +49,13 @@ class direct_codec final : public nxwarp_codec
 	std::vector<uint8_t> header;
 	bool lz4_enabled = false;
 	std::vector<uint8_t> compressed, cached_raw;
+	std::vector<uint8_t> frame;
+	std::unique_ptr<direct_codec> safety_codec;
+	bool safety_enabled = false;
 	nxwarp_direct::plan plan;
 	std::vector<nxwarp_tile_desc> tile_info;
-	uint32_t target = 500'000'000;
+	uint32_t target = 0;
+	uint32_t total_target = 0;
 	float refresh = 90;
 	int64_t next_due = 0;
 	bool submitted = false;
@@ -99,6 +104,7 @@ class direct_codec final : public nxwarp_codec
 			tile_info[i] = {.index = i, .qp = 0, .mode = 0, .res_level = uint8_t(plan.descriptors[i] >> 30), .ref_delta = 3};
 		std::memcpy(jobs.mapped, plan.jobs.data(), plan.jobs.size() * sizeof(plan.jobs[0]));
 	}
+	size_t planned_bytes() const { return plan.bytes(); }
 	std::array<VkImageView, 2> image_views(VkImage image, uint32_t layers)
 	{
 		auto key = std::make_pair(image, layers);
@@ -127,10 +133,25 @@ class direct_codec final : public nxwarp_codec
 
 public:
 	direct_codec(const nxwarp_codec_config & c, VkPhysicalDevice p, VkDevice d, VkQueue q, uint32_t f) :
-	        geometry{c.width, c.height, c.eyes}, physical(p), device(d), queue(q), family(f), header(nxwarp_direct::stream_header(geometry, c.trusted_lan, c.direct_lz4)), lz4_enabled(c.direct_lz4)
+	        geometry{c.width, c.height, c.eyes}, source_width(c.source_width ? c.source_width : c.width), source_height(c.source_height ? c.source_height : c.height), physical(p), device(d), queue(q), family(f), header(nxwarp_direct::stream_header(geometry, c.trusted_lan, c.direct_lz4, c.safety)), lz4_enabled(c.direct_lz4), safety_enabled(c.safety)
 	{
 		if (header.empty())
 			throw std::runtime_error("NX direct: eye geometry must be multiples of 32, <=4096");
+		if (safety_enabled)
+		{
+			const uint32_t sw = ((source_width / 4 + 31) / 32) * 32;
+			const uint32_t sh = ((source_height / 4 + 31) / 32) * 32;
+			if (!sw || !sh || sw > geometry.width || sh > geometry.height)
+				throw std::runtime_error("NX direct: invalid safety geometry");
+			nxwarp_codec_config sc = c;
+			sc.width = sw;
+			sc.height = sh;
+			sc.safety = false;
+			sc.direct_lz4 = c.direct_lz4;
+			sc.source_width = source_width;
+			sc.source_height = source_height;
+			safety_codec = std::make_unique<direct_codec>(sc, p, d, q, f);
+		}
 	}
 	void initialize()
 	{
@@ -141,7 +162,7 @@ public:
 			bindings[i] = {i, i < 2 ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
 		VkDescriptorSetLayoutCreateInfo sl{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 4, .pBindings = bindings.data()};
 		check(vkCreateDescriptorSetLayout(device, &sl, nullptr, &set_layout), "descriptor layout");
-		VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT, 0, 20};
+		VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT, 0, 28};
 		VkPipelineLayoutCreateInfo pl{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &set_layout, .pushConstantRangeCount = 1, .pPushConstantRanges = &push};
 		check(vkCreatePipelineLayout(device, &pl, nullptr, &pipeline_layout), "pipeline layout");
 		const auto & code = ::shaders.at("direct_blocks_encode");
@@ -163,6 +184,9 @@ public:
 		VkFenceCreateInfo fc{.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
 		check(vkCreateFence(device, &fc, nullptr, &fence), "fence");
 		update_plan();
+		if (safety_codec)
+			safety_codec->initialize();
+		set_target_bitrate(500'000'000u, 90.f);
 	}
 	~direct_codec() override
 	{
@@ -200,16 +224,29 @@ public:
 	{
 		bps = std::clamp(bps, 1u, 800'000'000u);
 		fps = std::isfinite(fps) ? std::clamp(fps, 1.f, 240.f) : 90.f;
-		if (bps == target && fps == refresh)
+		if (bps == total_target && fps == refresh)
 			return;
-		target = bps;
+		total_target = bps;
 		refresh = fps;
+		if (safety_codec)
+		{
+			const uint32_t safety_bps = std::min(20'000'000u, bps / 4u);
+			safety_codec->set_target_bitrate(safety_bps, fps);
+			bps -= safety_bps;
+		}
+		target = bps;
 		update_plan();
 		next_due = 0;
 	}
 	bool admit_frame(int64_t now) override
 	{
-		int64_t interval = int64_t(std::ceil(plan.bytes() * 8.0 * 1.25 * 1e9 / target));
+		const auto lz4_overhead = [](size_t n) {
+			return size_t(16) + ((n + nxwarp_direct::lz4_chunk_bytes - 1) / nxwarp_direct::lz4_chunk_bytes) * 12;
+		};
+		const size_t safety_bytes = safety_codec ? safety_codec->planned_bytes() : 0;
+		const size_t raw_bytes = plan.bytes() + safety_bytes + (safety_codec ? 32 : 0);
+		const size_t wire_overhead = lz4_enabled ? lz4_overhead(plan.bytes()) + (safety_codec ? lz4_overhead(safety_bytes) : 0) : 0;
+		int64_t interval = int64_t(std::ceil((raw_bytes + wire_overhead) * 8.0 * 1.25 * 1e9 / total_target));
 		if (now < next_due)
 			return false;
 		next_due = std::max(next_due, now - interval) + interval;
@@ -250,6 +287,9 @@ public:
 	{
 		if (submitted)
 			throw std::runtime_error("NX direct: unfinished GPU work");
+		std::span<const uint8_t> safety_raw;
+		if (safety_codec)
+			safety_raw = safety_codec->encode_image_pair(image, left, right, 0);
 		auto source = image_views(image, std::max(left, right) + 1);
 		auto * words = static_cast<uint32_t *>(output.mapped);
 		words[0] = nxwarp_direct::frame_magic;
@@ -270,7 +310,7 @@ public:
 		vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &input, 0, nullptr, 0, nullptr);
 		vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 		vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout, 0, 1, &descriptor, 0, nullptr);
-		uint32_t push[5] = {geometry.width, geometry.height, uint32_t(plan.jobs.size()), left, right};
+		uint32_t push[7] = {geometry.width, geometry.height, uint32_t(plan.jobs.size()), left, right, source_width, source_height};
 		vkCmdPushConstants(command, pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), push);
 		vkCmdDispatch(command, (push[2] + 63) / 64, 1, 1);
 		VkMemoryBarrier host{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT};
@@ -283,12 +323,33 @@ public:
 		check(vkWaitForFences(device, 1, &fence, VK_TRUE, 1'000'000'000), "encode timeout");
 		submitted = false;
 		const std::span<const uint8_t> raw{static_cast<const uint8_t *>(output.mapped), plan.bytes()};
-		if (!lz4_enabled) return raw;
-		// LZ4 revisits input bytes. Host-visible Vulkan memory can be uncached;
-		// one sequential copy is much cheaper than hashing directly over that map.
-		cached_raw.resize(raw.size());
-		std::memcpy(cached_raw.data(), raw.data(), raw.size());
-		return nxwarp_direct::compress_lz4(cached_raw, compressed);
+		if (!safety_codec)
+		{
+			if (!lz4_enabled) return raw;
+			cached_raw.resize(raw.size());
+			std::memcpy(cached_raw.data(), raw.data(), raw.size());
+			return nxwarp_direct::compress_lz4(cached_raw, compressed);
+		}
+		std::span<const uint8_t> safety_wire = safety_raw;
+		std::span<const uint8_t> detail_wire = raw;
+		std::vector<uint8_t> detail_compressed;
+		if (lz4_enabled)
+		{
+			// The child owns and caches its optional LZ4 result, so do not
+			// revisit its mapped Vulkan memory or wrap an existing NXDL envelope.
+			safety_wire = safety_raw;
+			cached_raw.resize(raw.size());
+			std::memcpy(cached_raw.data(), raw.data(), raw.size());
+			detail_wire = nxwarp_direct::compress_lz4(cached_raw, detail_compressed);
+		}
+		frame.clear();
+		frame.reserve(32 + safety_wire.size() + detail_wire.size());
+		for (uint32_t v: {uint32_t(0x5344584e), 1u, safety_codec->geometry.width, safety_codec->geometry.height,
+		                  geometry.eyes, uint32_t(safety_wire.size()), uint32_t(detail_wire.size()), 0u})
+			nxwarp_direct::append32(frame, v);
+		frame.insert(frame.end(), safety_wire.begin(), safety_wire.end());
+		frame.insert(frame.end(), detail_wire.begin(), detail_wire.end());
+		return frame;
 	}
 };
 } // namespace

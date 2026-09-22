@@ -177,6 +177,8 @@ class nxwarp_decoder : public decoder
 	bool direct_block_active = false;
 	bool direct_trusted_lan = false;
 	bool direct_lz4 = false;
+	bool direct_safety = false;
+	bool direct_safety_loss_test = false;
 	std::vector<uint8_t> direct_unpacked;
 	uint64_t direct_lz4_frames = 0, direct_lz4_raw_frames = 0, direct_lz4_input_bytes = 0, direct_lz4_output_bytes = 0;
 	double direct_lz4_ms = 0;
@@ -400,6 +402,7 @@ class nxwarp_decoder : public decoder
 		uint16_t frame_id = 0;
 		bool have_view_info = false;
 		bool concealed = false;
+		bool safety = false;
 		// The pose the frame was rendered for, off its first datagram. Carried on the
 		// job rather than read from the member state, because by the time the worker
 		// runs the network thread is already assembling the next frame.
@@ -488,6 +491,7 @@ class nxwarp_decoder : public decoder
 		// The frame's bytes are all here (nxwarp_wire::is_complete). Only then is it
 		// ready for the worker.
 		bool complete = false;
+		bool safety_queued = false;
 		// At least one of this frame's datagrams arrived after a newer frame's had.
 		bool reordered = false;
 		// The path the frame's datagrams came in on, for band_deadline's feedback.
@@ -770,7 +774,7 @@ private:
 	vk::Extent2D extent;
 	vk::Extent2D native_extent;
 
-	std::array<image, image_count> image_pool;
+	std::array<image, image_count + 2> image_pool; // Two safety snapshots; allocated only for NXDS.
 
 	// Owned only when the client constructor made it; `host` is the reference actually
 	// used and may point at somebody else's.

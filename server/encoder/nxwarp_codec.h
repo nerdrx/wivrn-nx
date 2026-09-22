@@ -68,6 +68,9 @@ struct nxwarp_codec_config
 	// first end-to-end bring-up because it needs no client reference state.
 	bool inter = false;
 	bool direct_lz4 = false; // Direct backend only: optional independent LZ4 chunks.
+	bool safety = false; // Direct backend only: prepend a low-resolution NXDS safety frame.
+	uint32_t source_width = 0; // Direct source luma width; defaults to width.
+	uint32_t source_height = 0; // Direct source luma height; defaults to height.
 	bool trusted_lan = false; // Direct backend only: CRC transport without inner encryption.
 	// How a paired stream's two eyes reach E0. "layers" (the default) points the
 	// encoder at the two ARRAY LAYERS the compositor already keeps them in,

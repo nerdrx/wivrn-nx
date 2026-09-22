@@ -210,6 +210,7 @@ public:
 		vk::Buffer atlas_table = nullptr;
 		vk::DeviceSize atlas_table_bytes = 0;
 		bool direct_valid = false;
+		vk::Extent2D direct_extent{};
 		vk::Buffer direct_tiles = nullptr;
 		vk::DeviceSize direct_tiles_bytes = 0;
 		vk::Buffer direct_blocks = nullptr;

@@ -1,10 +1,12 @@
 #include "nxwarp_codec.h"
 #include "nxwarp_direct.h"
 #include "nxwarp_direct_lz4.h"
+#include "nxwarp_direct_safety.h"
 #include <array>
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <chrono>
 #include <memory>
 #include <vector>
 #include <vulkan/vulkan.h>
@@ -61,7 +63,10 @@ int main()
 	VkQueue queue{};
 	vkGetDeviceQueue(device, family, 0, &queue);
 
-	constexpr uint32_t w = 64, h = 64, layers = 2;
+	#ifndef NX_DIRECT_TEST_WIDTH
+#define NX_DIRECT_TEST_WIDTH 64
+#endif
+	constexpr uint32_t w = NX_DIRECT_TEST_WIDTH, h = NX_DIRECT_TEST_WIDTH, layers = 2;
 	constexpr VkDeviceSize yb = w * h, uvb = (w / 2) * (h / 2) * 2, lb = yb + uvb;
 	std::vector<uint8_t> pixels(lb * layers);
 	auto eye = [&](uint32_t n, uint8_t y, uint8_t cb, uint8_t cr) {
@@ -165,7 +170,7 @@ int main()
 	auto low = codec->encode_image_pair(image, 0, 1, 1);
 	auto parsed = wivrn::nxwarp_direct::parse_frame({w, h, 2}, low);
 	assert(parsed);
-	uint32_t left = wivrn::nxwarp_direct::read32(parsed->descriptors, 0), right = wivrn::nxwarp_direct::read32(parsed->descriptors, 8);
+	uint32_t left = wivrn::nxwarp_direct::read32(parsed->descriptors, 0), right = wivrn::nxwarp_direct::read32(parsed->descriptors, (w / 32) * 4);
 	assert((left >> 30) == 3 && (right >> 30) == 3);
 	assert(((left >> 16) & 255) > 180 && (left & 255) < 100);
 	assert(((right >> 16) & 255) < 100 && (right & 255) > 150);
@@ -186,6 +191,49 @@ int main()
 	}
 	else
 		assert(std::vector<uint8_t>(packed.begin(), packed.end()) == expected);
+	// Safety envelope: verify the actual GPU output, source downsampling, and
+	// independent raw/LZ4 validation at both requested rate points.
+	for (uint32_t bps: {160'000'000u, 500'000'000u})
+	{
+		cfg.safety = true;
+		cfg.direct_lz4 = true;
+		auto safe_codec = wivrn::nxwarp_codec::make_direct(cfg, instance, gpu, device, queue, family);
+		safe_codec->set_target_bitrate(bps, 90);
+		auto t0 = std::chrono::steady_clock::now();
+		auto safe = safe_codec->encode_image_pair(image, 0, 1, bps);
+		auto encode_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+		auto sh = wivrn::nxwarp_direct::parse_safety_header({w, h, 2}, safe);
+		assert(sh && sh->total_bytes() == safe.size());
+		auto part = [&](size_t off, size_t n, wivrn::nxwarp_direct::layout l) {
+			std::span<const uint8_t> wire = safe.subspan(off, n);
+			std::vector<uint8_t> raw;
+			if (wivrn::nxwarp_direct::is_lz4(wire))
+			{
+				assert(wivrn::nxwarp_direct::decompress_lz4(l, wire, raw));
+				wire = raw;
+			}
+			auto parsed = wivrn::nxwarp_direct::parse_frame(l, wire);
+			assert(parsed);
+			// Uniform red/blue source eyes must remain separated in both segments.
+			for (unsigned eye = 0; eye < 2; ++eye)
+			{
+				const auto desc = wivrn::nxwarp_direct::read32(parsed->descriptors, eye * (l.width / 32) * 4);
+				unsigned red, blue;
+				if ((desc >> 30) == 3) { red = (desc >> 16) & 255; blue = desc & 255; }
+				else {
+					const auto rgb565 = wivrn::nxwarp_direct::read32(parsed->blocks, (desc & 0x3fffffff) * 4) & 65535;
+					red = ((rgb565 >> 11) & 31) * 255 / 31; blue = (rgb565 & 31) * 255 / 31;
+				}
+				assert(eye == 0 ? red > 180 && blue < 100 : red < 100 && blue > 150);
+			}
+			return wire.size();
+		};
+		const auto low = wivrn::nxwarp_direct::layout{sh->low.width, sh->low.height, 2};
+		const size_t safety_raw = part(32, sh->safety_bytes, low);
+		const size_t detail_raw = part(32 + sh->safety_bytes, sh->detail_bytes, {w, h, 2});
+		std::printf("safety %u Mbps: encode=%.3f ms wire=%zu safety=%zu/%u detail=%zu/%u\n", bps / 1'000'000,
+		            encode_ms, safe.size(), safety_raw, sh->safety_bytes, detail_raw, sh->detail_bytes);
+	}
 	packed_codec.reset();
 	codec.reset();
 	vkDeviceWaitIdle(device);

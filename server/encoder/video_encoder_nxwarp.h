@@ -111,6 +111,7 @@ class video_encoder_nxwarp : public video_encoder
 	// The GPU backend submits on vk.queue and so must hold WiVRn's queue mutex
 	// across encode(); the CPU one never touches a queue. See encode().
 	bool codec_uses_vk_queue = false;
+	bool codec_direct_blocks = false;
 	// The codec reads the compositor's image itself (nxwarp_codec::accepts_image).
 	// Set once from the codec, and it decides the shape of present_image, of
 	// encode(), and of what this class allocates per slot.

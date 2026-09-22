@@ -54,6 +54,7 @@
 #if WIVRN_USE_NXWARP
 
 #include "decoder/decoder.h"
+#include "nxwarp_direct.h"
 #include "decoder/nxwarp/nxwarp_reassemble.h"
 
 #include "utils/sync_queue.h"
@@ -151,6 +152,8 @@ class nxwarp_decoder : public decoder
 		std::array<image_allocation, 2> atlas_planes;
 		std::array<vk::raii::ImageView, 2> atlas_views{nullptr, nullptr};
 		buffer_allocation atlas_table;
+		buffer_allocation direct_tiles;
+		buffer_allocation direct_blocks;
 		nxvc_vkd_atlas_images atlas_snapshot{};
 		VkDeviceSize atlas_table_size = 0;
 		// UINT storage views of the same mutable NV12 image, for nxvc's optional
@@ -171,6 +174,8 @@ class nxwarp_decoder : public decoder
 	// Opt-in all-PLANAR direct graphics path. It is deliberately separate from nxvc:
 	// the ordinary decoder remains the fallback for every stream/frame it cannot prove.
 	bool planar_direct_active = false;
+	bool direct_block_active = false;
+	wivrn::nxwarp_direct::layout direct_layout{};
 	bool borrowed_output_active = false;
 	bool compact_centre_active = false;
 	bool compact_large_centre_active = false;
@@ -719,6 +724,7 @@ private:
 	// stream description is therefore half the width the picture needs.
 	void build_image_pool();
 	bool on_stream_header(std::span<const uint8_t> header);
+	bool on_direct_stream_header(std::span<const uint8_t> header);
 	void decode_unit(decode_job & job);
 	void fire_bands_through(inflight_frame & f, uint8_t last_band);
 	// The window, all on the network thread. See THE WINDOW POLICY above.

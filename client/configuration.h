@@ -539,7 +539,7 @@ public:
 
 	uint32_t max_bitrate(bool extended) const
 	{
-		return extended ? 800'000'000u : 200'000'000u;
+		return extended ? 800'000'000u : 500'000'000u;
 	}
 
 	uint32_t max_bitrate() const

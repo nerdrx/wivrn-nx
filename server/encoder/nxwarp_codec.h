@@ -337,6 +337,13 @@ public:
 	// one the frame was coded at.
 	virtual bool set_qp(uint32_t qp) = 0;
 
+	// Independent direct blocks use byte budgeting, not transform quantisation.
+	virtual bool direct_blocks() const { return false; }
+	virtual void set_target_bitrate(uint32_t, float) {}
+	virtual bool admit_frame(int64_t) { return true; }
+	static std::unique_ptr<nxwarp_codec> make_direct(const nxwarp_codec_config &,
+	    VkInstance, VkPhysicalDevice, VkDevice, VkQueue, uint32_t queue_family);
+
 	// Encode one frame from planar 8-bit 4:2:0. Returns the frame's bytes, valid
 	// until the next call, or an empty span on failure (which is logged by the
 	// implementation). `cb` and `cr` are half size in both axes.

@@ -84,6 +84,7 @@ private:
 	pipeline_t pipeline_a[view_count];
 	pipeline_t pipeline_atlas_r8_rgb[view_count];
 	pipeline_t pipeline_atlas_r8_a[view_count];
+	pipeline_t pipeline_direct[view_count];
 
 	// CAS kernel the currently built pipelines were specialized for. defoveate()
 	// rebuilds them if the requested kernel differs, so switching is a rare pipeline
@@ -182,7 +183,7 @@ private:
 	void ensure_vertices(size_t num_vertices);
 	vertex * get_vertices(size_t view);
 
-	pipeline_t & ensure_pipeline(size_t view, vk::Sampler rgb, vk::Sampler a, bool atlas_r8, bool compact_centre);
+	pipeline_t & ensure_pipeline(size_t view, vk::Sampler rgb, vk::Sampler a, bool atlas_r8, bool compact_centre, bool direct = false);
 
 public:
 	struct input
@@ -208,6 +209,11 @@ public:
 		std::array<vk::Extent2D, 3> atlas_extents{};
 		vk::Buffer atlas_table = nullptr;
 		vk::DeviceSize atlas_table_bytes = 0;
+		bool direct_valid = false;
+		vk::Buffer direct_tiles = nullptr;
+		vk::DeviceSize direct_tiles_bytes = 0;
+		vk::Buffer direct_blocks = nullptr;
+		vk::DeviceSize direct_blocks_bytes = 0;
 	};
 
 	// Post-processing folded into the defoveation pass, all values are neutral by default

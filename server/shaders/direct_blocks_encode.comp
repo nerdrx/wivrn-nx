@@ -1,0 +1,110 @@
+#version 460
+
+// NX direct blocks encoder. One invocation handles one 8x8 block job.
+// The source remains on the compositor image; only the compact output buffer
+// leaves the device.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(binding = 0, r8ui) readonly uniform uimage2DArray luma;
+layout(binding = 1, rg8ui) readonly uniform uimage2DArray chroma;
+layout(std430, binding = 2) readonly buffer Jobs { uvec4 jobs[]; };
+layout(std430, binding = 3) writeonly buffer Output { uint words[]; };
+
+layout(push_constant) uniform DirectPc {
+	uint width;
+	uint height;
+	uint jobCount;
+	uint leftLayer;
+	uint rightLayer;
+} pc;
+
+vec3 yuv(uint x, uint y, uint layer)
+{
+	x = min(x, pc.width - 1u);
+	y = min(y, pc.height - 1u);
+	uint yy = imageLoad(luma, ivec3(int(x), int(y), int(layer))).r;
+	uvec4 cc = imageLoad(chroma, ivec3(int(x / 2u), int(y / 2u), int(layer)));
+	float yf = float(yy) / 255.0;
+	float cb = float(cc.r) / 255.0 - 0.5;
+	float cr = float(cc.g) / 255.0 - 0.5;
+	// Same BT.709 matrix as quad_convert.comp, inverted.
+	return clamp(vec3(yf + 1.5748 * cr,
+	                  yf - 0.1873 * cb - 0.4681 * cr,
+	                  yf + 1.8556 * cb), 0.0, 1.0);
+}
+
+uvec3 rgb8(vec3 c) { return uvec3(round(c * 255.0)); }
+
+uint pack565(uvec3 c)
+{
+	return (((c.r * 31u + 127u) / 255u) << 11) |
+	       (((c.g * 63u + 127u) / 255u) << 5) |
+	       ((c.b * 31u + 127u) / 255u);
+}
+
+uvec3 expand565(uint p)
+{
+	uint r = (p >> 11u) & 31u;
+	uint g = (p >> 5u) & 63u;
+	uint b = p & 31u;
+	return uvec3((r << 3u) | (r >> 2u),
+	             (g << 2u) | (g >> 4u),
+	             (b << 3u) | (b >> 2u));
+}
+
+void main()
+{
+	uint id = gl_GlobalInvocationID.x;
+	if (id >= pc.jobCount || id >= jobs.length())
+		return;
+	uvec4 j = jobs[id];
+	uint layer = j.x >= pc.width ? pc.rightLayer : pc.leftLayer;
+	uint ox = j.x >= pc.width ? j.x - pc.width : j.x;
+	uint step = j.z;
+
+	// step 0 is the 32x32 tile summary used by mode 3 descriptors.
+	if (step == 0u) {
+		vec3 mean = vec3(0.0);
+		for (uint yy = 0u; yy < 32u; ++yy)
+			for (uint xx = 0u; xx < 32u; ++xx)
+				mean += yuv(ox + xx, j.y + yy, layer);
+		uvec3 c = rgb8(mean / 1024.0);
+		words[j.w] = (3u << 30u) | (c.r << 16u) | (c.g << 8u) | c.b;
+		return;
+	}
+
+	uvec3 lo = uvec3(255u), hi = uvec3(0u);
+	uvec3 samples[64];
+	for (uint yy = 0u; yy < 8u; ++yy)
+		for (uint xx = 0u; xx < 8u; ++xx) {
+			vec3 c = vec3(0.0);
+			for (uint sy = 0u; sy < step; ++sy)
+				for (uint sx = 0u; sx < step; ++sx)
+					c += yuv(ox + xx * step + sx, j.y + yy * step + sy, layer);
+			uvec3 q = rgb8(c / float(step * step));
+			samples[yy * 8u + xx] = q;
+			lo = min(lo, q);
+			hi = max(hi, q);
+		}
+	uint p0 = pack565(lo);
+	uint p1 = pack565(hi);
+	uvec3 a = expand565(p0), b = expand565(p1);
+	words[j.w] = p0 | (p1 << 16u);
+	uvec4 selectors = uvec4(0u);
+	for (uint i = 0u; i < 64u; ++i) {
+		uint selected = 0u, best = 0xffffffffu;
+		for (uint q = 0u; q < 4u; ++q) {
+			uvec3 p = ((3u - q) * a + q * b + 1u) / 3u;
+			uvec3 d = uvec3(abs(int(samples[i].r) - int(p.r)),
+			                abs(int(samples[i].g) - int(p.g)),
+			                abs(int(samples[i].b) - int(p.b)));
+			uint error = d.r * d.r + d.g * d.g + d.b * d.b;
+			if (error < best) { best = error; selected = q; }
+		}
+		selectors[i / 16u] |= selected << (2u * (i % 16u));
+	}
+	words[j.w + 1u] = selectors.x;
+	words[j.w + 2u] = selectors.y;
+	words[j.w + 3u] = selectors.z;
+	words[j.w + 4u] = selectors.w;
+}

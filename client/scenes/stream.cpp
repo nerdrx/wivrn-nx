@@ -1988,6 +1988,11 @@ void scenes::stream::render(const XrFrameState & frame_state)
 					images[v].atlas_table = blit_handle->atlas_table_buffer;
 					images[v].atlas_table_bytes = blit_handle->atlas_table_bytes;
 				}
+				images[v].direct_valid = blit_handle->direct_valid;
+				images[v].direct_tiles = blit_handle->direct_tiles;
+				images[v].direct_tiles_bytes = blit_handle->direct_tiles_bytes;
+				images[v].direct_blocks = blit_handle->direct_blocks;
+				images[v].direct_blocks_bytes = blit_handle->direct_blocks_bytes;
 			}
 		}
 		else

@@ -60,6 +60,12 @@ public:
 		std::array<vk::Extent2D, 3> atlas_extents{};
 		vk::Buffer atlas_table_buffer = nullptr;
 		vk::DeviceSize atlas_table_bytes = 0;
+		// Optional NX direct-block payload. Buffers are snapshots owned by decoder pool item.
+		bool direct_valid = false;
+		vk::Buffer direct_tiles = nullptr;
+		vk::DeviceSize direct_tiles_bytes = 0;
+		vk::Buffer direct_blocks = nullptr;
+		vk::DeviceSize direct_blocks_bytes = 0;
 	};
 
 public:

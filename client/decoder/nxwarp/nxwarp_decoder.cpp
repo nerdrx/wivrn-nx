@@ -470,6 +470,8 @@ void nxwarp_decoder::build_image_pool()
 {
 	for (auto & item: image_pool)
 	{
+		item.direct_tiles = buffer_allocation{};
+		item.direct_blocks = buffer_allocation{};
 		// The view must go before the image it was made from: on a rebuild the
 		// assignment below frees the old image at once, and a live VkImageView on a
 		// destroyed VkImage is a use-after-free the validation layers will not see
@@ -480,8 +482,8 @@ void nxwarp_decoder::build_image_pool()
 		item.semaphore_val = 0;
 		item.free = true;
 
-		const auto output_format = planar_direct_active ? vk::Format::eR8G8B8A8Unorm : vk::Format::eG8B8R82Plane420Unorm;
-		const auto output_usage = planar_direct_active
+		const auto output_format = (planar_direct_active || direct_block_active) ? vk::Format::eR8G8B8A8Unorm : vk::Format::eG8B8R82Plane420Unorm;
+		const auto output_usage = (planar_direct_active || direct_block_active)
 		        ? vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eSampled
 		        : vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst |
 		          (borrowed_output_active ? vk::ImageUsageFlagBits::eStorage : vk::ImageUsageFlags{});
@@ -506,12 +508,13 @@ void nxwarp_decoder::build_image_pool()
 		}
 		else
 		{
-			item.image = image_allocation(
+		const auto image_extent = direct_block_active ? vk::Extent3D{1, 1, 1} : vk::Extent3D{extent.width, extent.height, 1};
+		item.image = image_allocation(
 		        device,
 		        vk::ImageCreateInfo{
 		                .imageType = vk::ImageType::e2D,
 		                .format = output_format,
-		                .extent = {.width = extent.width, .height = extent.height, .depth = 1},
+		                .extent = image_extent,
 		                .mipLevels = 1,
 		                .arrayLayers = 1,
 		                .tiling = vk::ImageTiling::eOptimal,
@@ -519,6 +522,19 @@ void nxwarp_decoder::build_image_pool()
 	        },
 		        {.usage = VMA_MEMORY_USAGE_AUTO},
 		        "nxwarp image");
+		}
+		if (direct_block_active)
+		{
+			const auto tile_bytes = vk::DeviceSize(direct_layout.tile_count()) * 4;
+			const auto block_bytes = vk::DeviceSize(direct_layout.max_block_words()) * 4;
+			item.direct_tiles = buffer_allocation(device,
+			        vk::BufferCreateInfo{.size = tile_bytes, .usage = vk::BufferUsageFlagBits::eStorageBuffer},
+			        {.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+			         .usage = VMA_MEMORY_USAGE_AUTO}, "nx direct tile descriptors");
+			item.direct_blocks = buffer_allocation(device,
+			        vk::BufferCreateInfo{.size = block_bytes, .usage = vk::BufferUsageFlagBits::eStorageBuffer},
+			        {.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+			         .usage = VMA_MEMORY_USAGE_AUTO}, "nx direct block words");
 		}
 
 		vk::SamplerYcbcrConversionInfo conv{.conversion = *ycbcr_conversion};
@@ -542,7 +558,7 @@ void nxwarp_decoder::build_image_pool()
 		}
 		else
 		{
-			full_info.pNext = planar_direct_active ? nullptr : &conv;
+			full_info.pNext = (planar_direct_active || direct_block_active) ? nullptr : &conv;
 			item.view_full = vk::raii::ImageView(device, full_info);
 		}
 		if (borrowed_output_active)
@@ -636,6 +652,8 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 {
 	if (nxvc or nxvc_failed or header.empty())
 		return nxvc != nullptr;
+	if (nxwarp_direct::is_stream(header))
+		return on_direct_stream_header(header);
 	// The mixed centre stream still uses the generic decoder, but its PLANAR
 	// Pass-B shader is opt-in in nxvc.  Set this before create(), which loads
 	// the pipelines; the shader is format-compatible with ordinary streams and
@@ -924,6 +942,65 @@ bool nxwarp_decoder::on_stream_header(std::span<const uint8_t> header)
 	spdlog::info("nxwarp[{}]: {}x{} per eye, {} {}, on {}, {} x {} tiles, {} bytes per tile",
 	             stream_index, si.width, si.height, si.eyes, si.eyes == 1 ? "eye" : "eyes",
 	             nxvc_vk_decoder_device_name(nxvc), cfg.cols, cfg.rows, chunk);
+	return true;
+}
+
+bool nxwarp_decoder::on_direct_stream_header(std::span<const uint8_t> header)
+{
+	auto parsed = nxwarp_direct::parse_stream(header);
+	if (!parsed)
+	{
+		spdlog::error("nxwarp[{}]: invalid NXDB stream header", stream_index);
+		return false;
+	}
+	if (direct_block_active)
+	{
+		const bool same = parsed->width == direct_layout.width && parsed->height == direct_layout.height &&
+		                  parsed->eyes == direct_layout.eyes;
+		if (!same)
+			spdlog::error("nxwarp[{}]: changed NXDB geometry/version rejected", stream_index);
+		return same;
+	}
+	if (nxvc or header.empty())
+		return false;
+	direct_layout = *parsed;
+	direct_block_active = true;
+	native_extent = {.width = direct_layout.width * direct_layout.eyes, .height = direct_layout.height};
+	extent = native_extent;
+	sampler_ = make_rgba_sampler(device);
+	host_sync = true;
+	build_image_pool();
+
+	cfg.stream_id = stream_index;
+	cfg.cols = direct_layout.eyes * (direct_layout.width / 32);
+	cfg.rows = direct_layout.height / 32;
+	// Direct frames occupy one transport unit. Delay the sole feedback deadline until
+	// whole-frame arrival; spatial band deadlines would discard packed chunks too early.
+	cfg.band_rows = cfg.rows;
+	cfg.layers = 1;
+	cfg.mtu = 1280;
+	cfg.caps = nxt::kCapFec | nxt::kCapPoseHdr | nxt::kCapRleFeedback;
+	aead = nxt::make_null_aead();
+	nxt::Key key{}, salt{};
+	for (size_t i = 0; i < key.size(); ++i) { key[i] = uint8_t(i); salt[i] = uint8_t(0xA0 + i); }
+	receiver = std::make_unique<nxt::Receiver>(cfg, aead.get(), key, salt);
+	receiver->set_negotiated_caps(cfg.caps);
+	chunk = nxwarp_wire::chunk_bytes(cfg);
+	for (auto & f: window)
+	{
+		f = {};
+		f.slots.assign(cfg.tiles_per_frame(), {});
+		f.band_fired.assign(cfg.bands(), 0);
+	}
+	seen_any_frame = false;
+	any_retired = false;
+	hdr_eyes.store(direct_layout.eyes, std::memory_order_release);
+	hdr_width.store(direct_layout.width, std::memory_order_relaxed);
+	hdr_height.store(direct_layout.height, std::memory_order_relaxed);
+	hdr_tools.store(0, std::memory_order_relaxed);
+	spdlog::info("nxwarp[{}]: NXDB direct blocks {}x{} per eye, {} eyes, {} tiles, max {} bytes",
+	             stream_index, direct_layout.width, direct_layout.height, direct_layout.eyes,
+	             direct_layout.tile_count(), direct_layout.max_frame_bytes());
 	return true;
 }
 
@@ -1230,6 +1307,25 @@ nxwarp_decoder::inflight_frame * nxwarp_decoder::frame_slot(uint16_t frame_id, u
 // kFrameWindow ahead of it arrives.
 void nxwarp_decoder::close_complete_prefix()
 {
+	if (direct_block_active)
+	{
+		// Independent frames need no reference ordering. Retire holes before the newest
+		// complete frame so one lost packed frame cannot stall later complete frames.
+		std::optional<uint16_t> newest_complete;
+		for (auto & f: window)
+			if (f.used && f.complete && (!newest_complete || seq_lt(*newest_complete, f.frame_id)))
+				newest_complete = f.frame_id;
+		if (!newest_complete)
+			return;
+		while (auto * f = oldest_in_flight())
+		{
+			const uint16_t id = f->frame_id;
+			close_frame(*f);
+			if (id == *newest_complete)
+				break;
+		}
+		return;
+	}
 	while (auto * f = oldest_in_flight())
 	{
 		if (not f->complete)
@@ -1622,6 +1718,58 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	// the queue segment ahead of it: the one number the dashboard had for nxwarp's
 	// decode was the one number it could not be.
 	job.fb.sent_to_decoder = host.now();
+	// NXDB/NXDF uses immutable per-frame descriptors and blocks. Validate the complete
+	// payload before touching Vulkan; malformed offsets never become GPU reads.
+	if (direct_block_active)
+	{
+		const auto frame = nxwarp_direct::parse_frame(direct_layout,
+		        std::span<const uint8_t>(job.unit.data(), job.unit.size()));
+		if (!frame)
+		{
+			spdlog::warn("nxwarp[{}]: direct-block frame rejected by bounds/size validation", stream_index);
+			host.report_frame_not_held(stream_index, job.frame_id,
+			                           from_headset::nxwarp_frame_not_held::reason::refused);
+			return;
+		}
+		auto * item = get_free();
+		if (!item)
+		{
+			host.report_frame_not_held(stream_index, job.frame_id,
+			                           from_headset::nxwarp_frame_not_held::reason::backlog);
+			return;
+		}
+		const auto tile_bytes = frame->descriptors.size();
+		const auto block_bytes = frame->blocks.size();
+		if (vmaCopyMemoryToAllocation(vk_allocator::instance(), frame->descriptors.data(), item->direct_tiles, 0, tile_bytes) != VK_SUCCESS)
+		{
+			item->free = true;
+			host.report_frame_not_held(stream_index, job.frame_id,
+			                           from_headset::nxwarp_frame_not_held::reason::refused);
+			return;
+		}
+		if (block_bytes)
+			if (vmaCopyMemoryToAllocation(vk_allocator::instance(), frame->blocks.data(), item->direct_blocks, 0, block_bytes) != VK_SUCCESS)
+			{
+				item->free = true;
+				host.report_frame_not_held(stream_index, job.frame_id,
+				                           from_headset::nxwarp_frame_not_held::reason::refused);
+				return;
+			}
+		auto handle = std::make_shared<nxwarp_blit_handle>(job.fb, job.view_info, *item->view_full,
+		                                                   item->image, native_extent, item->current_layout,
+		                                                   VK_NULL_HANDLE, item->semaphore_val, item->free);
+		handle->direct_valid = true;
+		handle->direct_tiles = vk::Buffer(item->direct_tiles);
+		handle->direct_tiles_bytes = tile_bytes;
+		handle->direct_blocks = vk::Buffer(item->direct_blocks);
+		handle->direct_blocks_bytes = vk::DeviceSize(direct_layout.max_block_words()) * 4;
+		handle->feedback.received_from_decoder = host.now();
+		note_frame_held(job.frame_id);
+		++frames_decoded;
+		host.on_frame_decoded(job.frame_id);
+		host.publish(accumulator, std::move(handle));
+		return;
+	}
 	if (planar_direct_active)
 	{
 		const auto direct_start = std::chrono::steady_clock::now();

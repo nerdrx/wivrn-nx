@@ -79,7 +79,7 @@ public:
 bool nxwarp_backend_is_vk(const wivrn::encoder_settings & settings)
 {
 	auto it = settings.options.find("backend");
-	return it != settings.options.end() and it->second == "vk";
+	return it != settings.options.end() and (it->second == "vk" or it->second == "direct");
 }
 
 uint32_t nxwarp_target_queue(wivrn::vk_bundle & vk, const wivrn::encoder_settings & settings)
@@ -499,6 +499,24 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	        .preset = option_u32(settings.options, "preset", 1),
 	        .threads = option_u32(settings.options, "threads", 0),
 	};
+	const std::string backend = option_string(settings.options, "backend", "ref");
+	const bool direct_backend = backend == "direct";
+	if (direct_backend)
+	{
+		if (codec_cfg.inter)
+			throw std::runtime_error("nxwarp: \"backend\": \"direct\" requires \"inter\": \"off\"");
+		if (codec_cfg.atlas != nxwarp_codec_config::atlas_t::off)
+			throw std::runtime_error("nxwarp: \"backend\": \"direct\" requires \"atlas\": \"off\"");
+		if (option_bool(settings.options, "planar-gpu-flat", false) or
+		    option_bool(settings.options, "planar-gpu-centre", false) or
+		    option_bool(settings.options, "planar-centre-graduated", false) or
+		    option_bool(settings.options, "planar-centre-quarter", false))
+			throw std::runtime_error("nxwarp: \"backend\": \"direct\" does not support GPU planar options");
+		if (settings.options.count("planar") != 0 and
+		    nxwarp_planar_from(option_string(settings.options, "planar", "off")) !=
+		            nxwarp_codec_config::planar_t::off)
+			throw std::runtime_error("nxwarp: \"backend\": \"direct\" requires \"planar\": \"off\"");
+	}
 	if (codec_cfg.atlas != nxwarp_codec_config::atlas_t::off and not codec_cfg.inter)
 		throw std::runtime_error("nxwarp: \"atlas\": \"auto\" needs \"inter\": true");
 	if (codec_cfg.atlas_picture_d > uint32_t(std::numeric_limits<int>::max()))
@@ -751,7 +769,7 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 			note.clear();
 		}
 		codec_cfg.planar = eff;
-		stats_planar_name = nxwarp_planar_name(eff);
+		stats_planar_name = direct_backend ? "off" : nxwarp_planar_name(eff);
 		stats_planar_note = note;
 		if (not note.empty())
 			U_LOG_I("nxwarp: \"planar\": \"%s\" -> \"off\" (%s)",
@@ -763,8 +781,10 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 
 	// The same three facts the log states once, kept so every two-second report can carry
 	// them: a status page must not depend on having been open when the session started.
-	stats_effort = codec_cfg.effort;
-	stats_entropy_name = codec_cfg.entropy == nxwarp_codec_config::entropy_t::lite ? "lite" : "rans";
+	stats_effort = direct_backend ? 0 : codec_cfg.effort;
+	stats_entropy_name = direct_backend
+	                             ? "none"
+	                             : (codec_cfg.entropy == nxwarp_codec_config::entropy_t::lite ? "lite" : "rans");
 	stats_entropy_was_auto = entropy_req == entropy_request::automatic;
 	stats_negotiated_tools = client_tools;
 	encode_scale_reported = settings.encode_scale;
@@ -772,7 +792,6 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	stats_width = settings.width;
 	stats_height = settings.height;
 
-	const std::string backend = option_string(settings.options, "backend", "ref");
 	if (backend == "ref")
 	{
 		// The one configuration in which "effort" is asked for and cannot be
@@ -807,10 +826,25 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 		        "this server was built without it");
 #endif
 	}
+	else if (backend == "direct")
+	{
+#ifdef WIVRN_NXWARP_VK_ENCODER
+		codec_uses_vk_queue = true;
+		codec = nxwarp_codec::make_direct(codec_cfg,
+		                                  *vk.instance,
+		                                  *vk.physical_device,
+		                                  *vk.device,
+		                                  *vk.queue.queue,
+		                                  vk.queue.family_index);
+#else
+		throw std::runtime_error(
+		        "\"backend\": \"direct\" needs an nxvc built with the Vulkan encoder");
+#endif
+	}
 	else
 	{
 		throw std::runtime_error(
-		        std::format("unknown NX Warp backend \"{}\"; expected \"ref\" or \"vk\"",
+		        std::format("unknown NX Warp backend \"{}\"; expected \"ref\", \"vk\" or \"direct\"",
 		                    backend));
 	}
 	// ---- the negotiated tool mask, checked and logged once.
@@ -853,7 +887,7 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 			        (unsigned long long)client_tools);
 		}
 	}
-	else
+	else if (not codec->direct_blocks())
 	{
 		// The magic did not match, so the offset this reads is not the tool
 		// field any more. Refusing beats checking a number that is not the mask.
@@ -863,6 +897,7 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	}
 
 	codec_reads_image = codec->accepts_image();
+	codec_direct_blocks = codec->direct_blocks();
 	U_LOG_I("nxwarp: stream %d backend: %s%s",
 	        int(stream_idx),
 	        codec->description().c_str(),
@@ -876,7 +911,10 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	stream_cfg.stream_id = stream_idx;
 	stream_cfg.cols = uint16_t(cols);
 	stream_cfg.rows = uint16_t(rows);
-	stream_cfg.band_rows = uint16_t(std::min<uint32_t>(rows, option_u32(settings.options, "band-rows", 6)));
+	// Direct chunks describe a whole frame, not spatial scan bands. Early
+	// spatial deadlines would discard FEC while that frame is still arriving.
+	stream_cfg.band_rows = codec_direct_blocks ? uint16_t(rows)
+	    : uint16_t(std::min<uint32_t>(rows, option_u32(settings.options, "band-rows", 6)));
 	stream_cfg.layers = 1;
 	// One nxt datagram travels inside one to_headset::nxwarp_datagram inside one
 	// WiVRn UDP datagram, so the transport's MTU has to leave room for WiVRn's own
@@ -943,7 +981,8 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	}
 
 	const std::string rc_desc =
-	        rc_auto ? std::format("rate control from QP {} in {}..{} at {:.0f} Hz",
+	        codec_direct_blocks ? std::format("direct byte budget at {:.0f} Hz", rc_fps)
+                             : rc_auto ? std::format("rate control from QP {} in {}..{} at {:.0f} Hz",
 	                              current_qp,
 	                              rc_min_qp,
 	                              rc_max_qp,
@@ -1025,6 +1064,8 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 void wivrn::video_encoder_nxwarp::run_rate_control(size_t last_frame_bytes,
                                                    bool frame_was_intra)
 {
+	if (codec_direct_blocks)
+		return;
 	// The deadline controller runs FIRST and unconditionally, before every early
 	// return below. The byte loop gives up when it has no bitrate target yet, or
 	// when the bytes are already on target -- and neither of those says anything
@@ -1969,7 +2010,10 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// (client_holds_nothing) and the not-held queue are deliberately NOT read here --
 	// they are answered by the next frame that is actually sent, and consuming them on
 	// a frame that never leaves would throw the answer away.
-	if (not pace_admit(std::chrono::steady_clock::now(), in[slot].view_info.display_time))
+	const auto admit_now = std::chrono::steady_clock::now();
+	if (codec_direct_blocks)
+		follow_path_budget();
+	if (not pace_admit(admit_now, in[slot].view_info.display_time))
 	{
 		++prof_paced_out;
 		++paced_out_total;
@@ -1977,6 +2021,23 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		// encode from it later.
 		in[slot].have_view_info = false;
 		return {};
+	}
+	if (codec_direct_blocks)
+	{
+		const uint32_t bitrate = pending_bitrate.load(std::memory_order_relaxed)
+		                                 ? pending_bitrate.load(std::memory_order_relaxed)
+		                                 : uint32_t(std::max(0.0, path_bps));
+		float fps = pending_framerate.load(std::memory_order_relaxed);
+		if (!(fps > 0))
+			fps = rc_fps;
+		codec->set_target_bitrate(bitrate, fps);
+		if (not codec->admit_frame(os_monotonic_get_ns()))
+		{
+			++prof_paced_out;
+			++paced_out_total;
+			in[slot].have_view_info = false;
+			return {};
+		}
 	}
 
 	const auto & view_info = in[slot].view_info;
@@ -2084,7 +2145,10 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// a client that has lost the entire reference range still costs a resync.
 	//
 	// A backend that cannot take the report gets the old answer below.
-	bool report_fallback = held_fallback_reset.exchange(false, std::memory_order_relaxed);
+	bool report_fallback = codec_direct_blocks
+	                               ? false
+	                               : held_fallback_reset.exchange(false, std::memory_order_relaxed);
+	if (not codec_direct_blocks)
 	{
 		std::vector<uint16_t> ids;
 		uint16_t abase = 0;
@@ -2159,7 +2223,8 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	}
 
 	bool resync_this_frame = false;
-	if (client_holds_nothing.exchange(false) or report_fallback)
+	if (not codec_direct_blocks and
+	    (client_holds_nothing.exchange(false) or report_fallback))
 	{
 		std::fill(received_tiles.begin(), received_tiles.end(), uint8_t(0));
 		codec->set_received_tiles(received_tiles);
@@ -2182,7 +2247,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		// just as much a point the headset may start trusting again.
 		resync_this_frame = true;
 	}
-	else if (have_previous_frame)
+	else if (not codec_direct_blocks and have_previous_frame)
 	{
 		std::lock_guard lock(sender_mutex);
 		auto & shadow = sender->shadow();
@@ -2267,7 +2332,12 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	{
 		logged_rc_mode = true;
 		const uint32_t bps = pending_bitrate.load();
-		if (rc_auto)
+		if (codec_direct_blocks)
+			U_LOG_I("nxwarp: stream %d direct blocks target: %u bit/s at %.0f Hz",
+			        int(stream_idx),
+			        unsigned(bps),
+			        double(pending_framerate.load() > 0 ? pending_framerate.load() : rc_fps));
+		else if (rc_auto)
 			U_LOG_I("nxwarp: stream %d rate control on: %u bit/s is %.0f B/frame at %.0f Hz, QP band %u..%u",
 			        int(stream_idx),
 			        unsigned(bps),
@@ -2368,7 +2438,8 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		life_tiles_coded += coded;
 		life_tiles_total += total;
 		++life_frames;
-		resync_this_frame = all_intra and (resync_this_frame or chain_broken);
+		if (not codec_direct_blocks)
+			resync_this_frame = all_intra and (resync_this_frame or chain_broken);
 		if (resync_this_frame)
 			chain_broken = false;
 	}
@@ -2379,7 +2450,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// was just encoded — the profile, and the tile records the transport puts on
 	// the wire — so none of it may see the quantiser the controller picks at the
 	// end of this function for the next frame.
-	const uint32_t coded_qp = current_qp;
+	const uint32_t coded_qp = codec_direct_blocks ? 0 : current_qp;
 
 	{
 		const double ms = std::chrono::duration<double, std::milli>(t_enc1 - t_enc0).count();
@@ -2454,7 +2525,18 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				        rc_decode_budget_s() * 1000.0,
 				        unsigned(rc_decode_floor));
 			}
-			if (rc_auto and rc_target_bytes > 0)
+			if (codec_direct_blocks)
+				U_LOG_I("nxwarp: stream %d encoded %llu frames in %.1f s: %.1f ms/frame (max %.1f), "
+				        "%.0f B/frame at direct byte budget %.3f Mbit/s%s",
+				        int(stream_idx),
+				        (unsigned long long)prof_n,
+				        std::chrono::duration<double>(t_enc1 - prof_since).count(),
+				        prof_ms / prof_n,
+				        prof_max_ms,
+				        achieved,
+				        double(rc_bitrate ? rc_bitrate : uint32_t(std::max(0.0, path_bps))) * 1e-6,
+				        pace_note.c_str());
+			else if (rc_auto and rc_target_bytes > 0)
 				U_LOG_I("nxwarp: stream %d encoded %llu frames in %.1f s: %.1f ms/frame (max %.1f), "
 				        "%.0f B/frame vs %.0f target (%+.0f%%), QP %.1f [%u..%u], "
 				        "controller allows %.1f Mbit/s%s%s%s",
@@ -2889,7 +2971,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// its own frame header (nx-warp docs/SYNTAX.md 3.1) -- against the id the
 	// headset will name it by, so a later not-held report can be translated. The
 	// two are equal in a session that starts from zero and are not after a resume.
-	if (bitstream.size() >= 2)
+	if (not codec_direct_blocks and bitstream.size() >= 2)
 	{
 		wire_to_codec & e = frame_map[frame_id16 % kFrameMapDepth];
 		e.wire = frame_id16;
@@ -2911,10 +2993,13 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		have_resync.store(true, std::memory_order_release);
 		send_resync_notice(frame_id16);
 	}
-	previous_frame_id = frame_id16;
-	have_previous_frame = true;
-	nxwarp_record_intentional_skips(previous_intentional_skips, tiles_per_frame,
-	                                 codec->last_frame_is_atlas(), codec->tiles());
+	if (not codec_direct_blocks)
+	{
+		previous_frame_id = frame_id16;
+		have_previous_frame = true;
+		nxwarp_record_intentional_skips(previous_intentional_skips, tiles_per_frame,
+		                                 codec->last_frame_is_atlas(), codec->tiles());
+	}
 
 	// The quantiser for the NEXT frame, from the size of this one. Last, because
 	// everything above describes the frame that was just sent and the controller

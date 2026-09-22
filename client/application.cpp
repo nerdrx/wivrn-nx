@@ -36,6 +36,7 @@
 #include "xr/htc_face_tracker.h"
 #include "xr/to_string.h"
 #include <algorithm>
+#include <charconv>
 #include <boost/locale.hpp>
 #include <boost/url/parse.hpp>
 #include <chrono>
@@ -1526,6 +1527,59 @@ void application::initialize()
 
 	config.emplace(xr_system_id, xr_session, application::get_config_path() / "client.json");
 	default_config.emplace(xr_system_id, xr_session);
+
+#ifdef __ANDROID__
+	// Optional test preset. Properties are intentionally startup-only: clearing them
+	// prevents later launches from overriding subsequent user changes.
+	{
+		auto read_uint = [](const char * name) -> std::optional<uint32_t> {
+			char value[PROP_VALUE_MAX] = {};
+			const int n = __system_property_get(name, value);
+			if (n <= 0)
+				return {};
+			uint32_t parsed = 0;
+			const auto result = std::from_chars(value, value + n, parsed);
+			if (result.ec != std::errc{} || result.ptr != value + n)
+				return {};
+			return parsed;
+		};
+		const auto bitrate_mbps = read_uint("debug.wivrn.test.bitrate_mbps");
+		const auto refresh_hz = read_uint("debug.wivrn.test.refresh_hz");
+		bool changed = false;
+		if (bitrate_mbps)
+		{
+			if (*bitrate_mbps >= 1 && *bitrate_mbps <= 800)
+			{
+				const uint32_t bitrate = *bitrate_mbps * 1'000'000u;
+				changed |= config->bitrate_bps != bitrate;
+				config->bitrate_bps = bitrate;
+			}
+			else
+				spdlog::warn("Ignoring debug.wivrn.test.bitrate_mbps outside 1..800");
+		}
+		if (refresh_hz)
+		{
+			const auto rates = xr_session.get_refresh_rates();
+			const auto match = std::find(rates.begin(), rates.end(), float(*refresh_hz));
+			if (match != rates.end())
+			{
+				changed |= config->preferred_refresh_rate != *match;
+				config->preferred_refresh_rate = *match;
+				changed |= config->fps_divider != 1;
+				config->fps_divider = 1;
+			}
+			else
+				spdlog::warn("Ignoring debug.wivrn.test.refresh_hz unsupported by headset");
+		}
+		if (bitrate_mbps || refresh_hz)
+		{
+			if (changed)
+				config->save();
+			spdlog::info("ADB test preset applied: bitrate={} Mbps, refresh={} Hz, adaptive bitrate unchanged",
+			             config->bitrate_bps / 1'000'000u, config->preferred_refresh_rate);
+		}
+	}
+#endif
 
 	// HTC face tracker fails if created later
 	// we can destroy it right away, it actually stores static handles

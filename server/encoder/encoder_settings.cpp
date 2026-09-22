@@ -128,6 +128,7 @@ static void split_bitrate(std::array<wivrn::encoder_settings, num_streams> & enc
 			case wivrn::h265:
 			case wivrn::av1:
 			case wivrn::raw:
+			case wivrn::nxwarp:
 				break;
 		}
 		encoder.bitrate = w;

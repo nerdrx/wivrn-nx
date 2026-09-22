@@ -192,10 +192,10 @@ stream_defoveator::vertex * stream_defoveator::get_vertices(size_t view)
 	return reinterpret_cast<vertex *>(reinterpret_cast<uintptr_t>(buffer.map()) + view * vertices_size);
 }
 
-stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, vk::Sampler rgb, vk::Sampler a, bool atlas_r8, bool compact_centre)
+stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, vk::Sampler rgb, vk::Sampler a, bool atlas_r8, bool compact_centre, bool direct)
 {
-	auto & target = atlas_r8 ? (a ? pipeline_atlas_r8_a[view] : pipeline_atlas_r8_rgb[view])
-	                         : (a ? pipeline_a[view] : pipeline_rgb[view]);
+	auto & target = direct ? pipeline_direct[view] : (atlas_r8 ? (a ? pipeline_atlas_r8_a[view] : pipeline_atlas_r8_rgb[view])
+	                         : (a ? pipeline_a[view] : pipeline_rgb[view]));
 	if (*target.pipeline)
 		return target;
 
@@ -232,22 +232,22 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 	        // [atlas prototype] the atlas planes and the per-tile table. Always in the
 	        // layout and always bound, so the two paths share one descriptor set and
 	        // the specialization constant is the only difference between them.
-	        vk::DescriptorSetLayoutBinding{
-	                .binding = 3,
-	                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+		vk::DescriptorSetLayoutBinding{
+		                .binding = 3,
+		                .descriptorType = direct ? vk::DescriptorType::eStorageBuffer : vk::DescriptorType::eCombinedImageSampler,
 	                .descriptorCount = 1,
 	                .stageFlags = vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment,
-	                .pImmutableSamplers = &*atlas_sampler,
+		                .pImmutableSamplers = direct ? nullptr : &*atlas_sampler,
 	        },
 		vk::DescriptorSetLayoutBinding{
 		                .binding = 4,
-		                .descriptorType = atlas_r8 ? vk::DescriptorType::eCombinedImageSampler : vk::DescriptorType::eStorageImage,
+		                .descriptorType = direct ? vk::DescriptorType::eStorageBuffer : (atlas_r8 ? vk::DescriptorType::eCombinedImageSampler : vk::DescriptorType::eStorageImage),
 	                .descriptorCount = 1,
 	                .stageFlags = vk::ShaderStageFlagBits::eFragment,
 	        },
 		vk::DescriptorSetLayoutBinding{
 		                .binding = 5,
-		                .descriptorType = atlas_r8 ? vk::DescriptorType::eStorageBuffer : vk::DescriptorType::eUniformBuffer,
+		                .descriptorType = direct ? vk::DescriptorType::eStorageBuffer : (atlas_r8 ? vk::DescriptorType::eStorageBuffer : vk::DescriptorType::eUniformBuffer),
 	                .descriptorCount = 1,
 	                .stageFlags = vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment,
 	        },
@@ -312,7 +312,7 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 		float(compact_eye_size_baked),
 		VkBool32(compact_large_centre_baked),
 		VkBool32(motion_blur_requested()));
-	auto fragment_shader = load_shader(device, atlas_r8 ? "reprojection_atlas_r8.frag" : "reprojection.frag");
+	auto fragment_shader = load_shader(device, direct ? "reprojection_direct.frag" : (atlas_r8 ? "reprojection_atlas_r8.frag" : "reprojection.frag"));
 
 	vk::pipeline_builder pipeline_info{
 	        .flags = {},
@@ -1189,7 +1189,8 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 	for (size_t view = 0; view < view_count; ++view)
 	{
 		const auto & input = inputs[view];
-		const bool atlas_r8 = input.atlas_valid && input.atlas_table != nullptr && input.atlas_table_bytes != 0;
+		const bool direct = input.direct_valid && input.direct_tiles != nullptr && input.direct_blocks != nullptr;
+		const bool atlas_r8 = !direct && input.atlas_valid && input.atlas_table != nullptr && input.atlas_table_bytes != 0;
 		const bool use_unorm = unorm_baked && atlas_r8;
 		vk::RenderPassBeginInfo begin_info{
 		        .renderPass = use_unorm ? *renderpass_unorm : *renderpass,
@@ -1200,7 +1201,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		        },
 		};
 
-		auto & pipeline = ensure_pipeline(view, input.sampler_rgb, input.sampler_a, atlas_r8, input.compact_centre);
+		auto & pipeline = ensure_pipeline(view, input.sampler_rgb, input.sampler_a, atlas_r8, input.compact_centre, direct);
 		if (atlas_r8 && atlas_vertex_warp &&
 		    (!atlas_mesh_buffers[view] || atlas_mesh_extents[view] != input.atlas_extents[0] ||
 		     atlas_mesh_foveation[view].x != foveation[view].x ||
@@ -1290,6 +1291,10 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		        .offset = 0,
 		        .range = atlas_r8 ? input.atlas_table_bytes : VK_WHOLE_SIZE,
 		};
+		vk::DescriptorBufferInfo direct_tiles_info{.buffer = input.direct_tiles, .offset = 0,
+		                                           .range = input.direct_tiles_bytes};
+		vk::DescriptorBufferInfo direct_blocks_info{.buffer = input.direct_blocks, .offset = 0,
+		                                            .range = input.direct_blocks_bytes};
 
 		std::array descriptor_writes{
 		        vk::WriteDescriptorSet{
@@ -1317,22 +1322,24 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		                .dstSet = pipeline.ds,
 		                .dstBinding = 3,
 		                .descriptorCount = 1,
-		                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
-		                .pImageInfo = &atlas_r16_info,
+					.descriptorType = direct ? vk::DescriptorType::eStorageBuffer : vk::DescriptorType::eCombinedImageSampler,
+					.pImageInfo = direct ? nullptr : &atlas_r16_info,
+					.pBufferInfo = direct ? &direct_tiles_info : nullptr,
 		        },
 		        vk::WriteDescriptorSet{
 		                .dstSet = pipeline.ds,
 		                .dstBinding = 4,
 		                .descriptorCount = 1,
-		                .descriptorType = atlas_r8 ? vk::DescriptorType::eCombinedImageSampler : vk::DescriptorType::eStorageImage,
-		                .pImageInfo = &atlas_store_info,
+					.descriptorType = direct ? vk::DescriptorType::eStorageBuffer : (atlas_r8 ? vk::DescriptorType::eCombinedImageSampler : vk::DescriptorType::eStorageImage),
+					.pImageInfo = direct ? nullptr : &atlas_store_info,
+					.pBufferInfo = direct ? &direct_blocks_info : nullptr,
 		        },
 		        vk::WriteDescriptorSet{
 		                .dstSet = pipeline.ds,
 		                .dstBinding = 5,
 		                .descriptorCount = 1,
-		                .descriptorType = atlas_r8 ? vk::DescriptorType::eStorageBuffer : vk::DescriptorType::eUniformBuffer,
-		                .pBufferInfo = &atlas_table_info,
+					.descriptorType = direct ? vk::DescriptorType::eStorageBuffer : (atlas_r8 ? vk::DescriptorType::eStorageBuffer : vk::DescriptorType::eUniformBuffer),
+					.pBufferInfo = direct ? &direct_blocks_info : &atlas_table_info,
 		        },
 		        vk::WriteDescriptorSet{
 		                .dstSet = pipeline.ds,

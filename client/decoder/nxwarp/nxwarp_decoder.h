@@ -177,6 +177,13 @@ class nxwarp_decoder : public decoder
 	bool direct_block_active = false;
 	bool direct_trusted_lan = false;
 	bool direct_rejected_dumped = false;
+	bool direct_partial_recovery = false;
+	// Network-thread-only history: complete validated frames, never concealed output.
+	std::vector<uint8_t> direct_history;
+	XrTime direct_history_time = 0;
+	uint64_t direct_recovery_attempts = 0, direct_recovery_frames = 0;
+	uint64_t direct_recovery_tiles = 0;
+	double direct_recovery_ms = 0;
 	wivrn::nxwarp_direct::layout direct_layout{};
 	bool borrowed_output_active = false;
 	bool compact_centre_active = false;
@@ -388,6 +395,7 @@ class nxwarp_decoder : public decoder
 		from_headset::feedback fb;
 		uint16_t frame_id = 0;
 		bool have_view_info = false;
+		bool concealed = false;
 		// The pose the frame was rendered for, off its first datagram. Carried on the
 		// job rather than read from the member state, because by the time the worker
 		// runs the network thread is already assembling the next frame.

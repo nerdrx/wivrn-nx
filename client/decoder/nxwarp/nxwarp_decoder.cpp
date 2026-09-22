@@ -8,6 +8,7 @@
  */
 
 #include <fstream>
+#include "nxwarp_direct_recovery.h"
 #include "nxwarp_stream_grid.h"
 #include "nxwarp_decoder.h"
 #include "application.h"
@@ -968,6 +969,12 @@ bool nxwarp_decoder::on_direct_stream_header(std::span<const uint8_t> header)
 	direct_layout = *parsed;
 	direct_block_active = true;
 	direct_trusted_lan = trusted_lan;
+#ifdef __ANDROID__
+	char recovery[PROP_VALUE_MAX] = {};
+	direct_partial_recovery = __system_property_get("debug.wivrn.nx.partial_direct", recovery) > 0 && recovery[0] == '1';
+#endif
+	spdlog::info("nxwarp[{}]: partial direct recovery {} (at most 10% retained tiles, history at most 50 ms)",
+	             stream_index, direct_partial_recovery);
 	native_extent = {.width = direct_layout.width * direct_layout.eyes, .height = direct_layout.height};
 	extent = native_extent;
 	sampler_ = make_rgba_sampler(device);
@@ -1499,6 +1506,34 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 	last_frame_tiles.store(f.tiles_present, std::memory_order_relaxed);
 	const auto t_reasm0 = std::chrono::steady_clock::now();
 	auto unit = nxwarp_wire::reassemble(cfg, f.slots, chunk, direct_block_active);
+	const bool had_hole = unit.empty();
+	bool concealed = false;
+	if (direct_block_active && direct_partial_recovery && f.have_view_info)
+	{
+		if (unit.empty() && !direct_history.empty() && host.now() >= direct_history_time &&
+		    host.now() - direct_history_time <= 50'000'000)
+		{
+			++direct_recovery_attempts;
+			const auto started = std::chrono::steady_clock::now();
+			auto recovered = nxwarp_direct::recover_partial(direct_layout, f.slots, chunk, direct_history, direct_layout.tile_count() / 10);
+			direct_recovery_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+			if (recovered)
+			{
+				unit = std::move(recovered->unit);
+				concealed = true;
+				++direct_recovery_frames;
+				direct_recovery_tiles += recovered->retained_tiles;
+				// Loss remains visible even though a concealed picture can be presented.
+				// The server's frame loss flag is sticky across later display feedback.
+				host.report_frame_lost(f.fb);
+			}
+		}
+		else if (!unit.empty() && nxwarp_direct::parse_frame(direct_layout, unit))
+		{
+			direct_history = unit;
+			direct_history_time = f.fb.received_first_packet;
+		}
+	}
 	{
 		// The network thread's own cost, folded into the worker's report. It is a
 		// different thread, but it is the same frame and the same two-second window,
@@ -1518,7 +1553,7 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 		// net_frames is monotonic (the GUI differences it); the line below wants the
 		// count for this window, so it keeps its own mark of where the window began.
 		const uint64_t closed = net_frames.fetch_add(1, std::memory_order_relaxed) + 1;
-		if (unit.empty())
+		if (had_hole)
 		{
 			net_holes++;
 			last_hole = nxwarp_wire::last_report();
@@ -1566,6 +1601,10 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 				net_tiles_placed_at = rs.tiles_placed;
 				net_tiles_late_at = rs.tiles_late;
 			}
+			if (direct_partial_recovery)
+				spdlog::info("nxwarp[{}] recovery: {} attempts, {} concealed frames, {} retained tiles, {:.3f} ms helper total (cumulative)",
+				             stream_index, direct_recovery_attempts, direct_recovery_frames,
+				             direct_recovery_tiles, direct_recovery_ms);
 			net_frames_mark = closed;
 			net_holes = 0;
 			net_out_of_order = 0;
@@ -1630,6 +1669,7 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 	job.fb = f.fb;
 	job.view_info = f.view_info;
 	job.have_view_info = f.have_view_info;
+	job.concealed = concealed;
 	// The network delivers at the server's rate; the worker decodes at whatever
 	// rate this device manages. When the device cannot keep up, a queued frame is
 	// nothing but latency the user will wear -- 90 fps arriving against a 57 ms
@@ -1780,7 +1820,10 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		handle->direct_blocks = vk::Buffer(item->direct_blocks);
 		handle->direct_blocks_bytes = vk::DeviceSize(direct_layout.max_block_words()) * 4;
 		handle->feedback.received_from_decoder = host.now();
-		note_frame_held(job.frame_id);
+		if (!job.concealed)
+			note_frame_held(job.frame_id);
+		else
+			host.report_frame_not_held(stream_index, job.frame_id, from_headset::nxwarp_frame_not_held::reason::hole);
 		++frames_decoded;
 		host.on_frame_decoded(job.frame_id);
 		host.publish(accumulator, std::move(handle));

@@ -156,3 +156,29 @@ consume encode-thread time and does not create extra network capacity.
 It remains opt-in: short Pico testing did not establish an improvement at
 500 Mbit/s. Use a sustainable bitrate instead of treating pacing as a cure.
 [Short-run evidence](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-22/packet-pacing).
+
+## Experimental tile-aware concealment (2026-09-22)
+
+Android property `debug.wivrn.nx.partial_direct=1`, read when a direct stream
+opens, enables a conservative missing-region experiment. Default is off.
+It requires current view metadata and a complete current header/descriptor
+table. Each current tile is used only if its entire referenced block range
+arrived. Missing tiles reuse the same tile from a validated complete frame,
+with offsets repacked so changes in mode/layout cannot reinterpret old bytes.
+
+At most 10% of tiles may be retained. History must be at most 50 ms old, measured
+from first packet arrival on the client clock; this does not bound source-image
+age before arrival. Concealed output never becomes history. Raw holes still
+count as network losses, lost-frame feedback remains sticky in the server's
+bitrate controller, and concealed frames are not acknowledged as exact references.
+The wire format and normal direct path remain unchanged.
+
+Short live runs salvaged 97 incomplete frames at requested 400 Mbit/s and 18 at
+500 Mbit/s. Helper work averaged 0.43 and 0.52 ms per attempted recovery,
+respectively, excluding complete-history copies and upload/presentation. This
+rescues isolated damage, not insufficient bandwidth: 500 remained unusable.
+Retained tiles can visibly lag during motion and have no separate pose correction;
+the experiment is not enabled for normal use. Clear the property and reconnect
+to disable it.
+
+[Evidence and plots](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-22/partial-recovery).

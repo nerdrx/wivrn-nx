@@ -69,3 +69,30 @@ There is no additional smoothing pass.
 - Live low-rate, adaptive 500/90 and fixed 500/90 runs with animated content.
 
 Live reliability at 500/90 remains a failing test, not a release claim.
+
+## Faster, smaller automatic bitrate adjustments
+
+The AIMD controller now lowers bitrate by 10% for ordinary congestion or 20%
+for severe congestion, with a 500 ms minimum between feedback-driven cuts.
+Previously those cuts were 30% or 60%, with a 2-second minimum. Thus sustained
+severe congestion can produce 500 → 400 → 320 → 256 Mbit/s instead of a single
+500 → 200 Mbit/s cliff. Actual timing also requires enough new feedback; this
+is not a promise of a switch every 500 ms.
+
+Recovery waits for one second of healthy measurements, then uses 15% steps
+with at least 500 ms of healthy measurements between subsequent steps, rather
+than doubling. Ordinary upward probes use 2% of the ceiling (minimum 2 Mbit/s)
+after one healthy second. Existing floor, ceiling, hysteresis, and rejection of
+old in-flight measurements remain in effect. Radio-triggered AIMD drops are
+also gentler; their separate timing and the bandwidth-estimation controller's
+backoff timing remain unchanged.
+
+These policy changes are locally tested; they do not establish that 500 Mbit/s
+streaming is viable on the Pico or fix the underlying packet-delivery bottleneck.
+
+Validation: 151 assertions across the NX Warp, radio, and bandwidth-estimator
+controller tests passed, and the server rebuilt successfully. A virtual-clock
+500 Mbit/s congestion case stepped to 450 then 405 Mbit/s, with 766 ms between
+those cuts; the severe case first stepped to 400 Mbit/s. The recovery test
+requires actual upward progress and bounds each increase. These are simulated
+feedback results, not a new live Pico measurement.

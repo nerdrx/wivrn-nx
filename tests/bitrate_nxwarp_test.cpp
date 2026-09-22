@@ -122,11 +122,11 @@ struct harness
 
 	std::vector<std::pair<tp, uint32_t>> changes;
 
-	harness(numbering how, bool report_losses = true) :
+	harness(numbering how, bool report_losses = true, uint32_t configured_ceiling = ceiling) :
 	        how(how), report_losses(report_losses)
 	{
 		now = tp{} + 1h;
-		ctl.configure({.enabled = true, .min_bitrate_bps = floor_bps}, ceiling, true, false, mode::aimd);
+		ctl.configure({.enabled = true, .min_bitrate_bps = floor_bps}, configured_ceiling, true, false, mode::aimd);
 	}
 
 	uint32_t current() const
@@ -464,6 +464,64 @@ void part_f()
 	}
 }
 
+void part_g()
+{
+	std::printf("Part G: AIMD drops stay bounded and recover without overshoot\n");
+
+	// Use 500 Mbit/s so a regression to the old 0.4 acute cut is visible (500 -> 200).
+	{
+		harness h(numbering::wire_frame_id, true, 500'000'000);
+		h.seconds(3, 45); // one cleanly reported loss every 500 ms
+		CHECK(h.changes.size() >= 2);
+		if (h.changes.size() >= 2)
+		{
+			CHECK(h.changes[0].second == 450'000'000);
+			CHECK(h.changes[1].second == 405'000'000);
+			const auto step_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+			        h.changes[1].first - h.changes[0].first).count();
+			std::printf("  gradual: 500.0 -> %.1f -> %.1f Mbit/s, next step %+lld ms\n",
+			            mbit(h.changes[0].second), mbit(h.changes[1].second), (long long)step_ms);
+			CHECK(step_ms >= 500);
+			CHECK(step_ms <= 1000);
+		}
+	}
+
+	{
+		harness h(numbering::wire_frame_id, true, 500'000'000);
+		h.seconds_even_loss(2, 8); // persistent severe loss
+		CHECK(not h.changes.empty());
+		if (not h.changes.empty())
+		{
+			CHECK(h.changes.front().second == 400'000'000);
+			std::printf("  severe: 500.0 -> %.1f Mbit/s\n", mbit(h.changes.front().second));
+		}
+
+		// Congestion during recovery lowers its target; clean recovery never exceeds the
+		// pre-drop ceiling, even after a second severe interval.
+		h.seconds(1);
+		h.seconds_even_loss(1, 8);
+		const size_t changes_before_clean = h.changes.size();
+		h.seconds(8);
+		CHECK(h.current() <= 500'000'000);
+		size_t upward = 0;
+		uint32_t previous = changes_before_clean ? h.changes[changes_before_clean - 1].second : 0;
+		for (size_t i = changes_before_clean; i < h.changes.size(); ++i)
+		{
+			const uint32_t next = h.changes[i].second;
+			CHECK(next <= 500'000'000);
+			if (next > previous)
+			{
+				++upward;
+				CHECK(uint64_t(next) <= std::max<uint64_t>(uint64_t(previous) * 115 / 100,
+				                                           uint64_t(previous) + 10'000'000));
+			}
+			previous = next;
+		}
+		CHECK(upward > 0);
+		std::printf("  recovered: %.1f Mbit/s, %zu total changes\n", mbit(h.current()), h.changes.size());
+	}
+}
+
 int main(int argc, char ** argv)
 {
 	verbose = argc > 1 and std::string(argv[1]) == std::string("-v");
@@ -473,6 +531,7 @@ int main(int argc, char ** argv)
 	part_d();
 	part_e();
 	part_f();
+	part_g();
 
 	std::printf("\n%d checks, %d failure(s)\n", checks, failures);
 	return failures ? 1 : 0;

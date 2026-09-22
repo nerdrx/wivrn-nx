@@ -47,8 +47,8 @@ namespace wivrn
 // Two regimes coexist:
 //   * gradual degradation (walking away from the router): gentle multiplicative decrease followed
 //     by slow additive probing back up;
-//   * acute lag spike: a deep drop, which in practice also flushes whatever queue got wedged, then
-//     a fast slow-start style rebound back to the pre-drop bitrate. If congestion returns during
+//   * acute lag spike: repeated bounded cuts allow the queue to drain, then
+//     smaller, frequent recovery steps approach the pre-drop bitrate. If congestion returns during
 //     the rebound the rebound target itself is lowered (the classic ssthresh idea) so the two do
 //     not oscillate.
 //
@@ -71,7 +71,7 @@ namespace wivrn
 //
 // Everything above is a *congestion* controller: it reacts to the link being full. It never
 // learns how big the link is, so after a decrease it has to walk back up blind, one additive
-// step every five seconds, and after a deep drop it rebounds towards a number it remembered
+// step after a healthy interval, and after a deep drop it rebounds towards a number it remembered
 // rather than one it measured. v2 measures the link instead, the way BBR does, and derives the
 // bitrate from that estimate. It is selected per session and runs inside this same object: the
 // ceilings, the floor, the two switches, the frame ring that joins the per-stream feedback into
@@ -221,28 +221,28 @@ public:
 
 	// --- Decrease -----------------------------------------------------------------------
 	// Gentle multiplicative decrease, for gradual degradation.
-	static constexpr double decrease_factor = 0.7;
-	// Deep drop on an acute lag spike. The drop itself is therapeutic: it lets whatever queue
-	// piled up on the link drain, after which the same bitrate is usually fine again.
-	static constexpr double deep_decrease_factor = 0.4;
-	// Minimum time between two decreases, so a single bad patch cannot collapse the bitrate.
+	static constexpr double decrease_factor = 0.9;
+	// Acute congestion uses a bounded cut; persistent trouble repeats it using fresh samples.
+	static constexpr double deep_decrease_factor = 0.8;
+	static constexpr std::chrono::milliseconds aimd_decrease_cooldown{500};
+	// Existing cooldown for bandwidth-estimator and radio-triggered decreases.
 	static constexpr std::chrono::milliseconds decrease_cooldown{2000};
 
 	// --- Slow additive increase (above the recovery target) -----------------------------
 	// Increase step, whichever is larger.
 	static constexpr uint32_t increase_step_min = 2'000'000;
-	static constexpr double increase_step_ratio = 0.05; // of the ceiling
+	static constexpr double increase_step_ratio = 0.02; // of the ceiling
 	// The link must measure healthy for this long before every increase. As the window is
 	// flushed on every change this also acts as the increase cooldown.
-	static constexpr std::chrono::milliseconds increase_hold{5000};
+	static constexpr std::chrono::milliseconds increase_hold{1000};
 
 	// --- Fast recovery (after a deep drop, up to the pre-drop bitrate) ------------------
 	// Healthy period required before the first rebound step.
-	static constexpr std::chrono::milliseconds recovery_confirm{2500};
+	static constexpr std::chrono::milliseconds recovery_confirm{1000};
 	// Healthy period required before each subsequent rebound step.
-	static constexpr std::chrono::milliseconds recovery_step_interval{1000};
-	// Rebound steps are multiplicative, so the pre-drop level is reached in a few seconds.
-	static constexpr double recovery_factor = 2.0;
+	static constexpr std::chrono::milliseconds recovery_step_interval{500};
+	// Smaller multiplicative steps avoid a doubling spike during recovery.
+	static constexpr double recovery_factor = 1.15;
 	// If congestion comes back while rebounding, lower the rebound target by this factor.
 	static constexpr double recovery_target_backoff = 0.75;
 

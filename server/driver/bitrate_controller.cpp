@@ -926,7 +926,7 @@ std::optional<uint32_t> bitrate_controller::evaluate_aimd(clock::time_point now,
 	{
 		healthy_since.reset();
 
-		if (now - last_decrease < decrease_cooldown)
+		if (now - last_decrease < aimd_decrease_cooldown)
 			return {};
 		last_decrease = now;
 

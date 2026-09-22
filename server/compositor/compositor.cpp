@@ -580,6 +580,7 @@ bool compositor::fail_over_encoder(size_t idx, const std::string & reason)
 	replacement->set_framerate(nx_source_cap_60 ? effective_framerate(frame_rate) : frame_rate.load());
 	replacement->set_pacing(pacing_enabled, pacing_window);
 	replacement->set_fec(fec_enabled);
+	replacement->set_nxwarp_lz4_hc(nxwarp_lz4_hc_enabled);
 	replacement->set_fec_adaptive(fec_adaptive_enabled);
 	replacement->set_shard_retransmit(retransmit_enabled);
 	// x264 has a refresh mechanism of its own, and `conf` carries the same intra_refresh
@@ -1806,6 +1807,7 @@ compositor::compositor(wivrn_session & session) :
 		if (not settings.enabled or i == quad_stream_idx)
 			continue;
 		encoders[i] = video_encoder::create(vk, settings, i);
+		encoders[i]->set_nxwarp_lz4_hc(nxwarp_lz4_hc_enabled);
 		if (nx_source_cap_60)
 			encoders[i]->set_framerate(effective_framerate(frame_rate));
 	}
@@ -1818,6 +1820,7 @@ compositor::compositor(wivrn_session & session) :
 		try
 		{
 			encoders[quad_stream_idx] = video_encoder::create(vk, settings[quad_stream_idx], quad_stream_idx);
+			encoders[quad_stream_idx]->set_nxwarp_lz4_hc(nxwarp_lz4_hc_enabled);
 			if (nx_source_cap_60)
 				encoders[quad_stream_idx]->set_framerate(effective_framerate(frame_rate));
 			quad = std::make_unique<wivrn::quad_converter>(vk, settings[quad_stream_idx], images.size());
@@ -1919,6 +1922,14 @@ void compositor::set_bitrate(uint32_t bitrate)
 		if (encoder)
 			encoder->set_bitrate(bitrate);
 	}
+}
+
+void compositor::set_nxwarp_lz4_hc(bool enabled)
+{
+	nxwarp_lz4_hc_enabled = enabled;
+	for (auto & encoder: get_encoders())
+		if (encoder)
+			encoder->set_nxwarp_lz4_hc(enabled);
 }
 
 void compositor::set_pacing(bool enabled, float window)

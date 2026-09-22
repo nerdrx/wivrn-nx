@@ -418,6 +418,7 @@ public:
 	// the encoder bitrate will be scaled accordingly
 	void set_bitrate(uint32_t bitrate_bps);
 	void set_framerate(float framerate);
+	virtual void set_nxwarp_lz4_hc(bool) {}
 
 	// Whole-stream bitrate the controller last asked for, so that an encoder that
 	// replaces this one starts where the controller had got to rather than back at

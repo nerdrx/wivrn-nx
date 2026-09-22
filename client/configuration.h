@@ -294,6 +294,9 @@ public:
 	// protocol field, and a server that has never heard of NX Warp simply picks the next
 	// codec in the list.
 	bool nxwarp = true; // the side-by-side test build exists for this codec: on unless turned off
+	// Direct NX Warp LZ4 uses the slower high-compression mode when enabled.
+	// Off by default; applies live to the direct encoder.
+	bool nxwarp_lz4_hc = false;
 
 	// Frame smoothing: on the first display refresh that shows a newly decoded frame,
 	// blend it half and half with the frame it replaces, so the step between two decoded

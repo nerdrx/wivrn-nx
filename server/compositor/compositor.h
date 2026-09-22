@@ -244,6 +244,7 @@ private:
 	// Same story for forward error correction, the adaptive parity ratio that extends
 	// it, and the shard retransmission that shares its loss measurement
 	std::atomic<bool> fec_enabled = false;
+	std::atomic<bool> nxwarp_lz4_hc_enabled = false;
 	std::atomic<bool> fec_adaptive_enabled = false;
 	std::atomic<bool> retransmit_enabled = false;
 	// And for intra refresh loss recovery. Starts true because that is the default at
@@ -437,6 +438,7 @@ public:
 	}
 
 	void set_bitrate(uint32_t);
+	void set_nxwarp_lz4_hc(bool enabled);
 
 	// Packet pacing: spread each frame's shards over `window` of a frame period
 	// instead of handing them to the socket in one burst. Logs state changes.

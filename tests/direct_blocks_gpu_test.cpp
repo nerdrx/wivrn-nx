@@ -191,6 +191,16 @@ int main()
 	}
 	else
 		assert(std::vector<uint8_t>(packed.begin(), packed.end()) == expected);
+	// A live HC switch must preserve decoded bytes in both directions.
+	for (bool hc : {true, false, true, false})
+	{
+		packed_codec->set_lz4_hc(hc);
+		auto wire = packed_codec->encode_image_pair(image, 0, 1, 4);
+		if (wivrn::nxwarp_direct::is_lz4(wire)) {
+			assert(wivrn::nxwarp_direct::decompress_lz4({w, h, 2}, wire, unpacked));
+			assert(unpacked == expected);
+		} else assert(std::vector<uint8_t>(wire.begin(), wire.end()) == expected);
+	}
 	// Safety envelope: verify the actual GPU output, source downsampling, and
 	// independent raw/LZ4 validation at both requested rate points.
 	for (uint32_t bps: {160'000'000u, 500'000'000u})

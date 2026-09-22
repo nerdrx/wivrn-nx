@@ -508,6 +508,7 @@ class video_encoder_nxwarp : public video_encoder
 	void flatten_masked_tiles(uint8_t * y_base, size_t y_stride, size_t chroma_stride);
 
 public:
+	void set_nxwarp_lz4_hc(bool enabled) override;
 	// What the lens mask did, over the whole stream. For the e2e harness, which runs for
 	// far less than one two-second report window and would otherwise see nothing.
 	struct lens_report

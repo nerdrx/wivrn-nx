@@ -157,6 +157,7 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 	// the only switch worth having.
 	compositor.set_fec_adaptive(get_info().settings.fec_adaptive);
 	compositor.set_shard_retransmit(get_info().settings.shard_retransmit);
+	compositor.set_nxwarp_lz4_hc(get_info().settings.nxwarp_lz4_hc);
 
 	// Both switches again: a stream whose hardware encoder dies mid-session is handed
 	// to the software one instead of freezing
@@ -585,6 +586,7 @@ void wivrn_session::operator()(const from_headset::settings_changed & settings)
 	compositor.set_fec(settings.fec);
 	compositor.set_fec_adaptive(settings.fec_adaptive);
 	compositor.set_shard_retransmit(settings.shard_retransmit);
+	compositor.set_nxwarp_lz4_hc(settings.nxwarp_lz4_hc);
 	compositor.set_encoder_failover(encoder_failover_conf and settings.encoder_failover);
 	// Live only downwards: an encoder that was not built with a refresh mechanism cannot
 	// grow one, so turning this back on mid-session waits for the next connection.

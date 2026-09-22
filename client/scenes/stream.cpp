@@ -427,6 +427,7 @@ void scenes::stream::send_initial_control_packets(wivrn_session & net, float gue
 			info.settings.minimum_refresh_rate = config.minimum_refresh_rate.value_or(0);
 		}
 		info.settings.fps_divider = config.fps_divider;
+		info.settings.nxwarp_lz4_hc = config.nxwarp_lz4_hc;
 
 		if (info.available_refresh_rates.empty())
 		{

@@ -1461,6 +1461,7 @@ static void send_settings_changed_packet(xr::session & session, wivrn_session * 
 	                .foveation_strength = config.effective_foveation_strength(),
 	                .foveation_adaptive = config.foveation_adaptive,
 	                .foveation_foveal_qp = config.foveation_foveal_qp,
+	                .nxwarp_lz4_hc = config.nxwarp_lz4_hc,
 	        });
 }
 

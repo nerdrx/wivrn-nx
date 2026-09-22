@@ -345,6 +345,7 @@ public:
 	// Independent direct blocks use byte budgeting, not transform quantisation.
 	virtual bool direct_blocks() const { return false; }
 	virtual void set_target_bitrate(uint32_t, float) {}
+	virtual void set_lz4_hc(bool) {}
 	virtual bool admit_frame(int64_t) { return true; }
 	static std::unique_ptr<nxwarp_codec> make_direct(const nxwarp_codec_config &,
 	    VkInstance, VkPhysicalDevice, VkDevice, VkQueue, uint32_t queue_family);

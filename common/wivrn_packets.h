@@ -582,6 +582,8 @@ struct settings_changed
 	// the encoder exposes a per-region QP map. Only NVENC (qpDeltaMap) and x264 (quant_offsets)
 	// have such a path; VAAPI and Vulkan ignore it. Read when the encoders are created.
 	bool foveation_foveal_qp = false;
+	// Whether direct NX Warp uses LZ4 high compression. Live; only direct streams use it.
+	bool nxwarp_lz4_hc = false;
 };
 
 // The motion smoothing mode a settings packet asks for. A headset that names one always

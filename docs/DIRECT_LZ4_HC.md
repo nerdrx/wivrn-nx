@@ -1,6 +1,6 @@
 # Optional direct-block LZ4 HC
 
-Normal LZ4 remains the default. Set `NX_DIRECT_LZ4_HC=1` in the server environment to test HC level 2 with direct LZ4 enabled. Unset it to return to the normal compressor. The option applies to detail and safety payloads; it does not change wire format, independent chunks, raw fallback, or the client decoder.
+Normal LZ4 remains the default. Enable `Stronger lossless compression (LZ4 HC)` in the headset's NX Warp settings to use HC level 2 with direct LZ4. Disable it to return to the normal compressor. The option applies live to detail and safety payloads; it does not change wire format, independent chunks, raw fallback, or the client decoder.
 
 Host fixture tests found 10.3% additional scene savings at +0.637 ms compression time, 3.5% photo savings at +1.563 ms, and no noise savings at +2.028 ms. These are compression-only medians, not live or Pico latency measurements. HC is therefore not enabled automatically.
 

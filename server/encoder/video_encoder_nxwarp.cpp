@@ -1033,6 +1033,12 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	        chunk_bytes);
 }
 
+void wivrn::video_encoder_nxwarp::set_nxwarp_lz4_hc(bool enabled)
+{
+	if (codec)
+		codec->set_lz4_hc(enabled);
+}
+
 // The rate controller.
 //
 // WHAT IT CONTROLS. Not a bit budget in the abstract: bytes per frame. The

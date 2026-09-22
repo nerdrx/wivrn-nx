@@ -241,7 +241,7 @@ public:
 	}
 	void set_target_bitrate(uint32_t bps, float fps) override
 	{
-		bps = std::clamp(bps, 1u, 800'000'000u);
+		bps = std::clamp(bps, 1u, 1'000'000'000u);
 		fps = std::isfinite(fps) ? std::clamp(fps, 1.f, 240.f) : 90.f;
 		if (bps == total_target && fps == refresh)
 			return;

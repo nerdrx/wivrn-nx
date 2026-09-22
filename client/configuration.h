@@ -540,9 +540,9 @@ public:
 	float get_stream_scale() const;
 	float get_default_stream_scale() const;
 
-	uint32_t max_bitrate(bool extended) const
+	uint32_t max_bitrate(bool) const
 	{
-		return extended ? 800'000'000u : 700'000'000u;
+		return 1'000'000'000u;
 	}
 
 	uint32_t max_bitrate() const

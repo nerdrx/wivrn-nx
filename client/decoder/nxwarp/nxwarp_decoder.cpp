@@ -9,6 +9,7 @@
 
 #include <fstream>
 #include "nxwarp_direct_recovery.h"
+#include "nxwarp_direct_lz4.h"
 #include "nxwarp_stream_grid.h"
 #include "nxwarp_decoder.h"
 #include "application.h"
@@ -955,11 +956,13 @@ bool nxwarp_decoder::on_direct_stream_header(std::span<const uint8_t> header)
 		spdlog::error("nxwarp[{}]: invalid NXDB stream header", stream_index);
 		return false;
 	}
-	const bool trusted_lan = nxwarp_direct::read32(header, 4) == 2;
+	const uint32_t direct_version = nxwarp_direct::read32(header, 4);
+	const bool trusted_lan = direct_version == 2 || direct_version == 4;
+	const bool lz4 = direct_version >= 3;
 	if (direct_block_active)
 	{
 		const bool same = parsed->width == direct_layout.width && parsed->height == direct_layout.height &&
-		                  parsed->eyes == direct_layout.eyes && trusted_lan == direct_trusted_lan;
+		                  parsed->eyes == direct_layout.eyes && trusted_lan == direct_trusted_lan && lz4 == direct_lz4;
 		if (!same)
 			spdlog::error("nxwarp[{}]: changed NXDB geometry/version rejected", stream_index);
 		return same;
@@ -969,10 +972,13 @@ bool nxwarp_decoder::on_direct_stream_header(std::span<const uint8_t> header)
 	direct_layout = *parsed;
 	direct_block_active = true;
 	direct_trusted_lan = trusted_lan;
+	direct_lz4 = lz4;
 #ifdef __ANDROID__
 	char recovery[PROP_VALUE_MAX] = {};
 	direct_partial_recovery = __system_property_get("debug.wivrn.nx.partial_direct", recovery) > 0 && recovery[0] == '1';
 #endif
+	if (direct_lz4) direct_partial_recovery = false; // Compressed holes are not raw tile holes.
+	spdlog::info("nxwarp[{}]: LZ4 envelope {}", stream_index, direct_lz4);
 	spdlog::info("nxwarp[{}]: partial direct recovery {} (at most 10% retained tiles, history at most 50 ms, stable-neighbor guard)",
 	             stream_index, direct_partial_recovery);
 	native_extent = {.width = direct_layout.width * direct_layout.eyes, .height = direct_layout.height};
@@ -1765,8 +1771,29 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	// payload before touching Vulkan; malformed offsets never become GPU reads.
 	if (direct_block_active)
 	{
-		const auto frame = nxwarp_direct::parse_frame(direct_layout,
-		        std::span<const uint8_t>(job.unit.data(), job.unit.size()));
+		std::span<const uint8_t> payload{job.unit.data(), job.unit.size()};
+		if (nxwarp_direct::is_lz4(payload))
+		{
+			const auto started = std::chrono::steady_clock::now();
+			if (!direct_lz4 || !nxwarp_direct::decompress_lz4(direct_layout, payload, direct_unpacked))
+			{
+				host.report_frame_not_held(stream_index, job.frame_id, from_headset::nxwarp_frame_not_held::reason::refused);
+				return;
+			}
+			direct_lz4_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+			++direct_lz4_frames;
+			payload = direct_unpacked;
+		}
+		else if (direct_lz4) ++direct_lz4_raw_frames;
+		if (direct_lz4)
+		{
+			direct_lz4_input_bytes += job.unit.size();
+			direct_lz4_output_bytes += payload.size();
+			if ((direct_lz4_frames + direct_lz4_raw_frames) % 180 == 0)
+				spdlog::info("nxwarp[{}]: LZ4 {} compressed / {} raw units, {} wire / {} unpacked bytes, {:.3f} ms total decompression",
+				        stream_index, direct_lz4_frames, direct_lz4_raw_frames, direct_lz4_input_bytes, direct_lz4_output_bytes, direct_lz4_ms);
+		}
+		const auto frame = nxwarp_direct::parse_frame(direct_layout, payload);
 		if (!frame)
 		{
 			spdlog::warn("nxwarp[{}]: direct-block frame rejected by bounds/size validation", stream_index);

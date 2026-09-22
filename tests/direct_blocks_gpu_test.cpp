@@ -1,5 +1,6 @@
 #include "nxwarp_codec.h"
 #include "nxwarp_direct.h"
+#include "nxwarp_direct_lz4.h"
 #include <array>
 #include <cassert>
 #include <cstdio>
@@ -172,6 +173,20 @@ int main()
 	auto high = codec->encode_image_pair(image, 0, 1, 2);
 	assert(wivrn::nxwarp_direct::parse_frame({w, h, 2}, high));
 	assert(high.size() >= low.size());
+	const std::vector<uint8_t> expected(high.begin(), high.end());
+	cfg.direct_lz4 = true;
+	auto packed_codec = wivrn::nxwarp_codec::make_direct(cfg, instance, gpu, device, queue, family);
+	packed_codec->set_target_bitrate(800'000'000, 90);
+	auto packed = packed_codec->encode_image_pair(image, 0, 1, 3);
+	std::vector<uint8_t> unpacked;
+	if (wivrn::nxwarp_direct::is_lz4(packed))
+	{
+		assert(wivrn::nxwarp_direct::decompress_lz4({w, h, 2}, packed, unpacked));
+		assert(unpacked == expected);
+	}
+	else
+		assert(std::vector<uint8_t>(packed.begin(), packed.end()) == expected);
+	packed_codec.reset();
 	codec.reset();
 	vkDeviceWaitIdle(device);
 	vkDestroyFence(device, fence, nullptr);

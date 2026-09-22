@@ -3,6 +3,7 @@
  */
 #include "nxwarp_codec.h"
 #include "nxwarp_direct_layout.h"
+#include "nxwarp_direct_lz4.h"
 #include "wivrn-server_shaders.h"
 #include <array>
 #include <cmath>
@@ -45,6 +46,8 @@ class direct_codec final : public nxwarp_codec
 	VkShaderModule module{};
 	std::map<std::pair<VkImage, uint32_t>, std::array<VkImageView, 2>> views;
 	std::vector<uint8_t> header;
+	bool lz4_enabled = false;
+	std::vector<uint8_t> compressed, cached_raw;
 	nxwarp_direct::plan plan;
 	std::vector<nxwarp_tile_desc> tile_info;
 	uint32_t target = 500'000'000;
@@ -124,7 +127,7 @@ class direct_codec final : public nxwarp_codec
 
 public:
 	direct_codec(const nxwarp_codec_config & c, VkPhysicalDevice p, VkDevice d, VkQueue q, uint32_t f) :
-	        geometry{c.width, c.height, c.eyes}, physical(p), device(d), queue(q), family(f), header(nxwarp_direct::stream_header(geometry, c.trusted_lan))
+	        geometry{c.width, c.height, c.eyes}, physical(p), device(d), queue(q), family(f), header(nxwarp_direct::stream_header(geometry, c.trusted_lan, c.direct_lz4)), lz4_enabled(c.direct_lz4)
 	{
 		if (header.empty())
 			throw std::runtime_error("NX direct: eye geometry must be multiples of 32, <=4096");
@@ -237,7 +240,7 @@ public:
 	}
 	std::string description() const override
 	{
-		return "NX direct RGB blocks v1 (GPU source, independent frames)";
+		return lz4_enabled ? "NX direct RGB blocks + LZ4 (64 KiB chunks, 5% minimum saving)" : "NX direct RGB blocks v1 (GPU source, independent frames)";
 	}
 	std::span<const uint8_t> encode_image(VkImage image, uint32_t layer) override
 	{
@@ -279,7 +282,13 @@ public:
 		submitted = true;
 		check(vkWaitForFences(device, 1, &fence, VK_TRUE, 1'000'000'000), "encode timeout");
 		submitted = false;
-		return {static_cast<const uint8_t *>(output.mapped), plan.bytes()};
+		const std::span<const uint8_t> raw{static_cast<const uint8_t *>(output.mapped), plan.bytes()};
+		if (!lz4_enabled) return raw;
+		// LZ4 revisits input bytes. Host-visible Vulkan memory can be uncached;
+		// one sequential copy is much cheaper than hashing directly over that map.
+		cached_raw.resize(raw.size());
+		std::memcpy(cached_raw.data(), raw.data(), raw.size());
+		return nxwarp_direct::compress_lz4(cached_raw, compressed);
 	}
 };
 } // namespace

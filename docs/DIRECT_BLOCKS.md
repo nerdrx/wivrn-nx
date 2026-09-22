@@ -206,3 +206,42 @@ full-quality 2176×2176 stereo payload. Successful unguarded helper time was
 1.478 versus 1.483 ms. This isolates helper work; it is not a live FPS result.
 
 [Motion clips, limitations and measurements](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-22/recovery-motion).
+
+
+## Optional LZ4 transport envelope
+
+Set `"lz4":"true"` in direct encoder options on matching server/client builds.
+Default is off. LZ4 1.10.0 compresses each independent NXDF unit in independent
+64 KiB input chunks. If the complete envelope saves less than 5%, the original
+NXDF bytes are sent instead. The bitrate controller continues to budget the
+uncompressed representation; it does not spend savings on extra image detail.
+Frame byte counters and packetization use the actual compressed/raw result.
+The host copies the mapped GPU output into a reusable CPU buffer first: direct
+LZ4 reads over uncached Vulkan memory caused a severe live regression.
+
+Stream version 3 announces LZ4 with the original transport; version 4 combines
+LZ4 with trusted-LAN CRC. Versions 1 and 2 retain their existing meanings.
+Older clients reject the new versions. Within a stream, NXDF magic identifies
+raw fallback and NXDL identifies the compressed envelope. The 16-byte NXDL
+header contains magic, envelope version 1, original size and chunk count.
+Each chunk has three little-endian uint32 fields: decoded size, stored size,
+and flags (0 raw, 1 LZ4), followed by exactly that many stored bytes.
+
+The client bounds original size against the negotiated geometry, validates all
+chunk lengths before allocating, calls `LZ4_decompress_safe`, then validates the
+restored NXDF descriptors before GPU upload. No renderer change is needed.
+Partial history recovery is disabled for LZ4 streams, including raw bypass units:
+missing compressed bytes cannot be treated as missing pixel blocks. Existing
+FEC/retransmission may restore packets, otherwise incomplete units are dropped
+and reported through normal loss feedback. This first integration waits for a
+complete unit; chunks are not independently presented.
+
+[Fixture savings and Pico CPU cost](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-22/lz4)
+are not a live latency claim. LZ4 is fetched from its pinned upstream release
+with a SHA-256 check, under the BSD 2-Clause license in `lib/LICENSE`.
+
+The September 22 source profile also reduces full/half-detail base radii from
+0.42/0.72 to 0.34/0.64. For coarse samples, host averaging footprints widen
+gradually outside normalized radius 0.65 to twice their width at radius 1.0.
+Sample reads per block and the headset shader remain unchanged. This softens
+source detail; four-color block quantization can still produce visible edges.

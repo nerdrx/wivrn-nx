@@ -493,6 +493,7 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	        .eyes = stereo_eyes,
 	        .base_qp = current_qp,
 	        .inter = option_bool(settings.options, "inter", false),
+	        .direct_lz4 = option_bool(settings.options, "lz4", false),
 	        .trusted_lan = option_bool(settings.options, "trusted-lan", false),
 	        // "stereo-compose": "layers" (the default) or "blit". See
 	        // nxwarp_codec_config::eye_layers -- identical bitstream either way,
@@ -516,6 +517,8 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	};
 	const std::string backend = option_string(settings.options, "backend", "ref");
 	const bool direct_backend = backend == "direct";
+	if (codec_cfg.direct_lz4 && !direct_backend)
+		throw std::runtime_error("nxwarp: lz4 requires the direct backend");
 	if (codec_cfg.trusted_lan && !direct_backend)
 		throw std::runtime_error("nxwarp: trusted-lan requires the direct backend");
 	if (direct_backend)

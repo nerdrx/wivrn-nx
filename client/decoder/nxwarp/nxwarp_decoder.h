@@ -176,6 +176,10 @@ class nxwarp_decoder : public decoder
 	bool planar_direct_active = false;
 	bool direct_block_active = false;
 	bool direct_trusted_lan = false;
+	bool direct_lz4 = false;
+	std::vector<uint8_t> direct_unpacked;
+	uint64_t direct_lz4_frames = 0, direct_lz4_raw_frames = 0, direct_lz4_input_bytes = 0, direct_lz4_output_bytes = 0;
+	double direct_lz4_ms = 0;
 	bool direct_rejected_dumped = false;
 	bool direct_partial_recovery = false;
 	// Network-thread-only history: complete validated frames, never concealed output.

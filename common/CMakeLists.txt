@@ -82,3 +82,14 @@ endif()
 target_include_directories(wivrn-common-base PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_SOURCE_DIR})
 target_link_libraries(wivrn-common PUBLIC Boost::pfr OpenSSL::Crypto wivrn-external wivrn-common-base)
 target_compile_definitions(wivrn-common PUBLIC VULKAN_HPP_NO_STRUCT_CONSTRUCTORS)
+
+# Same small, pinned LZ4 implementation on the host and Android.
+FetchContent_Declare(nx_lz4
+    URL https://github.com/lz4/lz4/archive/refs/tags/v1.10.0.tar.gz
+    URL_HASH SHA256=537512904744b35e232912055ccf8ec66d768639ff3abe5788d90d792ec5f48b
+    SOURCE_SUBDIR lib/no-cmake)
+FetchContent_MakeAvailable(nx_lz4)
+add_library(wivrn-lz4 STATIC ${nx_lz4_SOURCE_DIR}/lib/lz4.c)
+set_target_properties(wivrn-lz4 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(wivrn-lz4 SYSTEM PUBLIC ${nx_lz4_SOURCE_DIR}/lib)
+target_link_libraries(wivrn-common PUBLIC wivrn-lz4)

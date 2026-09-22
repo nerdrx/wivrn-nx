@@ -7,12 +7,13 @@
 namespace wivrn::nxwarp_direct
 {
 constexpr uint32_t stream_magic = 0x4244584e, frame_magic = 0x4644584e, version = 1, native_version = 2;
-constexpr uint32_t native_rgb_words = 1025, native_extra_words = 32800;
+constexpr uint32_t native_rgb_words = 1025;
 constexpr size_t stream_header_bytes = 32, frame_header_bytes = 16;
 struct layout
 {
 	uint32_t width = 0, height = 0, eyes = 0; // width per eye
 	bool native_center = false;
+	uint32_t native_side = 256;
 	bool valid() const
 	{
 		return width && height && width <= 4096 && height <= 4096 &&
@@ -24,7 +25,7 @@ struct layout
 	}
 	uint32_t max_block_words() const
 	{
-		return tile_count() * 80 + (native_center ? native_extra_words : 0);
+		return tile_count() * 80 + (native_center ? (native_side / 32) * (native_side / 32) * eyes * native_rgb_words : 0);
 	}
 	uint32_t max_frame_bytes() const
 	{
@@ -46,6 +47,7 @@ inline bool is_stream(std::span<const uint8_t> b)
 }
 // Versions 1/2: raw; 3/4: optional LZ4; 5/6: safety prefix and optional LZ4.
 // Versions 7/8 are the native-RGB variants of 5/6. Even versions use trusted-LAN CRC.
+// Versions 9/10 expand the native container to 256x256.
 // Native RGB tiles use NXDF v2; legacy payloads remain v1.
 // Older clients reject unsupported stream versions.
 inline std::vector<uint8_t> stream_header(layout l, bool trusted_lan = false, bool lz4 = false, bool safety = false)
@@ -54,25 +56,25 @@ inline std::vector<uint8_t> stream_header(layout l, bool trusted_lan = false, bo
 		return {};
 	std::vector<uint8_t> b;
 	b.reserve(32);
-	if (l.native_center && (!safety || !lz4 || l.eyes != 2 || l.width < 256))
+	if (l.native_center && (!safety || !lz4 || l.eyes != 2 || l.width < l.native_side || l.height < l.native_side || (l.native_side != 128 && l.native_side != 256)))
 		return {};
 	// Native streams always use the safety+LZ4 envelope; 7/8 retain the
 	// existing odd/even CRC/trusted-LAN distinction.
-	const uint32_t base = l.native_center ? 7u : (safety ? 5u : lz4 ? 3u : 1u);
+	const uint32_t base = l.native_center ? (l.native_side == 128 ? 7u : 9u) : (safety ? 5u : lz4 ? 3u : 1u);
 	for (uint32_t v: {stream_magic, base + (trusted_lan ? 1u : 0u), l.width, l.height, l.eyes, l.tile_count(), l.max_block_words(), l.max_frame_bytes()})
 		append32(b, v);
 	return b;
 }
 inline std::optional<layout> parse_stream(std::span<const uint8_t> b)
 {
-	if (b.size() != 32 || !is_stream(b) || (read32(b, 4) < 1 || read32(b, 4) > 8))
+	if (b.size() != 32 || !is_stream(b) || (read32(b, 4) < 1 || read32(b, 4) > 10))
 		return {};
 	const uint32_t stream_version = read32(b, 4);
 	const bool native = stream_version >= 7;
 	const bool safety = stream_version >= 5;
 	if (native && !safety)
 		return {};
-	layout l{read32(b, 8), read32(b, 12), read32(b, 16), native};
+	layout l{read32(b, 8), read32(b, 12), read32(b, 16), native, stream_version >= 9 ? 256u : 128u};
 	if (!l.valid() || read32(b, 20) != l.tile_count() || read32(b, 24) != l.max_block_words() || read32(b, 28) != l.max_frame_bytes())
 		return {};
 	return l;

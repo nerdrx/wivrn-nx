@@ -278,7 +278,7 @@ std::array<wivrn::compositor::image, 2> make_images(wivrn::vk_bundle & vk, vk::C
 			native_buffer = buffer_allocation{
 			        vk.device,
 			        {
-			                .size = 2u * 128u * 128u * sizeof(uint32_t),
+			                .size = 2u * 256u * 256u * sizeof(uint32_t),
 			                .usage = vk::BufferUsageFlagBits::eStorageBuffer,
 			        },
 			        VmaAllocationCreateInfo{
@@ -1141,7 +1141,7 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 			continue;
 		}
 		encoder->present_native_center(
-		        images[i].native_center ? std::span<const uint32_t>(images[i].native_center.data<uint32_t>(), 2u * 128u * 128u) : std::span<const uint32_t>{});
+		        images[i].native_center ? std::span<const uint32_t>(images[i].native_center.data<uint32_t>(), 2u * 256u * 256u) : std::span<const uint32_t>{});
 		encoder->present_image(
 		        images[i].image,
 		        sem_info,

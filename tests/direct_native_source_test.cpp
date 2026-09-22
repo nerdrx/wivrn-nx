@@ -139,11 +139,11 @@ int main(int argc, char ** argv)
 			u[2 * md + e * md + x] = x;
 		}
 	u[tail] = 1;
-	u[tail + 1] = 64;
-	u[tail + 2] = 64;
-	u[tail + 3] = 128;
-	auto capture = buf(2 * 128 * 128 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-	memset(capture.p, 0xa5, 2 * 128 * 128 * 4);
+	u[tail + 1] = 0;
+	u[tail + 2] = 0;
+	u[tail + 3] = 256;
+	auto capture = buf(2 * 256 * 256 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+	memset(capture.p, 0xa5, 2 * 256 * 256 * 4);
 	VkSamplerCreateInfo sc{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
 	sc.magFilter = sc.minFilter = VK_FILTER_NEAREST;
 	sc.maxLod = 0;
@@ -272,16 +272,16 @@ int main(int argc, char ** argv)
 	ok(vkQueueWaitIdle(queue));
 	auto result = (uint32_t *)capture.p;
 	for (unsigned e = 0; e < 2; e++)
-		for (unsigned yy = 0; yy < 128; yy++)
-			for (unsigned x = 0; x < 128; x++)
+		for (unsigned yy = 0; yy < 256; yy++)
+			for (unsigned x = 0; x < 256; x++)
 			{
 				uint32_t expected = ((x + yy + e) & 1) ? 0xff0000u : 0x00ff00u;
-				unsigned k = (e * 128 + yy) * 128 + x;
+				unsigned k = (e * 256 + yy) * 256 + x;
 				if (result[k] != expected)
 				{
 					printf("FAIL %u got %x expected %x\n", k, result[k], expected);
 					return 1;
 				}
 			}
-	puts("actual foveation source capture: all 32768 RGB pixels exact");
+	puts("actual foveation source capture: all 131072 RGB pixels exact");
 }

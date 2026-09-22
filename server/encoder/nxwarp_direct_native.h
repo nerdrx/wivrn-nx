@@ -8,12 +8,37 @@
 #include <vector>
 namespace wivrn::nxwarp_direct
 {
-// Flat native core: 64-pixel diameter. No discrete resolution bands.
-inline float native_center_weight(uint32_t x, uint32_t y)
+// Scale detail with bytes available per refresh, after the safety allocation.
+inline float native_center_radius(uint32_t bitrate, float refresh)
 {
-	const float dx = float(x) - 63.5f, dy = float(y) - 63.5f;
-	const float t = std::clamp((std::sqrt(dx * dx + dy * dy) - 32.f) / 31.f, 0.f, 1.f);
-	return 1.f - t * t * t * (t * (t * 6.f - 15.f) + 10.f);
+	const float equivalent = float(bitrate) * 90.f / std::max(refresh, 1.f);
+	return 127.f * std::sqrt(std::clamp((equivalent - 80'000'000.f) / 600'000'000.f, 0.f, 1.f));
+}
+inline bool native_center_tile(uint32_t x, uint32_t y, float radius)
+{
+	const float dx = std::max({float(x) - 127.5f, 127.5f - float(x + 31), 0.f});
+	const float dy = std::max({float(y) - 127.5f, 127.5f - float(y + 31), 0.f});
+	return dx * dx + dy * dy < radius * radius;
+}
+inline size_t native_center_extra(float radius)
+{
+	size_t tiles = 0;
+	for (uint32_t y = 0; y < 256; y += 32)
+		for (uint32_t x = 0; x < 256; x += 32)
+			tiles += native_center_tile(x, y, radius);
+	return tiles * 1025u * 4u * 2u;
+}
+// Continuous circular fade; the full-budget core has a 128-pixel diameter.
+inline float native_center_weight(uint32_t x, uint32_t y, float radius = 127.f)
+{
+	if (radius <= 0.f)
+		return 0.f;
+	const float dx = float(x) - 127.5f, dy = float(y) - 127.5f;
+	const float core = radius * 64.f / 127.f;
+	const float t = std::clamp((std::sqrt(dx * dx + dy * dy) - core) / (radius - core), 0.f, 1.f);
+	// Fade the tiny core in, avoiding a sudden full-strength birth at low budgets.
+	const float strength = std::clamp(radius / 16.f, 0.f, 1.f);
+	return (1.f - t * t * t * (t * (t * 6.f - 15.f) + 10.f)) * strength * strength * (3.f - 2.f * strength);
 }
 inline uint32_t native_base_pixel(std::span<const uint8_t> blocks, uint32_t d, uint32_t x, uint32_t y)
 {
@@ -34,18 +59,22 @@ inline uint32_t native_base_pixel(std::span<const uint8_t> blocks, uint32_t d, u
 		c |= (((3 - selector) * ((a >> shift) & 255) + selector * ((b >> shift) & 255) + 1) / 3) << shift;
 	return c;
 }
-inline std::span<const uint8_t> native_center_frame(layout l, std::span<const uint8_t> raw, std::span<const uint32_t> rgb, std::vector<uint8_t> & out)
+inline std::span<const uint8_t> native_center_frame(layout l, std::span<const uint8_t> raw, std::span<const uint32_t> rgb, std::vector<uint8_t> & out, float radius = 127.f)
 {
-	constexpr uint32_t side = 128, native_flag = 1u << 29;
-	static const auto weights = [] {
-		std::array<float, side * side> result{};
+	constexpr uint32_t side = 256, native_flag = 1u << 29;
+	if (radius <= 0.f)
+		return raw;
+	thread_local std::array<float, side * side> weights{};
+	thread_local float cached_radius = -1.f;
+	if (cached_radius != radius)
+	{
 		for (uint32_t y = 0; y < side; ++y)
 			for (uint32_t x = 0; x < side; ++x)
-				result[y * side + x] = native_center_weight(x, y);
-		return result;
-	}();
+				weights[y * side + x] = native_center_weight(x, y, radius);
+		cached_radius = radius;
+	}
 	const auto f = parse_frame(l, raw);
-	if (!l.native_center || !f || read32(raw, 4) != 1 || l.eyes != 2 || l.width < 256 || l.height < 256 || rgb.size() != 2 * side * side)
+	if (!l.native_center || l.native_side != side || !f || read32(raw, 4) != 1 || l.eyes != 2 || l.width < 256 || l.height < 256 || rgb.size() != 2 * side * side)
 		return raw;
 	const uint32_t ox = ((l.width - side) / 2) & ~31u, oy = ((l.height - side) / 2) & ~31u;
 	const uint32_t cols = l.width / 32, rows = l.height / 32;
@@ -61,7 +90,7 @@ inline std::span<const uint8_t> native_center_frame(layout l, std::span<const ui
 			const uint32_t tile = ty * cols * l.eyes + tx, eye = tx / cols, x = (tx % cols) * 32, y = ty * 32;
 			const uint32_t old = read32(f->descriptors, tile * 4), mode = old >> 30;
 			uint32_t d = old;
-			if (x >= ox && x < ox + side && y >= oy && y < oy + side)
+			if (x >= ox && x < ox + side && y >= oy && y < oy + side && native_center_tile(x - ox, y - oy, radius))
 			{
 				d = native_flag | words;
 				for (uint32_t dy = 0; dy < 32; ++dy)

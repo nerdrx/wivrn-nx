@@ -53,7 +53,8 @@ class direct_codec final : public nxwarp_codec
 	std::atomic_bool lz4_hc = false;
 	std::vector<uint8_t> compressed, cached_raw, native_frame;
 	std::span<const uint32_t> native_pixels;
-	size_t native_extra() const { return geometry.native_center ? 32800u * 4u : 0u; }
+	float native_radius = 0;
+	size_t native_extra() const { return geometry.native_center ? nxwarp_direct::native_center_extra(native_radius) : 0u; }
 	std::vector<uint8_t> frame;
 	std::unique_ptr<direct_codec> safety_codec;
 	bool safety_enabled = false;
@@ -103,6 +104,7 @@ class direct_codec final : public nxwarp_codec
 	}
 	void update_plan()
 	{
+		native_radius = geometry.native_center ? nxwarp_direct::native_center_radius(target, refresh) : 0.f;
 		const auto reserved = uint32_t(std::ceil(native_extra() * 8.0 * 1.25 * refresh));
 		plan = nxwarp_direct::select_plan(geometry, target > reserved ? target - reserved : 1u, refresh);
 		tile_info.resize(geometry.tile_count());
@@ -346,9 +348,9 @@ public:
 			raw = cached_raw;
 		}
 		if (geometry.native_center) {
-			if (native_pixels.size() != 2u * 128u * 128u)
+			if (native_pixels.size() != 2u * 256u * 256u)
 				throw std::runtime_error("NX direct native centre source missing");
-			raw = nxwarp_direct::native_center_frame(geometry, raw, native_pixels, native_frame);
+			raw = nxwarp_direct::native_center_frame(geometry, raw, native_pixels, native_frame, native_radius);
 		}
 		if (!safety_codec)
 		{

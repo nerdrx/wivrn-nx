@@ -1,11 +1,13 @@
-# Native-colour centre (experimental)
+# Adaptive round colour foveation (experimental)
 
-Set `NX_DIRECT_NATIVE_CENTER=1` before launching the server. Requires a paired direct-backend stream with LZ4 and safety enabled, at least 256×256 pixels per eye, and an updated client supporting stream versions 7/8. It is disabled by default. The enabled user session preserves its existing bitrate settings.
+Enable `NX_DIRECT_NATIVE_CENTER=1` on the server. Requires stereo direct mode, LZ4 and safety, at least 256×256 encoded pixels per eye, and the updated client. Default remains off.
 
-A tile-aligned 128×128 container per eye carries a circular transition. The inner circle (64-pixel diameter) retains RGB888 before chroma averaging. Between radii 32 and 63 pixels, a quintic smoothstep continuously blends native colour into the exact decoded baseline colour on the PC. At and outside radius 63 the patch equals the baseline, including its corners. There are no discrete quality rings, and the blend has zero first and second derivatives at both ends. The surrounding frame and safety prefix retain their previous representations. This smooths the added native patch boundary; it does not remove existing peripheral palette blocks. This is spatially native colour when the source map is 1:1, not 10-bit or floating-point losslessness. A one-time source-footprint log records the mapping for verification.
+The existing foveation pass captures RGB888 before chroma averaging into a 256×256 container per eye. The host blends this with the exact decoded baseline using a circular quintic falloff. At 700 Mbit/s total/90 Hz the native core is 128 pixels across, with a 63-pixel fade on each side. This is a colour enhancement within existing renderer foveation, not a new projection map. Native spatial sharpness requires a 1:1 source map; the source-footprint log measures it.
 
-The patch reserves 131,200 bytes per frame before compression (94.46 Mbit/s at 90 Hz, 118.08 Mbit/s including the conservative 25% transport allowance). It consumes part of the selected budget; it is not extra traffic outside the slider limit. Low budgets can reduce peripheral detail or admission rate. No extra client rendering pass is introduced.
+The encoder first allocates safety bandwidth, then chooses radius from remaining bits per refresh. Full radius is 127 at 680 Mbit/s detail/90 Hz, dropping continuously to zero at 80 Mbit/s detail/90 Hz. A tiny emerging core fades in rather than popping on. Tiles wholly outside the circular support retain baseline coding and consume no native payload. Reserve only selected native tiles before choosing the baseline plan and frame admission. High-budget expansion costs more bandwidth than the old small patch; low-budget mode removes that cost rather than just hiding detail.
 
-The wire uses descriptor bit 29 in mode 0, a 29-bit word offset, 1024 RGB888 words plus one alignment word per native tile. Frame version 2 requires native negotiation; legacy payloads remain valid, and the low-resolution safety layout remains legacy. Bounds and offsets are validated before upload.
+No extra Pico rendering pass. Raw native tiles remain 1025 words including alignment. Stream versions 9/10 negotiate the larger capacity, with versions 7/8 still accepted at their original bounds. Frame v2 and all legacy frame validation remain unchanged. User bitrate settings are preserved.
 
-Tests and live evidence: https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-22/native-centre
+Continuous native blending removes the added square seam; it does not eliminate baseline palette blocks or guarantee cadence. Centre size changes with bitrate. A later refinement can unify the underlying palette sampling layout as well; this change unifies budget allocation only.
+
+Evidence: https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-22/adaptive-round

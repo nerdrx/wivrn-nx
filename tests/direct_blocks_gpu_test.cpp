@@ -252,12 +252,12 @@ int main()
 	cfg.direct_lz4 = true;
 	cfg.safety = true;
 	auto native_codec = wivrn::nxwarp_codec::make_direct(cfg, instance, gpu, device, queue, family);
-	std::vector<uint32_t> native_pixels(2 * 128 * 128);
+	std::vector<uint32_t> native_pixels(2 * 256 * 256);
 	for (unsigned eye=0; eye<2; ++eye)
-		for (unsigned y=0; y<128; ++y) for (unsigned x=0; x<128; ++x)
-			native_pixels[eye*128*128+y*128+x]=((x+y+eye)&1) ? 0xff0000u : 0x00ff00u;
+		for (unsigned y=0; y<256; ++y) for (unsigned x=0; x<256; ++x)
+			native_pixels[eye*256*256+y*256+x]=((x+y+eye)&1) ? 0xff0000u : 0x00ff00u;
 	native_codec->set_native_center(native_pixels);
-	native_codec->set_target_bitrate(500'000'000u,90);
+	native_codec->set_target_bitrate(700'000'000u,90);
 	const auto wire=native_codec->encode_image_pair(image,0,1,99);
 	const wivrn::nxwarp_direct::layout nl{w,h,2,true};
 	const auto nh=wivrn::nxwarp_direct::parse_safety_header(nl,wire);assert(nh);
@@ -267,16 +267,16 @@ int main()
 		assert(wivrn::nxwarp_direct::decompress_lz4(nl,detail,raw));detail=raw;
 	}
 	const auto nfview=wivrn::nxwarp_direct::parse_frame(nl,detail);assert(nfview);
-	unsigned origin=((w-128)/2)&~31u;
-	for(unsigned eye=0;eye<2;++eye) for(unsigned y=0;y<128;++y) for(unsigned x=0;x<128;++x) {
+	unsigned origin=((w-256)/2)&~31u;
+	for(unsigned eye=0;eye<2;++eye) for(unsigned y=0;y<256;++y) for(unsigned x=0;x<256;++x) {
 		unsigned px=origin+x,py=origin+y;
 		auto d=wivrn::nxwarp_direct::read32(nfview->descriptors,((py/32)*(w/32*2)+eye*(w/32)+px/32)*4);
-		assert((d&(1u<<29))!=0);
+		if (!(d&(1u<<29))) { assert(wivrn::nxwarp_direct::native_center_weight(x,y)==0.f); continue; }
 		auto rgb=wivrn::nxwarp_direct::read32(nfview->blocks,((d&0x1fffffffu)+(py%32)*32+px%32)*4);
 		if (wivrn::nxwarp_direct::native_center_weight(x, y) == 1.f)
-			assert(rgb==native_pixels[eye*128*128+y*128+x]);
+			assert(rgb==native_pixels[eye*256*256+y*256+x]);
 	}
-	std::printf("native centre: circular 32px-radius core exact, envelope %zu bytes\n",wire.size());
+	std::printf("native centre: circular 64px-radius core exact, envelope %zu bytes\n",wire.size());
 	native_codec.reset();
 #endif
 	packed_codec.reset();

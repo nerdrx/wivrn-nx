@@ -966,6 +966,7 @@ bool nxwarp_decoder::on_direct_stream_header(std::span<const uint8_t> header)
 	{
 		const bool same = parsed->width == direct_layout.width && parsed->height == direct_layout.height &&
 		                  parsed->eyes == direct_layout.eyes && parsed->native_center == direct_layout.native_center &&
+	                  parsed->native_side == direct_layout.native_side &&
 		                  trusted_lan == direct_trusted_lan && lz4 == direct_lz4 && safety == direct_safety;
 		if (!same)
 			spdlog::error("nxwarp[{}]: changed NXDB geometry/version rejected", stream_index);

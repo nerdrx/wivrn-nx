@@ -51,12 +51,17 @@ int main()
 	// Native centre negotiation is explicit: v7/v8 streams carry the larger
 	// bound, while their safety layout remains the legacy v1 shape.
 	layout native{32, 32, 1, true};
-	layout native_stream{256, 32, 2, true};
+	layout native_stream{256, 256, 2, true};
 	assert(stream_header(native).empty());
 	assert(stream_header(native_stream, false, false, true).empty());
-	assert(read32(stream_header(native_stream, false, true, true), 4) == 7);
-	assert(read32(stream_header(native_stream, true, true, true), 4) == 8);
+	assert(read32(stream_header(native_stream, false, true, true), 4) == 9);
+	assert(read32(stream_header(native_stream, true, true, true), 4) == 10);
 	assert(parse_stream(stream_header(native_stream, false, true, true))->native_center);
+	layout old_native{256, 256, 2, true, 128};
+	assert(read32(stream_header(old_native, false, true, true), 4) == 7);
+	assert(parse_stream(stream_header(old_native, false, true, true))->native_side == 128);
+	assert(parse_stream(stream_header(native_stream, false, true, true))->native_side == 256);
+	assert(native_stream.max_block_words() > old_native.max_block_words());
 	assert(!parse_frame(native, frame_header(1, 0, native_version)));
 	auto nf = frame_header(1, native_rgb_words, native_version);
 	append32(nf, 0x20000000u);
@@ -77,9 +82,11 @@ int main()
 	auto old_solid = frame_header(1, 0);
 	append32(old_solid, 0xc0123456u);
 	assert(parse_frame(native, old_solid)); // old v1 payloads remain accepted
-	auto truncated_native = nf; truncated_native.pop_back();
+	auto truncated_native = nf;
+	truncated_native.pop_back();
 	assert(!parse_frame(native, truncated_native));
-	auto unaligned_native = nf; unaligned_native[16] = 1;
+	auto unaligned_native = nf;
+	unaligned_native[16] = 1;
 	assert(!parse_frame(native, unaligned_native));
 	std::cout << "NXDB header/frame bounds, dynamic modes, truncation and reserved bits: PASS\n";
 }

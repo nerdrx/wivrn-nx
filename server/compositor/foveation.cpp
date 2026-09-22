@@ -788,12 +788,12 @@ void foveation::update_ubo(
 	ubo.mask_on = 0;
 	ubo.mask_pad[0] = ubo.mask_pad[1] = 0;
 	ubo.native_center_on = native_center ? 1u : 0u;
-	ubo.native_center_origin_x = (foveated_size.width / 2u - 64u) & ~31u;
-	ubo.native_center_origin_y = (foveated_size.height / 2u - 64u) & ~31u;
-	ubo.native_center_size = native_center ? 128u : 0u;
+	ubo.native_center_origin_x = (foveated_size.width / 2u - 128u) & ~31u;
+	ubo.native_center_origin_y = (foveated_size.height / 2u - 128u) & ~31u;
+	ubo.native_center_size = native_center ? 256u : 0u;
 	if (native_center && !native_footprint_logged) {
 		uint32_t min_x = UINT32_MAX, max_x = 0, min_y = UINT32_MAX, max_y = 0;
-		for (unsigned eye = 0; eye < 2; ++eye) for (unsigned i = 0; i < 128; ++i) {
+		for (unsigned eye = 0; eye < 2; ++eye) for (unsigned i = 0; i < 256; ++i) {
 			const auto x = eye * RENDER_FOVEATION_BUFFER_DIMENSIONS + ubo.native_center_origin_x + i;
 			const auto y = eye * RENDER_FOVEATION_BUFFER_DIMENSIONS + ubo.native_center_origin_y + i;
 			const auto dx = uint32_t(std::abs(int(ubo.x[x + 1]) - int(ubo.x[x])));

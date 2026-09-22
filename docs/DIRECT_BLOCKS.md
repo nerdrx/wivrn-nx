@@ -141,3 +141,18 @@ For explicit diagnostic capture only, Android property
 `debug.wivrn.nx.capture_rejected=1` writes one rejected direct unit per decoder
 to the app external data directory as `nxdb-rejected.bin`. Off by default;
 clear the property after capture. Captures may contain image payload data.
+
+## Experimental packet pacing (2026-09-22)
+
+`"packet-window": "0.5"` spreads direct NX packets over half the configured
+frame period (about 5.6 ms at 90 Hz), using the existing shard pacer. Accepted
+range is 0 through 0.5; default 0 preserves burst sending. It is independent
+of `pace`, which controls frame admission. Non-direct backends are unaffected.
+The window covers NX payload bytes including transport parity, not outer
+WiVRn/IP headers. Absolute sleeps prevent cumulative per-packet sleep drift;
+a late sender does not sleep to catch up. This synchronous experiment can
+consume encode-thread time and does not create extra network capacity.
+
+It remains opt-in: short Pico testing did not establish an improvement at
+500 Mbit/s. Use a sustainable bitrate instead of treating pacing as a cure.
+[Short-run evidence](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-22/packet-pacing).

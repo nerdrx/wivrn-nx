@@ -70,6 +70,15 @@ std::vector<int64_t> replay(shard_pacer & pacer, size_t total, int64_t start, si
 
 void part_a()
 {
+	{
+		constexpr size_t direct_bytes = 96 * 1024;
+		shard_pacer p(0, period * 2 / 5, direct_bytes);
+		check(p.active(), "direct packet window activates for a large frame");
+		check(p.deadline(direct_bytes) == period * 2 / 5,
+		      "direct packet budget ends at the configured window");
+		check(!shard_pacer(0, 0, direct_bytes).active(),
+		      "zero packet window preserves burst path");
+	}
 	std::printf("Part A: shard_pacer schedule\n");
 
 	// --- Nominal frame: 208 kB spread over 40% of a 90 fps frame period ----

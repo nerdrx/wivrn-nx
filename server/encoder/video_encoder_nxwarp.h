@@ -20,6 +20,7 @@
 #include <chrono>
 
 #include "nxwarp_codec.h"
+#include "shard_pacer.h"
 #include "video_encoder.h"
 #include "vk/allocation.h"
 
@@ -112,6 +113,10 @@ class video_encoder_nxwarp : public video_encoder
 	// across encode(); the CPU one never touches a queue. See encode().
 	bool codec_uses_vk_queue = false;
 	bool codec_direct_blocks = false;
+	// Direct blocks send one whole frame as nxt datagrams synchronously. Keep
+	// their historical burst by default; an opt-in fraction spreads packets over
+	// part of the frame period to avoid overflowing the AP queue.
+	float direct_packet_window = 0;
 	// The codec reads the compositor's image itself (nxwarp_codec::accepts_image).
 	// Set once from the codec, and it decides the shape of present_image, of
 	// encode(), and of what this class allocates per slot.

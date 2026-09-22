@@ -37,8 +37,10 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cerrno>
 #include <cmath>
 #include <cstdlib>
+#include <ctime>
 #include <cstring>
 #include <format>
 #include <limits>
@@ -404,6 +406,18 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 			// than "auto" is to get that number.
 			pace_interval = 1.0 / fps;
 		}
+	}
+	{
+		const std::string window = option_string(settings.options, "packet-window", "0");
+		char * stop = nullptr;
+		const double value = std::strtod(window.c_str(), &stop);
+		if (stop == window.data() or stop != window.data() + window.size() or
+		    not std::isfinite(value) or
+		    value < 0 or value > shard_pacer::max_window)
+			throw std::runtime_error(std::format(
+			        "unknown NX Warp \"packet-window\" value \"{}\"; expected 0..{}",
+			        window, shard_pacer::max_window));
+		direct_packet_window = float(value);
 	}
 	// "tile-map": how a frame's bytes are laid on the transport's tile grid.
 	//
@@ -2913,8 +2927,8 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// send_end is stamped BEFORE the last SendPacket rather than after it, because
 	// it has to travel inside that packet. It is the last instant the server can
 	// name and still have the number reach the headset; the packet's own write is
-	// the only thing outside it, and the pacing that matters happens before this
-	// loop, not inside it.
+	// the only thing outside it. Direct packet pacing, when enabled, waits inside
+	// this loop immediately before each packet.
 	frame_timing->send_end = frame_timing->send_begin;
 	// Counted here rather than at the decision, so that the tally is of frames that
 	// actually went on the wire: a frame that produced no datagrams took neither
@@ -2943,9 +2957,30 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		return {};
 	}
 
+	size_t packet_bytes = 0;
+	if (codec_direct_blocks and direct_packet_window > 0)
+		for (const auto & d: datagrams)
+			packet_bytes += d.bytes.size();
+	shard_pacer packet_pacer;
+	const int64_t packet_period_ns = int64_t(stream_cfg.frame_period_us) * 1000;
+	if (codec_direct_blocks and direct_packet_window > 0 and packet_period_ns > 0)
+		packet_pacer = shard_pacer(
+		        os_monotonic_get_ns(),
+		        int64_t(double(packet_period_ns) * direct_packet_window),
+		        packet_bytes);
+	size_t packet_sent = 0;
 	for (size_t i = 0; i < datagrams.size(); ++i)
 	{
+		if (packet_pacer.active() and packet_sent > 0)
+			if (const auto deadline = packet_pacer.wait_until(packet_sent, os_monotonic_get_ns()))
+			{
+				timespec ts{.tv_sec = time_t(*deadline / 1'000'000'000),
+				            .tv_nsec = long(*deadline % 1'000'000'000)};
+				while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr) == EINTR)
+					;
+			}
 		const bool last = i + 1 == datagrams.size();
+		const size_t bytes = datagrams[i].bytes.size();
 		if (last)
 			frame_timing->send_end =
 			        headset_clock().to_headset(os_monotonic_get_ns());
@@ -2963,6 +2998,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		                   .payload = std::move(datagrams[i].bytes),
 		           },
 		           last);
+		packet_sent += bytes;
 	}
 
 	in[slot].have_view_info = false;

@@ -100,8 +100,10 @@ class video_encoder_nxwarp : public video_encoder
 		// is submitted, one call earlier than encode() would give it.
 		to_headset::video_stream_data_shard::view_info_t view_info{};
 		bool have_view_info = false;
+		std::span<const uint32_t> native_center;
 	};
 	std::array<in_t, num_slots> in;
+	std::span<const uint32_t> pending_native_center;
 
 	// Chroma de-interleaving scratch: the compositor writes NV12 (one plane of
 	// interleaved CbCr) and the codec takes planar Cb and Cr.
@@ -863,6 +865,10 @@ public:
 	                   uint8_t slot,
 	                   uint64_t frame_index,
 	                   const to_headset::video_stream_data_shard::view_info_t & view_info) override;
+	void present_native_center(std::span<const uint32_t> data) override
+	{
+		pending_native_center = data;
+	}
 
 	std::optional<data> encode(uint8_t slot, uint64_t frame_id) override;
 

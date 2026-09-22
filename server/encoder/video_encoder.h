@@ -36,6 +36,7 @@
 #include <memory>
 #include <mutex>
 #include <stop_token>
+#include <span>
 #include <thread>
 #include <vulkan/vulkan_raii.hpp>
 
@@ -390,6 +391,9 @@ public:
 	                   vk::SemaphoreSubmitInfo sem_info,
 	                   uint64_t frame_index,
 	                   const to_headset::video_stream_data_shard::view_info_t & view_info);
+	// Optional compositor-side packed RGB centre. The span remains valid until the
+	// next compositor frame slot reuse; codecs copy or consume it during present/encode.
+	virtual void present_native_center(std::span<const uint32_t>) {}
 
 	void on_feedback(const from_headset::feedback &);
 

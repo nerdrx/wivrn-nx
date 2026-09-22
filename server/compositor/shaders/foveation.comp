@@ -47,10 +47,15 @@ layout(set = 0, binding = 1, std430) buffer restrict Config
 	uint mask_cols;
 	uint mask_on;
 	uint mask_pad[2];
+	uint native_center_on;
+	uint native_center_origin_x;
+	uint native_center_origin_y;
+	uint native_center_size;
 } ubo;
 
 layout(set = 0, binding = 2) uniform writeonly restrict image2DArray luma;
 layout(set = 0, binding = 3) uniform writeonly restrict image2DArray chroma;
+layout(set = 0, binding = 4, std430) buffer NativeCenter { uint rgb[]; } native_center;
 
 layout(constant_id = 0) const int alpha_width = 0;
 
@@ -139,7 +144,20 @@ void main()
 		}
 	}
 	colour /= max(count, 1);
-	colour.xyz = rgb_to_ycbcr(from_linear_to_srgb(colour.rgb));
+	vec3 encoded_rgb = from_linear_to_srgb(colour.rgb);
+	if (ubo.native_center_on != 0u &&
+	    ix >= ubo.native_center_origin_x &&
+	    iy >= ubo.native_center_origin_y &&
+	    ix < ubo.native_center_origin_x + ubo.native_center_size &&
+	    iy < ubo.native_center_origin_y + ubo.native_center_size)
+	{
+		vec3 native_rgb = clamp(encoded_rgb, 0.0, 1.0);
+		uint cx = ix - ubo.native_center_origin_x;
+		uint cy = iy - ubo.native_center_origin_y;
+		native_center.rgb[iz * ubo.native_center_size * ubo.native_center_size + cy * ubo.native_center_size + cx] =
+			(uint(round(native_rgb.r * 255.0)) << 16u) | (uint(round(native_rgb.g * 255.0)) << 8u) | uint(round(native_rgb.b * 255.0));
+	}
+	colour.xyz = rgb_to_ycbcr(encoded_rgb);
 
 	// A 64x64 tile is 64 whole 8x8 workgroups, so this branch is uniform across the
 	// workgroup AND across every subgroup in it -- which is what makes it safe to take

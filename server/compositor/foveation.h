@@ -87,6 +87,8 @@ class foveation
 	void compute_lens_mask();
 
 	buffer_allocation gpu_buffer;
+	buffer_allocation native_dummy;
+	bool native_footprint_logged = false;
 	vk::raii::Sampler sampler;
 
 	vk::raii::DescriptorSetLayout ds_layout;
@@ -116,7 +118,8 @@ class foveation
 	        vk::raii::CommandBuffer & cmd,
 	        bool flip_y,
 	        std::array<xrt_rect, 2> src_rect,
-	        std::array<xrt_fov, 2> src_fov);
+	        std::array<xrt_fov, 2> src_fov,
+	        vk::Buffer native_center);
 
 public:
 	foveation(wivrn::vk_bundle &,
@@ -149,6 +152,7 @@ public:
 	        std::array<vk::ImageView, 2> src,
 	        std::array<xrt_rect, 2> src_rect,
 	        std::array<xrt_fov, 2> src_fov,
-	        bool alpha);
+	        bool alpha,
+	        vk::Buffer native_center = nullptr);
 };
 } // namespace wivrn

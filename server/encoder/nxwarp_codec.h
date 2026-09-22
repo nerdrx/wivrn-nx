@@ -67,6 +67,7 @@ struct nxwarp_codec_config
 	// ring. Off makes every frame all-intra, which is the safe default for a
 	// first end-to-end bring-up because it needs no client reference state.
 	bool inter = false;
+	bool direct_native_center = false; // Experimental native RGB centre in paired safety streams.
 	bool direct_lz4 = false; // Direct backend only: optional independent LZ4 chunks.
 	bool safety = false; // Direct backend only: prepend a low-resolution NXDS safety frame.
 	uint32_t source_width = 0; // Direct source luma width; defaults to width.
@@ -346,6 +347,7 @@ public:
 	virtual bool direct_blocks() const { return false; }
 	virtual void set_target_bitrate(uint32_t, float) {}
 	virtual void set_lz4_hc(bool) {}
+	virtual void set_native_center(std::span<const uint32_t>) {}
 	virtual bool admit_frame(int64_t) { return true; }
 	static std::unique_ptr<nxwarp_codec> make_direct(const nxwarp_codec_config &,
 	    VkInstance, VkPhysicalDevice, VkDevice, VkQueue, uint32_t queue_family);

@@ -19,7 +19,7 @@ inline std::span<const uint8_t> compress_lz4_impl(std::span<const uint8_t> raw, 
                                                   int hc_level)
 {
 	out.clear();
-	if (raw.size() < 16 || raw.size() > layout{4096, 4096, 2}.max_frame_bytes())
+	if (raw.size() < 16 || raw.size() > layout{4096, 4096, 2, true}.max_frame_bytes())
 		return raw;
 	const uint32_t count = (raw.size() + lz4_chunk_bytes - 1) / lz4_chunk_bytes;
 	out.reserve(16 + raw.size() + count * 12);

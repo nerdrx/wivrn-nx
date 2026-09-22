@@ -520,6 +520,10 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	};
 	const std::string backend = option_string(settings.options, "backend", "ref");
 	const bool direct_backend = backend == "direct";
+	const char * native_env = std::getenv("NX_DIRECT_NATIVE_CENTER");
+	codec_cfg.direct_native_center = native_env && std::strcmp(native_env, "1") == 0 && direct_backend &&
+	                                codec_cfg.eyes == 2 && codec_cfg.safety && codec_cfg.direct_lz4 &&
+	                                codec_cfg.width >= 256 && codec_cfg.height >= 256;
 	if (codec_cfg.direct_lz4 && !direct_backend)
 		throw std::runtime_error("nxwarp: lz4 requires the direct backend");
 	if (codec_cfg.safety && !direct_backend)
@@ -1619,6 +1623,8 @@ void wivrn::video_encoder_nxwarp::present_image(
 	// previous frame's, and encode() is one call too late for that.
 	in[slot].view_info = view_info;
 	in[slot].have_view_info = true;
+	in[slot].native_center = pending_native_center;
+	pending_native_center = {};
 
 	auto & cmd = in[slot].cmd;
 	cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
@@ -2048,6 +2054,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		// The pose in this slot belongs to a frame that was not sent, so nothing may
 		// encode from it later.
 		in[slot].have_view_info = false;
+		in[slot].native_center = {};
 		return {};
 	}
 	if (codec_direct_blocks)
@@ -2064,6 +2071,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 			++prof_paced_out;
 			++paced_out_total;
 			in[slot].have_view_info = false;
+			in[slot].native_center = {};
 			return {};
 		}
 	}
@@ -2402,6 +2410,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	if (codec_uses_vk_queue)
 	{
 		std::unique_lock lock(vk.queue.mutex);
+		codec->set_native_center(in[slot].native_center);
 		// With the eyes paired the codec takes BOTH array layers and brings
 		// them together itself; at one eye this is encode_image(image,
 		// src_layer) exactly as before.

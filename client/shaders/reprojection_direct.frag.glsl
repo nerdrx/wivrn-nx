@@ -29,8 +29,13 @@ vec3 srgb_linear(vec3 c) {
 }
 vec3 sample_block(uvec2 p) {
     uint cols = (uint(max(motion.x, 1.0)) + 31u) / 32u;
-    uint d = tiles.tile[(p.y / 32u) * cols + p.x / 32u];
-    uint mode = d >> 30u;
+	uint d = tiles.tile[(p.y / 32u) * cols + p.x / 32u];
+	uint mode = d >> 30u;
+	if ((d & 0x20000000u) != 0u) {
+		uint offset = d & 0x1fffffffu;
+		uint rgb = blocks.block[offset + (p.y % 32u) * 32u + p.x % 32u];
+		return vec3((rgb >> 16u) & 0xffu, (rgb >> 8u) & 0xffu, rgb & 0xffu) / 255.0;
+	}
     if (mode == 3u)
         return vec3((d >> 16u) & 0xffu, (d >> 8u) & 0xffu, d & 0xffu) / 255.0;
     uint shift = mode;

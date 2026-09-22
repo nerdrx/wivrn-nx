@@ -4,6 +4,7 @@
 #include "nxwarp_codec.h"
 #include "nxwarp_direct_layout.h"
 #include "nxwarp_direct_lz4.h"
+#include "nxwarp_direct_native.h"
 #include "wivrn-server_shaders.h"
 #include <array>
 #include <atomic>
@@ -50,7 +51,9 @@ class direct_codec final : public nxwarp_codec
 	std::vector<uint8_t> header;
 	bool lz4_enabled = false;
 	std::atomic_bool lz4_hc = false;
-	std::vector<uint8_t> compressed, cached_raw;
+	std::vector<uint8_t> compressed, cached_raw, native_frame;
+	std::span<const uint32_t> native_pixels;
+	size_t native_extra() const { return geometry.native_center ? 32800u * 4u : 0u; }
 	std::vector<uint8_t> frame;
 	std::unique_ptr<direct_codec> safety_codec;
 	bool safety_enabled = false;
@@ -100,13 +103,14 @@ class direct_codec final : public nxwarp_codec
 	}
 	void update_plan()
 	{
-		plan = nxwarp_direct::select_plan(geometry, target, refresh);
+		const auto reserved = uint32_t(std::ceil(native_extra() * 8.0 * 1.25 * refresh));
+		plan = nxwarp_direct::select_plan(geometry, target > reserved ? target - reserved : 1u, refresh);
 		tile_info.resize(geometry.tile_count());
 		for (uint32_t i = 0; i < tile_info.size(); i++)
 			tile_info[i] = {.index = i, .qp = 0, .mode = 0, .res_level = uint8_t(plan.descriptors[i] >> 30), .ref_delta = 3};
 		std::memcpy(jobs.mapped, plan.jobs.data(), plan.jobs.size() * sizeof(plan.jobs[0]));
 	}
-	size_t planned_bytes() const { return plan.bytes(); }
+	size_t planned_bytes() const { return plan.bytes() + native_extra(); }
 	std::array<VkImageView, 2> image_views(VkImage image, uint32_t layers)
 	{
 		auto key = std::make_pair(image, layers);
@@ -135,9 +139,11 @@ class direct_codec final : public nxwarp_codec
 
 public:
 	direct_codec(const nxwarp_codec_config & c, VkPhysicalDevice p, VkDevice d, VkQueue q, uint32_t f) :
-	        geometry{c.width, c.height, c.eyes}, source_width(c.source_width ? c.source_width : c.width), source_height(c.source_height ? c.source_height : c.height), physical(p), device(d), queue(q), family(f), header(nxwarp_direct::stream_header(geometry, c.trusted_lan, c.direct_lz4, c.safety)), lz4_enabled(c.direct_lz4), safety_enabled(c.safety)
+	        geometry{c.width, c.height, c.eyes, c.direct_native_center}, source_width(c.source_width ? c.source_width : c.width), source_height(c.source_height ? c.source_height : c.height), physical(p), device(d), queue(q), family(f), header(nxwarp_direct::stream_header(geometry, c.trusted_lan, c.direct_lz4, c.safety)), lz4_enabled(c.direct_lz4), safety_enabled(c.safety)
 	{
 		lz4_hc = false;
+		if (c.direct_native_center && (!c.safety || !c.direct_lz4 || c.eyes != 2 || c.width < 256 || c.height < 256))
+			throw std::runtime_error("NX direct native centre requires paired LZ4 safety stream >=256 pixels");
 		if (header.empty())
 			throw std::runtime_error("NX direct: eye geometry must be multiples of 32, <=4096");
 		if (safety_enabled)
@@ -150,12 +156,14 @@ public:
 			sc.width = sw;
 			sc.height = sh;
 			sc.safety = false;
+			sc.direct_native_center = false;
 			sc.direct_lz4 = c.direct_lz4;
 			sc.source_width = source_width;
 			sc.source_height = source_height;
 			safety_codec = std::make_unique<direct_codec>(sc, p, d, q, f);
 		}
 	}
+	void set_native_center(std::span<const uint32_t> pixels) override { native_pixels = pixels; }
 	void set_lz4_hc(bool enabled) override
 	{
 		lz4_hc = enabled;
@@ -253,8 +261,8 @@ public:
 			return size_t(16) + ((n + nxwarp_direct::lz4_chunk_bytes - 1) / nxwarp_direct::lz4_chunk_bytes) * 12;
 		};
 		const size_t safety_bytes = safety_codec ? safety_codec->planned_bytes() : 0;
-		const size_t raw_bytes = plan.bytes() + safety_bytes + (safety_codec ? 32 : 0);
-		const size_t wire_overhead = lz4_enabled ? lz4_overhead(plan.bytes()) + (safety_codec ? lz4_overhead(safety_bytes) : 0) : 0;
+		const size_t raw_bytes = planned_bytes() + safety_bytes + (safety_codec ? 32 : 0);
+		const size_t wire_overhead = lz4_enabled ? lz4_overhead(planned_bytes()) + (safety_codec ? lz4_overhead(safety_bytes) : 0) : 0;
 		int64_t interval = int64_t(std::ceil((raw_bytes + wire_overhead) * 8.0 * 1.25 * 1e9 / total_target));
 		if (now < next_due)
 			return false;
@@ -332,13 +340,20 @@ public:
 		submitted = true;
 		check(vkWaitForFences(device, 1, &fence, VK_TRUE, 1'000'000'000), "encode timeout");
 		submitted = false;
-		const std::span<const uint8_t> raw{static_cast<const uint8_t *>(output.mapped), plan.bytes()};
+		std::span<const uint8_t> raw{static_cast<const uint8_t *>(output.mapped), plan.bytes()};
+		if (lz4_enabled || geometry.native_center) {
+			cached_raw.assign(raw.begin(), raw.end());
+			raw = cached_raw;
+		}
+		if (geometry.native_center) {
+			if (native_pixels.size() != 2u * 128u * 128u)
+				throw std::runtime_error("NX direct native centre source missing");
+			raw = nxwarp_direct::native_center_frame(geometry, raw, native_pixels, native_frame);
+		}
 		if (!safety_codec)
 		{
 			if (!lz4_enabled) return raw;
-			cached_raw.resize(raw.size());
-			std::memcpy(cached_raw.data(), raw.data(), raw.size());
-			return (use_hc ? nxwarp_direct::compress_lz4_hc(cached_raw, compressed) : nxwarp_direct::compress_lz4(cached_raw, compressed));
+			return (use_hc ? nxwarp_direct::compress_lz4_hc(raw, compressed) : nxwarp_direct::compress_lz4(raw, compressed));
 		}
 		std::span<const uint8_t> safety_wire = safety_raw;
 		std::span<const uint8_t> detail_wire = raw;
@@ -348,9 +363,7 @@ public:
 			// The child owns and caches its optional LZ4 result, so do not
 			// revisit its mapped Vulkan memory or wrap an existing NXDL envelope.
 			safety_wire = safety_raw;
-			cached_raw.resize(raw.size());
-			std::memcpy(cached_raw.data(), raw.data(), raw.size());
-			detail_wire = (use_hc ? nxwarp_direct::compress_lz4_hc(cached_raw, detail_compressed) : nxwarp_direct::compress_lz4(cached_raw, detail_compressed));
+			detail_wire = (use_hc ? nxwarp_direct::compress_lz4_hc(raw, detail_compressed) : nxwarp_direct::compress_lz4(raw, detail_compressed));
 		}
 		frame.clear();
 		frame.reserve(32 + safety_wire.size() + detail_wire.size());

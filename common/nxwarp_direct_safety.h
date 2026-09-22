@@ -20,7 +20,7 @@ inline std::optional<safety_header> parse_safety_header(layout full, std::span<c
 	    read32(b, 4) != 1 || read32(b, 28) != 0)
 		return {};
 	safety_header h{{read32(b, 8), read32(b, 12), read32(b, 16)}, read32(b, 20), read32(b, 24)};
-	if (!h.low.valid() || h.low.eyes != full.eyes || h.low.width > full.width || h.low.height > full.height ||
+	if (!h.low.valid() || h.low.native_center || h.low.eyes != full.eyes || h.low.width > full.width || h.low.height > full.height ||
 	    h.safety_bytes < frame_header_bytes || h.safety_bytes > h.low.max_frame_bytes() ||
 	    h.detail_bytes < frame_header_bytes || h.detail_bytes > full.max_frame_bytes())
 		return {};

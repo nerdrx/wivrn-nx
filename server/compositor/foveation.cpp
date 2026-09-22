@@ -27,6 +27,7 @@
 
 #include "xrt/xrt_defines.h"
 #include "xrt/xrt_limits.h"
+#include "util/u_logging.h"
 
 #include <array>
 #include <cmath>
@@ -53,6 +54,10 @@ struct ubo_data
 	uint32_t mask_cols;
 	uint32_t mask_on;
 	uint32_t mask_pad[2];
+	uint32_t native_center_on;
+	uint32_t native_center_origin_x;
+	uint32_t native_center_origin_y;
+	uint32_t native_center_size;
 };
 
 vk::raii::Sampler make_sampler(wivrn::vk_bundle & vk)
@@ -93,12 +98,18 @@ vk::raii::DescriptorSetLayout make_ds_layout(wivrn::vk_bundle & vk)
 	                .descriptorCount = 1,
 	                .stageFlags = vk::ShaderStageFlagBits::eCompute,
 	        },
-	        vk::DescriptorSetLayoutBinding{
-	                .binding = 3,
+		vk::DescriptorSetLayoutBinding{
+		                .binding = 3,
 	                .descriptorType = vk::DescriptorType::eStorageImage,
 	                .descriptorCount = 1,
-	                .stageFlags = vk::ShaderStageFlagBits::eCompute,
-	        },
+		                .stageFlags = vk::ShaderStageFlagBits::eCompute,
+		        },
+		        vk::DescriptorSetLayoutBinding{
+		                .binding = 4,
+		                .descriptorType = vk::DescriptorType::eStorageBuffer,
+		                .descriptorCount = 1,
+		                .stageFlags = vk::ShaderStageFlagBits::eCompute,
+		        },
 	};
 	vk::raii::DescriptorSetLayout res{
 	        vk.device,
@@ -169,9 +180,9 @@ vk::raii::DescriptorPool make_ds_pool(wivrn::vk_bundle & vk)
 	                .type = vk::DescriptorType::eStorageImage,
 	                .descriptorCount = 2,
 	        },
-	        vk::DescriptorPoolSize{
-	                .type = vk::DescriptorType::eStorageBuffer,
-	                .descriptorCount = 1,
+		vk::DescriptorPoolSize{
+		                .type = vk::DescriptorType::eStorageBuffer,
+		                .descriptorCount = 2,
 	        },
 	};
 	vk::raii::DescriptorPool res{
@@ -582,7 +593,15 @@ foveation::foveation(wivrn::vk_bundle & bundle, vk::Extent3D foveated_size) :
                         .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
                 },
                 "foveation storage buffer"),
-        sampler(make_sampler(bundle)),
+		native_dummy(
+		        bundle.device,
+		        {
+		                .size = sizeof(uint32_t),
+		                .usage = vk::BufferUsageFlagBits::eStorageBuffer,
+		        },
+		        VmaAllocationCreateInfo{.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE},
+		        "foveation native centre dummy"),
+		sampler(make_sampler(bundle)),
         ds_layout(make_ds_layout(bundle)),
         layout(make_layout(bundle, ds_layout)),
         pipeline(make_pipelines(bundle, layout, foveated_size.width / 2)),
@@ -684,7 +703,8 @@ void foveation::update_ubo(
         vk::raii::CommandBuffer & cmd,
         bool flip_y,
         std::array<xrt_rect, 2> src_rect,
-        std::array<xrt_fov, 2> src_fov)
+        std::array<xrt_fov, 2> src_fov,
+        vk::Buffer native_center)
 {
 	// Check if the last value is still valid
 	std::lock_guard lock(mutex);
@@ -767,6 +787,23 @@ void foveation::update_ubo(
 	ubo.mask_cols = lens_mask_tiles[0].cols;
 	ubo.mask_on = 0;
 	ubo.mask_pad[0] = ubo.mask_pad[1] = 0;
+	ubo.native_center_on = native_center ? 1u : 0u;
+	ubo.native_center_origin_x = (foveated_size.width / 2u - 64u) & ~31u;
+	ubo.native_center_origin_y = (foveated_size.height / 2u - 64u) & ~31u;
+	ubo.native_center_size = native_center ? 128u : 0u;
+	if (native_center && !native_footprint_logged) {
+		uint32_t min_x = UINT32_MAX, max_x = 0, min_y = UINT32_MAX, max_y = 0;
+		for (unsigned eye = 0; eye < 2; ++eye) for (unsigned i = 0; i < 128; ++i) {
+			const auto x = eye * RENDER_FOVEATION_BUFFER_DIMENSIONS + ubo.native_center_origin_x + i;
+			const auto y = eye * RENDER_FOVEATION_BUFFER_DIMENSIONS + ubo.native_center_origin_y + i;
+			const auto dx = uint32_t(std::abs(int(ubo.x[x + 1]) - int(ubo.x[x])));
+			const auto dy = uint32_t(std::abs(int(ubo.y[y + 1]) - int(ubo.y[y])));
+			min_x = std::min(min_x, dx); max_x = std::max(max_x, dx);
+			min_y = std::min(min_y, dy); max_y = std::max(max_y, dy);
+		}
+		U_LOG_I("NX native centre source footprint: x %u..%u, y %u..%u source texels per encoded pixel", min_x, max_x, min_y, max_y);
+		native_footprint_logged = true;
+	}
 	for (size_t view = 0; view < 2; ++view)
 	{
 		const auto & m = lens_mask_tiles[view];
@@ -793,10 +830,10 @@ std::array<to_headset::foveation_parameter, 2> foveation::foveate(
         std::array<vk::ImageView, 2> src,
         std::array<xrt_rect, 2> src_rect,
         std::array<xrt_fov, 2> src_fov,
-        bool alpha)
+	bool alpha,
+	vk::Buffer native_center)
 {
-	update_ubo(cmd, flip_y, src_rect, src_fov);
-	auto ubo = gpu_buffer.data<ubo_data>();
+	update_ubo(cmd, flip_y, src_rect, src_fov, native_center);
 
 	std::array src_image_info{
 	        vk::DescriptorImageInfo{
@@ -825,7 +862,7 @@ std::array<to_headset::foveation_parameter, 2> foveation::foveate(
 	        .imageLayout = vk::ImageLayout::eGeneral,
 	};
 
-	std::array writes = {
+	std::vector<vk::WriteDescriptorSet> writes = {
 	        vk::WriteDescriptorSet{
 	                .dstSet = descriptor_set,
 	                .dstBinding = 0,
@@ -853,8 +890,19 @@ std::array<to_headset::foveation_parameter, 2> foveation::foveate(
 	                .descriptorCount = 1,
 	                .descriptorType = vk::DescriptorType::eStorageImage,
 	                .pImageInfo = &cbcr_info,
-	        },
+		        },
 	};
+	vk::DescriptorBufferInfo native_info{
+	        .buffer = native_center ? native_center : vk::Buffer(native_dummy),
+	        .range = vk::WholeSize,
+};
+	writes.push_back(vk::WriteDescriptorSet{
+	        .dstSet = descriptor_set,
+	        .dstBinding = 4,
+	        .descriptorCount = 1,
+	        .descriptorType = vk::DescriptorType::eStorageBuffer,
+	        .pBufferInfo = &native_info,
+	});
 
 	device.updateDescriptorSets(writes, {});
 

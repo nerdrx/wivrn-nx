@@ -1,4 +1,4 @@
-// NX direct blocks v1: bounded, little-endian, independent-frame format.
+// NX direct blocks v1/v2: bounded, little-endian, independent-frame format.
 #pragma once
 #include <cstdint>
 #include <optional>
@@ -6,11 +6,13 @@
 #include <vector>
 namespace wivrn::nxwarp_direct
 {
-constexpr uint32_t stream_magic = 0x4244584e, frame_magic = 0x4644584e, version = 1;
+constexpr uint32_t stream_magic = 0x4244584e, frame_magic = 0x4644584e, version = 1, native_version = 2;
+constexpr uint32_t native_rgb_words = 1025, native_extra_words = 32800;
 constexpr size_t stream_header_bytes = 32, frame_header_bytes = 16;
 struct layout
 {
 	uint32_t width = 0, height = 0, eyes = 0; // width per eye
+	bool native_center = false;
 	bool valid() const
 	{
 		return width && height && width <= 4096 && height <= 4096 &&
@@ -22,7 +24,7 @@ struct layout
 	}
 	uint32_t max_block_words() const
 	{
-		return tile_count() * 80;
+		return tile_count() * 80 + (native_center ? native_extra_words : 0);
 	}
 	uint32_t max_frame_bytes() const
 	{
@@ -43,23 +45,34 @@ inline bool is_stream(std::span<const uint8_t> b)
 	return b.size() >= 4 && read32(b, 0) == stream_magic;
 }
 // Versions 1/2: raw; 3/4: optional LZ4; 5/6: safety prefix and optional LZ4.
-// Even versions use trusted-LAN CRC.
-// Packed NXDF frames remain v1. Older clients reject unsupported stream versions.
+// Versions 7/8 are the native-RGB variants of 5/6. Even versions use trusted-LAN CRC.
+// Native RGB tiles use NXDF v2; legacy payloads remain v1.
+// Older clients reject unsupported stream versions.
 inline std::vector<uint8_t> stream_header(layout l, bool trusted_lan = false, bool lz4 = false, bool safety = false)
 {
 	if (!l.valid())
 		return {};
 	std::vector<uint8_t> b;
 	b.reserve(32);
-	for (uint32_t v: {stream_magic, (safety ? 5u : lz4 ? 3u : 1u) + (trusted_lan ? 1u : 0u), l.width, l.height, l.eyes, l.tile_count(), l.max_block_words(), l.max_frame_bytes()})
+	if (l.native_center && (!safety || !lz4 || l.eyes != 2 || l.width < 256))
+		return {};
+	// Native streams always use the safety+LZ4 envelope; 7/8 retain the
+	// existing odd/even CRC/trusted-LAN distinction.
+	const uint32_t base = l.native_center ? 7u : (safety ? 5u : lz4 ? 3u : 1u);
+	for (uint32_t v: {stream_magic, base + (trusted_lan ? 1u : 0u), l.width, l.height, l.eyes, l.tile_count(), l.max_block_words(), l.max_frame_bytes()})
 		append32(b, v);
 	return b;
 }
 inline std::optional<layout> parse_stream(std::span<const uint8_t> b)
 {
-	if (b.size() != 32 || !is_stream(b) || (read32(b, 4) < 1 || read32(b, 4) > 6))
+	if (b.size() != 32 || !is_stream(b) || (read32(b, 4) < 1 || read32(b, 4) > 8))
 		return {};
-	layout l{read32(b, 8), read32(b, 12), read32(b, 16)};
+	const uint32_t stream_version = read32(b, 4);
+	const bool native = stream_version >= 7;
+	const bool safety = stream_version >= 5;
+	if (native && !safety)
+		return {};
+	layout l{read32(b, 8), read32(b, 12), read32(b, 16), native};
 	if (!l.valid() || read32(b, 20) != l.tile_count() || read32(b, 24) != l.max_block_words() || read32(b, 28) != l.max_frame_bytes())
 		return {};
 	return l;
@@ -70,7 +83,10 @@ struct frame_view
 };
 inline std::optional<frame_view> parse_frame(layout l, std::span<const uint8_t> b)
 {
-	if (!l.valid() || b.size() < 16 || b.size() > l.max_frame_bytes() || read32(b, 0) != frame_magic || read32(b, 4) != version)
+	if (!l.valid() || b.size() < 16 || b.size() > l.max_frame_bytes() || read32(b, 0) != frame_magic)
+		return {};
+	const uint32_t frame_version = read32(b, 4);
+	if (frame_version == native_version ? !l.native_center : frame_version != version)
 		return {};
 	uint32_t n = read32(b, 8), words = read32(b, 12);
 	if (n != l.tile_count() || words > l.max_block_words() || words % 5 || b.size() != 16ull + 4ull * (n + words))
@@ -79,6 +95,15 @@ inline std::optional<frame_view> parse_frame(layout l, std::span<const uint8_t> 
 	for (uint32_t i = 0; i < n; i++)
 	{
 		uint32_t d = read32(v.descriptors, i * 4), mode = d >> 30;
+		if (d & 0x20000000u)
+		{
+			if (!l.native_center || frame_version != native_version || mode != 0)
+				return {};
+			const uint32_t offset = d & 0x1fffffffu;
+			if (offset % 5 || uint64_t(offset) + native_rgb_words > words)
+				return {};
+			continue;
+		}
 		if (mode == 3)
 		{
 			if (d & 0x3f000000u)
@@ -91,11 +116,11 @@ inline std::optional<frame_view> parse_frame(layout l, std::span<const uint8_t> 
 	}
 	return v;
 }
-inline std::vector<uint8_t> frame_header(uint32_t descriptors, uint32_t words)
+inline std::vector<uint8_t> frame_header(uint32_t descriptors, uint32_t words, uint32_t frame_version = version)
 {
 	std::vector<uint8_t> b;
 	b.reserve(16);
-	for (uint32_t v: {frame_magic, version, descriptors, words})
+	for (uint32_t v: {frame_magic, frame_version, descriptors, words})
 		append32(b, v);
 	return b;
 }

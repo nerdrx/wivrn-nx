@@ -5,6 +5,8 @@
 #include "nxwarp_direct_layout.h"
 #include "nxwarp_direct_lz4.h"
 #include "nxwarp_direct_native.h"
+#include "nxwarp_direct_zstd.h"
+#include <cstdlib>
 #include "wivrn-server_shaders.h"
 #include <array>
 #include <atomic>
@@ -22,6 +24,13 @@ void check(VkResult r, const char * what)
 {
 	if (r != VK_SUCCESS)
 		throw std::runtime_error(std::string("NX direct: ") + what + " (" + std::to_string(r) + ")");
+}
+nxwarp_direct::layout direct_geometry(const nxwarp_codec_config & c) {
+ nxwarp_direct::layout l{c.width,c.height,c.eyes,c.direct_native_center};
+ auto enabled=[](const char* name){const auto v=std::getenv(name);return v && std::strcmp(v,"1")==0;};
+ l.packed_native=!enabled("NX_DIRECT_NATIVE_RGB888");
+ l.zstd=l.native_center && enabled("NX_DIRECT_ZSTD");
+ return l;
 }
 class direct_codec final : public nxwarp_codec
 {
@@ -51,10 +60,18 @@ class direct_codec final : public nxwarp_codec
 	std::vector<uint8_t> header;
 	bool lz4_enabled = false;
 	std::atomic_bool lz4_hc = false;
-	std::vector<uint8_t> compressed, cached_raw, native_frame;
+	std::vector<uint8_t> compressed, cached_raw, native_frame, zstd_compressed;
 	std::span<const uint32_t> native_pixels;
 	float native_radius = 0;
-	size_t native_extra() const { return geometry.native_center ? nxwarp_direct::native_center_extra(native_radius) : 0u; }
+ std::span<const uint8_t> pack_detail(std::span<const uint8_t> raw,std::vector<uint8_t>& out,bool hc) {
+  auto fast=hc ? nxwarp_direct::compress_lz4_hc(raw,out) : nxwarp_direct::compress_lz4(raw,out);
+  if(geometry.zstd) {
+   auto dense=nxwarp_direct::compress_zstd(raw,zstd_compressed);
+   if(dense.size()*100 <= fast.size()*90) return dense;
+  }
+  return fast;
+ }
+	size_t native_extra() const { return geometry.native_center ? nxwarp_direct::native_center_extra(native_radius, geometry.packed_native) : 0u; }
 	std::vector<uint8_t> frame;
 	std::unique_ptr<direct_codec> safety_codec;
 	bool safety_enabled = false;
@@ -141,7 +158,7 @@ class direct_codec final : public nxwarp_codec
 
 public:
 	direct_codec(const nxwarp_codec_config & c, VkPhysicalDevice p, VkDevice d, VkQueue q, uint32_t f) :
-	        geometry{c.width, c.height, c.eyes, c.direct_native_center}, source_width(c.source_width ? c.source_width : c.width), source_height(c.source_height ? c.source_height : c.height), physical(p), device(d), queue(q), family(f), header(nxwarp_direct::stream_header(geometry, c.trusted_lan, c.direct_lz4, c.safety)), lz4_enabled(c.direct_lz4), safety_enabled(c.safety)
+	        geometry{direct_geometry(c)}, source_width(c.source_width ? c.source_width : c.width), source_height(c.source_height ? c.source_height : c.height), physical(p), device(d), queue(q), family(f), header(nxwarp_direct::stream_header(geometry, c.trusted_lan, c.direct_lz4, c.safety)), lz4_enabled(c.direct_lz4), safety_enabled(c.safety)
 	{
 		lz4_hc = false;
 		if (c.direct_native_center && (!c.safety || !c.direct_lz4 || c.eyes != 2 || c.width < 256 || c.height < 256))
@@ -296,6 +313,7 @@ public:
 	}
 	std::string description() const override
 	{
+		if(geometry.zstd) return "NX direct RGB blocks + adaptive LZ4/Zstd (independent frames)";
 		return lz4_enabled ? "NX direct RGB blocks + LZ4 (64 KiB chunks, 5% minimum saving)" : "NX direct RGB blocks v1 (GPU source, independent frames)";
 	}
 	std::span<const uint8_t> encode_image(VkImage image, uint32_t layer) override
@@ -355,7 +373,7 @@ public:
 		if (!safety_codec)
 		{
 			if (!lz4_enabled) return raw;
-			return (use_hc ? nxwarp_direct::compress_lz4_hc(raw, compressed) : nxwarp_direct::compress_lz4(raw, compressed));
+			return pack_detail(raw, compressed, use_hc);
 		}
 		std::span<const uint8_t> safety_wire = safety_raw;
 		std::span<const uint8_t> detail_wire = raw;
@@ -365,7 +383,7 @@ public:
 			// The child owns and caches its optional LZ4 result, so do not
 			// revisit its mapped Vulkan memory or wrap an existing NXDL envelope.
 			safety_wire = safety_raw;
-			detail_wire = (use_hc ? nxwarp_direct::compress_lz4_hc(raw, detail_compressed) : nxwarp_direct::compress_lz4(raw, detail_compressed));
+			detail_wire = pack_detail(raw, detail_compressed, use_hc);
 		}
 		frame.clear();
 		frame.reserve(32 + safety_wire.size() + detail_wire.size());

@@ -180,6 +180,7 @@ class nxwarp_decoder : public decoder
 	bool direct_safety = false;
 	bool direct_safety_loss_test = false;
 	std::vector<uint8_t> direct_unpacked;
+	uint64_t direct_zstd_frames = 0;
 	uint64_t direct_lz4_frames = 0, direct_lz4_raw_frames = 0, direct_lz4_input_bytes = 0, direct_lz4_output_bytes = 0;
 	double direct_lz4_ms = 0;
 	bool direct_rejected_dumped = false;

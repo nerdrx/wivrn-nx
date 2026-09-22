@@ -54,19 +54,38 @@ int main()
 	layout native_stream{256, 256, 2, true};
 	assert(stream_header(native).empty());
 	assert(stream_header(native_stream, false, false, true).empty());
-	assert(read32(stream_header(native_stream, false, true, true), 4) == 9);
-	assert(read32(stream_header(native_stream, true, true, true), 4) == 10);
+	assert(read32(stream_header(native_stream, false, true, true), 4) == 11);
+	assert(read32(stream_header(native_stream, true, true, true), 4) == 12);
 	assert(parse_stream(stream_header(native_stream, false, true, true))->native_center);
-	layout old_native{256, 256, 2, true, 128};
+	layout old_native{256, 256, 2, true, 128, false};
 	assert(read32(stream_header(old_native, false, true, true), 4) == 7);
 	assert(parse_stream(stream_header(old_native, false, true, true))->native_side == 128);
 	assert(parse_stream(stream_header(native_stream, false, true, true))->native_side == 256);
 	assert(native_stream.max_block_words() > old_native.max_block_words());
+	for (bool packed: {false, true})
+	{
+		layout dense{256, 256, 2, true, 256, packed, true};
+		auto h = stream_header(dense, false, true, true);
+		assert(read32(h, 4) == (packed ? 15u : 13u));
+		auto parsed = parse_stream(h);
+		assert(parsed && parsed->zstd && parsed->packed_native == packed);
+	}
+
 	assert(!parse_frame(native, frame_header(1, 0, native_version)));
 	auto nf = frame_header(1, native_rgb_words, native_version);
 	append32(nf, 0x20000000u);
 	nf.resize(nf.size() + native_rgb_words * 4);
 	assert(parse_frame(native, nf));
+	auto packed = frame_header(1, 515, native_version);
+	append32(packed, 0x30000000u);
+	packed.resize(packed.size() + 515 * 4);
+	assert(parse_frame(native, packed));
+	auto old_layout = native;
+	old_layout.packed_native = false;
+	assert(!parse_frame(old_layout, packed));
+	auto cut = packed;
+	cut.resize(cut.size() - 4);
+	assert(!parse_frame(native, cut));
 	// A native descriptor cannot be smuggled into a legacy stream or use a
 	// non-zero mode; offsets remain five-word aligned and bounded.
 	auto legacy_native = frame_header(1, native_rgb_words, version);

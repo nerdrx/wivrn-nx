@@ -93,3 +93,17 @@ add_library(wivrn-lz4 STATIC ${nx_lz4_SOURCE_DIR}/lib/lz4.c ${nx_lz4_SOURCE_DIR}
 set_target_properties(wivrn-lz4 PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(wivrn-lz4 SYSTEM PUBLIC ${nx_lz4_SOURCE_DIR}/lib)
 target_link_libraries(wivrn-common PUBLIC wivrn-lz4)
+
+# Pinned lossless alternative; selected only when it materially beats LZ4.
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(ZSTD_MULTITHREAD_SUPPORT OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(nx_zstd
+    URL https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
+    URL_HASH SHA256=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
+    SOURCE_SUBDIR build/cmake)
+FetchContent_MakeAvailable(nx_zstd)
+set_target_properties(libzstd_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_link_libraries(wivrn-common PUBLIC libzstd_static)

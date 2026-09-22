@@ -1,3 +1,4 @@
+#include "nxwarp_direct_zstd.h"
 #include "nxwarp_codec.h"
 #include "nxwarp_direct.h"
 #include "nxwarp_direct_lz4.h"
@@ -263,7 +264,9 @@ int main()
 	const auto nh=wivrn::nxwarp_direct::parse_safety_header(nl,wire);assert(nh);
 	auto detail=wire.subspan(nh->prefix_bytes(),nh->detail_bytes);
 	std::vector<uint8_t> raw;
-	if(wivrn::nxwarp_direct::is_lz4(detail)) {
+	if(wivrn::nxwarp_direct::is_zstd(detail)) {
+        assert(wivrn::nxwarp_direct::decompress_zstd(nl,detail,raw));detail=raw;
+    } else if(wivrn::nxwarp_direct::is_lz4(detail)) {
 		assert(wivrn::nxwarp_direct::decompress_lz4(nl,detail,raw));detail=raw;
 	}
 	const auto nfview=wivrn::nxwarp_direct::parse_frame(nl,detail);assert(nfview);
@@ -272,7 +275,12 @@ int main()
 		unsigned px=origin+x,py=origin+y;
 		auto d=wivrn::nxwarp_direct::read32(nfview->descriptors,((py/32)*(w/32*2)+eye*(w/32)+px/32)*4);
 		if (!(d&(1u<<29))) { assert(wivrn::nxwarp_direct::native_center_weight(x,y)==0.f); continue; }
-		auto rgb=wivrn::nxwarp_direct::read32(nfview->blocks,((d&0x1fffffffu)+(py%32)*32+px%32)*4);
+		unsigned index=(py%32)*32+px%32;
+        auto pair=wivrn::nxwarp_direct::read32(nfview->blocks,((d&0x0fffffffu)+index/2)*4);
+        auto v=(pair>>(16*(index%2)))&65535;
+        unsigned r=(v>>11)&31,g=(v>>5)&63,b=v&31;
+        auto rgb=((r<<3)|(r>>2))<<16 | ((g<<2)|(g>>4))<<8 | (b<<3)|(b>>2);
+        if (!(d&0x10000000u)) rgb=wivrn::nxwarp_direct::read32(nfview->blocks,((d&0xfffffff)+index)*4);
 		if (wivrn::nxwarp_direct::native_center_weight(x, y) == 1.f)
 			assert(rgb==native_pixels[eye*256*256+y*256+x]);
 	}

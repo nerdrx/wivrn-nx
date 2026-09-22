@@ -1,4 +1,4 @@
-// Bake a circular native-colour transition into RGB888 on the host.
+// Bake a circular full-resolution colour transition into packed RGB565 on the host.
 #pragma once
 #include "nxwarp_direct.h"
 #include <algorithm>
@@ -20,13 +20,13 @@ inline bool native_center_tile(uint32_t x, uint32_t y, float radius)
 	const float dy = std::max({float(y) - 127.5f, 127.5f - float(y + 31), 0.f});
 	return dx * dx + dy * dy < radius * radius;
 }
-inline size_t native_center_extra(float radius)
+inline size_t native_center_extra(float radius, bool packed = true)
 {
 	size_t tiles = 0;
 	for (uint32_t y = 0; y < 256; y += 32)
 		for (uint32_t x = 0; x < 256; x += 32)
 			tiles += native_center_tile(x, y, radius);
-	return tiles * 1025u * 4u * 2u;
+	return tiles * (packed ? 515u : 1025u) * 4u * 2u;
 }
 // Continuous circular fade; the full-budget core has a 128-pixel diameter.
 inline float native_center_weight(uint32_t x, uint32_t y, float radius = 127.f)
@@ -92,7 +92,8 @@ inline std::span<const uint8_t> native_center_frame(layout l, std::span<const ui
 			uint32_t d = old;
 			if (x >= ox && x < ox + side && y >= oy && y < oy + side && native_center_tile(x - ox, y - oy, radius))
 			{
-				d = native_flag | words;
+				d = native_flag | (l.packed_native ? 0x10000000u : 0u) | words;
+				uint32_t pair = 0;
 				for (uint32_t dy = 0; dy < 32; ++dy)
 					for (uint32_t dx = 0; dx < 32; ++dx)
 					{
@@ -106,10 +107,25 @@ inline std::span<const uint8_t> native_center_frame(layout l, std::span<const ui
 							const float a = float((base >> shift) & 255), b = float((source >> shift) & 255);
 							colour |= uint32_t(std::lround(a + weight * (b - a))) << shift;
 						}
-						append32(out, colour);
+						if (!l.packed_native)
+						{
+							append32(out, colour);
+							continue;
+						}
+						const uint32_t r = (colour >> 16) & 255, g = (colour >> 8) & 255, b = colour & 255;
+						const uint32_t packed = ((r * 31 + 127) / 255) << 11 | ((g * 63 + 127) / 255) << 5 | ((b * 31 + 127) / 255);
+						if (dx % 2 == 0)
+							pair = packed;
+						else
+							append32(out, pair | (packed << 16));
 					}
 				append32(out, 0);
-				words += 1025;
+				if (l.packed_native)
+				{
+					append32(out, 0);
+					append32(out, 0);
+				}
+				words += l.packed_native ? 515 : 1025;
 			}
 			else if (mode != 3)
 			{

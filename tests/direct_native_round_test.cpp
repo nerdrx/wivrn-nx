@@ -9,13 +9,22 @@
 
 using namespace wivrn::nxwarp_direct;
 
+static uint32_t quantized(uint32_t c)
+{
+	uint32_t r = (((c >> 16) & 255) * 31 + 127) / 255, g = (((c >> 8) & 255) * 63 + 127) / 255, b = ((c & 255) * 31 + 127) / 255;
+	return ((r << 3) | (r >> 2)) << 16 | ((g << 2) | (g >> 4)) << 8 | (b << 3) | (b >> 2);
+}
 static uint32_t output_pixel(const frame_view & frame, uint32_t width, uint32_t eye, uint32_t x, uint32_t y)
 {
 	const uint32_t tile = (y / 32) * (width / 32) * 2 + eye * (width / 32) + (x / 32);
 	const uint32_t d = read32(frame.descriptors, tile * 4);
 	if (!(d & (1u << 29)))
 		return native_base_pixel(frame.blocks, d, x % 32, y % 32);
-	return read32(frame.blocks, ((d & 0x1fffffffu) + (y % 32) * 32 + x % 32) * 4);
+	const uint32_t i = (y % 32) * 32 + x % 32;
+	const uint32_t word = read32(frame.blocks, ((d & 0x0fffffffu) + i / 2) * 4);
+	const uint32_t v = (word >> (16 * (i % 2))) & 65535;
+	const uint32_t r = (v >> 11) & 31, g = (v >> 5) & 63, b = v & 31;
+	return ((r << 3) | (r >> 2)) << 16 | ((g << 2) | (g >> 4)) << 8 | (b << 3) | (b >> 2);
 }
 
 static uint32_t blend(uint32_t base, uint32_t source, float weight)
@@ -107,12 +116,12 @@ int main()
 	for (uint32_t eye = 0; eye < eyes; ++eye)
 	{
 		const uint32_t expected_source = source[eye * side * side + 128 * side + 128];
-		assert(output_pixel(*parsed, width, eye, ox + 128, oy + 128) == expected_source);
+		assert(output_pixel(*parsed, width, eye, ox + 128, oy + 128) == quantized(expected_source));
 		assert(output_pixel(*parsed, width, eye, ox, oy) == (old_solid & 0xffffffu));
 		assert(output_pixel(*parsed, width, eye, ox + 255, oy + 255) == (old_solid & 0xffffffu));
 		const uint32_t x = ox + 12, y = oy + 127;
 		const auto weight = native_center_weight(x - ox, y - oy);
-		assert(output_pixel(*parsed, width, eye, x, y) == blend(old_solid, expected_source, weight));
+		assert(output_pixel(*parsed, width, eye, x, y) == quantized(blend(old_solid, expected_source, weight)));
 	}
 	// All palette modes: exact RGB565 expansion and selector interpolation.
 	for (uint32_t mode = 0; mode < 3; ++mode)
@@ -129,5 +138,16 @@ int main()
 		assert(native_base_pixel(blocks, mode << 30, 2u << mode, 0) == 0x5500aau);
 		assert(native_base_pixel(blocks, mode << 30, 3u << mode, 0) == 0x0000ffu);
 	}
+
+	auto exact_layout = l;
+	exact_layout.packed_native = false;
+	std::vector<uint8_t> exact_bytes;
+	auto exact = native_center_frame(exact_layout, raw, source, exact_bytes, 127.f);
+	auto exact_parsed = parse_frame(exact_layout, exact);
+	assert(exact_parsed);
+	unsigned tx = (ox + 128) / 32, ty = (oy + 128) / 32;
+	auto desc = read32(exact_parsed->descriptors, (ty * (width / 32) * 2 + tx) * 4);
+	assert((desc & 0x30000000u) == 0x20000000u);
+	assert(read32(exact_parsed->blocks, (desc & 0xfffffff) * 4) == source[128 * side + 128]);
 	std::puts("native centre circular blend: ok");
 }

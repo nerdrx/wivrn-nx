@@ -32,7 +32,12 @@ vec3 sample_block(uvec2 p) {
 	uint d = tiles.tile[(p.y / 32u) * cols + p.x / 32u];
 	uint mode = d >> 30u;
 	if ((d & 0x20000000u) != 0u) {
-		uint offset = d & 0x1fffffffu;
+		uint offset = d & 0x0fffffffu;
+        uint index = (p.y % 32u) * 32u + p.x % 32u;
+        if ((d & 0x10000000u) != 0u) {
+            uint pair = blocks.block[offset + index / 2u];
+            return vec3(rgb565((pair >> (16u * (index % 2u))) & 65535u)) / 255.0;
+        }
 		uint rgb = blocks.block[offset + (p.y % 32u) * 32u + p.x % 32u];
 		return vec3((rgb >> 16u) & 0xffu, (rgb >> 8u) & 0xffu, rgb & 0xffu) / 255.0;
 	}

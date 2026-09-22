@@ -11,6 +11,7 @@
 #include <fstream>
 #include "nxwarp_direct_recovery.h"
 #include "nxwarp_direct_lz4.h"
+#include "nxwarp_direct_zstd.h"
 #include "nxwarp_stream_grid.h"
 #include "nxwarp_decoder.h"
 #include "application.h"
@@ -967,6 +968,8 @@ bool nxwarp_decoder::on_direct_stream_header(std::span<const uint8_t> header)
 		const bool same = parsed->width == direct_layout.width && parsed->height == direct_layout.height &&
 		                  parsed->eyes == direct_layout.eyes && parsed->native_center == direct_layout.native_center &&
 	                  parsed->native_side == direct_layout.native_side &&
+                          parsed->packed_native == direct_layout.packed_native &&
+                          parsed->zstd == direct_layout.zstd &&
 		                  trusted_lan == direct_trusted_lan && lz4 == direct_lz4 && safety == direct_safety;
 		if (!same)
 			spdlog::error("nxwarp[{}]: changed NXDB geometry/version rejected", stream_index);
@@ -1840,16 +1843,17 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			else payload = payload.subspan(h->prefix_bytes(), h->detail_bytes);
 		}
 		const size_t coded_input_bytes = payload.size();
-		if (nxwarp_direct::is_lz4(payload))
+		if (nxwarp_direct::is_lz4(payload) || nxwarp_direct::is_zstd(payload))
 		{
 			const auto started = std::chrono::steady_clock::now();
-			if (!direct_lz4 || !nxwarp_direct::decompress_lz4(coded_layout, payload, direct_unpacked))
+			if (!direct_lz4 || !(nxwarp_direct::is_zstd(payload) ? (coded_layout.zstd && nxwarp_direct::decompress_zstd(coded_layout, payload, direct_unpacked)) : nxwarp_direct::decompress_lz4(coded_layout, payload, direct_unpacked)))
 			{
 				host.report_frame_not_held(stream_index, job.frame_id, from_headset::nxwarp_frame_not_held::reason::refused);
 				return;
 			}
 			direct_lz4_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 			++direct_lz4_frames;
+            if(nxwarp_direct::is_zstd(payload)) ++direct_zstd_frames;
 			payload = direct_unpacked;
 		}
 		else if (direct_lz4) ++direct_lz4_raw_frames;
@@ -1858,8 +1862,8 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			direct_lz4_input_bytes += coded_input_bytes;
 			direct_lz4_output_bytes += payload.size();
 			if ((direct_lz4_frames + direct_lz4_raw_frames) % 180 == 0)
-				spdlog::info("nxwarp[{}]: LZ4 {} compressed / {} raw units, {} wire / {} unpacked bytes, {:.3f} ms total decompression",
-				        stream_index, direct_lz4_frames, direct_lz4_raw_frames, direct_lz4_input_bytes, direct_lz4_output_bytes, direct_lz4_ms);
+				spdlog::info("nxwarp[{}]: lossless {} compressed ({} Zstd) / {} raw units, {} wire / {} unpacked bytes, {:.3f} ms total decompression",
+				        stream_index, direct_lz4_frames, direct_zstd_frames, direct_lz4_raw_frames, direct_lz4_input_bytes, direct_lz4_output_bytes, direct_lz4_ms);
 		}
 		const auto frame = nxwarp_direct::parse_frame(coded_layout, payload);
 		if (!frame)

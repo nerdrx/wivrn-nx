@@ -460,3 +460,6 @@ if(NOT ANDROID)
 
     install(DIRECTORY "${ASSETS_DIR}" DESTINATION ${CMAKE_INSTALL_DATADIR}/wivrn)
 endif()
+
+FetchContent_GetProperties(nx_zstd)
+file(COPY_FILE "${nx_zstd_SOURCE_DIR}/LICENSE" "${LICENSES_DIR}/Zstandard")

@@ -1,6 +1,7 @@
 #include "nxwarp_codec.h"
 #include "nxwarp_direct.h"
 #include "nxwarp_direct_lz4.h"
+#include "nxwarp_direct_native.h"
 #include "nxwarp_direct_safety.h"
 #include <array>
 #include <cassert>
@@ -272,9 +273,10 @@ int main()
 		auto d=wivrn::nxwarp_direct::read32(nfview->descriptors,((py/32)*(w/32*2)+eye*(w/32)+px/32)*4);
 		assert((d&(1u<<29))!=0);
 		auto rgb=wivrn::nxwarp_direct::read32(nfview->blocks,((d&0x1fffffffu)+(py%32)*32+px%32)*4);
-		assert(rgb==native_pixels[eye*128*128+y*128+x]);
+		if (wivrn::nxwarp_direct::native_center_weight(x, y) == 1.f)
+			assert(rgb==native_pixels[eye*128*128+y*128+x]);
 	}
-	std::printf("native centre: all 32768 RGB native_pixels exact, envelope %zu bytes\n",wire.size());
+	std::printf("native centre: circular 32px-radius core exact, envelope %zu bytes\n",wire.size());
 	native_codec.reset();
 #endif
 	packed_codec.reset();

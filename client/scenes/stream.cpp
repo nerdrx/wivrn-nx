@@ -1100,6 +1100,13 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, scenes::stream::deco
 			                                    return std::abs(frame->view_info.display_time - target);
 		                                    });
 
+		// Independent direct frames prioritize freshness. Their server display timestamps
+		// may be predicted ahead of this refresh; nearest-time selection otherwise keeps
+		// choosing an older decoded image even when a newer complete stereo pair is ready.
+		if (std::ranges::all_of(common_frames, [](auto frame) { return frame->direct_valid; }))
+			min = std::ranges::max_element(common_frames, std::ranges::less{},
+			                              [](auto frame) { return frame->feedback.frame_index; });
+
 #ifdef __ANDROID__
 		char past_property[PROP_VALUE_MAX] = {};
 		if (__system_property_get("debug.wivrn.nx.motion_past", past_property) > 0 and past_property[0] == '1' and

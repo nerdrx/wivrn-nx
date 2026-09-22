@@ -120,3 +120,24 @@ The isolated Pico transport benchmark measured approximately 12.74 ms per frame
 with legacy SHA framing versus 2.90 ms with trusted-LAN CRC framing (4.39×).
 This excludes sockets, GPU work and display; live 500 Mbit/s delivery remains
 unproven. [Workload, raw results and graph](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-22/packet-cost).
+
+## Missing-prefix repair and freshest stereo selection (2026-09-22)
+
+Fixed-chunk direct frames require chunk zero, contiguous indices, exact total
+length and exact chunk sizes. A missing prefix previously allowed body data to
+masquerade as a length and trigger false completion. Sparse/span framing keeps
+its existing behavior. `tests/nxwarp_reassemble_test.cpp` covers both modes.
+
+The viewer selects the newest complete direct stereo pair, avoiding retention
+of older ready images due to predicted source timestamps. Short Pico runs
+measured 44.6 ms receive-to-predicted-display at 200 Mbit/s versus 64.6 ms before;
+83.6 fresh FPS after startup, 89.5 viewer submissions/s. This is not optical
+photon latency. The 500 Mbit/s run still lost too many frames despite zero
+direct-frame validation rejections.
+
+[Measurements and graph](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-22/direct-freshness).
+
+For explicit diagnostic capture only, Android property
+`debug.wivrn.nx.capture_rejected=1` writes one rejected direct unit per decoder
+to the app external data directory as `nxdb-rejected.bin`. Off by default;
+clear the property after capture. Captures may contain image payload data.

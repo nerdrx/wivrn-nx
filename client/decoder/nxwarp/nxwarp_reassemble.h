@@ -83,9 +83,10 @@ size_t chunk_bytes(const nxt::StreamConfig & cfg);
 // arrived" is not the same statement as "the frame is here": on a link that reorders, the
 // datagram carrying the last run routinely overtakes an earlier one, and a frame closed on
 // the flag alone is closed with a hole it was about to fill.
+// Direct streams use fixed_chunks: slot zero and every chunk must be present.
 bool is_complete(const nxt::StreamConfig & cfg,
                  std::span<const std::vector<uint8_t>> by_index,
-                 size_t chunk);
+                 size_t chunk, bool fixed_chunks = false);
 
 // `tiles` is everything Receiver::on_datagram delivered for one frame, in any order.
 // Returns the frame's bytes with the length prefix stripped, or an empty vector if the run
@@ -93,6 +94,6 @@ bool is_complete(const nxt::StreamConfig & cfg,
 // fewer bytes arrived than the prefix says the frame is.
 std::vector<uint8_t> reassemble(const nxt::StreamConfig & cfg,
                                 std::span<const std::vector<uint8_t>> by_index,
-                                size_t chunk);
+                                size_t chunk, bool fixed_chunks = false);
 
 } // namespace wivrn::nxwarp_wire

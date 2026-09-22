@@ -176,6 +176,7 @@ class nxwarp_decoder : public decoder
 	bool planar_direct_active = false;
 	bool direct_block_active = false;
 	bool direct_trusted_lan = false;
+	bool direct_rejected_dumped = false;
 	wivrn::nxwarp_direct::layout direct_layout{};
 	bool borrowed_output_active = false;
 	bool compact_centre_active = false;

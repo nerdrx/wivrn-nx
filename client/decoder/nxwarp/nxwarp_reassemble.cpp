@@ -122,30 +122,43 @@ bool complete(const extent & e)
 {
 	return e.any and e.have_len and e.total >= size_t(kFrameLenBytes) + e.declared;
 }
+
+bool complete_fixed(const extent & e, std::span<const std::vector<uint8_t>> slots, size_t chunk)
+{
+	if (!complete(e) || chunk < kFrameLenBytes || e.lowest != 0)
+		return false;
+	const size_t bytes = size_t(kFrameLenBytes) + e.declared;
+	const size_t count = bytes / chunk + (bytes % chunk != 0);
+	if (e.total != bytes || count > slots.size() || e.present != count || size_t(e.highest) + 1 != count)
+		return false;
+	for (size_t i = 0; i < count; ++i)
+		if (slots[i].size() != std::min(chunk, bytes - i * chunk))
+			return false;
+	return true;
+}
 } // namespace
 
 bool is_complete(const nxt::StreamConfig & cfg,
                  std::span<const std::vector<uint8_t>> by_index,
-                 size_t chunk)
+                 size_t chunk, bool fixed_chunks)
 {
 	(void)cfg;
-	(void)chunk;
 	if (by_index.empty())
 		return false;
-	return complete(scan(by_index));
+	const extent e = scan(by_index);
+	return fixed_chunks ? complete_fixed(e, by_index, chunk) : complete(e);
 }
 
 std::vector<uint8_t> reassemble(const nxt::StreamConfig & cfg,
                                 std::span<const std::vector<uint8_t>> by_index,
-                                size_t chunk)
+                                size_t chunk, bool fixed_chunks)
 {
 	(void)cfg;
-	(void)chunk;
 	std::vector<uint8_t> out;
 	if (by_index.empty())
 		return out;
 	const extent e = scan(by_index);
-	if (not complete(e))
+	if (fixed_chunks ? !complete_fixed(e, by_index, chunk) : !complete(e))
 		return out;
 
 	// Exactly the frame, and not a byte more.

@@ -7,6 +7,7 @@
  * (at your option) any later version.
  */
 
+#include <fstream>
 #include "nxwarp_stream_grid.h"
 #include "nxwarp_decoder.h"
 #include "application.h"
@@ -1158,7 +1159,8 @@ void nxwarp_decoder::push_datagram(to_headset::nxwarp_datagram && dg)
 		if (target->any_tile)
 		{
 			const auto & lead = target->slots[target->lowest];
-			target->have_declared = lead.size() >= nxwarp_wire::kFrameLenBytes;
+			target->have_declared = lead.size() >= nxwarp_wire::kFrameLenBytes &&
+			                        (!direct_block_active || target->lowest == 0);
 			target->declared = target->have_declared
 			                           ? (uint32_t(lead[0]) | (uint32_t(lead[1]) << 8) |
 			                              (uint32_t(lead[2]) << 16) | (uint32_t(lead[3]) << 24))
@@ -1496,7 +1498,7 @@ void nxwarp_decoder::close_frame(inflight_frame & f)
 
 	last_frame_tiles.store(f.tiles_present, std::memory_order_relaxed);
 	const auto t_reasm0 = std::chrono::steady_clock::now();
-	auto unit = nxwarp_wire::reassemble(cfg, f.slots, chunk);
+	auto unit = nxwarp_wire::reassemble(cfg, f.slots, chunk, direct_block_active);
 	{
 		// The network thread's own cost, folded into the worker's report. It is a
 		// different thread, but it is the same frame and the same two-second window,
@@ -1728,6 +1730,19 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		if (!frame)
 		{
 			spdlog::warn("nxwarp[{}]: direct-block frame rejected by bounds/size validation", stream_index);
+#ifdef __ANDROID__
+			// Opt-in, one rejected unit per decoder for off-device diagnosis.
+			char capture[PROP_VALUE_MAX] = {};
+			if (!direct_rejected_dumped && __system_property_get("debug.wivrn.nx.capture_rejected", capture) > 0 && capture[0] == '1')
+			{
+				if (const char * path = application::native_app()->activity->externalDataPath)
+				{
+					std::ofstream file(std::string(path) + "/nxdb-rejected.bin", std::ios::binary);
+					file.write(reinterpret_cast<const char *>(job.unit.data()), job.unit.size());
+					direct_rejected_dumped = file.good();
+				}
+			}
+#endif
 			host.report_frame_not_held(stream_index, job.frame_id,
 			                           from_headset::nxwarp_frame_not_held::reason::refused);
 			return;

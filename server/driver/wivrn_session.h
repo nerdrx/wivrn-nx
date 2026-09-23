@@ -287,6 +287,11 @@ public:
 		connection->send_stream(std::forward<T>(packet));
 	}
 
+	uint8_t send_video_tail_padding(uint8_t count)
+	{
+		return connection->send_video_tail_padding(count);
+	}
+
 	template <typename T>
 	void send_control(T && packet)
 	{

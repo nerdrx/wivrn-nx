@@ -1917,6 +1917,13 @@ struct nxwarp_datagram
 	std::vector<uint8_t> payload;
 };
 
+// Best-effort primary-UDP tail padding for direct video burst experiments. The
+// client deliberately ignores it; it carries no stream or frame state.
+struct stream_padding
+{
+	std::array<uint8_t, 15> bytes{};
+};
+
 using packets = std::variant<
         crypto_handshake,
         pin_check_2,
@@ -1941,7 +1948,8 @@ using packets = std::variant<
         transport_status,
         application_list,
         application_icon,
-        running_applications>;
+        running_applications,
+        stream_padding>;
 } // namespace to_headset
 } // namespace wivrn
 

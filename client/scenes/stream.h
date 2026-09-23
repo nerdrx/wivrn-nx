@@ -772,6 +772,7 @@ public:
 	void operator()(to_headset::video_stream_data_shard &&);
 	void operator()(to_headset::video_stream_parity_shard &&);
 	void operator()(to_headset::nxwarp_datagram &&);
+	void operator()(to_headset::stream_padding &&) {};
 	void operator()(to_headset::motion_field &&);
 	void operator()(to_headset::haptics &&);
 	void operator()(to_headset::timesync_query &&);

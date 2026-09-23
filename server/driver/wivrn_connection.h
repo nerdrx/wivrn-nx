@@ -387,6 +387,10 @@ public:
 		}
 	}
 
+	// Best-effort padding on the primary UDP stream only. It must never follow
+	// the secondary TCP path or fall back to control.
+	uint8_t send_video_tail_padding(uint8_t count);
+
 	std::optional<from_headset::packets> poll_control(int timeout);
 
 	const from_headset::headset_info_packet & info()

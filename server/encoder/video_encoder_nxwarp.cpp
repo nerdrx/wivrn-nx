@@ -39,6 +39,7 @@
 #include <charconv>
 #include <cerrno>
 #include <cmath>
+#include <cctype>
 #include <cstdlib>
 #include <ctime>
 #include <cstring>
@@ -52,6 +53,22 @@
 
 namespace
 {
+uint8_t direct_tail_packets_env()
+{
+	static const uint8_t value = [] {
+		const char * text = std::getenv("NX_DIRECT_TAIL_PACKETS");
+		if (!text || !*text)
+			return uint8_t(0);
+		char * end = nullptr;
+		errno = 0;
+		const unsigned long parsed = std::strtoul(text, &end, 10);
+		if (errno || end == text || *end != '\0' || !std::isdigit(static_cast<unsigned char>(*text)))
+			return uint8_t(0);
+		return uint8_t(std::min(parsed, 64ul));
+	}();
+	return value;
+}
+
 class dummy_idr_handler : public wivrn::idr_handler
 {
 public:
@@ -360,6 +377,7 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	// INTEGRATION-DECISIONS 6. Must be set before the first frame: the watchdog is
 	// polled by the compositor's present path, which is running already.
 	watchdog.set_eligible(false);
+	direct_tail_packets = direct_tail_packets_env();
 
 	base_qp = std::min(63u, option_u32(settings.options, "qp", 28));
 	current_qp = base_qp;
@@ -2564,7 +2582,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 			}
 			if (codec_direct_blocks)
 				U_LOG_I("nxwarp: stream %d encoded %llu frames in %.1f s: %.1f ms/frame (max %.1f), "
-				        "%.0f B/frame at direct byte budget %.3f Mbit/s%s",
+				        "%.0f B/frame at direct byte budget %.3f Mbit/s%s%s",
 				        int(stream_idx),
 				        (unsigned long long)prof_n,
 				        std::chrono::duration<double>(t_enc1 - prof_since).count(),
@@ -2572,7 +2590,8 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 				        prof_max_ms,
 				        achieved,
 				        double(rc_bitrate ? rc_bitrate : uint32_t(std::max(0.0, path_bps))) * 1e-6,
-				        pace_note.c_str());
+				        pace_note.c_str(),
+				        direct_tail_packets ? std::format(", {} cumulative tail-padding packets", (unsigned long long)direct_tail_packets_sent).c_str() : "");
 			else if (rc_auto and rc_target_bytes > 0)
 				U_LOG_I("nxwarp: stream %d encoded %llu frames in %.1f s: %.1f ms/frame (max %.1f), "
 				        "%.0f B/frame vs %.0f target (%+.0f%%), QP %.1f [%u..%u], "
@@ -3023,6 +3042,8 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		           last);
 		packet_sent += bytes;
 	}
+	if (codec_direct_blocks && direct_tail_packets)
+		direct_tail_packets_sent += SendTailPadding(direct_tail_packets);
 
 	in[slot].have_view_info = false;
 	// The frame is on the wire, so its id is spent and the next one follows it.

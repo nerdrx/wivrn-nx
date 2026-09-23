@@ -1074,4 +1074,14 @@ void video_encoder::SendPacket(to_headset::nxwarp_datagram && packet, bool end_o
 	}
 }
 
+uint8_t video_encoder::SendTailPadding(uint8_t count)
+{
+	if (!count)
+		return 0;
+	std::lock_guard lock(mutex);
+	if (cnx && !nxwarp_sink)
+		return cnx->send_video_tail_padding(count);
+	return 0;
+}
+
 } // namespace wivrn

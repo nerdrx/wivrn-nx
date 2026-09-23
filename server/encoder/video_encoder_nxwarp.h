@@ -119,6 +119,8 @@ class video_encoder_nxwarp : public video_encoder
 	// their historical burst by default; an opt-in fraction spreads packets over
 	// part of the frame period to avoid overflowing the AP queue.
 	float direct_packet_window = 0;
+	uint8_t direct_tail_packets = 0;
+	uint64_t direct_tail_packets_sent = 0;
 	// The codec reads the compositor's image itself (nxwarp_codec::accepts_image).
 	// Set once from the codec, and it decides the shape of present_image, of
 	// encode(), and of what this class allocates per slot.

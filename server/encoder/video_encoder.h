@@ -560,6 +560,8 @@ protected:
 	// accounting the bitrate controller reads, which SendData would otherwise do.
 	// Falls back to the control socket when there is no stream socket.
 	void SendPacket(to_headset::nxwarp_datagram && packet, bool end_of_frame);
+	// Optional direct-video experiment: append bounded padding on primary UDP.
+	uint8_t SendTailPadding(uint8_t count);
 
 	// The same on the control (TCP) socket, for the one part of an NX Warp stream
 	// that must not be lost: the codec's stream header.

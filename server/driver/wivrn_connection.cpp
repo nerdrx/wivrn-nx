@@ -261,6 +261,26 @@ void wivrn::wivrn_connection::on_stream_send_error(const std::exception & e)
 	drain_socket_error(stream.get_fd(), "stream socket");
 }
 
+uint8_t wivrn::wivrn_connection::send_video_tail_padding(uint8_t count)
+{
+	if (!active || !stream || selector.on_secondary())
+		return 0;
+	uint8_t sent = 0;
+	for (; sent < count; ++sent)
+	{
+		try
+		{
+			stream.send(to_headset::stream_padding{});
+		}
+		catch (const std::exception & e)
+		{
+			on_stream_send_error(e);
+			break;
+		}
+	}
+	return sent;
+}
+
 void wivrn::wivrn_connection::update_paths()
 {
 	auto now = std::chrono::steady_clock::now();

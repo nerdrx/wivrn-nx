@@ -22,6 +22,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -43,6 +45,8 @@ void bitrate_controller::configure(const config & c, uint32_t ceiling_bps, bool 
 	std::lock_guard lock(mutex);
 
 	conf = c;
+	const char * loss_only_env = std::getenv("WIVRN_BITRATE_AIMD_LOSS_ONLY");
+	aimd_loss_only = loss_only_env && std::strcmp(loss_only_env, "1") == 0;
 	client_enabled = client_enabled_;
 	radio_aware = radio_aware_;
 	client_mode = client_mode_;
@@ -69,6 +73,8 @@ void bitrate_controller::configure(const config & c, uint32_t ceiling_bps, bool 
 		        radio_aware ? "on" : "off");
 	else if (conf.enabled and not client_enabled and eff)
 		U_LOG_I("Automatic bitrate disabled on the headset, using %.1f Mbit/s", eff * to_mbits);
+	if (aimd_loss_only and mode_locked() == mode::aimd)
+		U_LOG_I("AIMD diagnostic: utilisation-only decreases disabled; loss/late protection remains enabled");
 }
 
 uint32_t bitrate_controller::effective_ceiling() const
@@ -910,11 +916,13 @@ std::optional<uint32_t> bitrate_controller::evaluate_aimd(clock::time_point now,
 	// not keeping up stops the controller climbing; it just may not push it down.
 	const bool link_lost_something = s.lost > 0;
 	const size_t late_for_decrease = link_lost_something ? s.late : 0;
-	const bool severe = s.utilisation > utilisation_severe or
+	const bool utilisation_congestion = not aimd_loss_only and s.utilisation > utilisation_decrease;
+	const bool span_severe = not aimd_loss_only and s.utilisation > bitrate_controller::utilisation_severe;
+	const bool severe = span_severe or
 	                    s.lost >= lost_frames_severe or
 	                    late_for_decrease >= late_frames_severe;
 	const bool degraded = severe or
-	                      s.utilisation > utilisation_decrease or
+	                      utilisation_congestion or
 	                      s.lost >= lost_frames_decrease or
 	                      late_for_decrease >= late_frames_decrease;
 	const bool healthy = s.utilisation < utilisation_increase and s.lost == 0 and s.late == 0;

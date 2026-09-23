@@ -102,6 +102,28 @@ those cuts; the severe case first stepped to 400 Mbit/s. The recovery test
 requires actual upward progress and bounds each increase. These are simulated
 feedback results, not a new live Pico measurement.
 
+### AIMD loss-only diagnostic
+
+`WIVRN_BITRATE_AIMD_LOSS_ONLY=1` is an opt-in AIMD diagnostic. It disables
+decreases caused only by the receive-span utilisation signal, while retaining
+the existing loss and late-frame rules. Late frames still count toward a
+decrease only when the same feedback window also contains a lost frame. Healthy
+state, radio handling, ceilings, and all other controller behavior are
+unchanged. This mode therefore does not guarantee a decrease when queue
+congestion appears without packet loss, and is not a global default.
+
+A short matched Pico comparison held much more detail and selected roughly
+89 fresh sources/s instead of 46 with ordinary AIMD. One candidate run still
+had a real loss burst and cut 500 → 400 → 320 Mbit/s; another retained the full
+budget with no incomplete units. This is a diagnostic result, not proof of
+robust recovery under arbitrary congestion. In particular, the unchanged
+healthy threshold can still delay recovery after a real cut.
+[Measurements and timeline](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-23/overnight-gains/aimd-span-report).
+
+The focused virtual-clock check is
+`tests/bitrate_aimd_loss_only_test.cpp`; its portable build command and
+expected output are recorded in `tests/README.md`.
+
 ## Trusted-LAN packet mode
 
 Set `"trusted-lan":"true"` in the direct encoder options to replace the inner

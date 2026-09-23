@@ -1,15 +1,27 @@
-#include "nxwarp_direct_zstd.h"
 #include "nxwarp_codec.h"
 #include "nxwarp_direct.h"
 #include "nxwarp_direct_lz4.h"
 #include "nxwarp_direct_native.h"
 #include "nxwarp_direct_safety.h"
+#include "nxwarp_direct_zstd.h"
 #include <array>
 #include <cassert>
-#include <cstdio>
-#include <cstring>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <iterator>
 #include <memory>
+
+#ifdef NX_DIRECT_PHOTO_FIXTURE
+#include "wivrn_ipc.h"
+std::optional<wivrn::typed_socket<wivrn::UnixDatagram, to_monado::packets, from_monado::packets>> wivrn_ipc_socket_monado;
+extern "C"
+{
+	int listen_socket = -1;
+}
+#endif
 #include <vector>
 #include <vulkan/vulkan.h>
 
@@ -31,8 +43,14 @@ static uint32_t mt(VkPhysicalDevice g, uint32_t bits, VkMemoryPropertyFlags f)
 	std::abort();
 }
 
-int main()
+int main(int argc, char ** argv)
 {
+	if (argc == 2 || argc > 5)
+	{
+		std::fprintf(stderr, "usage: %s INPUT_RGBA8_2160x2160 OUTPUT_NXDF [horizontal_shift] [repeats]\n", argv[0]);
+		return 2;
+	}
+	const int input_shift = argc >= 4 ? std::atoi(argv[3]) : 0;
 	VkApplicationInfo ai{VK_STRUCTURE_TYPE_APPLICATION_INFO, nullptr, "direct-gpu-test", 1, "direct-gpu-test", 1, VK_API_VERSION_1_3};
 	VkInstanceCreateInfo ii{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
 	ii.pApplicationInfo = &ai;
@@ -60,6 +78,9 @@ int main()
 	VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
 	dci.queueCreateInfoCount = 1;
 	dci.pQueueCreateInfos = &qci;
+	VkPhysicalDeviceFeatures features{};
+	vkGetPhysicalDeviceFeatures(gpu, &features);
+	dci.pEnabledFeatures = &features;
 	VkDevice device{};
 	ok(vkCreateDevice(gpu, &dci, nullptr, &device), "device");
 	VkQueue queue{};
@@ -71,6 +92,46 @@ int main()
 	constexpr uint32_t w = NX_DIRECT_TEST_WIDTH, h = NX_DIRECT_TEST_WIDTH, layers = 2;
 	constexpr VkDeviceSize yb = w * h, uvb = (w / 2) * (h / 2) * 2, lb = yb + uvb;
 	std::vector<uint8_t> pixels(lb * layers);
+	if (argc >= 3)
+	{
+		std::ifstream in(argv[1], std::ios::binary);
+		std::vector<uint8_t> rgba(std::istreambuf_iterator<char>(in), {});
+		constexpr uint32_t sw = 2160, sh = 2160;
+		const size_t expected = size_t(sw) * sh * 4;
+		if (rgba.size() != expected)
+		{
+			std::fprintf(stderr, "expected raw RGBA8 %ux%u (%zu bytes), got %zu bytes\n", sw, sh, expected, rgba.size());
+			return 3;
+		}
+		for (uint32_t e = 0; e < layers; ++e)
+		{
+			auto * p = pixels.data() + e * lb;
+			for (uint32_t y = 0; y < h; ++y)
+				for (uint32_t x = 0; x < w; ++x)
+				{
+					const uint32_t sx = std::clamp<int>(int(x) + input_shift, 0, sw - 1), sy = std::min(y, sh - 1);
+					const size_t at = (size_t(sy) * sw + sx) * 4;
+					const float r = rgba[at], g = rgba[at + 1], b = rgba[at + 2];
+					p[y * w + x] = uint8_t(std::clamp(0.2126f * r + 0.7152f * g + 0.0722f * b, 0.f, 255.f));
+				}
+			for (uint32_t y = 0; y < h; y += 2)
+				for (uint32_t x = 0; x < w; x += 2)
+				{
+					float cb = 0, cr = 0;
+					for (uint32_t dy = 0; dy < 2; ++dy)
+						for (uint32_t dx = 0; dx < 2; ++dx)
+						{
+							const uint32_t sx = std::clamp<int>(int(x + dx) + input_shift, 0, sw - 1), sy = std::min(y + dy, sh - 1);
+							const size_t at = (size_t(sy) * sw + sx) * 4;
+							const float r = rgba[at], g = rgba[at + 1], b = rgba[at + 2];
+							cb += -0.1146f * r - 0.3854f * g + 0.5f * b + 128.f;
+							cr += 0.5f * r - 0.4542f * g - 0.0458f * b + 128.f;
+						}
+					p[yb + (y / 2) * (w / 2) * 2 + (x / 2) * 2] = uint8_t(std::clamp(cb / 4.f, 0.f, 255.f));
+					p[yb + (y / 2) * (w / 2) * 2 + (x / 2) * 2 + 1] = uint8_t(std::clamp(cr / 4.f, 0.f, 255.f));
+				}
+		}
+	}
 	auto eye = [&](uint32_t n, uint8_t y, uint8_t cb, uint8_t cr) {
 		auto * p = pixels.data() + n * lb;
 		std::fill(p, p + yb, y);
@@ -80,8 +141,11 @@ int main()
 			p[yb + i + 1] = cr;
 		}
 	};
-	eye(0, 54, 98, 255);
-	eye(1, 18, 255, 116);
+	if (argc < 3)
+	{
+		eye(0, 54, 98, 255);
+		eye(1, 18, 255, 116);
+	}
 	VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
 	bci.size = pixels.size();
 	bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
@@ -162,6 +226,113 @@ int main()
 	si.pCommandBuffers = &cmd;
 	ok(vkQueueSubmit(queue, 1, &si, fence), "upload");
 	ok(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX), "wait");
+	if (argc >= 3)
+	{
+		wivrn::nxwarp_codec_config cfg{};
+		cfg.width = w;
+		cfg.height = h;
+		cfg.eyes = 2;
+		cfg.source_width = 2160;
+		cfg.source_height = 2160;
+		cfg.direct_native_center = true;
+		cfg.safety = true;
+		cfg.direct_lz4 = true;
+		auto codec = wivrn::nxwarp_codec::make_direct(cfg, instance, gpu, device, queue, family);
+		std::ifstream in(argv[1], std::ios::binary);
+		std::vector<uint8_t> rgba(std::istreambuf_iterator<char>(in), {});
+		std::vector<uint32_t> native(2 * 256 * 256);
+		const uint32_t ox = std::clamp<int>((2160 - 256) / 2 + input_shift, 0, 2160 - 256), oy = (2160 - 256) / 2;
+		for (uint32_t y = 0; y < 256; ++y)
+			for (uint32_t x = 0; x < 256; ++x)
+			{
+				size_t a = (size_t(oy + y) * 2160 + ox + x) * 4;
+				native[y * 256 + x] = native[256 * 256 + y * 256 + x] = uint32_t(rgba[a]) << 16 | uint32_t(rgba[a + 1]) << 8 | rgba[a + 2];
+			}
+		codec->set_native_center(native);
+		codec->set_target_bitrate(500'000'000, 90);
+		const int repeats = argc >= 5 ? std::max(1, std::atoi(argv[4])) : 1;
+		std::vector<double> times;
+		std::vector<uint8_t> reference;
+		std::span<const uint8_t> wire;
+		for (int i = 0; i < repeats; ++i)
+		{
+			const auto t = std::chrono::steady_clock::now();
+			wire = codec->encode_image_pair(image, 0, 1, i + 1);
+			const auto end = std::chrono::steady_clock::now();
+			if (i == 0)
+				reference.assign(wire.begin(), wire.end());
+			else if (!std::equal(wire.begin(), wire.end(), reference.begin(), reference.end()))
+				return 13;
+			if (i >= 5)
+				times.push_back(std::chrono::duration<double, std::milli>(end - t).count());
+		}
+		if (!times.empty())
+		{
+			std::sort(times.begin(), times.end());
+			std::printf("encode GPU+CPU median %.6f ms p95 %.6f ms wire %zu, %d exact repeats\n", times[times.size() / 2], times[(times.size() * 95 + 99) / 100 - 1], wire.size(), repeats);
+		}
+		const auto full = wivrn::nxwarp_direct::parse_stream(codec->stream_header());
+		if (!full)
+			return 15;
+		auto sh = wivrn::nxwarp_direct::parse_safety_header(*full, wire);
+		if (!sh)
+		{
+			std::fprintf(stderr, "safety parse failure bytes=%zu", wire.size());
+			for (size_t at = 0; at + 4 <= std::min<size_t>(wire.size(), 32); at += 4)
+				std::fprintf(stderr, " %08x", wivrn::nxwarp_direct::read32(wire, at));
+			std::fprintf(stderr, "\n");
+			return 4;
+		}
+		auto safety = wire.subspan(32, sh->safety_bytes);
+		std::vector<uint8_t> safety_raw;
+		const auto low = sh->low;
+		if (wivrn::nxwarp_direct::is_lz4(safety))
+		{
+			if (!wivrn::nxwarp_direct::decompress_lz4(low, safety, safety_raw))
+				return 10;
+			safety = safety_raw;
+		}
+		if (!wivrn::nxwarp_direct::parse_frame(low, safety))
+			return 11;
+		std::ofstream safety_out(std::string(argv[2]) + ".safety.nxdf", std::ios::binary);
+		safety_out.write(reinterpret_cast<const char *>(safety.data()), safety.size());
+		if (!safety_out)
+			return 12;
+		auto detail = wire.subspan(sh->prefix_bytes(), sh->detail_bytes);
+		std::vector<uint8_t> raw;
+		if (wivrn::nxwarp_direct::is_lz4(detail))
+		{
+			if (!wivrn::nxwarp_direct::decompress_lz4(*full, detail, raw))
+				return 5;
+			detail = raw;
+		}
+		else if (wivrn::nxwarp_direct::is_zstd(detail))
+		{
+			if (!wivrn::nxwarp_direct::decompress_zstd(*full, detail, raw))
+				return 14;
+			detail = raw;
+		}
+
+		const auto nl = *full;
+		const auto parsed = wivrn::nxwarp_direct::parse_frame(nl, detail);
+		if (!parsed || w != 2176)
+			return 7;
+		const unsigned origin = ((w - 256) / 2) & ~31u;
+		for (unsigned e = 0; e < 2; ++e)
+		{
+			const unsigned x = 128, y = 128, px = origin + x, py = origin + y;
+			const auto d = wivrn::nxwarp_direct::read32(parsed->descriptors, ((py / 32) * (w / 32 * 2) + e * (w / 32) + px / 32) * 4);
+			if (!(d & (1u << 29)) || (d & (1u << 28)))
+				return 8;
+			const auto rgb = wivrn::nxwarp_direct::read32(parsed->blocks, ((d & 0x0fffffffu) + (py % 32) * 32 + px % 32) * 4);
+			if (rgb != native[e * 256 * 256 + y * 256 + x])
+				return 9;
+		}
+		std::printf("validated GPU NXDF %ux%u: %zu bytes, native centre exact\n", w, h, detail.size());
+		std::ofstream out(argv[2], std::ios::binary);
+		out.write(reinterpret_cast<const char *>(detail.data()), detail.size());
+		return out ? 0 : 6;
+	}
 
 	wivrn::nxwarp_codec_config cfg{};
 	cfg.width = w;

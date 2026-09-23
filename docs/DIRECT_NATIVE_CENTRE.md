@@ -41,3 +41,11 @@ Short paired photo workloads showed unchanged app GPU-pass time, but one busy-sc
 The default direct-frame selection still chooses the newest completed stereo image. The diagnostic Android property `debug.wivrn.nx.direct_nearest=1` (desktop `WIVRN_NX_DIRECT_NEAREST=1`) instead uses the existing nearest-display-target selection. It is read once per client process, so reconnect after restarting the app to change modes. Safety-image selection remains unchanged.
 
 A paired crowded-photo run increased fresh-source selection from 87.0 to 89.15 FPS, but increased the approximate client first-arrival-to-predicted-display interval from 41.2 to 47.72 ms. This is a smoothness/age tradeoff, not a latency improvement; newest remains the default. [Numeric evidence](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-23/photo-selection).
+
+### Exact repeat reuse and optional byte prediction
+
+The encoder now reuses a compressed result when the complete raw frame and compression policy match exactly. The cache owns both byte arrays and compares every byte; there is no hash-only acceptance or cross-frame decoder dependency. It is enabled by default. Set `NX_DIRECT_COMPRESSION_CACHE=0` for paired measurements. Changing frames still use the normal compressor.
+
+`NX_DIRECT_PREDICTOR=1`, together with `NX_DIRECT_ZSTD=1`, enables an experimental lossless byte predictor before Zstd. Each byte records its difference from the byte four positions earlier; the decoder restores the original bytes inside the same frame. The encoder compares ordinary and predicted Zstd and requires another 5% reduction before choosing prediction. Existing LZ4/raw fallback remains available. This spends additional PC work and adds a small decoder pass; it is off by default.
+
+Predictor-capable stream versions are 17/18 for RGB888 and 19/20 for RGB565. NXDZ envelope version 2 denotes predicted bytes; version 1 remains ordinary Zstd. Both endpoints must support the new stream version. Old clients reject it rather than interpreting incompatible data. Frame bounds and decompressed-size validation remain enabled.

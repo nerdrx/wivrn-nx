@@ -16,6 +16,7 @@ struct layout
 	uint32_t native_side = 256;
 	bool packed_native = true;
 	bool zstd = false;
+	bool predictor = false;
 	bool valid() const
 	{
 		return width && height && width <= 4096 && height <= 4096 &&
@@ -52,11 +53,12 @@ inline bool is_stream(std::span<const uint8_t> b)
 // Versions 9/10 expand the native container to 256x256.
 // Versions 11/12 additionally permit packed RGB565 native pixels (descriptor bit 28).
 // Versions 13/14: RGB888 + optional Zstd; 15/16: RGB565 + optional Zstd.
+// Versions 17/18: RGB888 + optional byte predictor; 19/20: RGB565 + predictor.
 // Native RGB tiles use NXDF v2; legacy payloads remain v1.
 // Older clients reject unsupported stream versions.
 inline std::vector<uint8_t> stream_header(layout l, bool trusted_lan = false, bool lz4 = false, bool safety = false)
 {
-	if (!l.valid() || (l.zstd && !l.native_center) || (l.native_center && (l.packed_native || l.zstd) && l.native_side != 256))
+	if (!l.valid() || (l.zstd && !l.native_center) || (l.predictor && !l.zstd) || (l.native_center && (l.packed_native || l.zstd) && l.native_side != 256))
 		return {};
 	std::vector<uint8_t> b;
 	b.reserve(32);
@@ -64,7 +66,7 @@ inline std::vector<uint8_t> stream_header(layout l, bool trusted_lan = false, bo
 		return {};
 	// Native streams always use the safety+LZ4 envelope; 7/8 retain the
 	// existing odd/even CRC/trusted-LAN distinction.
-	const uint32_t base = l.native_center ? (l.zstd ? (l.packed_native ? 15u : 13u) : l.packed_native ? 11u
+	const uint32_t base = l.native_center ? (l.zstd ? (l.predictor ? (l.packed_native ? 19u : 17u) : (l.packed_native ? 15u : 13u)) : l.packed_native ? 11u
 	                                                                          : l.native_side == 128  ? 7u
 	                                                                                                  : 9u)
 	                                      : (safety ? 5u : lz4 ? 3u
@@ -75,14 +77,16 @@ inline std::vector<uint8_t> stream_header(layout l, bool trusted_lan = false, bo
 }
 inline std::optional<layout> parse_stream(std::span<const uint8_t> b)
 {
-	if (b.size() != 32 || !is_stream(b) || (read32(b, 4) < 1 || read32(b, 4) > 16))
+	if (b.size() != 32 || !is_stream(b) || (read32(b, 4) < 1 || read32(b, 4) > 20))
 		return {};
 	const uint32_t stream_version = read32(b, 4);
 	const bool native = stream_version >= 7;
 	const bool safety = stream_version >= 5;
 	if (native && !safety)
 		return {};
-	layout l{read32(b, 8), read32(b, 12), read32(b, 16), native, stream_version >= 9 ? 256u : 128u, (stream_version >= 11 && stream_version <= 12) || stream_version >= 15, stream_version >= 13};
+	layout l{read32(b, 8), read32(b, 12), read32(b, 16), native, stream_version >= 9 ? 256u : 128u,
+	          (stream_version >= 11 && stream_version <= 12) || (stream_version >= 15 && stream_version <= 16) || stream_version >= 19,
+	          stream_version >= 13, stream_version >= 17};
 	if (!l.valid() || (native && (l.eyes != 2 || l.width < l.native_side || l.height < l.native_side)) || read32(b, 20) != l.tile_count() || read32(b, 24) != l.max_block_words() || read32(b, 28) != l.max_frame_bytes())
 		return {};
 	return l;

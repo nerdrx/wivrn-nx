@@ -4,6 +4,7 @@
 #include "nxwarp_codec.h"
 #include "nxwarp_compression_credit.h"
 #include "nxwarp_direct_admission.h"
+#include "nxwarp_direct_compression_cache.h"
 #include "nxwarp_direct_layout.h"
 #include "nxwarp_direct_lz4.h"
 #include "nxwarp_direct_native.h"
@@ -36,6 +37,7 @@ nxwarp_direct::layout direct_geometry(const nxwarp_codec_config & c)
 	};
 	l.packed_native = enabled("NX_DIRECT_NATIVE_RGB565") && !enabled("NX_DIRECT_NATIVE_RGB888");
 	l.zstd = l.native_center && enabled("NX_DIRECT_ZSTD");
+	l.predictor = l.zstd && enabled("NX_DIRECT_PREDICTOR");
 	return l;
 }
 class direct_codec final : public nxwarp_codec
@@ -66,20 +68,39 @@ class direct_codec final : public nxwarp_codec
 	std::vector<uint8_t> header;
 	bool lz4_enabled = false;
 	std::atomic_bool lz4_hc = false;
-	std::vector<uint8_t> compressed, cached_raw, native_frame, zstd_compressed;
+	std::vector<uint8_t> compressed, cached_raw, native_frame, zstd_compressed, zstd_predicted, predictor_scratch;
+	nxwarp_direct::exact_compression_cache compression_cache;
+	bool compression_cache_enabled = true;
 	std::span<const uint32_t> native_pixels;
 	float native_radius = 0;
 	bool credit_enabled = false, plan_dirty = false;
 	nxwarp_direct::compression_credit credit;
 	std::span<const uint8_t> pack_detail(std::span<const uint8_t> raw, std::vector<uint8_t> & out, bool hc)
 	{
+		const nxwarp_direct::compression_cache_policy policy{
+			hc, geometry.zstd, geometry.width, geometry.height, geometry.eyes, geometry.predictor};
+		if (compression_cache_enabled && compression_cache.lookup(raw, policy, out))
+			return out;
 		auto fast = hc ? nxwarp_direct::compress_lz4_hc(raw, out) : nxwarp_direct::compress_lz4(raw, out);
 		if (geometry.zstd)
 		{
 			auto dense = nxwarp_direct::compress_zstd(raw, zstd_compressed);
+			if (geometry.predictor)
+			{
+				auto predicted = nxwarp_direct::compress_zstd_predicted(raw, zstd_predicted, predictor_scratch);
+				// Spend PC work only when it removes at least 5% more wire bytes.
+				if (predicted.size() * 100 <= dense.size() * 95)
+					dense = predicted;
+			}
 			if (dense.size() * 100 <= fast.size() * 90)
+			{
+				if (compression_cache_enabled)
+					compression_cache.store(raw, policy, dense);
 				return dense;
+			}
 		}
+		if (compression_cache_enabled)
+			compression_cache.store(raw, policy, fast);
 		return fast;
 	}
 	std::span<const uint8_t> finish_frame(std::span<const uint8_t> wire)
@@ -186,6 +207,8 @@ public:
 	        geometry{direct_geometry(c)}, source_width(c.source_width ? c.source_width : c.width), source_height(c.source_height ? c.source_height : c.height), physical(p), device(d), queue(q), family(f), header(nxwarp_direct::stream_header(geometry, c.trusted_lan, c.direct_lz4, c.safety)), lz4_enabled(c.direct_lz4), safety_enabled(c.safety)
 	{
 		lz4_hc = false;
+		const char * cache_env = std::getenv("NX_DIRECT_COMPRESSION_CACHE");
+		compression_cache_enabled = !cache_env || std::strcmp(cache_env, "0") != 0;
 		const char * wire_env = std::getenv("NX_DIRECT_WIRE_ADMISSION");
 		wire_admission = lz4_enabled && (!wire_env || std::strcmp(wire_env, "0") != 0);
 		const char * credit_env = std::getenv("NX_DIRECT_COMPRESSION_CREDIT");
@@ -426,13 +449,12 @@ public:
 		}
 		std::span<const uint8_t> safety_wire = safety_raw;
 		std::span<const uint8_t> detail_wire = raw;
-		std::vector<uint8_t> detail_compressed;
 		if (lz4_enabled)
 		{
 			// The child owns and caches its optional LZ4 result, so do not
 			// revisit its mapped Vulkan memory or wrap an existing NXDL envelope.
 			safety_wire = safety_raw;
-			detail_wire = pack_detail(raw, detail_compressed, use_hc);
+			detail_wire = pack_detail(raw, compressed, use_hc);
 		}
 		frame.clear();
 		frame.reserve(32 + safety_wire.size() + detail_wire.size());

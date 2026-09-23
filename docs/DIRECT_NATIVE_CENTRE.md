@@ -49,3 +49,33 @@ The encoder now reuses a compressed result when the complete raw frame and compr
 `NX_DIRECT_PREDICTOR=1`, together with `NX_DIRECT_ZSTD=1`, enables an experimental lossless byte predictor before Zstd. Each byte records its difference from the byte four positions earlier; the decoder restores the original bytes inside the same frame. The encoder compares ordinary and predicted Zstd and requires another 5% reduction before choosing prediction. Existing LZ4/raw fallback remains available. This spends additional PC work and adds a small decoder pass; it is off by default.
 
 Predictor-capable stream versions are 17/18 for RGB888 and 19/20 for RGB565. NXDZ envelope version 2 denotes predicted bytes; version 1 remains ordinary Zstd. Both endpoints must support the new stream version. Old clients reject it rather than interpreting incompatible data. Frame bounds and decompressed-size validation remain enabled.
+
+## Bounded live timing profile (23 September)
+
+A paired Pico experiment used the existing Android settings below, with a 90 Hz
+refresh rate and fixed 500 Mbit/s requested quality budget:
+
+```sh
+adb shell setprop debug.wivrn.nx.jit_max_sleep_us 5000
+adb shell setprop debug.wivrn.nx.ready_wait_us 4000
+```
+
+Restart the headset app before reconnecting. The first caps JIT sleep; the second
+allows a bounded wait for a completed stereo image only when presentation would
+otherwise repeat, retaining the existing display-deadline reserve. Neither adds
+a GPU pass. These are experimental settings, not changed global defaults.
+
+In four 120-second duplicated-photo runs, the combined settings changed mean
+fresh-source selection from 88.52 to 89.54 per second and derived software delay
+from 46.63 to 42.62 ms. Those figures do not measure physical motion-to-photon
+latency, unique scene updates, or arbitrary game motion. The 5 ms JIT setting on
+its own was inconsistent; do not attribute the combined result to it alone.
+
+Clear both properties and restart the app to restore the default timing:
+
+```sh
+adb shell setprop debug.wivrn.nx.jit_max_sleep_us '""'
+adb shell setprop debug.wivrn.nx.ready_wait_us '""'
+```
+
+[Paired measurements and limitations](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-23/overnight-gains/ready-abba-report).

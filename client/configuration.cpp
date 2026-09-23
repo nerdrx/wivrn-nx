@@ -471,6 +471,25 @@ float configuration::get_default_stream_scale() const
 	return 0.5;
 }
 
+// Non-persistent controller switch for controlled headset experiments. Set
+// debug.wivrn.test.bitrate_mode to aimd, bbr, or server before launch; invalid
+// and absent values preserve the saved preference. Nothing is written back.
+std::optional<wivrn::bitrate_mode> configuration::bitrate_control() const
+{
+#ifdef __ANDROID__
+	char value[PROP_VALUE_MAX]{};
+	if (__system_property_get("debug.wivrn.test.bitrate_mode", value) > 0)
+	{
+		const std::string_view mode(value);
+		if (mode == "aimd") return wivrn::bitrate_mode::aimd;
+		if (mode == "bbr") return wivrn::bitrate_mode::bbr;
+		if (mode == "server") return std::nullopt;
+	}
+#endif
+	if (not bitrate_bbr) return std::nullopt;
+	return *bitrate_bbr ? wivrn::bitrate_mode::bbr : wivrn::bitrate_mode::aimd;
+}
+
 // Non-persistent switch for controlled headset-warp experiments. An empty or
 // unknown value follows the user's saved setting.
 wivrn::motion_mode configuration::motion_mode() const

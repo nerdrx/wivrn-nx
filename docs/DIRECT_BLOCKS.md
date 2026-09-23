@@ -44,6 +44,11 @@ Android development presets `debug.wivrn.test.bitrate_mbps` (1–800) and
 save the setting. Clear each property after use to avoid overriding later UI
 changes. Clearing a property does not restore the previous saved setting.
 
+For controller A/B runs, `debug.wivrn.test.bitrate_mode` is a non-persistent
+startup override: `aimd` forces the original controller, `bbr` forces Adaptive
+v2, and `server` leaves the choice to the server default. Missing or invalid
+values preserve the saved headset preference; this property never writes it.
+
 ## Representation
 
 Version 1 uses a 32-byte NXDB stream header and a 16-byte NXDF frame header,

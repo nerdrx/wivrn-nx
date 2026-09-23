@@ -41,3 +41,9 @@ Short paired photo workloads showed unchanged app GPU-pass time, but one busy-sc
 A long receive span does not establish that a compressed frame filled the connection. The BBR-style estimator now also requires at least half the current nominal frame budget before admitting a delivery-rate capacity sample. Small compressed frames still contribute to loss and receive-utilisation checks. This prevents their low offered byte rate from becoming an artificial capacity limit, while severe delay and loss still reduce bitrate. The 50% gate is a conservative heuristic, not a capacity measurement.
 
 Virtual-clock regression checks cover the false-capacity case, late-only underloaded traffic, real loss, and severe receive-span congestion. Live validation is reported separately from those tests.
+
+## Optional selection comparison
+
+The default direct-frame selection still chooses the newest completed stereo image. The diagnostic Android property `debug.wivrn.nx.direct_nearest=1` (desktop `WIVRN_NX_DIRECT_NEAREST=1`) instead uses the existing nearest-display-target selection. It is read once per client process, so reconnect after restarting the app to change modes. Safety-image selection remains unchanged.
+
+A paired crowded-photo run increased fresh-source selection from 87.0 to 89.15 FPS, but increased the approximate client first-arrival-to-predicted-display interval from 41.2 to 47.72 ms. This is a smoothness/age tradeoff, not a latency improvement; newest remains the default. [Numeric evidence](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-23/photo-selection).

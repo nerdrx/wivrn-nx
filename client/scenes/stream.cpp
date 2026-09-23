@@ -84,6 +84,23 @@ static bool motion_source_clock_enabled()
 #endif
 }
 
+// Opt-in selection experiment; cached once so the render loop never rereads the property.
+static bool direct_nearest_enabled()
+{
+	static const bool enabled = [] {
+#ifdef __ANDROID__
+		char value[PROP_VALUE_MAX] = {};
+		const bool on = __system_property_get("debug.wivrn.nx.direct_nearest", value) > 0 && value[0] == '1';
+#else
+		const char * value = std::getenv("WIVRN_NX_DIRECT_NEAREST");
+		const bool on = value && value[0] == '1';
+#endif
+		spdlog::info("NX direct selection mode: {}", on ? "nearest-target" : "newest-direct");
+		return on;
+	}();
+	return enabled;
+}
+
 static bool motion_cap_enabled()
 {
 #ifdef __ANDROID__
@@ -1131,7 +1148,7 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, scenes::stream::deco
 		// Independent direct frames prioritize freshness. Their server display timestamps
 		// may be predicted ahead of this refresh; nearest-time selection otherwise keeps
 		// choosing an older decoded image even when a newer complete stereo pair is ready.
-		if (std::ranges::all_of(common_frames, [](auto frame) { return frame->direct_valid; }))
+		if (not direct_nearest_enabled() && std::ranges::all_of(common_frames, [](auto frame) { return frame->direct_valid; }))
 			min = std::ranges::max_element(common_frames, std::ranges::less{},
 			                              [](auto frame) { return frame->feedback.frame_index; });
 

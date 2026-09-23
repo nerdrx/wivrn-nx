@@ -107,17 +107,22 @@ feedback results, not a new live Pico measurement.
 `WIVRN_BITRATE_AIMD_LOSS_ONLY=1` is an opt-in AIMD diagnostic. It disables
 decreases caused only by the receive-span utilisation signal, while retaining
 the existing loss and late-frame rules. Late frames still count toward a
-decrease only when the same feedback window also contains a lost frame. Healthy
-state, radio handling, ceilings, and all other controller behavior are
-unchanged. This mode therefore does not guarantee a decrease when queue
+decrease only when the same feedback window also contains a lost frame.
+In this mode, recovery requires zero lost and late frames and a receive span
+below 1.10 refresh periods, rather than the ordinary AIMD limit of 0.60. This
+allows bounded upward probing when receiver scheduling spans nearly a refresh.
+Radio handling, ceilings, increase sizes, and cooldowns remain unchanged.
+This mode therefore does not guarantee a decrease when queue
 congestion appears without packet loss, and is not a global default.
 
 A short matched Pico comparison held much more detail and selected roughly
 89 fresh sources/s instead of 46 with ordinary AIMD. One candidate run still
 had a real loss burst and cut 500 → 400 → 320 Mbit/s; another retained the full
 budget with no incomplete units. This is a diagnostic result, not proof of
-robust recovery under arbitrary congestion. In particular, the unchanged
-healthy threshold can still delay recovery after a real cut.
+robust recovery under arbitrary congestion.
+The original diagnostic retained the 0.60 healthy threshold and stalled after
+real cuts; the recovery-gate change addresses that case. Continued loss, late
+frames, slow receive spans, or radio holds can still delay recovery.
 [Measurements and timeline](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-23/overnight-gains/aimd-span-report).
 
 The focused virtual-clock check is
@@ -272,3 +277,5 @@ The September 22 source profile also reduces full/half-detail base radii from
 gradually outside normalized radius 0.65 to twice their width at radius 1.0.
 Sample reads per block and the headset shader remain unchanged. This softens
 source detail; four-color block quantization can still produce visible edges.
+
+[Recovery-gate device check and limitations](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-23/recovery-gate).

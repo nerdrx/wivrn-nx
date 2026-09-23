@@ -925,7 +925,11 @@ std::optional<uint32_t> bitrate_controller::evaluate_aimd(clock::time_point now,
 	                      utilisation_congestion or
 	                      s.lost >= lost_frames_decrease or
 	                      late_for_decrease >= late_frames_decrease;
-	const bool healthy = s.utilisation < utilisation_increase and s.lost == 0 and s.late == 0;
+	// This mode tolerates receive scheduling that spans almost one refresh.
+	// Requiring the ordinary 0.60 threshold here prevents recovery indefinitely.
+	// Keep a bounded span and zero lost/late frames before probing upward.
+	const double recovery_span = aimd_loss_only ? 1.10 : utilisation_increase;
+	const bool healthy = s.utilisation < recovery_span and s.lost == 0 and s.late == 0;
 
 	const uint32_t previous = bitrate;
 	const char * reason = nullptr;

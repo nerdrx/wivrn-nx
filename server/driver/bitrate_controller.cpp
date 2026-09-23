@@ -981,7 +981,9 @@ std::optional<uint32_t> bitrate_controller::evaluate_aimd(clock::time_point now,
 
 		if (st == state::recovering)
 		{
-			if (held < (first_recovery_step ? recovery_confirm : recovery_step_interval))
+			const auto hold = aimd_loss_only ? std::chrono::milliseconds{250} :
+			                  (first_recovery_step ? recovery_confirm : recovery_step_interval);
+			if (held < hold)
 				return {};
 
 			bitrate = std::min(recovery_target, clamp(uint64_t(bitrate * recovery_factor)));
@@ -998,10 +1000,15 @@ std::optional<uint32_t> bitrate_controller::evaluate_aimd(clock::time_point now,
 			if (radio_hold)
 				return {};
 
-			if (held < increase_hold or bitrate >= effective_ceiling())
+			const auto hold = aimd_loss_only ? std::chrono::milliseconds{250} : increase_hold;
+			if (held < hold or bitrate >= effective_ceiling())
 				return {};
 
 			uint32_t step = std::max<uint32_t>(increase_step_min, uint32_t(effective_ceiling() * increase_step_ratio));
+			// Clean loss-only feedback permits a proportional probe after a deep cut.
+			// Keep ordinary AIMD additive and retain the ceiling and radio hold.
+			if (aimd_loss_only)
+				step = std::max(step, uint32_t(bitrate * (recovery_factor - 1.0)));
 			bitrate = clamp(uint64_t(bitrate) + step);
 			recovery_target = bitrate;
 			reason = "spare capacity";

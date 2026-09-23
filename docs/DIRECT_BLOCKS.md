@@ -111,7 +111,13 @@ decrease only when the same feedback window also contains a lost frame.
 In this mode, recovery requires zero lost and late frames and a receive span
 below 1.10 refresh periods, rather than the ordinary AIMD limit of 0.60. This
 allows bounded upward probing when receiver scheduling spans nearly a refresh.
-Radio handling, ceilings, increase sizes, and cooldowns remain unchanged.
+Radio handling, ceilings, and decrease cooldowns remain unchanged.
+The loss-only mode now uses a 250 ms clean confirmation after enough fresh
+feedback samples arrive, and steady upward probes of at least 15% of the
+current bitrate (or the ordinary additive step, whichever is larger).
+This replaces the previous 1 s steady hold and small additive-only climb.
+It is not a promise of one increase every 250 ms: fresh-sample collection,
+loss, lateness, receive span, and radio holds still gate each probe.
 This mode therefore does not guarantee a decrease when queue
 congestion appears without packet loss, and is not a global default.
 
@@ -279,3 +285,10 @@ Sample reads per block and the headset shader remain unchanged. This softens
 source detail; four-color block quantization can still produce visible edges.
 
 [Recovery-gate device check and limitations](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-23/recovery-gate).
+
+A deterministic 90 Hz feedback trace with three seconds of loss, then clean
+0.96-period delivery, recovered from 327.68 to 1000 Mbit/s in 7.90 seconds
+after loss ended, versus 55.21 seconds with the previous recovery gate.
+Normal and NDEBUG checks passed; the previous controller fails the new
+10-second regression bound. This is simulated controller feedback, not Wi-Fi
+throughput or a live Pico recovery measurement.

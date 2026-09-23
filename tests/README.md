@@ -19,11 +19,10 @@ g++ -std=c++23 \
 ./bitrate_aimd_loss_only_test | tee bitrate_aimd_loss_only_test.log
 ```
 
-Expected output is similar to:
-
-```text
-default_span=40000000 loss_only_span=50000000 loss_only_loss=40000000
-```
+The check covers clean recovery to the full 1 Gbit/s ceiling after sustained
+loss, ordinary-mode behavior, and loss/late/span guards. It prints recovery
+times in simulated nanoseconds; these are not live network measurements.
+Repeat compilation with `-DNDEBUG` to verify checks remain active.
 
 The log file is written in the checkout so it can be retained with the test
 evidence; it contains no image or device data.

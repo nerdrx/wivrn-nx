@@ -418,15 +418,7 @@ void bitrate_controller::close_frame(frame_state & frame, clock::time_point now)
 		double rate = 0;
 		// Only a frame that actually loaded the link says anything about how much the
 		// link can carry. See app_limited_wire_fraction.
-		// A compressed/app-limited frame may have a long receive span without
-		// offering enough bytes to say anything about bottleneck capacity. Keep
-		// that frame in utilisation/loss accounting, but exclude it from the
-		// delivered-bandwidth estimator. The nominal budget is the controller's
-		// target when sending began, not an assumption about the link's capacity.
-		const bool nominally_loaded = frame.nominal_frame_bits > 0 and
-		                             8.0 * double(frame.bytes) >=
-		                                     frame.nominal_frame_bits * app_limited_load_fraction;
-		if (mode_locked() == mode::bbr and wire_ns > 0 and frame.bytes and wire_ns >= min_loaded_wire_ns() and nominally_loaded)
+		if (mode_locked() == mode::bbr and wire_ns > 0 and frame.bytes and wire_ns >= min_loaded_wire_ns())
 		{
 			rate = 8e9 * double(frame.bytes) / double(wire_ns);
 			bandwidth.update(rate, now, estimator_window);
@@ -478,8 +470,6 @@ void bitrate_controller::on_frame_bytes(uint64_t frame_index, uint8_t stream_ind
 		close_frame(frame, now);
 		frame.index = frame_index;
 	}
-	if (frame.bytes == 0 and bitrate > 0 and frame_period > 0)
-		frame.nominal_frame_bits = double(bitrate) * double(frame_period) / 1e9;
 
 	frame.bytes += bytes;
 }

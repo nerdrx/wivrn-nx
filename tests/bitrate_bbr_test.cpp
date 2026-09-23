@@ -381,6 +381,36 @@ void part_e()
 
 	CHECK(h.current() == settled_at);
 
+	// A compressed photo can still occupy a visible receive span, without
+	// offering enough bytes to measure link capacity. Its nominal target is
+	// 50 Mbit/s, but 15 kB is far below half a 90 Hz frame budget; this must
+	// remain app-limited rather than collapsing the controller to ~11 Mbit/s.
+	harness photo(mode::bbr, 500e6);
+	for (int i = 0; i < 900; ++i)
+		photo.feed_raw(15'000, 11'000'000);
+	CHECK(photo.current() == ceiling);
+
+	// The same underloaded bytes must still participate in acute loss handling.
+	// The load guard only suppresses capacity samples; it must not suppress loss.
+	harness lossy_photo(mode::bbr, 500e6);
+	for (int i = 0; i < 180; ++i)
+		lossy_photo.feed_raw(15'000, 11'000'000, i % 6 == 0);
+	CHECK(lossy_photo.current() < ceiling);
+
+	// Late delivery without loss still follows the underloaded path. It must not
+	// become a capacity sample or trigger a bitrate decrease by itself.
+	harness late_photo(mode::bbr, 500e6);
+	for (int i = 0; i < 900; ++i)
+		late_photo.feed_raw(15'000, 11'000'000, false, true);
+	CHECK(late_photo.current() == ceiling);
+
+	// A genuinely late, underloaded stream still exercises the utilisation
+	// backoff. Suppressing false capacity samples must not hide this signal.
+	harness delayed_photo(mode::bbr, 500e6);
+	for (int i = 0; i < 180; ++i)
+		delayed_photo.feed_raw(15'000, 25'000'000);
+	CHECK(delayed_photo.current() < ceiling);
+
 	// And once real frames come back, the real link is still what is measured.
 	CHECK(near(h.quiet(), settled(20e6)));
 }

@@ -302,6 +302,11 @@ public:
 	// micro-burst and the measurement is quantisation noise on a stopwatch, not a capacity.
 	// See the app-limited discussion above.
 	static constexpr double app_limited_wire_fraction = 0.30;
+	// A long span alone is insufficient: a highly compressed frame can take a
+	// measurable time while still offering far less than the current bitrate.
+	// Require half the nominal per-frame budget before treating delivery as a
+	// capacity sample. Underloaded frames still feed utilisation/loss decisions.
+	static constexpr double app_limited_load_fraction = 0.50;
 	// The same idea with pacing switched off, where there is no window to be a fraction of:
 	// a frame must have occupied at least this much of a frame period.
 	static constexpr double unpaced_wire_fraction = 0.10;
@@ -533,6 +538,10 @@ private:
 		// Bytes put on the wire for this frame, summed over the video streams. Filled in
 		// from the encoder's send path, v2 only.
 		uint64_t bytes = 0;
+		// Nominal frame bits at send time, captured before the first byte arrives.
+		// Zero means the pacer period or target was unavailable; such a frame is never
+		// admitted as a capacity sample at close, even if a later shard has a period.
+		double nominal_frame_bits = 0;
 	};
 
 	struct sample

@@ -35,3 +35,9 @@ Compressed direct streams now settle frame admission using the complete encoded 
 On this Pico/access-point pair, appended packets reduced the measured first-to-last main-frame arrival span. The mechanism is not established and other networks may gain nothing. Keep this opt-in: it adds up to 5,760 packets/s at 90 Hz. Each packet is 16 bytes before WiVRn encryption framing, 24 bytes with the encrypted counter, or 52 bytes including IPv4/UDP headers: approximately 2.40 Mbit/s before link-layer overhead. Padding is excluded from frame telemetry and the codec byte budget; account for this additional traffic when comparing total bandwidth. The existing admission transport allowance is unchanged.
 
 Short paired photo workloads showed unchanged app GPU-pass time, but one busy-scene run selected fewer fresh sources despite lower delivery delay. This is experimental transport evidence, not proof of photon latency or universal smoothness. [Measurements and caveats](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-23/photo-tail).
+
+## Compressed frames and automatic bitrate
+
+A long receive span does not establish that a compressed frame filled the connection. The BBR-style estimator now also requires at least half the current nominal frame budget before admitting a delivery-rate capacity sample. Small compressed frames still contribute to loss and receive-utilisation checks. This prevents their low offered byte rate from becoming an artificial capacity limit, while severe delay and loss still reduce bitrate. The 50% gate is a conservative heuristic, not a capacity measurement.
+
+Virtual-clock regression checks cover the false-capacity case, late-only underloaded traffic, real loss, and severe receive-span congestion. Live validation is reported separately from those tests.

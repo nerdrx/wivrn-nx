@@ -986,7 +986,8 @@ std::optional<uint32_t> bitrate_controller::evaluate_aimd(clock::time_point now,
 			if (held < hold)
 				return {};
 
-			bitrate = std::min(recovery_target, clamp(uint64_t(bitrate * recovery_factor)));
+			const double factor = aimd_loss_only ? 1.35 : recovery_factor;
+			bitrate = std::min(recovery_target, clamp(uint64_t(bitrate * factor)));
 			first_recovery_step = false;
 			reason = "link healthy again, rebounding";
 
@@ -1008,7 +1009,7 @@ std::optional<uint32_t> bitrate_controller::evaluate_aimd(clock::time_point now,
 			// Clean loss-only feedback permits a proportional probe after a deep cut.
 			// Keep ordinary AIMD additive and retain the ceiling and radio hold.
 			if (aimd_loss_only)
-				step = std::max(step, uint32_t(bitrate * (recovery_factor - 1.0)));
+				step = std::max(step, uint32_t(bitrate * 0.35));
 			bitrate = clamp(uint64_t(bitrate) + step);
 			recovery_target = bitrate;
 			reason = "spare capacity";

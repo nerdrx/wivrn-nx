@@ -59,6 +59,7 @@ void bitrate_controller::configure(const config & c, uint32_t ceiling_bps, bool 
 	st = state::steady;
 	first_recovery_step = true;
 	aimd_probe_ratio = 0.35;
+	quality_stream_mask = measured_stream_mask = 0;
 	frames = {};
 	has_frames = false;
 	stale_before = 0;
@@ -369,6 +370,7 @@ std::optional<uint32_t> bitrate_controller::reset_locked()
 	st = state::steady;
 	first_recovery_step = true;
 	aimd_probe_ratio = 0.35;
+	quality_stream_mask = measured_stream_mask = 0;
 	frames = {};
 	has_frames = false;
 	stale_before = 0;
@@ -401,11 +403,14 @@ void bitrate_controller::close_frame(frame_state & frame, clock::time_point now)
 		return;
 
 	const bool fresh = frame.index >= stale_before;
+	const double quality_scale = frame.quality_budget_bps && frame.bytes && frame_period > 0
+	                                     ? double(frame.quality_budget_bps) * double(frame.quality_period_ns > 0 ? frame.quality_period_ns : frame_period) / (8e9 * double(frame.bytes))
+	                                     : 0;
 
 	if (frame.lost)
 	{
 		if (fresh)
-			window.push_back({.when = now, .lost = true, .late = frame.late});
+			window.push_back({.when = now, .lost = true, .late = frame.late, .quality_scale = quality_scale});
 	}
 	else if (frame.valid and frame.first and frame.last >= frame.first and frame_period > 0)
 	{
@@ -440,13 +445,14 @@ void bitrate_controller::close_frame(frame_state & frame, clock::time_point now)
 			        .utilisation = float(double(wire_ns) / double(frame_period)),
 			        .late = frame.late,
 			        .rate = rate,
+			        .quality_scale = quality_scale,
 			});
 	}
 
 	frame = {};
 }
 
-void bitrate_controller::on_frame_bytes(uint64_t frame_index, uint8_t stream_index, uint32_t bytes, clock::time_point now)
+void bitrate_controller::on_frame_bytes(uint64_t frame_index, uint8_t stream_index, uint32_t bytes, clock::time_point now, uint32_t quality_budget_bps, int64_t quality_period_ns)
 {
 	std::lock_guard lock(mutex);
 
@@ -480,6 +486,13 @@ void bitrate_controller::on_frame_bytes(uint64_t frame_index, uint8_t stream_ind
 	}
 
 	frame.bytes += bytes;
+	frame.quality_budget_bps = quality_budget_bps;
+	frame.quality_period_ns = quality_period_ns;
+	measured_stream_mask |= uint8_t(1u << stream_index);
+	if (quality_budget_bps)
+		quality_stream_mask |= uint8_t(1u << stream_index);
+	else
+		quality_stream_mask &= uint8_t(~(1u << stream_index));
 }
 
 bitrate_controller::stats bitrate_controller::analyse(clock::time_point now)
@@ -502,6 +515,9 @@ bitrate_controller::stats bitrate_controller::analyse(clock::time_point now)
 			++res.late;
 		if (s.rate > 0)
 			rates.push_back(s.rate);
+		// Use the most expensive compression ratio in this fresh feedback window.
+		if (s.quality_scale > 0)
+			res.quality_scale = res.quality_scale > 0 ? std::min(res.quality_scale, s.quality_scale) : s.quality_scale;
 	}
 
 	if (not utilisations.empty())
@@ -1049,6 +1065,12 @@ std::optional<uint32_t> bitrate_controller::evaluate_aimd(clock::time_point now,
 
 std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, const stats & s)
 {
+	// Keep the estimator in measured network units. Only the encoder target is
+	// converted for the direct stereo stream whose budget describes image detail.
+	const bool quality_mode = quality_stream_mask == 1 && measured_stream_mask == 1;
+	const bool missing_scale = quality_mode && s.quality_scale <= 0;
+	const double quality_scale = quality_mode ? s.quality_scale : 1.0;
+
 	// The measurements have not caught up with the last change yet, see change_settle.
 	if (last_bbr_change != clock::time_point{} and now - last_bbr_change < change_settle)
 		return {};
@@ -1068,8 +1090,9 @@ std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, 
 	const bool acute = s.lost >= lost_frames_decrease or
 	                   (s.lost > 0 and s.late >= late_frames_decrease) or
 	                   (not overshooting and
-	                    (s.utilisation > utilisation_severe or
-	                     (bbr_st != bbr_state::startup and slowdown > slowdown_backoff)));
+	                    (s.utilisation > (quality_mode ? 1.10 : utilisation_severe) or
+	                     (bbr_st != bbr_state::startup and slowdown > slowdown_backoff and
+	                      (not quality_mode or s.utilisation > 1.10))));
 
 	// An estimate no loaded frame has refreshed for a whole window is not a bottleneck any
 	// more: the link has been carrying everything asked of it without ever filling up. Forget
@@ -1082,7 +1105,12 @@ std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, 
 		        int(estimator_window.count()));
 	}
 
-	if (bandwidth_samples < estimator_min_samples)
+	// Lost frames can have no byte callback at all. Missing conversion metadata
+	// must never hide that loss, but cannot justify a clean target or a fake rate.
+	if (missing_scale and not acute)
+		return {};
+
+	if (not missing_scale and bandwidth_samples < estimator_min_samples)
 	{
 		// Nothing measured. On a link with capacity to spare every frame is over before
 		// it loaded anything (see the app-limited rule) and there is simply nothing to
@@ -1093,7 +1121,7 @@ std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, 
 		// right fallback, hold and all.
 		if (not acute)
 		{
-			const bool healthy = s.utilisation < utilisation_increase and s.lost == 0 and s.late == 0;
+			const bool healthy = s.utilisation < (quality_mode ? 1.10 : utilisation_increase) and s.lost == 0 and s.late == 0;
 			if (not healthy or radio_hold)
 			{
 				healthy_since.reset();
@@ -1128,7 +1156,7 @@ std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, 
 		// backoff below has something to work from, and so that there is an estimate from
 		// here on.
 		bandwidth.reset();
-		bandwidth.update(double(bitrate), now, estimator_window);
+		bandwidth.update(double(bitrate) / quality_scale, now, estimator_window);
 		bandwidth_samples = estimator_min_samples;
 		last_bandwidth_sample = now;
 	}
@@ -1143,7 +1171,7 @@ std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, 
 
 	if (acute)
 	{
-		if (now - last_decrease < decrease_cooldown)
+		if (now - last_decrease < (quality_mode ? aimd_decrease_cooldown : decrease_cooldown))
 			return {};
 		last_decrease = now;
 
@@ -1159,7 +1187,10 @@ std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, 
 		last_bbr_change = now;
 		probe_until = {};
 
-		bitrate = clamp(uint64_t(backoff_factor * bandwidth.get()));
+		bitrate = missing_scale ? clamp(uint64_t(previous * backoff_factor)) :
+		                          clamp(uint64_t(std::min(backoff_factor * bandwidth.get() * quality_scale, double(effective_ceiling()))));
+		if (quality_mode)
+			bitrate = std::min(bitrate, clamp(uint64_t(previous * backoff_factor)));
 		gain = backoff_factor;
 		reason = "backing off";
 
@@ -1220,7 +1251,7 @@ std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, 
 				// One probe every probe_interval, to rediscover capacity that came
 				// back. Never into a falling radio: that is walking into the wall v1
 				// used to walk into with its blind additive increase.
-				if (not radio_hold and now - last_probe >= probe_interval and bitrate < effective_ceiling())
+				if (not radio_hold and now - last_probe >= (quality_mode ? std::chrono::milliseconds{500} : probe_interval) and bitrate < effective_ceiling())
 				{
 					bbr_st = bbr_state::probe;
 					probe_until = now + probe_duration;
@@ -1247,17 +1278,23 @@ std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, 
 				break;
 		}
 
-		const uint32_t target = clamp(uint64_t(gain * bw));
+		uint32_t target = clamp(uint64_t(std::min(gain * bw * quality_scale, double(effective_ceiling()))));
+		// Coalesced receive timestamps can make a clean, compressed frame look
+		// link-limited. Without congestion or radio evidence, do not spend quality
+		// merely to match that estimate. Decoder lateness also blocks upward probes.
+		if (quality_mode and not radio_hold)
+			target = s.late ? bitrate : std::max(bitrate, target);
 
 		// Do not chase the few percent the estimate wobbles by, and do not re-encode at a
-		// new bitrate more often than once a second, once out of the startup ramp.
+		// new bitrate more often than the selected steady interval after startup.
 		if (bbr_st != bbr_state::startup and not forced)
 		{
-			if (now - last_bbr_change < steady_interval)
+			if (now - last_bbr_change < (quality_mode ? std::chrono::milliseconds{500} : steady_interval))
 				return {};
 
 			const double delta = std::abs(double(target) - double(bitrate));
-			if (bitrate and delta < steady_change_threshold * double(bitrate))
+			if (bitrate and delta < steady_change_threshold * double(bitrate) and
+			    not (quality_mode and target == effective_ceiling() and target > bitrate))
 				return {};
 		}
 

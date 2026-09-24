@@ -559,7 +559,8 @@ protected:
 	// there is nothing here to shard, pace or protect — only the frame byte
 	// accounting the bitrate controller reads, which SendData would otherwise do.
 	// Falls back to the control socket when there is no stream socket.
-	void SendPacket(to_headset::nxwarp_datagram && packet, bool end_of_frame);
+	void SendPacket(to_headset::nxwarp_datagram && packet, bool end_of_frame,
+	                uint32_t quality_budget_bps = 0, int64_t quality_period_ns = 0);
 	// Optional direct-video experiment: append bounded padding on primary UDP.
 	uint8_t SendTailPadding(uint8_t count);
 

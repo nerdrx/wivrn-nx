@@ -1002,10 +1002,12 @@ void wivrn_session::set_pacing(bool client_enabled)
 	bitrate_ctl.set_pacing_window(enabled ? std::min(pacing_conf.window, shard_pacer::max_window) : 0.f);
 }
 
-void wivrn_session::on_frame_sent(uint64_t frame_index, uint8_t stream_index, uint32_t bytes)
+void wivrn_session::on_frame_sent(uint64_t frame_index, uint8_t stream_index, uint32_t bytes,
+                                 uint32_t quality_budget_bps, int64_t quality_period_ns)
 {
 	// Called from the encoder's send thread; the controller has its own mutex.
-	bitrate_ctl.on_frame_bytes(frame_index, stream_index, bytes);
+	bitrate_ctl.on_frame_bytes(frame_index, stream_index, bytes, bitrate_controller::clock::now(),
+	                           quality_budget_bps, quality_period_ns);
 }
 
 void wivrn_session::operator()(from_headset::feedback && feedback)

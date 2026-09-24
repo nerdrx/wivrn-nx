@@ -1012,7 +1012,8 @@ void video_encoder::SendControlPacket(to_headset::nxwarp_datagram && packet)
 	}
 }
 
-void video_encoder::SendPacket(to_headset::nxwarp_datagram && packet, bool end_of_frame)
+void video_encoder::SendPacket(to_headset::nxwarp_datagram && packet, bool end_of_frame,
+                               uint32_t quality_budget_bps, int64_t quality_period_ns)
 {
 	std::lock_guard lock(mutex);
 
@@ -1064,7 +1065,7 @@ void video_encoder::SendPacket(to_headset::nxwarp_datagram && packet, bool end_o
 		// time the headset says it spent receiving the frame. Every NX Warp
 		// datagram rides the primary path today — the transport's own striper is
 		// not wired to WiVRn's secondary path yet — so the split is trivial.
-		cnx->on_frame_sent(shard.frame_idx, stream_idx, frame_bytes);
+		cnx->on_frame_sent(shard.frame_idx, stream_idx, frame_bytes, quality_budget_bps, quality_period_ns);
 		cnx->on_frame_paths(frame_bytes_primary, 0);
 
 		frame_bytes = 0;

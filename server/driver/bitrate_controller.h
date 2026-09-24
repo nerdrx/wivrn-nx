@@ -81,10 +81,15 @@ namespace wivrn
 // --- The delivery rate sample ---------------------------------------------------------
 // The headset says, per frame, when the first and the last packet of that frame arrived. The
 // server knows how many bytes it put on the wire for that frame (see on_frame_bytes: the
-// encoder reports them from its send path, parity shards included, which is exactly the unit
-// set_bitrate is expressed in). One frame therefore yields
+// encoder reports them from its send path, parity shards included). For NX direct this is
+// datagram payload accounting, excluding outer WiVRn framing and tail padding. One frame yields
 //
 //     delivery_rate = 8 * frame_bytes / (received_last - received_first)
+//
+// NX direct's controller input buys image detail before lossless compression; it is not
+// a wire-rate target. The encoder tags each frame with that input and its cadence. Only
+// the control output is converted through their ratio to the actual datagram bytes.
+// The delivery-rate estimator never receives the nominal quality budget as a byte count.
 //
 // which is a *lower bound* on the capacity of the bottleneck: those bytes really did get
 // through in that time. Both timestamps are in the client clock, so no clock offset is needed.
@@ -440,7 +445,9 @@ public:
 	// path, i.e. from a different thread than on_feedback and usually a frame or two ahead
 	// of it; the frame ring joins the two. Allocation-free, and a no-op unless the v2
 	// estimator is the one running.
-	void on_frame_bytes(uint64_t frame_index, uint8_t stream_index, uint32_t bytes, clock::time_point now = clock::now());
+	// Optional direct-frame metadata freezes the applied quality budget and cadence;
+	// ordinary encoders leave both zero. These fields never go onto the wire.
+	void on_frame_bytes(uint64_t frame_index, uint8_t stream_index, uint32_t bytes, clock::time_point now = clock::now(), uint32_t quality_budget_bps = 0, int64_t quality_period_ns = 0);
 
 	// A new ceiling was requested (client settings, or a manual change from the dashboard).
 	// Resets the controller to it. Returns the bitrate to apply.
@@ -530,9 +537,12 @@ private:
 		bool valid = false;
 		bool lost = false; // at least one stream never arrived completely
 		bool late = false; // decoded but dropped before being displayed
-		// Bytes put on the wire for this frame, summed over the video streams. Filled in
+		// NX transport bytes sent for this frame (outer framing/tail packets excluded),
+		// summed over the video streams. Filled in
 		// from the encoder's send path, v2 only.
 		uint64_t bytes = 0;
+		uint32_t quality_budget_bps = 0; // Controller input applied to this direct frame.
+		int64_t quality_period_ns = 0;
 	};
 
 	struct sample
@@ -544,6 +554,7 @@ private:
 		// Delivery rate this frame measured, bits per second, or 0 when it says nothing
 		// about the capacity (v1, a lost frame, an app-limited one)
 		double rate = 0;
+		double quality_scale = 0; // Quality bps / offered wire bps for this frame.
 	};
 
 	// Windowed maximum of a scalar, Kathleen Nichols' three-sample filter, the same one BBR
@@ -679,6 +690,7 @@ private:
 		// maximum is compared; v2 only.
 		double rate = 0;
 		size_t rate_count = 0;
+		double quality_scale = 0;
 	};
 
 	mutable std::mutex mutex;
@@ -693,6 +705,9 @@ private:
 	// Diagnostic only: ignore utilisation-only AIMD decreases while retaining loss/late cuts.
 	bool aimd_loss_only = false;
 	double aimd_probe_ratio = 0.35;
+	// Mapping is supported only for a sole primary direct stereo stream.
+	uint8_t quality_stream_mask = 0;
+	uint8_t measured_stream_mask = 0;
 	// Ceiling requested by the client
 	uint32_t ceiling = 0;
 	// Ceiling of the path carrying video, if it is more restrictive

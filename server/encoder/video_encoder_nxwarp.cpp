@@ -2062,6 +2062,9 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// (client_holds_nothing) and the not-held queue are deliberately NOT read here --
 	// they are answered by the next frame that is actually sent, and consuming them on
 	// a frame that never leaves would throw the answer away.
+	// Freeze the controller input and cadence for this encoded frame, including safety.
+	uint32_t direct_quality_budget = 0;
+	int64_t direct_quality_period = 0;
 	const auto admit_now = std::chrono::steady_clock::now();
 	if (codec_direct_blocks)
 		follow_path_budget();
@@ -2083,7 +2086,10 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		float fps = pending_framerate.load(std::memory_order_relaxed);
 		if (!(fps > 0))
 			fps = rc_fps;
-		codec->set_target_bitrate(bitrate, fps);
+		direct_quality_budget = std::clamp(bitrate, 1u, 1'000'000'000u);
+		fps = std::isfinite(fps) ? std::clamp(fps, 1.f, 240.f) : 90.f;
+		direct_quality_period = int64_t(1e9 / double(fps));
+		codec->set_target_bitrate(direct_quality_budget, fps);
 		if (not codec->admit_frame(os_monotonic_get_ns()))
 		{
 			++prof_paced_out;
@@ -3039,7 +3045,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		                   .timing_info = last ? frame_timing : std::nullopt,
 		                   .payload = std::move(datagrams[i].bytes),
 		           },
-		           last);
+		           last, direct_quality_budget, direct_quality_period);
 		packet_sent += bytes;
 	}
 	if (codec_direct_blocks && direct_tail_packets)

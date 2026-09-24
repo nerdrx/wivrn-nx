@@ -317,7 +317,8 @@ public:
 	// One video frame of one stream finished going out, with the number of bytes it put on
 	// the wire (parity shards included). Called from the encoder's send path; only the
 	// bandwidth estimating bitrate control law uses it, and it takes no lock of its own.
-	void on_frame_sent(uint64_t frame_index, uint8_t stream_index, uint32_t bytes);
+	void on_frame_sent(uint64_t frame_index, uint8_t stream_index, uint32_t bytes,
+	                   uint32_t quality_budget_bps = 0, int64_t quality_period_ns = 0);
 
 	// How one frame's bytes were split between the two paths, for the Transport page.
 	// Called from the encoder's send path right after on_frame_sent; two atomic adds.

@@ -303,3 +303,24 @@ The adaptive follow-up reduces repeated overshoot in nine toy FIFO-link
 scenarios, retaining full-ceiling recovery. This remains an offline candidate;
 no server restart or Pico validation was performed.
 [Method, numeric evidence, and graph](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-24/adaptive-recovery).
+
+### NX direct v2 budget mapping
+
+For the direct stereo stream, v2 keeps its bandwidth estimator in measured
+datagram bits/s. Each sent frame records server-local metadata: the controller input budget
+(including any safety allocation) and the frame period used when it was
+applied. At feedback time, that frozen pair is mapped through the frame's
+actual datagram bytes; the estimator itself is never fed a nominal or quality
+budget. Mapping is enabled only when the primary direct stream is the sole
+measured video stream, so mixed-stream frames retain ordinary v2 accounting.
+
+Clean direct delivery does not lower quality merely to match a physical
+estimate. Real loss, radio degradation, or sustained receive spans above
+1.10 refresh periods still cut it; slowdown-only cuts use the same span gate.
+Direct v2 uses 500 ms probe/decrease/steady timing, a 1.10 probe gain, and
+allows the final step to the exact ceiling when the remaining gap is below 5%.
+
+The nine-case offline model, compared with baseline `66a5e6e6`, reports recovery
+in 2.4–7.2 seconds. It ran with
+the server off and has no Pico validation; it is a controller model, not a
+wireless or image-quality result. [Model matrix and evidence](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-24/v2-budget).

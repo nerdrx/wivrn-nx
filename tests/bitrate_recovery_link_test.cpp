@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <string_view>
 
 using controller = wivrn::bitrate_controller;
 constexpr double hz = 90, period = 1 / hz;
@@ -21,6 +22,15 @@ extern "C" enum u_logging_level u_log_get_global_level(void)
 {
 	return U_LOGGING_INFO;
 }
+template<typename C>
+void account_frame(C & ctl, uint64_t index, uint32_t bytes, controller::clock::time_point now, bool tagged)
+{
+	if constexpr (requires { ctl.on_frame_bytes(index, 0, bytes, now, ctl.current(), period_ns); })
+		ctl.on_frame_bytes(index, 0, bytes, now, tagged ? ctl.current() : 0, tagged ? period_ns : 0);
+	else
+		ctl.on_frame_bytes(index, 0, bytes, now);
+}
+
 int main(int argc, char ** argv)
 {
 	// Optional feedback delay and synthetic receive-span floor.
@@ -30,8 +40,10 @@ int main(int argc, char ** argv)
 	if (delay < 0 || delay > 0.1 || span_floor < 0 || span_floor > 2 || weak_capacity < 1e8 || weak_capacity > 1e9)
 		return 1;
 	setenv("WIVRN_BITRATE_AIMD_LOSS_ONLY", "1", 1);
+	const bool bbr = argc > 4 && std::string_view(argv[4]) == "bbr";
+	const bool tagged = argc > 5 && std::string_view(argv[5]) == "tagged";
 	controller ctl;
-	ctl.configure({.enabled = true}, 1'000'000'000, true, true, controller::mode::aimd);
+	ctl.configure({.enabled = true}, 1'000'000'000, true, true, bbr ? controller::mode::bbr : controller::mode::aimd);
 	const auto start = controller::clock::time_point{} + std::chrono::hours(1);
 	auto clock_at = [&](double s) { return start + std::chrono::nanoseconds(int64_t(s * 1e9)); };
 	std::deque<pending> feedback;
@@ -51,7 +63,7 @@ int main(int argc, char ** argv)
 			feedback.pop_front();
 		}
 		uint32_t bytes = uint32_t(std::ceil(ctl.current() * .25 / hz / 8));
-		ctl.on_frame_bytes(i, 0, bytes, clock_at(t));
+		account_frame(ctl, i, bytes, clock_at(t), tagged);
 		const double bits = bytes * 8.0;
 		bool lost = (queued_bits + bits) / wire_capacity > 2 * period;
 		wivrn::from_headset::feedback f{};

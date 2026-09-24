@@ -26,3 +26,15 @@ Repeat compilation with `-DNDEBUG` to verify checks remain active.
 
 The log file is written in the checkout so it can be retained with the test
 evidence; it contains no image or device data.
+
+## Closed-loop recovery model
+
+`python3 tests/run_bitrate_recovery_link.py --build-dir "$BUILD_DIR" --output-dir /tmp/nx-recovery-results`
+
+Compiles the real controller at fixed-35% baseline `3b142e1b` and the working
+version. Tests nine combinations of a 400/550/700 Mbit/s *budget-equivalent*
+link and 0/40/100 ms feedback delay. Each run simulates 100 seconds at 90 Hz.
+This is a toy FIFO, not Wi-Fi, codec quality, or headset validation. See the
+harness comments and report for assumptions. It checks reduced losses without
+large budget sacrifice and recovery to the full requested ceiling. No server,
+network interface, or headset is touched.

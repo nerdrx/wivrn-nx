@@ -58,6 +58,7 @@ void bitrate_controller::configure(const config & c, uint32_t ceiling_bps, bool 
 	recovery_target = eff;
 	st = state::steady;
 	first_recovery_step = true;
+	aimd_probe_ratio = 0.35;
 	frames = {};
 	has_frames = false;
 	stale_before = 0;
@@ -367,6 +368,7 @@ std::optional<uint32_t> bitrate_controller::reset_locked()
 	recovery_target = bitrate;
 	st = state::steady;
 	first_recovery_step = true;
+	aimd_probe_ratio = 0.35;
 	frames = {};
 	has_frames = false;
 	stale_before = 0;
@@ -937,6 +939,9 @@ std::optional<uint32_t> bitrate_controller::evaluate_aimd(clock::time_point now,
 	if (degraded)
 	{
 		healthy_since.reset();
+		// A failed probe earns a small retry; clean probes grow back to full speed.
+		if (aimd_loss_only)
+			aimd_probe_ratio = 0.10;
 
 		if (now - last_decrease < aimd_decrease_cooldown)
 			return {};
@@ -986,7 +991,7 @@ std::optional<uint32_t> bitrate_controller::evaluate_aimd(clock::time_point now,
 			if (held < hold)
 				return {};
 
-			const double factor = aimd_loss_only ? 1.35 : recovery_factor;
+			const double factor = aimd_loss_only ? 1.0 + aimd_probe_ratio : recovery_factor;
 			bitrate = std::min(recovery_target, clamp(uint64_t(bitrate * factor)));
 			first_recovery_step = false;
 			reason = "link healthy again, rebounding";
@@ -1009,12 +1014,14 @@ std::optional<uint32_t> bitrate_controller::evaluate_aimd(clock::time_point now,
 			// Clean loss-only feedback permits a proportional probe after a deep cut.
 			// Keep ordinary AIMD additive and retain the ceiling and radio hold.
 			if (aimd_loss_only)
-				step = std::max(step, uint32_t(bitrate * 0.35));
+				step = std::max(step, uint32_t(bitrate * aimd_probe_ratio));
 			bitrate = clamp(uint64_t(bitrate) + step);
 			recovery_target = bitrate;
 			reason = "spare capacity";
 		}
 
+		if (aimd_loss_only and bitrate > previous)
+			aimd_probe_ratio = std::min(0.35, aimd_probe_ratio * 2);
 		flush();
 	}
 	else

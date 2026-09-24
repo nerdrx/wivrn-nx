@@ -692,6 +692,7 @@ private:
 	bool radio_aware = true;
 	// Diagnostic only: ignore utilisation-only AIMD decreases while retaining loss/late cuts.
 	bool aimd_loss_only = false;
+	double aimd_probe_ratio = 0.35;
 	// Ceiling requested by the client
 	uint32_t ceiling = 0;
 	// Ceiling of the path carrying video, if it is more restrictive

@@ -113,8 +113,9 @@ below 1.10 refresh periods, rather than the ordinary AIMD limit of 0.60. This
 allows bounded upward probing when receiver scheduling spans nearly a refresh.
 Radio handling, ceilings, and decrease cooldowns remain unchanged.
 The loss-only mode now uses a 250 ms clean confirmation after enough fresh
-feedback samples arrive, and steady upward probes of at least 35% of the
-current bitrate (or the ordinary additive step, whichever is larger).
+feedback samples arrive, and adaptive upward probes: after loss, 10%, then 20%, then at most 35% of
+the current bitrate on consecutive clean upward changes. Steady probes retain
+the ordinary additive minimum when it is larger.
 This replaces the previous 1 s steady hold and small additive-only climb.
 It is not a promise of one increase every 250 ms: fresh-sample collection,
 loss, lateness, receive span, and radio holds still gate each probe.
@@ -297,3 +298,8 @@ The stronger 35% opt-in probe subsequently reached 1000 Mbit/s in 4.01
 simulated seconds on the same trace (15%: 7.90 s). Normal and NDEBUG checks
 pass. Larger probes can overshoot real capacity more; no live improvement
 is claimed until a device test. The user session was not restarted.
+
+The adaptive follow-up reduces repeated overshoot in nine toy FIFO-link
+scenarios, retaining full-ceiling recovery. This remains an offline candidate;
+no server restart or Pico validation was performed.
+[Method, numeric evidence, and graph](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-24/adaptive-recovery).

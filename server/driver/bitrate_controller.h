@@ -748,6 +748,8 @@ private:
 	double startup_mark = 0;
 	size_t startup_stalled = 0;
 	clock::time_point round_started{};
+	// Smaller direct-stream retries after congestion; clean probes restore the gain.
+	double direct_probe_gain = gain_probe;
 	clock::time_point last_probe{};
 	clock::time_point probe_until{};
 	clock::time_point last_bbr_change{};

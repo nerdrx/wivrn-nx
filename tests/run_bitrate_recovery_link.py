@@ -13,7 +13,9 @@ parser.add_argument("--build-dir", type=Path, required=True, help="Configured bu
 parser.add_argument("--output-dir", type=Path, required=True)
 parser.add_argument("--baseline-ref", default="3b142e1b")
 parser.add_argument("--v2", action="store_true", help="Compare unconverted and mapped v2 budgets")
+parser.add_argument("--v2-probes", action="store_true", help="Compare mapped v2 baseline and adaptive probe gains")
 args = parser.parse_args()
+args.v2 = args.v2 or args.v2_probes
 repo = Path(__file__).resolve().parents[1]
 b = args.build_dir.resolve()
 out = args.output_dir.resolve()
@@ -28,7 +30,7 @@ with tempfile.TemporaryDirectory(prefix="nx-recovery-") as tmp:
     (tmp / "driver").mkdir()
     (tmp / "driver" / "bitrate_controller.h").write_bytes(subprocess.check_output(["git", "show", args.baseline_ref + ":server/driver/bitrate_controller.h"], cwd=repo))
     old.write_bytes(subprocess.check_output(["git", "show", args.baseline_ref + ":server/driver/bitrate_controller.cpp"], cwd=repo))
-    labels = ("legacy-v2", "mapped-v2") if args.v2 else ("fixed35", "adaptive")
+    labels = ("fixed-probe-v2", "adaptive-probe-v2") if args.v2_probes else (("legacy-v2", "mapped-v2") if args.v2 else ("fixed35", "adaptive"))
     for label, source in ((labels[0], str(old)), (labels[1], "server/driver/bitrate_controller.cpp")):
         exe = tmp / label
         build_flags = flags if label != labels[0] else [flags[0], "-I" + str(tmp), "-I" + str(tmp / "driver")] + flags[1:]
@@ -51,13 +53,20 @@ with tempfile.TemporaryDirectory(prefix="nx-recovery-") as tmp:
                               total_lost_frames=int(rows[-1]["lost_frames"]),
                               mean_weak_budget_mbps=sum(float(r["budget_mbps"]) for r in weak) / len(weak),
                               recovery_seconds=recovered)
-                if recovered is None and not (args.v2 and label == labels[0]):
+                if recovered is None and not (args.v2 and not args.v2_probes and label == labels[0]):
                     raise RuntimeError(f"{label}, delay={delay}, capacity={capacity}: controller did not recover")
                 summary.append(record)
                 if delay == 40 and capacity == 550:
                     (out / (label + ".csv")).write_text(raw)
 (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
 for old, new in zip(summary[:9], summary[9:]):
+    if args.v2_probes:
+        if new["lost_frames_40_70"] > old["lost_frames_40_70"] * .4:
+            raise RuntimeError("Direct probe retries must cut model losses by at least 60%")
+        if new["mean_weak_budget_mbps"] < old["mean_weak_budget_mbps"] * .95:
+            raise RuntimeError("Direct probe loss savings must retain 95% of the weak-link budget")
+        if new["recovery_seconds"] > old["recovery_seconds"] + 1.5:
+            raise RuntimeError("Direct probe recovery must stay within 1.5 seconds of baseline")
     if args.v2:
         if new["mean_initial_budget_mbps"] < 999:
             raise RuntimeError("Mapped v2 must retain full clean-link budget")

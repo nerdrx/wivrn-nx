@@ -441,6 +441,8 @@ public:
 		std::span<const uint8_t> raw{static_cast<const uint8_t *>(output.mapped), plan.bytes()};
 		if (lz4_enabled || geometry.native_center)
 		{
+			// Coherent mapped output is not necessarily CPU-cached. Stage it once
+			// before compression and native sampling revisit its bytes.
 			cached_raw.assign(raw.begin(), raw.end());
 			raw = cached_raw;
 		}

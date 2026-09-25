@@ -2,6 +2,9 @@
 #pragma once
 #include "nxwarp_direct.h"
 
+#include <bit>
+#include <cstring>
+
 namespace wivrn::nxwarp_direct
 {
 constexpr uint32_t checker_upload_magic = 0x5544584e; // "NXDU"
@@ -24,7 +27,10 @@ inline uint32_t checker_row(std::span<const uint8_t> blocks, uint32_t offset, ui
 
 inline void checker_store32(std::vector<uint8_t> & out, size_t at, uint32_t value)
 {
-	for (unsigned b = 0; b < 4; ++b) out[at + b] = uint8_t(value >> (8 * b));
+	if constexpr (std::endian::native == std::endian::little)
+		std::memcpy(out.data() + at, &value, sizeof(value));
+	else
+		for (unsigned b = 0; b < 4; ++b) out[at + b] = uint8_t(value >> (8 * b));
 }
 
 inline bool merge_checkerboard_upload(layout l, std::span<const uint8_t> current,

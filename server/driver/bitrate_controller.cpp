@@ -261,6 +261,7 @@ void bitrate_controller::flush_estimator()
 	startup_mark = 0;
 	startup_stalled = 0;
 	round_started = {};
+	direct_probe_gain = gain_probe;
 	last_probe = {};
 	probe_until = {};
 	last_bbr_change = {};
@@ -1174,6 +1175,9 @@ std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, 
 		if (now - last_decrease < (quality_mode ? aimd_decrease_cooldown : decrease_cooldown))
 			return {};
 		last_decrease = now;
+		// A direct-stream probe need not repeat a large overshoot after real congestion.
+		if (quality_mode)
+			direct_probe_gain = 1.04;
 
 		// A maximum filter remembers for ten seconds, and an acute failure is proof that
 		// what it remembers was never really deliverable. Replace it by what the link is
@@ -1237,6 +1241,9 @@ std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, 
 			case bbr_state::probe:
 				if (now >= probe_until)
 				{
+					// Grow only when the raised stream still fits inside a refresh period.
+					if (quality_mode and s.lost == 0 and s.late == 0 and s.utilisation < 1.0)
+						direct_probe_gain = std::min(gain_probe, direct_probe_gain + 0.02);
 					bbr_st = bbr_state::steady;
 					last_probe = now;
 					// The samples in the window were taken at the raised
@@ -1256,7 +1263,7 @@ std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, 
 					bbr_st = bbr_state::probe;
 					probe_until = now + probe_duration;
 					U_LOG_I("Automatic bitrate v2: probing at gain %.2f, estimate %.1f Mbit/s",
-					        gain_probe,
+					        quality_mode ? direct_probe_gain : gain_probe,
 					        bw * to_mbits);
 				}
 				break;
@@ -1269,7 +1276,7 @@ std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, 
 				reason = "startup";
 				break;
 			case bbr_state::probe:
-				gain = gain_probe;
+				gain = quality_mode ? direct_probe_gain : gain_probe;
 				reason = "probing";
 				break;
 			case bbr_state::steady:
@@ -1294,7 +1301,7 @@ std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, 
 
 			const double delta = std::abs(double(target) - double(bitrate));
 			if (bitrate and delta < steady_change_threshold * double(bitrate) and
-			    not (quality_mode and target == effective_ceiling() and target > bitrate))
+			    not (quality_mode and target > bitrate and (target == effective_ceiling() or bbr_st == bbr_state::probe)))
 				return {};
 		}
 

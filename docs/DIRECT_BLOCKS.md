@@ -378,10 +378,30 @@ measured video stream, so mixed-stream frames retain ordinary v2 accounting.
 Clean direct delivery does not lower quality merely to match a physical
 estimate. Real loss, radio degradation, or sustained receive spans above
 1.10 refresh periods still cut it; slowdown-only cuts use the same span gate.
-Direct v2 uses 500 ms probe/decrease/steady timing, a 1.10 probe gain, and
+Direct v2 uses 500 ms probe/decrease/steady timing and a probe gain up to
+1.10. After congestion the gain drops to 1.04; each completed probe with no
+loss/late frames and p90 receive span below one refresh period adds 0.02, up
+to 1.10. Small upward probe steps bypass the steady-state 5% deadband. It
 allows the final step to the exact ceiling when the remaining gap is below 5%.
 
 The nine-case offline model, compared with baseline `66a5e6e6`, reports recovery
 in 2.4–7.2 seconds. It ran with
 the server off and has no Pico validation; it is a controller model, not a
 wireless or image-quality result. [Model matrix and evidence](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-24/v2-budget).
+
+### Follow-up: gentler direct-stream probes and packed stores
+
+The 25 September offline comparison against `11eff678` cuts restricted-link
+model losses from 114-116 to 28-29 frames per 30-second interval (nine cases),
+while retaining about 96.8% of the previous mean quality budget. Full-ceiling
+recovery takes 3.4-8.2 seconds, about one second longer than the fixed-gain
+control. This favors fewer interrupted updates over the fastest climb. It
+changes only direct-stream Adaptive v2; regular codec v2 and AIMD are unchanged.
+
+Checkerboard upload now writes packed words with unaligned-safe `memcpy` on
+little-endian hosts and retains an explicit little-endian fallback elsewhere.
+On the tested host, median run p50 fell from 0.203124 to 0.160647 ms with
+identical bytes, across three ABBA cycles. This is CPU merger timing only;
+no new Pico GPU, photon-latency, or live Wi-Fi result is claimed.
+
+[Measurements, graphs, rejected candidates and reproduction](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-25/recovery-headroom).

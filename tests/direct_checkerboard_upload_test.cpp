@@ -211,6 +211,10 @@ static void check_native(bool packed)
 
 int main()
 {
+	std::vector<uint8_t> unaligned_store(6, 0xa5);
+	checker_store32(unaligned_store, 1, 0x12345678u);
+	assert((unaligned_store == std::vector<uint8_t>{0xa5, 0x78, 0x56, 0x34, 0x12, 0xa5}));
+
 	for (uint32_t mode = 0; mode < 3; ++mode) check_palette_mode(mode);
 	check_native(false);
 	check_native(true);

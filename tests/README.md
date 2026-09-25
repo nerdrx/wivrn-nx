@@ -86,3 +86,48 @@ round-trips LZ4/Zstd bytes exactly and prints CSV; its timings exclude packing,
 transport and headset presentation. Fixture geometry must match the defaults
 in the harness. `direct_checkerboard_motion.cpp` is a CPU reconstruction of the
 wire format for synthetic previews, not a GPU/headset timing test.
+
+### Packed checkerboard upload
+
+```sh
+g++ -std=c++20 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+  -Icommon tests/direct_checkerboard_upload_test.cpp -o /tmp/direct_checkerboard_upload_test
+/tmp/direct_checkerboard_upload_test
+
+g++ -std=c++20 -O3 -Icommon tests/direct_checkerboard_upload_bench.cpp \
+  -o /tmp/direct_checkerboard_upload_bench
+/tmp/direct_checkerboard_upload_bench current-full.nxdf history-full.nxdf
+```
+
+Keep assertions enabled. The upload tests check phase palettes, selectors,
+native formats, mode changes, missing/full history, malformed input and the
+expanded-buffer size limit. NXDU is an internal upload format, not NXDF wire data.
+The benchmark expects two 2176×2176-per-eye full RGB888 NXDF fixtures. It prepares
+checker inputs before timing, warms both phases, then alternates 180 measured
+merges. Output includes a checksum and per-phase timing. These are standalone
+CPU merge timings, excluding decompression, GPU upload and presentation.
+
+The pixel-parity harness renders the production fragment shader and compares
+its output against the former history-sampling algorithm. It requires Vulkan
+headers/loader, glslangValidator, and local captured frames (2176×2176 per eye):
+
+```sh
+g++ -std=c++20 -O2 -Icommon tests/direct_checkerboard_gpu_fragment_test.cpp \
+  -lvulkan -o /tmp/checker-fragment-test
+glslangValidator -V --target-env vulkan1.0 -S vert \
+  tests/direct_checkerboard_fullscreen.vert.glsl -o /tmp/checker.vert.spv
+glslangValidator -V --target-env vulkan1.0 -S frag \
+  client/shaders/reprojection_direct.frag.glsl -o /tmp/checker.frag.spv
+/tmp/checker-fragment-test /tmp/checker.frag.spv /tmp/checker.vert.spv \
+  current.nxdf previous.nxdf merged.nxdu
+```
+
+`NX_CHECKER_SRGB=1` also checks the sRGB attachment/conversion path.
+`NX_CHECKER_DUMP_RGBA=/tmp/eye.rgba` saves private raw output for inspection.
+Optional `NX_CHECKER_WIDTH`/`NX_CHECKER_HEIGHT` change output sampling; scaled
+CPU comparisons can differ at coordinate boundaries, so compare old/new GPU
+readbacks directly for those experiments. `--legacy-deband-phase` accepts the
+old fragment shader with phase moved to `deband.z` (no NXDU argument).
+`direct_checkerboard_gpu_sample_test.cpp` isolates the production sampling
+function in a compute shader; `direct_checkerboard_upload_sampling_test.cpp`
+provides the CPU reference. These tools do not measure live frame cadence.

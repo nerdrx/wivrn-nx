@@ -145,7 +145,8 @@ full frame so the headset can seed its image history.
 
 Each later encoded frame carries alternating samples: half of each encoded grid,
 with the same phase for both eyes. The other half comes from the immediately
-previous frame, sampled in the same presentation pass. This is temporal sample
+previous frame. The decoder merges the packed samples once before uploading
+them for the existing presentation pass. This is temporal sample
 reuse, not motion interpolation. A coarse peripheral sample covers several output
 pixels, so its checker cells are larger than a native centre pixel. Moving detail
 can shimmer or lag. Invalid or
@@ -163,20 +164,38 @@ Checker frames retain shared palette endpoints, so source-sample count is
 halved but encoded bytes are not: palette payloads shrink by about 40%, while
 native raw payloads shrink by 50%. Headers, descriptors, transport overhead and
 compression remain, so total network bandwidth is not guaranteed to halve. Repacking adds server
-CPU work; retaining and sampling history adds headset memory traffic and GPU
-work.
+CPU work. The headset also retains packed history and interleaves selectors/native
+samples on the CPU; it does not reconstruct a full RGB image. Each merged palette
+block retains both endpoint pairs, so old samples keep their original colours.
+The fragment shader reads one descriptor and one prepared sample without
+per-pixel history eligibility checks.
+
+The internal GPU upload uses an `NXDU` header (version 1), one descriptor table,
+and packed blocks. Palette blocks contain two endpoint words and four selector
+words; native tiles contain 1024 RGB888 words or 512 RGB565 words. This layout
+is never sent on the wire or passed to the NXDF parser. No network format change
+is needed for the CPU merge.
 
 The stream header uses the existing base version 1–20 plus 32 (versions 33–52)
 to advertise checkerboard support. Frame flag `0x100` marks checker samples;
 `0x200` marks phase 1. Full frames remain valid for bootstrap and may also
 appear later in the stream.
-Short Pico tests at a 500 Mbit/s requested budget measured about 64 → 47 Mbit/s
+Initial per-pixel-history Pico tests at a 500 Mbit/s requested budget measured about 64 → 47 Mbit/s
 of complete codec payload, with about 90 new-source selections per second in
 both modes. Per-sample refresh is half that rate. The on-mode presentation pass
 cost about 6.2 ms versus 3.2–4.1 ms in off controls. Device placement changed, so
 these short runs do not isolate GPU cost or prove motion-to-photon latency.
 The mode saves bandwidth at a temporal-quality and headset-work cost; it remains
 off by default. [Measurements, motion examples and limits](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-25/checkerboard).
+
+The packed CPU merge reduces the checkerboard GPU pass from about **5.4 to
+3.3 ms** in a later matched Pico workload. Decode telemetry rises from about
+0.5 to 1.1 ms; selected-image cadence stays near 90/s and payload is unchanged.
+This workload moves one photograph 16 pixels every four frames. Checker texture
+at each jump comes from mixing two image positions, in both implementations;
+the optimization preserves that temporal tradeoff. These short measurements
+do not establish physical latency or sustained refresh of every pixel.
+[CPU merge measurements and graphs](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-25/checkerboard-upload).
 
 ## Trusted-LAN packet mode
 

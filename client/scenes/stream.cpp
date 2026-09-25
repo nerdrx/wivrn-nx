@@ -2076,11 +2076,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 				images[v].direct_tiles_bytes = blit_handle->direct_tiles_bytes;
 				images[v].direct_blocks = blit_handle->direct_blocks;
 				images[v].direct_blocks_bytes = blit_handle->direct_blocks_bytes;
-				images[v].direct_tile_count = blit_handle->direct_tile_count;
-				images[v].direct_history_block_offset_words = blit_handle->direct_history_block_offset_words;
-				images[v].direct_checker = blit_handle->direct_checker;
-				images[v].direct_history_checker = blit_handle->direct_history_checker;
-				images[v].direct_history_valid = blit_handle->direct_history_valid;
+				images[v].direct_checker_merged = blit_handle->direct_checker_merged;
 			}
 		}
 		else

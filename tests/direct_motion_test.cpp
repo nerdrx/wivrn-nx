@@ -339,7 +339,7 @@ static void test_stream_versions()
 	auto wire = stream_header(l, false, true, true);
 	auto parsed = parse_stream(wire);
 	assert(parsed && parsed->motion && parsed->predictor && !parsed->checkerboard);
-	wire[5] |= 0x01;
+	wire[5] |= 0x02; // Bit 256 now advertises vertical prediction; 512 is unknown.
 	assert(!parse_stream(wire));
 	auto old = l;
 	old.motion = false;

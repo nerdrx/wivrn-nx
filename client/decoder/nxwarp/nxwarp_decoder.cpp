@@ -975,6 +975,7 @@ bool nxwarp_decoder::on_direct_stream_header(std::span<const uint8_t> header)
 		                  parsed->checkerboard == direct_layout.checkerboard &&
 		                  parsed->motion == direct_layout.motion &&
 		                  parsed->motion_regions == direct_layout.motion_regions &&
+		                  parsed->native_row_predictor == direct_layout.native_row_predictor &&
 		                  parsed->zstd == direct_layout.zstd &&
 		                  trusted_lan == direct_trusted_lan && lz4 == direct_lz4 && safety == direct_safety;
 		if (!same)
@@ -1000,6 +1001,7 @@ bool nxwarp_decoder::on_direct_stream_header(std::span<const uint8_t> header)
 	spdlog::info("nxwarp[{}]: alternating checker samples {}", stream_index, direct_layout.checkerboard);
 	spdlog::info("nxwarp[{}]: exact motion compression {}", stream_index, direct_layout.motion);
 	spdlog::info("nxwarp[{}]: regional motion compression {}", stream_index, direct_layout.motion_regions);
+	spdlog::info("nxwarp[{}]: native row predictor {}", stream_index, direct_layout.native_row_predictor);
 	spdlog::info("nxwarp[{}]: partial direct recovery {} (at most 10% retained tiles, history at most 50 ms, stable-neighbor guard)",
 	             stream_index, direct_partial_recovery);
 	native_extent = {.width = direct_layout.width * direct_layout.eyes, .height = direct_layout.height};

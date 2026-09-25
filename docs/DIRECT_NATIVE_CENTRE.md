@@ -50,6 +50,16 @@ The encoder now reuses a compressed result when the complete raw frame and compr
 
 Predictor-capable stream versions are 17/18 for RGB888 and 19/20 for RGB565. NXDZ envelope version 2 denotes predicted bytes; version 1 remains ordinary Zstd. Both endpoints must support the new stream version. Old clients reject it rather than interpreting incompatible data. Frame bounds and decompressed-size validation remain enabled.
 
+### Optional native vertical prediction
+
+`NX_DIRECT_ROW_PREDICTOR=1` enables another lossless compression trial for full-sample native RGB888 streams with Zstd and byte prediction enabled. It preserves the existing independent/global/regional selection first, then replaces the selected detail body only when vertical prediction saves at least another 5%. Global and regional motion decisions, receiver-confirmed references, periodic anchors and independent safety remain unchanged. RGB565 and checkerboard streams do not enable this option. The global default is off.
+
+Within each native 32×32 tile, the first row remains literal and subsequent rows store byte differences from the preceding row. Metadata, peripheral payload and each native tile's four padding bytes retain stride-4 prediction. The decoder restores the descriptor prefix, validates all referenced ranges and rejects overlaps before applying the tile inverse. AArch64 uses vectorized row addition. This changes compressed bytes without changing decoded pixels or adding a GPU pass.
+
+Stream feature bit 256 advertises support for NXDZ envelope version 3. Both endpoints need this implementation; old clients reject the unknown capability. Versions 1 and 2 remain legal fallbacks in the same stream. Install the matching client before enabling the server option.
+
+[Compression measurements and Pico CPU costs](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-25/row-compression).
+
 ## Bounded live timing profile (23 September)
 
 A paired Pico experiment used the existing Android settings below, with a 90 Hz

@@ -45,6 +45,7 @@ nxwarp_direct::layout direct_geometry(const nxwarp_codec_config & c)
 	l.predictor = l.zstd && enabled("NX_DIRECT_PREDICTOR");
 	l.motion = l.native_center && !l.packed_native && l.zstd && l.predictor && !l.checkerboard && enabled("NX_DIRECT_MOTION");
 	l.motion_regions = l.motion && enabled("NX_DIRECT_MOTION_REGIONS");
+	l.native_row_predictor = l.native_center && !l.packed_native && l.zstd && l.predictor && !l.checkerboard && enabled("NX_DIRECT_ROW_PREDICTOR");
 	return l;
 }
 class direct_codec final : public nxwarp_codec
@@ -78,7 +79,8 @@ class direct_codec final : public nxwarp_codec
 	std::vector<uint8_t> compressed, cached_raw, native_frame, zstd_compressed, zstd_predicted, predictor_scratch;
 	// One workspace per encoder; each call still produces an independent frame.
 	std::unique_ptr<ZSTD_CCtx, decltype(&ZSTD_freeCCtx)> zstd_context{nullptr, ZSTD_freeCCtx};
-	std::vector<uint8_t> motion_baseline;
+	std::vector<uint8_t> motion_baseline, zstd_row;
+	uint64_t row_attempts = 0, row_selected = 0, row_saved_bytes = 0;
 	std::vector<uint8_t> checker_frame;
 	uint64_t checker_sequence = 0;
 	nxwarp_direct::exact_compression_cache compression_cache;
@@ -122,11 +124,34 @@ class direct_codec final : public nxwarp_codec
 			compression_cache.store(raw, policy, fast);
 		return fast;
 	}
+	bool select_row_prediction(std::span<const uint8_t> raw, size_t incumbent_bytes)
+	{
+		if (!geometry.native_row_predictor) return false;
+		const auto row = nxwarp_direct::compress_zstd_row_predicted(geometry, raw, zstd_row, predictor_scratch, zstd_context.get());
+		const bool selected = nxwarp_direct::is_zstd(row) && nxwarp_direct::read32(row, 4) == 3 &&
+		                      row.size() * 100 <= incumbent_bytes * 95;
+		++row_attempts;
+		if (selected)
+		{
+			++row_selected;
+			row_saved_bytes += incumbent_bytes - row.size();
+		}
+		if ((row_attempts & 255u) == 0)
+			U_LOG_I("nxwarp: native row prediction selected=%llu/%llu saved=%llu bytes",
+			        (unsigned long long)row_selected, (unsigned long long)row_attempts, (unsigned long long)row_saved_bytes);
+		return selected;
+	}
+	// Compare with the existing winner so an extra compression trial cannot
+	// replace a smaller packet with a larger alternative through another gate.
+	std::span<const uint8_t> pack_independent_rows(std::span<const uint8_t> raw, std::span<const uint8_t> incumbent)
+	{
+		return select_row_prediction(raw, incumbent.size()) ? std::span<const uint8_t>(zstd_row) : incumbent;
+	}
 	std::span<const uint8_t> pack_detail_motion(std::span<const uint8_t> raw, bool hc)
 	{
 		auto baseline = pack_detail(raw, compressed, hc);
 		if (!geometry.motion)
-			return baseline;
+			return pack_independent_rows(raw, baseline);
 
 		// Cache only the exact, decoder-ready NXDF bytes; failed sends are harmless
 		// because a reference is usable only after the matching positive ACK.
@@ -134,10 +159,10 @@ class direct_codec final : public nxwarp_codec
 		const bool current_cached = !checker && wire_frame_id_valid &&
 		                            motion_references.put(geometry, wire_frame_id, raw);
 		if (checker || !wire_frame_id_valid || (wire_frame_id & 7u) == 0 || !held_ack_valid)
-			return baseline;
+			return pack_independent_rows(raw, baseline);
 		const auto * current = motion_references.find(wire_frame_id);
 		if (!current_cached || !current)
-			return baseline;
+			return pack_independent_rows(raw, baseline);
 
 		const nxwarp_direct::motion_reference * reference = nullptr;
 		uint16_t reference_id = 0;
@@ -158,7 +183,7 @@ class direct_codec final : public nxwarp_codec
 			}
 		}
 		if (!reference)
-			return baseline;
+			return pack_independent_rows(raw, baseline);
 
 		// Preserve the independent incumbent before any predicted compression
 		// reuses its buffers. Keep a winning global candidate exactly as before;
@@ -171,7 +196,14 @@ class direct_codec final : public nxwarp_codec
 			const auto body = nxwarp_direct::compress_zstd_predicted(residual, zstd_predicted, predictor_scratch, zstd_context.get());
 			motion_wire = regions ? nxwarp_direct::make_motion_regions_wire(vectors, reference_id, body) :
 			                        nxwarp_direct::make_motion_wire(vectors[0].dx, vectors[0].dy, reference_id, body);
-			return !motion_wire.empty() && motion_wire.size() * 100 <= motion_baseline.size() * 90;
+			if (motion_wire.empty() || motion_wire.size() * 100 > motion_baseline.size() * 90)
+				return false;
+			// Keep the established global/regional decision. Only then try a
+			// different lossless representation of that exact residual.
+			if (select_row_prediction(residual, body.size()))
+				motion_wire = regions ? nxwarp_direct::make_motion_regions_wire(vectors, reference_id, zstd_row) :
+				                        nxwarp_direct::make_motion_wire(vectors[0].dx, vectors[0].dy, reference_id, zstd_row);
+			return true;
 		};
 		const auto vector = nxwarp_direct::estimate_motion(geometry, reference->raw, reference->native, raw, current->native);
 		const bool global_valid = vector.hits >= 256 && std::isfinite(vector.sad);
@@ -212,7 +244,7 @@ class direct_codec final : public nxwarp_codec
 			        (unsigned long long)motion_attempts,
 			        (unsigned long long)motion_saved_bytes,
 			        (unsigned long long)motion_regions_selected);
-		return selected ? std::span<const uint8_t>(motion_wire) : std::span<const uint8_t>(motion_baseline);
+		return selected ? std::span<const uint8_t>(motion_wire) : pack_independent_rows(raw, motion_baseline);
 	}
 	std::span<const uint8_t> finish_frame(std::span<const uint8_t> wire)
 	{
@@ -336,6 +368,8 @@ public:
 			U_LOG_I("nxwarp: direct motion residual enabled (NX_DIRECT_MOTION=1; native RGB888 predictor stream)");
 		if (geometry.motion_regions)
 			U_LOG_I("nxwarp: regional motion residual enabled (NX_DIRECT_MOTION_REGIONS=1; four fixed native-centre regions)");
+		if (geometry.native_row_predictor)
+			U_LOG_I("nxwarp: native row prediction enabled (NX_DIRECT_ROW_PREDICTOR=1; 5% winner gate)");
 		if (safety_enabled)
 		{
 			const uint32_t sw = ((source_width / 4 + 31) / 32) * 32;
@@ -603,7 +637,7 @@ public:
 		{
 			if (!lz4_enabled)
 				return finish_frame(raw);
-			return finish_frame(geometry.motion ? pack_detail_motion(raw, use_hc) : pack_detail(raw, compressed, use_hc));
+			return finish_frame((geometry.motion || geometry.native_row_predictor) ? pack_detail_motion(raw, use_hc) : pack_detail(raw, compressed, use_hc));
 		}
 		std::span<const uint8_t> safety_wire = safety_raw;
 		std::span<const uint8_t> detail_wire = raw;
@@ -612,7 +646,7 @@ public:
 			// The child owns and caches its optional LZ4 result, so do not
 			// revisit its mapped Vulkan memory or wrap an existing NXDL envelope.
 			safety_wire = safety_raw;
-			detail_wire = geometry.motion ? pack_detail_motion(raw, use_hc) : pack_detail(raw, compressed, use_hc);
+			detail_wire = (geometry.motion || geometry.native_row_predictor) ? pack_detail_motion(raw, use_hc) : pack_detail(raw, compressed, use_hc);
 		}
 		frame.clear();
 		frame.reserve(32 + safety_wire.size() + detail_wire.size());

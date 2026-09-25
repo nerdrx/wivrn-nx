@@ -62,6 +62,22 @@ int main()
 	require(read32(old_h, 4) == 13 && parse_stream(old_h) && !parse_stream(old_h)->predictor, "legacy stream version");
 	const auto new_h = stream_header(predicted, false, true, true);
 	require(read32(new_h, 4) == 17 && parse_stream(new_h) && parse_stream(new_h)->predictor && !parse_stream(new_h)->packed_native, "RGB888 predictor stream version");
+	layout row_capable = predicted;
+	row_capable.native_row_predictor = true;
+	const auto row_h = stream_header(row_capable, false, true, true);
+	require(read32(row_h, 4) == (17u | 256u) && parse_stream(row_h) && parse_stream(row_h)->native_row_predictor,
+	        "native row predictor stream capability");
+	for (layout invalid : {layout{256, 256, 2, true, 256, true, true, true},
+	                       layout{256, 256, 2, true, 128, false, true, true},
+	                       layout{256, 256, 2, true, 256, false, false, true},
+	                       layout{256, 256, 2, true, 256, false, true, true, true}})
+	{
+		invalid.native_row_predictor = true;
+		require(stream_header(invalid, false, true, true).empty(), "row capability rejects incompatible layout");
+	}
+	auto invalid_row_h = stream_header(legacy, false, true, true);
+	invalid_row_h[5] |= 0x01; // Add bit 256 to an otherwise valid legacy RGB888 stream.
+	require(!parse_stream(invalid_row_h), "row capability rejected without zstd predictor");
 	const layout packed_old{256, 256, 2, true, 256, true, true, false};
 	const layout packed_new{256, 256, 2, true, 256, true, true, true};
 	require(read32(stream_header(packed_old, false, true, true), 4) == 15, "RGB565 legacy stream version");
@@ -115,5 +131,5 @@ int main()
 					require(decompress_zstd(predicted, b, decoded) && decoded == input, "reused context independent decode");
 			}
 		}
-	std::puts("NXDZ v2 predictor roundtrip/bounds/fallback: PASS");
+	std::puts("NXDZ v2 predictor roundtrip/bounds/fallback and NXDB row-capability checks: PASS");
 }

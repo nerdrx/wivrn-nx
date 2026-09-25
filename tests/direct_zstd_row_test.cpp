@@ -1,9 +1,11 @@
 #include "common/nxwarp_direct_motion.h"
+#include "common/nxwarp_direct_motion_regions.h"
 #include "common/nxwarp_direct_zstd.h"
 
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <array>
 #include <vector>
 
 using namespace wivrn::nxwarp_direct;
@@ -48,6 +50,37 @@ static std::vector<uint8_t> make_mixed_frame(layout l, bool alias = false)
 		else append32(raw, 0xc0123456u);
 	}
 	for (uint32_t i = 0; i < words * 4; ++i) raw.push_back(uint8_t((i * 29u + 7u) & 0xffu));
+	return raw;
+}
+
+static std::array<uint8_t, 4> scene_pixel(int x, int y, unsigned eye)
+{
+	uint32_t h = uint32_t(x) * 0x9e3779b1u ^ uint32_t(y) * 0x85ebca6bu ^ eye * 0xc2b2ae35u;
+	h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15; h *= 0x846ca68bu; h ^= h >> 16;
+	return {uint8_t(h), uint8_t(h >> 8), uint8_t(h >> 16), 255};
+}
+
+static std::vector<uint8_t> make_regional_scene(layout l, const motion_region_vectors & shifts)
+{
+	const uint32_t tiles = l.tile_count(), words = tiles * native_rgb_words;
+	auto raw = frame_header(tiles, words, native_version);
+	for (uint32_t tile = 0; tile < tiles; ++tile)
+		append32(raw, 0x20000000u | (tile * native_rgb_words));
+	for (uint32_t tile = 0; tile < tiles; ++tile)
+	{
+		const unsigned cols = l.width / 32;
+		const unsigned eye = tile % (cols * l.eyes) / cols;
+		const unsigned tx = tile % cols;
+		const unsigned ty = tile / (cols * l.eyes);
+		const auto & shift = shifts[motion_region_index(l, int(tx * 32 + 16), int(ty * 32 + 16))];
+		for (int y = 0; y < 32; ++y)
+			for (int x = 0; x < 32; ++x)
+			{
+				const auto p = scene_pixel(int(tx * 32) + x + shift.dx, int(ty * 32) + y + shift.dy, eye);
+				raw.insert(raw.end(), p.begin(), p.end());
+			}
+		for (unsigned i = 0; i < 4; ++i) raw.push_back(uint8_t(0xb0 + tile + i));
+	}
 	return raw;
 }
 
@@ -184,6 +217,34 @@ int main()
 	assert(is_zstd(residual_wire) && read32(residual_wire, 4) == 3);
 	assert(decompress_zstd(ml, residual_wire, decoded) && decoded == residual);
 	assert(restore_motion(ml, previous, previous_info, decoded, 0, 0) && decoded == current);
+
+	// Four independently moving quadrants survive row compression and NXMV v2.
+	auto rl = row_layout(true);
+	rl.motion_regions = true;
+	const auto region_stream = stream_header(rl, false, true, true);
+	const auto parsed_stream = parse_stream(region_stream);
+	assert(parsed_stream && parsed_stream->motion && parsed_stream->motion_regions && parsed_stream->native_row_predictor);
+	motion_region_vectors zero{};
+	motion_region_vectors expected{{{4, 4, 0, 0}, {-4, 4, 0, 0}, {4, -4, 0, 0}, {-4, -4, 0, 0}}};
+	const auto region_old = make_regional_scene(rl, zero);
+	const auto region_now = make_regional_scene(rl, expected);
+	motion_native_info region_old_info, region_now_info;
+	assert(build_motion_native(rl, region_old, region_old_info));
+	assert(build_motion_native(rl, region_now, region_now_info));
+	const auto estimated = estimate_motion_regions(rl, region_old, region_old_info, region_now, region_now_info);
+	for (size_t i = 0; i < expected.size(); ++i)
+	{
+		assert(estimated[i].dx == expected[i].dx && estimated[i].dy == expected[i].dy && estimated[i].hits >= 32);
+	}
+	auto region_residual = motion_regions_residual(rl, region_old, region_old_info, region_now, region_now_info, estimated);
+	assert(!region_residual.empty() && region_residual != region_now);
+	const auto region_body = compress_zstd_row_predicted(rl, region_residual, packed, scratch);
+	assert(is_zstd(region_body) && read32(region_body, 4) == 3);
+	const auto region_wire = make_motion_regions_wire(estimated, 7, region_body);
+	const auto region_header = parse_motion_regions_wire(region_wire);
+	assert(region_header && region_header->reference == 7);
+	assert(decompress_zstd(rl, region_header->body, decoded) && decoded == region_residual);
+	assert(restore_motion_regions(rl, region_old, region_old_info, decoded, region_header->vectors) && decoded == region_now);
 
 	std::puts("NXDZ v3 native row predictor: PASS");
 }

@@ -339,7 +339,7 @@ static void test_stream_versions()
 	auto wire = stream_header(l, false, true, true);
 	auto parsed = parse_stream(wire);
 	assert(parsed && parsed->motion && parsed->predictor && !parsed->checkerboard);
-	wire[4] |= 0x80;
+	wire[5] |= 0x01;
 	assert(!parse_stream(wire));
 	auto old = l;
 	old.motion = false;
@@ -349,6 +349,17 @@ static void test_stream_versions()
 	old.checkerboard = true;
 	auto checker_stream = parse_stream(stream_header(old, false, true, true));
 	assert(checker_stream && checker_stream->checkerboard && !checker_stream->motion);
+	old = l;
+	old.motion_regions = true;
+	auto regional_wire = stream_header(old, false, true, true);
+	auto regional = parse_stream(regional_wire);
+	assert(regional && regional->motion && regional->motion_regions && regional->predictor && !regional->checkerboard);
+	assert(read32(regional_wire, 4) & 128u);
+	old.motion = false;
+	assert(stream_header(old, false, true, true).empty());
+	old.motion = true;
+	old.zstd = false;
+	assert(stream_header(old, false, true, true).empty());
 	auto invalid = l;
 	invalid.packed_native = true;
 	assert(stream_header(invalid, false, true, true).empty());

@@ -405,3 +405,36 @@ identical bytes, across three ABBA cycles. This is CPU merger timing only;
 no new Pico GPU, photon-latency, or live Wi-Fi result is claimed.
 
 [Measurements, graphs, rejected candidates and reproduction](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-25/recovery-headroom).
+
+
+### Exact regional motion compression (opt-in)
+
+`NX_DIRECT_MOTION=1` enables exact native RGB888 motion residuals. Add
+`NX_DIRECT_MOTION_REGIONS=1` to estimate four shifts across fixed quadrants of
+the native centre. Both require Zstd with byte prediction and full samples;
+RGB565 and checkerboard do not use this representation. The four shifts are
+shared across the stereo pair. This is a compression predictor, not display
+motion extrapolation: the residual reconstructs the original encoded bytes.
+It does not restore detail already removed by spatial foveation.
+
+The encoder keeps a global-motion candidate when it already saves at least
+10% against independent detail. Only a failed global candidate opens a second
+regional search and predicted-Zstd trial. Equal regional shifts use the existing
+24-byte global envelope; different shifts use a 40-byte regional envelope.
+The same 10% gate applies. This preserves winning global packets and avoids
+extra regional work on ordinary pans. Failed regional coverage keeps the
+independent fallback. Only positively acknowledged exact references
+up to eight frames old are eligible, every eighth frame is independent, and
+the safety image remains independent. A missing decoder reference rejects
+the dependent detail instead of substituting another image.
+
+The regional capability uses stream feature bit 128 in addition to motion
+bit 64. NXMV version 2 contains the reference ID, mode 3, vector count 4,
+body length and four packed signed 16-bit `(dx, dy)` pairs. Each component is
+bounded to ±16 pixels. Version 1 remains valid in a regional stream. Both
+ends need the regional-capable build; old clients reject the new stream bit.
+Disable only `NX_DIRECT_MOTION_REGIONS` to return to global motion, or disable
+`NX_DIRECT_MOTION` for independent detail. Changes take effect on reconnect.
+
+The receiver adds no GPU pass: CPU reconstruction feeds the existing direct
+Vulkan decode/upload path. [Tests, measurements and deployment scope](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-25/motion-regions).

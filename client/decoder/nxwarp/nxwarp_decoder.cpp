@@ -974,6 +974,7 @@ bool nxwarp_decoder::on_direct_stream_header(std::span<const uint8_t> header)
 		                  parsed->predictor == direct_layout.predictor &&
 		                  parsed->checkerboard == direct_layout.checkerboard &&
 		                  parsed->motion == direct_layout.motion &&
+		                  parsed->motion_regions == direct_layout.motion_regions &&
 		                  parsed->zstd == direct_layout.zstd &&
 		                  trusted_lan == direct_trusted_lan && lz4 == direct_lz4 && safety == direct_safety;
 		if (!same)
@@ -998,6 +999,7 @@ bool nxwarp_decoder::on_direct_stream_header(std::span<const uint8_t> header)
 	spdlog::info("nxwarp[{}]: LZ4 envelope {}", stream_index, direct_lz4);
 	spdlog::info("nxwarp[{}]: alternating checker samples {}", stream_index, direct_layout.checkerboard);
 	spdlog::info("nxwarp[{}]: exact motion compression {}", stream_index, direct_layout.motion);
+	spdlog::info("nxwarp[{}]: regional motion compression {}", stream_index, direct_layout.motion_regions);
 	spdlog::info("nxwarp[{}]: partial direct recovery {} (at most 10% retained tiles, history at most 50 ms, stable-neighbor guard)",
 	             stream_index, direct_partial_recovery);
 	native_extent = {.width = direct_layout.width * direct_layout.eyes, .height = direct_layout.height};
@@ -1853,30 +1855,52 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		}
 		const size_t coded_input_bytes = payload.size();
 		std::optional<nxwarp_direct::motion_header> motion;
+		std::optional<nxwarp_direct::motion_regions_header> motion_regions;
 		const nxwarp_direct::motion_reference * reference = nullptr;
 		if (nxwarp_direct::is_motion(payload))
 		{
-			motion = nxwarp_direct::parse_motion_wire(payload);
-			if (!direct_layout.motion || job.safety || job.concealed || !motion ||
-			    uint16_t(job.frame_id - motion->reference) == 0 ||
-			    uint16_t(job.frame_id - motion->reference) > 8)
+			const uint32_t motion_version = payload.size() >= 8 ? nxwarp_direct::read32(payload, 4) : 0;
+			uint16_t reference_id = 0;
+			if (motion_version == nxwarp_direct::motion_regions_version)
+			{
+				motion_regions = nxwarp_direct::parse_motion_regions_wire(payload);
+				if (!direct_layout.motion_regions || !motion_regions)
+				{
+					host.report_frame_not_held(stream_index, job.frame_id, from_headset::nxwarp_frame_not_held::reason::refused);
+					return;
+				}
+				reference_id = motion_regions->reference;
+			}
+			else
+			{
+				motion = nxwarp_direct::parse_motion_wire(payload);
+				if (!motion)
+				{
+					host.report_frame_not_held(stream_index, job.frame_id, from_headset::nxwarp_frame_not_held::reason::refused);
+					return;
+				}
+				reference_id = motion->reference;
+			}
+			if (!direct_layout.motion || job.safety || job.concealed ||
+			    uint16_t(job.frame_id - reference_id) == 0 ||
+			    uint16_t(job.frame_id - reference_id) > 8)
 			{
 				host.report_frame_not_held(stream_index, job.frame_id, from_headset::nxwarp_frame_not_held::reason::refused);
 				return;
 			}
-			reference = direct_motion_references.find(motion->reference);
+			reference = direct_motion_references.find(reference_id);
 			if (!reference)
 			{
 				// The independent safety prefix remains usable. Never reconstruct
 				// against a substitute or displayed frame when a reference is absent.
 				++direct_motion_missing;
-				host.report_frame_not_held(stream_index, motion->reference, from_headset::nxwarp_frame_not_held::reason::refused);
+				host.report_frame_not_held(stream_index, reference_id, from_headset::nxwarp_frame_not_held::reason::refused);
 				host.report_frame_not_held(stream_index, job.frame_id, from_headset::nxwarp_frame_not_held::reason::refused);
 				if (direct_motion_missing % 60 == 1)
 					spdlog::warn("nxwarp[{}]: motion reference absent, {} detail frames declined", stream_index, direct_motion_missing);
 				return;
 			}
-			payload = motion->body;
+			payload = motion_regions ? motion_regions->body : motion->body;
 		}
 		if (nxwarp_direct::is_lz4(payload) || nxwarp_direct::is_zstd(payload))
 		{
@@ -1896,20 +1920,26 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			payload = direct_unpacked;
 		}
 		else if (direct_lz4) ++direct_lz4_raw_frames;
-		if (motion)
+		if (motion || motion_regions)
 		{
 			// A raw residual is legal when neither lossless compressor wins.
 			if (payload.data() != direct_unpacked.data())
 				direct_unpacked.assign(payload.begin(), payload.end());
-			if (!nxwarp_direct::restore_motion(coded_layout, reference->raw, reference->native,
-			                                  direct_unpacked, motion->dx, motion->dy))
+			const bool restored = motion_regions
+			                              ? nxwarp_direct::restore_motion_regions(coded_layout, reference->raw, reference->native,
+			                                                                    direct_unpacked, motion_regions->vectors)
+			                              : nxwarp_direct::restore_motion(coded_layout, reference->raw, reference->native,
+			                                                              direct_unpacked, motion->dx, motion->dy);
+			if (!restored)
 			{
 				host.report_frame_not_held(stream_index, job.frame_id, from_headset::nxwarp_frame_not_held::reason::refused);
 				return;
 			}
 			payload = direct_unpacked;
-			if (++direct_motion_frames % 180 == 1)
-				spdlog::info("nxwarp[{}]: exact motion detail decoded {}, missing references {}", stream_index, direct_motion_frames, direct_motion_missing);
+			++direct_motion_frames;
+			if (motion_regions) ++direct_motion_region_frames;
+			if (direct_motion_frames % 180 == 1)
+				spdlog::info("nxwarp[{}]: exact motion detail decoded {} (regional {}), missing references {}", stream_index, direct_motion_frames, direct_motion_region_frames, direct_motion_missing);
 		}
 		if (direct_lz4)
 		{

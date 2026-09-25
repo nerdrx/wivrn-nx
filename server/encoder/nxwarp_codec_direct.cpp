@@ -9,6 +9,7 @@
 #include "nxwarp_direct_layout.h"
 #include "nxwarp_direct_lz4.h"
 #include "nxwarp_direct_motion.h"
+#include "nxwarp_direct_motion_regions.h"
 #include "nxwarp_direct_native.h"
 #include "nxwarp_direct_zstd.h"
 #include "util/u_logging.h"
@@ -43,6 +44,7 @@ nxwarp_direct::layout direct_geometry(const nxwarp_codec_config & c)
 	l.zstd = l.native_center && enabled("NX_DIRECT_ZSTD");
 	l.predictor = l.zstd && enabled("NX_DIRECT_PREDICTOR");
 	l.motion = l.native_center && !l.packed_native && l.zstd && l.predictor && !l.checkerboard && enabled("NX_DIRECT_MOTION");
+	l.motion_regions = l.motion && enabled("NX_DIRECT_MOTION_REGIONS");
 	return l;
 }
 class direct_codec final : public nxwarp_codec
@@ -86,6 +88,7 @@ class direct_codec final : public nxwarp_codec
 	uint32_t held_ack_mask = 0;
 	bool wire_frame_id_valid = false, held_ack_valid = false;
 	uint64_t motion_attempts = 0, motion_selected = 0, motion_saved_bytes = 0;
+	uint64_t motion_regions_selected = 0;
 	bool compression_cache_enabled = true;
 	std::span<const uint32_t> native_pixels;
 	float native_radius = 0;
@@ -157,40 +160,59 @@ class direct_codec final : public nxwarp_codec
 		if (!reference)
 			return baseline;
 
-		const auto vector = nxwarp_direct::estimate_motion(geometry, reference->raw, reference->native, raw, current->native);
-		if (vector.hits < 256 || !std::isfinite(vector.sad))
-			return baseline;
-
-		// The residual reuses predictor buffers. Own the incumbent before compressing
-		// it, or the second pass could overwrite the comparison bytes.
+		// Preserve the independent incumbent before any predicted compression
+		// reuses its buffers. Keep a winning global candidate exactly as before;
+		// regional search is useful when one shift cannot explain the centre.
 		motion_baseline.assign(baseline.begin(), baseline.end());
-		auto residual = nxwarp_direct::motion_residual(geometry, reference->raw, reference->native,
-		                                                   raw, current->native, vector.dx, vector.dy);
-		if (residual.empty())
-			return baseline;
-		// Keep the full independent selector as fallback, but try only predicted
-		// Zstd for the temporal residual. Repeating all three compressors costs
-		// more than motion search; the same 10% whole-envelope gate still applies.
-		const auto body = nxwarp_direct::compress_zstd_predicted(residual, zstd_predicted, predictor_scratch, zstd_context.get());
-		motion_wire = nxwarp_direct::make_motion_wire(vector.dx, vector.dy, reference_id, body);
-		++motion_attempts;
-		if (motion_wire.empty() || motion_wire.size() * 100 > motion_baseline.size() * 90)
+		bool selected_regions = false;
+		auto try_residual = [&](std::vector<uint8_t> residual,
+		                        const nxwarp_direct::motion_region_vectors & vectors, bool regions) {
+			if (residual.empty()) return false;
+			const auto body = nxwarp_direct::compress_zstd_predicted(residual, zstd_predicted, predictor_scratch, zstd_context.get());
+			motion_wire = regions ? nxwarp_direct::make_motion_regions_wire(vectors, reference_id, body) :
+			                        nxwarp_direct::make_motion_wire(vectors[0].dx, vectors[0].dy, reference_id, body);
+			return !motion_wire.empty() && motion_wire.size() * 100 <= motion_baseline.size() * 90;
+		};
+		const auto vector = nxwarp_direct::estimate_motion(geometry, reference->raw, reference->native, raw, current->native);
+		const bool global_valid = vector.hits >= 256 && std::isfinite(vector.sad);
+		nxwarp_direct::motion_region_vectors global_vectors{};
+		global_vectors.fill(vector);
+		bool selected = global_valid && try_residual(nxwarp_direct::motion_residual(geometry, reference->raw, reference->native,
+		                                                                          raw, current->native, vector.dx, vector.dy),
+		                                            global_vectors, false);
+		if (!selected && geometry.motion_regions)
 		{
-			if ((motion_attempts & 255u) == 0)
-				U_LOG_I("nxwarp: direct motion selected=%llu/%llu saved=%llu bytes",
-				        (unsigned long long)motion_selected,
-				        (unsigned long long)motion_attempts,
-				        (unsigned long long)motion_saved_bytes);
-			return motion_baseline;
+			const auto vectors = nxwarp_direct::estimate_motion_regions(geometry, reference->raw, reference->native, raw, current->native);
+			const bool valid = std::all_of(vectors.begin(), vectors.end(), [](const auto & v) {
+				return v.hits >= 32 && std::isfinite(v.sad);
+			});
+			const bool diverse = std::any_of(vectors.begin() + 1, vectors.end(), [&](const auto & v) {
+				return v.dx != vectors[0].dx || v.dy != vectors[0].dy;
+			});
+			// No second compression of an identical prediction.
+			const bool same_global = global_valid && !diverse && vectors[0].dx == vector.dx && vectors[0].dy == vector.dy;
+			if (valid && !same_global)
+			{
+				auto residual = diverse ? nxwarp_direct::motion_regions_residual(geometry, reference->raw, reference->native, raw, current->native, vectors) :
+				                          nxwarp_direct::motion_residual(geometry, reference->raw, reference->native, raw, current->native, vectors[0].dx, vectors[0].dy);
+				selected = try_residual(std::move(residual), vectors, diverse);
+				selected_regions = selected && diverse;
+			}
 		}
-		++motion_selected;
-		motion_saved_bytes += motion_baseline.size() - motion_wire.size();
+		++motion_attempts;
+		if (selected)
+		{
+			++motion_selected;
+			motion_regions_selected += selected_regions;
+			motion_saved_bytes += motion_baseline.size() - motion_wire.size();
+		}
 		if ((motion_attempts & 255u) == 0)
-			U_LOG_I("nxwarp: direct motion selected=%llu/%llu saved=%llu bytes",
+			U_LOG_I("nxwarp: direct motion selected=%llu/%llu saved=%llu bytes regional=%llu",
 			        (unsigned long long)motion_selected,
 			        (unsigned long long)motion_attempts,
-			        (unsigned long long)motion_saved_bytes);
-		return motion_wire;
+			        (unsigned long long)motion_saved_bytes,
+			        (unsigned long long)motion_regions_selected);
+		return selected ? std::span<const uint8_t>(motion_wire) : std::span<const uint8_t>(motion_baseline);
 	}
 	std::span<const uint8_t> finish_frame(std::span<const uint8_t> wire)
 	{
@@ -312,6 +334,8 @@ public:
 			throw std::runtime_error("NX direct: eye geometry must be multiples of 32, <=4096");
 		if (geometry.motion)
 			U_LOG_I("nxwarp: direct motion residual enabled (NX_DIRECT_MOTION=1; native RGB888 predictor stream)");
+		if (geometry.motion_regions)
+			U_LOG_I("nxwarp: regional motion residual enabled (NX_DIRECT_MOTION_REGIONS=1; four fixed native-centre regions)");
 		if (safety_enabled)
 		{
 			const uint32_t sw = ((source_width / 4 + 31) / 32) * 32;

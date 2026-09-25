@@ -136,6 +136,48 @@ The focused virtual-clock check is
 `tests/bitrate_aimd_loss_only_test.cpp`; its portable build command and
 expected output are recorded in `tests/README.md`.
 
+## Experimental checkerboard half-refresh
+
+The WiVRn headset app exposes **Checkerboard half-refresh (experimental)** in
+Streaming settings → Advanced. It is off by default and takes effect after
+reconnecting. Use matching client and server builds. The first frame remains a
+full frame so the headset can seed its image history.
+
+Each later encoded frame carries alternating samples: half of each encoded grid,
+with the same phase for both eyes. The other half comes from the immediately
+previous frame, sampled in the same presentation pass. This is temporal sample
+reuse, not motion interpolation. A coarse peripheral sample covers several output
+pixels, so its checker cells are larger than a native centre pixel. Moving detail
+can shimmer or lag. Invalid or
+unavailable history falls back to the nearest sample in the current frame.
+
+History reuse requires the previous adjacent frame to have arrived within 50 ms
+on the headset's transport clock and to carry the opposite phase or be a full
+bootstrap frame. A changed tile
+mode rejects old samples for that tile. Safety frames bypass detail history without erasing it; they are decoded before
+every detail frame even when never displayed. The
+existing partial-tile recovery path is disabled in this mode. These guards do
+not bound image age before packet arrival or correct for motion.
+
+Checker frames retain shared palette endpoints, so source-sample count is
+halved but encoded bytes are not: palette payloads shrink by about 40%, while
+native raw payloads shrink by 50%. Headers, descriptors, transport overhead and
+compression remain, so total network bandwidth is not guaranteed to halve. Repacking adds server
+CPU work; retaining and sampling history adds headset memory traffic and GPU
+work.
+
+The stream header uses the existing base version 1–20 plus 32 (versions 33–52)
+to advertise checkerboard support. Frame flag `0x100` marks checker samples;
+`0x200` marks phase 1. Full frames remain valid for bootstrap and may also
+appear later in the stream.
+Short Pico tests at a 500 Mbit/s requested budget measured about 64 → 47 Mbit/s
+of complete codec payload, with about 90 new-source selections per second in
+both modes. Per-sample refresh is half that rate. The on-mode presentation pass
+cost about 6.2 ms versus 3.2–4.1 ms in off controls. Device placement changed, so
+these short runs do not isolate GPU cost or prove motion-to-photon latency.
+The mode saves bandwidth at a temporal-quality and headset-work cost; it remains
+off by default. [Measurements, motion examples and limits](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-25/checkerboard).
+
 ## Trusted-LAN packet mode
 
 Set `"trusted-lan":"true"` in the direct encoder options to replace the inner

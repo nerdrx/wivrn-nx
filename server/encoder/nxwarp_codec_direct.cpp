@@ -4,6 +4,7 @@
 #include "nxwarp_codec.h"
 #include "nxwarp_compression_credit.h"
 #include "nxwarp_direct_admission.h"
+#include "nxwarp_direct_checkerboard.h"
 #include "nxwarp_direct_compression_cache.h"
 #include "nxwarp_direct_layout.h"
 #include "nxwarp_direct_lz4.h"
@@ -31,6 +32,7 @@ void check(VkResult r, const char * what)
 nxwarp_direct::layout direct_geometry(const nxwarp_codec_config & c)
 {
 	nxwarp_direct::layout l{c.width, c.height, c.eyes, c.direct_native_center};
+	l.checkerboard = c.direct_checkerboard;
 	auto enabled = [](const char * name) {
 		const auto v = std::getenv(name);
 		return v && std::strcmp(v, "1") == 0;
@@ -69,6 +71,8 @@ class direct_codec final : public nxwarp_codec
 	bool lz4_enabled = false;
 	std::atomic_bool lz4_hc = false;
 	std::vector<uint8_t> compressed, cached_raw, native_frame, zstd_compressed, zstd_predicted, predictor_scratch;
+	std::vector<uint8_t> checker_frame;
+	uint64_t checker_sequence = 0;
 	nxwarp_direct::exact_compression_cache compression_cache;
 	bool compression_cache_enabled = true;
 	std::span<const uint32_t> native_pixels;
@@ -174,6 +178,8 @@ class direct_codec final : public nxwarp_codec
 	}
 	size_t planned_bytes() const
 	{
+		if (geometry.checkerboard && checker_sequence > 0)
+			return 16 + geometry.tile_count() * 4 + (plan.words / 5) * 12 + native_extra() / 2;
 		return plan.bytes() + native_extra();
 	}
 	std::array<VkImageView, 2> image_views(VkImage image, uint32_t layers)
@@ -228,6 +234,7 @@ public:
 			sc.height = sh;
 			sc.safety = false;
 			sc.direct_native_center = false;
+			sc.direct_checkerboard = false;
 			sc.direct_lz4 = c.direct_lz4;
 			sc.source_width = source_width;
 			sc.source_height = source_height;
@@ -376,6 +383,8 @@ public:
 	}
 	std::string description() const override
 	{
+		if (geometry.checkerboard)
+			return "NX direct checkerboard half-refresh (experimental)";
 		if (geometry.zstd)
 			return "NX direct RGB blocks + adaptive LZ4/Zstd (independent frames)";
 		return lz4_enabled ? "NX direct RGB blocks + LZ4 (64 KiB chunks, 5% minimum saving)" : "NX direct RGB blocks v1 (GPU source, independent frames)";
@@ -440,6 +449,12 @@ public:
 			if (native_pixels.size() != 2u * 256u * 256u)
 				throw std::runtime_error("NX direct native centre source missing");
 			raw = nxwarp_direct::native_center_frame(geometry, raw, native_pixels, native_frame, native_radius);
+		}
+		if (geometry.checkerboard && checker_sequence++ > 0)
+		{
+			raw = nxwarp_direct::checkerboard_frame(geometry, raw, checker_frame, uint32_t((checker_sequence - 1) & 1u));
+			if (raw.empty())
+				throw std::runtime_error("NX direct: invalid checkerboard source frame");
 		}
 		if (!safety_codec)
 		{

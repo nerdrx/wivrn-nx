@@ -538,6 +538,7 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	};
 	const std::string backend = option_string(settings.options, "backend", "ref");
 	const bool direct_backend = backend == "direct";
+	codec_cfg.direct_checkerboard = direct_backend && settings.nx_checkerboard;
 	const char * native_env = std::getenv("NX_DIRECT_NATIVE_CENTER");
 	codec_cfg.direct_native_center = native_env && std::strcmp(native_env, "1") == 0 && direct_backend &&
 	                                codec_cfg.eyes == 2 && codec_cfg.safety && codec_cfg.direct_lz4 &&

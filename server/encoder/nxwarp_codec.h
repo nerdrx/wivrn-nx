@@ -69,6 +69,7 @@ struct nxwarp_codec_config
 	bool inter = false;
 	bool direct_native_center = false; // Experimental native RGB centre in paired safety streams.
 	bool direct_lz4 = false; // Direct backend only: optional independent LZ4 chunks.
+	bool direct_checkerboard = false; // Alternate encoded samples; negotiated at stream start.
 	bool safety = false; // Direct backend only: prepend a low-resolution NXDS safety frame.
 	uint32_t source_width = 0; // Direct source luma width; defaults to width.
 	uint32_t source_height = 0; // Direct source luma height; defaults to height.

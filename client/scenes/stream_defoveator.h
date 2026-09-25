@@ -215,6 +215,11 @@ public:
 		vk::DeviceSize direct_tiles_bytes = 0;
 		vk::Buffer direct_blocks = nullptr;
 		vk::DeviceSize direct_blocks_bytes = 0;
+		uint32_t direct_tile_count = 0;
+		uint32_t direct_history_block_offset_words = 0;
+		uint32_t direct_checker = 0;
+		uint32_t direct_history_checker = 0;
+		bool direct_history_valid = false;
 	};
 
 	// Post-processing folded into the defoveation pass, all values are neutral by default

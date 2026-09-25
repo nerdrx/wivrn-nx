@@ -292,6 +292,9 @@ public:
 	// Direct NX Warp LZ4 uses the slower high-compression mode when enabled.
 	// Off by default; applies live to the direct encoder.
 	bool nxwarp_lz4_hc = false;
+	// Experimental NX Warp half-refresh; applied when the server creates the encoders.
+	bool nx_checkerboard = false;
+	bool effective_nx_checkerboard() const;
 
 	// Frame smoothing: on the first display refresh that shows a newly decoded frame,
 	// blend it half and half with the frame it replaces, so the step between two decoded

@@ -584,6 +584,8 @@ struct settings_changed
 	bool foveation_foveal_qp = false;
 	// Whether direct NX Warp uses LZ4 high compression. Live; only direct streams use it.
 	bool nxwarp_lz4_hc = false;
+	// Experimental NX Warp half-refresh, read at encoder creation.
+	bool nx_checkerboard = false;
 };
 
 // The motion smoothing mode a settings packet asks for. A headset that names one always

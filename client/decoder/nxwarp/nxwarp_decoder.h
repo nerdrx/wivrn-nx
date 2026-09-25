@@ -188,6 +188,11 @@ class nxwarp_decoder : public decoder
 	// Network-thread-only history: complete validated frames, never concealed output.
 	std::vector<uint8_t> direct_history;
 	XrTime direct_history_time = 0;
+	// Worker-only packed frame history; avoids pinning an image-pool item.
+	std::vector<uint8_t> direct_sample_history, direct_sample_next_history;
+	uint64_t direct_sample_history_frame = uint64_t(-1);
+	XrTime direct_sample_history_time = 0;
+	uint64_t direct_sample_history_used = 0;
 	uint64_t direct_recovery_attempts = 0, direct_recovery_frames = 0;
 	uint64_t direct_recovery_tiles = 0;
 	double direct_recovery_ms = 0;

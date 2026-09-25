@@ -531,8 +531,9 @@ void nxwarp_decoder::build_image_pool()
 		}
 		if (direct_block_active)
 		{
-			const auto tile_bytes = vk::DeviceSize(direct_layout.tile_count()) * 4;
-			const auto block_bytes = vk::DeviceSize(direct_layout.max_block_words()) * 4;
+			const auto multiplier = direct_layout.checkerboard ? 2u : 1u;
+			const auto tile_bytes = vk::DeviceSize(direct_layout.tile_count()) * 4 * multiplier;
+			const auto block_bytes = vk::DeviceSize(direct_layout.max_block_words()) * 4 * multiplier;
 			item.direct_tiles = buffer_allocation(device,
 			        vk::BufferCreateInfo{.size = tile_bytes, .usage = vk::BufferUsageFlagBits::eStorageBuffer},
 			        {.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
@@ -960,16 +961,18 @@ bool nxwarp_decoder::on_direct_stream_header(std::span<const uint8_t> header)
 		return false;
 	}
 	const uint32_t direct_version = nxwarp_direct::read32(header, 4);
-	const bool trusted_lan = direct_version % 2 == 0;
-	const bool lz4 = direct_version >= 3;
-	const bool safety = direct_version >= 5;
+	const uint32_t base_version = direct_version & 31u;
+	const bool trusted_lan = base_version % 2 == 0;
+	const bool lz4 = base_version >= 3;
+	const bool safety = base_version >= 5;
 	if (direct_block_active)
 	{
 		const bool same = parsed->width == direct_layout.width && parsed->height == direct_layout.height &&
 		                  parsed->eyes == direct_layout.eyes && parsed->native_center == direct_layout.native_center &&
-	                  parsed->native_side == direct_layout.native_side &&
+		                  parsed->native_side == direct_layout.native_side &&
 		                  parsed->packed_native == direct_layout.packed_native &&
 		                  parsed->predictor == direct_layout.predictor &&
+		                  parsed->checkerboard == direct_layout.checkerboard &&
 		                  parsed->zstd == direct_layout.zstd &&
 		                  trusted_lan == direct_trusted_lan && lz4 == direct_lz4 && safety == direct_safety;
 		if (!same)
@@ -990,8 +993,9 @@ bool nxwarp_decoder::on_direct_stream_header(std::span<const uint8_t> header)
 	char recovery[PROP_VALUE_MAX] = {};
 	direct_partial_recovery = __system_property_get("debug.wivrn.nx.partial_direct", recovery) > 0 && recovery[0] == '1';
 #endif
-	if (direct_lz4) direct_partial_recovery = false; // Compressed holes are not raw tile holes.
+	if (direct_lz4 || direct_layout.checkerboard) direct_partial_recovery = false; // Compressed/half-sampled holes are not full raw tile holes.
 	spdlog::info("nxwarp[{}]: LZ4 envelope {}", stream_index, direct_lz4);
+	spdlog::info("nxwarp[{}]: alternating checker samples {}", stream_index, direct_layout.checkerboard);
 	spdlog::info("nxwarp[{}]: partial direct recovery {} (at most 10% retained tiles, history at most 50 ms, stable-neighbor guard)",
 	             stream_index, direct_partial_recovery);
 	native_extent = {.width = direct_layout.width * direct_layout.eyes, .height = direct_layout.height};
@@ -1826,6 +1830,8 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 	// payload before touching Vulkan; malformed offsets never become GPU reads.
 	if (direct_block_active)
 	{
+		// Safety prefixes are decoded before every detail frame, even when never
+		// displayed. They must not erase the separate detail-sample history.
 		std::span<const uint8_t> payload{job.unit.data(), job.unit.size()};
 		auto coded_layout = direct_layout;
 		if (direct_safety)
@@ -1873,6 +1879,9 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		const auto frame = nxwarp_direct::parse_frame(coded_layout, payload);
 		if (!frame)
 		{
+			direct_sample_history.clear();
+			direct_sample_history_frame = uint64_t(-1);
+			direct_sample_history_time = 0;
 			spdlog::warn("nxwarp[{}]: direct-block frame rejected by bounds/size validation", stream_index);
 #ifdef __ANDROID__
 			// Opt-in, one rejected unit per decoder for off-device diagnosis.
@@ -1891,6 +1900,27 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 			                           from_headset::nxwarp_frame_not_held::reason::refused);
 			return;
 		}
+		const bool checker = nxwarp_direct::checker_frame(payload);
+		const uint32_t phase = checker ? nxwarp_direct::checker_phase(payload) : 0;
+		std::optional<nxwarp_direct::frame_view> history_frame;
+		bool history_valid = false;
+		uint32_t history_checker = 0;
+		// The 50 ms bound is transport-arrival age (same XR clock), not photon age.
+		if (direct_layout.checkerboard && checker && !job.safety &&
+		    direct_sample_history_frame != uint64_t(-1) &&
+		    job.fb.frame_index == direct_sample_history_frame + 1 &&
+		    job.fb.received_first_packet >= direct_sample_history_time &&
+		    job.fb.received_first_packet - direct_sample_history_time <= 50'000'000)
+		{
+			history_frame = nxwarp_direct::parse_frame(coded_layout, direct_sample_history);
+			if (history_frame)
+			{
+				const bool old_checker = nxwarp_direct::checker_frame(direct_sample_history);
+				const uint32_t old_phase = old_checker ? nxwarp_direct::checker_phase(direct_sample_history) : 0;
+				history_valid = !old_checker || old_phase != phase;
+				history_checker = old_checker ? old_phase + 1 : 0;
+			}
+		}
 		auto * item = get_free();
 		if (!item)
 		{
@@ -1900,21 +1930,38 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		}
 		const auto tile_bytes = frame->descriptors.size();
 		const auto block_bytes = frame->blocks.size();
-		if (vmaCopyMemoryToAllocation(vk_allocator::instance(), frame->descriptors.data(), item->direct_tiles, 0, tile_bytes) != VK_SUCCESS)
+		const auto history_tile_bytes = history_valid ? history_frame->descriptors.size() : 0;
+		const auto history_block_bytes = history_valid ? history_frame->blocks.size() : 0;
+		if (vmaCopyMemoryToAllocation(vk_allocator::instance(), frame->descriptors.data(), item->direct_tiles, 0, tile_bytes) != VK_SUCCESS ||
+		    (history_valid && vmaCopyMemoryToAllocation(vk_allocator::instance(), history_frame->descriptors.data(), item->direct_tiles, tile_bytes, history_tile_bytes) != VK_SUCCESS))
 		{
 			item->free = true;
 			host.report_frame_not_held(stream_index, job.frame_id,
 			                           from_headset::nxwarp_frame_not_held::reason::refused);
 			return;
 		}
-		if (block_bytes)
-			if (vmaCopyMemoryToAllocation(vk_allocator::instance(), frame->blocks.data(), item->direct_blocks, 0, block_bytes) != VK_SUCCESS)
+		if ((block_bytes && vmaCopyMemoryToAllocation(vk_allocator::instance(), frame->blocks.data(), item->direct_blocks, 0, block_bytes) != VK_SUCCESS) ||
+		    (history_valid && history_block_bytes && vmaCopyMemoryToAllocation(vk_allocator::instance(), history_frame->blocks.data(), item->direct_blocks, block_bytes, history_block_bytes) != VK_SUCCESS))
 			{
 				item->free = true;
 				host.report_frame_not_held(stream_index, job.frame_id,
 				                           from_headset::nxwarp_frame_not_held::reason::refused);
 				return;
 			}
+		if (direct_layout.checkerboard && !job.concealed && !job.safety)
+		{
+			try
+			{
+				direct_sample_next_history.assign(payload.begin(), payload.end());
+			}
+			catch (...)
+			{
+				item->free = true;
+				host.report_frame_not_held(stream_index, job.frame_id,
+				                           from_headset::nxwarp_frame_not_held::reason::refused);
+				return;
+			}
+		}
 		auto handle = std::make_shared<nxwarp_blit_handle>(job.fb, job.view_info, *item->view_full,
 		                                                   item->image, native_extent, item->current_layout,
 		                                                   VK_NULL_HANDLE, item->semaphore_val, item->free);
@@ -1922,9 +1969,14 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		handle->direct_safety = job.safety;
 		handle->direct_extent = vk::Extent2D{coded_layout.width * coded_layout.eyes, coded_layout.height};
 		handle->direct_tiles = vk::Buffer(item->direct_tiles);
-		handle->direct_tiles_bytes = tile_bytes;
+		handle->direct_tiles_bytes = tile_bytes + history_tile_bytes;
 		handle->direct_blocks = vk::Buffer(item->direct_blocks);
-		handle->direct_blocks_bytes = vk::DeviceSize(direct_layout.max_block_words()) * 4;
+		handle->direct_blocks_bytes = vk::DeviceSize(direct_layout.max_block_words()) * 4 * (direct_layout.checkerboard ? 2u : 1u);
+		handle->direct_tile_count = direct_layout.checkerboard ? direct_layout.tile_count() : 0;
+		handle->direct_history_block_offset_words = direct_layout.checkerboard ? uint32_t(block_bytes / 4) : 0;
+		handle->direct_checker = checker ? phase + 1 : 0;
+		handle->direct_history_checker = history_checker;
+		handle->direct_history_valid = history_valid;
 		handle->feedback.received_from_decoder = host.now();
 		if (!job.concealed && !job.safety)
 			note_frame_held(job.frame_id);
@@ -1933,6 +1985,20 @@ void nxwarp_decoder::decode_unit(decode_job & job)
 		++frames_decoded;
 		host.on_frame_decoded(job.frame_id);
 		host.publish(accumulator, std::move(handle));
+		if (direct_layout.checkerboard && !job.concealed && !job.safety)
+		{
+			direct_sample_history.swap(direct_sample_next_history);
+			direct_sample_history_frame = job.fb.frame_index;
+			direct_sample_history_time = job.fb.received_first_packet;
+		}
+		else if (!job.safety)
+		{
+			direct_sample_history.clear();
+			direct_sample_history_frame = uint64_t(-1);
+			direct_sample_history_time = 0;
+		}
+		if (history_valid && (++direct_sample_history_used % 180 == 1))
+			spdlog::info("nxwarp[{}]: checker previous-frame samples used {} times", stream_index, direct_sample_history_used);
 		return;
 	}
 	if (planar_direct_active)

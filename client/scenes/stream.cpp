@@ -445,6 +445,7 @@ void scenes::stream::send_initial_control_packets(wivrn_session & net, float gue
 		}
 		info.settings.fps_divider = config.fps_divider;
 		info.settings.nxwarp_lz4_hc = config.nxwarp_lz4_hc;
+		info.settings.nx_checkerboard = config.effective_nx_checkerboard();
 
 		if (info.available_refresh_rates.empty())
 		{
@@ -2075,6 +2076,11 @@ void scenes::stream::render(const XrFrameState & frame_state)
 				images[v].direct_tiles_bytes = blit_handle->direct_tiles_bytes;
 				images[v].direct_blocks = blit_handle->direct_blocks;
 				images[v].direct_blocks_bytes = blit_handle->direct_blocks_bytes;
+				images[v].direct_tile_count = blit_handle->direct_tile_count;
+				images[v].direct_history_block_offset_words = blit_handle->direct_history_block_offset_words;
+				images[v].direct_checker = blit_handle->direct_checker;
+				images[v].direct_history_checker = blit_handle->direct_history_checker;
+				images[v].direct_history_valid = blit_handle->direct_history_valid;
 			}
 		}
 		else

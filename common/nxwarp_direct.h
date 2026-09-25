@@ -8,6 +8,7 @@ namespace wivrn::nxwarp_direct
 {
 constexpr uint32_t stream_magic = 0x4244584e, frame_magic = 0x4644584e, version = 1, native_version = 2;
 constexpr uint32_t native_rgb_words = 1025;
+constexpr uint32_t checker_flag = 0x100, phase_flag = 0x200;
 constexpr size_t stream_header_bytes = 32, frame_header_bytes = 16;
 struct layout
 {
@@ -17,6 +18,7 @@ struct layout
 	bool packed_native = true;
 	bool zstd = false;
 	bool predictor = false;
+	bool checkerboard = false;
 	bool valid() const
 	{
 		return width && height && width <= 4096 && height <= 4096 &&
@@ -56,6 +58,7 @@ inline bool is_stream(std::span<const uint8_t> b)
 // Versions 17/18: RGB888 + optional byte predictor; 19/20: RGB565 + predictor.
 // Native RGB tiles use NXDF v2; legacy payloads remain v1.
 // Older clients reject unsupported stream versions.
+// Add 32 to a base stream version to permit alternating checkerboard samples.
 inline std::vector<uint8_t> stream_header(layout l, bool trusted_lan = false, bool lz4 = false, bool safety = false)
 {
 	if (!l.valid() || (l.zstd && !l.native_center) || (l.predictor && !l.zstd) || (l.native_center && (l.packed_native || l.zstd) && l.native_side != 256))
@@ -71,22 +74,24 @@ inline std::vector<uint8_t> stream_header(layout l, bool trusted_lan = false, bo
 	                                                                                                  : 9u)
 	                                      : (safety ? 5u : lz4 ? 3u
 	                                                           : 1u);
-	for (uint32_t v: {stream_magic, base + (trusted_lan ? 1u : 0u), l.width, l.height, l.eyes, l.tile_count(), l.max_block_words(), l.max_frame_bytes()})
+	for (uint32_t v: {stream_magic, base + (trusted_lan ? 1u : 0u) + (l.checkerboard ? 32u : 0u), l.width, l.height, l.eyes, l.tile_count(), l.max_block_words(), l.max_frame_bytes()})
 		append32(b, v);
 	return b;
 }
 inline std::optional<layout> parse_stream(std::span<const uint8_t> b)
 {
-	if (b.size() != 32 || !is_stream(b) || (read32(b, 4) < 1 || read32(b, 4) > 20))
+	if (b.size() != 32 || !is_stream(b) || read32(b, 4) > 52)
 		return {};
-	const uint32_t stream_version = read32(b, 4);
+	const uint32_t stream_version = read32(b, 4) & 31u;
+	if (stream_version < 1 || stream_version > 20)
+		return {};
 	const bool native = stream_version >= 7;
 	const bool safety = stream_version >= 5;
 	if (native && !safety)
 		return {};
 	layout l{read32(b, 8), read32(b, 12), read32(b, 16), native, stream_version >= 9 ? 256u : 128u,
 	          (stream_version >= 11 && stream_version <= 12) || (stream_version >= 15 && stream_version <= 16) || stream_version >= 19,
-	          stream_version >= 13, stream_version >= 17};
+	          stream_version >= 13, stream_version >= 17, read32(b, 4) >= 32};
 	if (!l.valid() || (native && (l.eyes != 2 || l.width < l.native_side || l.height < l.native_side)) || read32(b, 20) != l.tile_count() || read32(b, 24) != l.max_block_words() || read32(b, 28) != l.max_frame_bytes())
 		return {};
 	return l;
@@ -95,15 +100,26 @@ struct frame_view
 {
 	std::span<const uint8_t> descriptors, blocks;
 };
+inline bool checker_frame(std::span<const uint8_t> b)
+{
+	return b.size() >= frame_header_bytes && (read32(b, 4) & checker_flag);
+}
+inline uint32_t checker_phase(std::span<const uint8_t> b)
+{
+	return b.size() >= frame_header_bytes && (read32(b, 4) & phase_flag) ? 1u : 0u;
+}
 inline std::optional<frame_view> parse_frame(layout l, std::span<const uint8_t> b)
 {
 	if (!l.valid() || b.size() < 16 || b.size() > l.max_frame_bytes() || read32(b, 0) != frame_magic)
 		return {};
-	const uint32_t frame_version = read32(b, 4);
+	const uint32_t flags = read32(b, 4), frame_version = flags & 255u;
+	const bool checker = flags & checker_flag;
+	if ((flags & ~(255u | checker_flag | phase_flag)) || (checker && !l.checkerboard) || (!checker && (flags & phase_flag)))
+		return {};
 	if (frame_version == native_version ? !l.native_center : frame_version != version)
 		return {};
 	uint32_t n = read32(b, 8), words = read32(b, 12);
-	if (n != l.tile_count() || words > l.max_block_words() || words % 5 || b.size() != 16ull + 4ull * (n + words))
+	if (n != l.tile_count() || words > l.max_block_words() || (!checker && words % 5) || b.size() != 16ull + 4ull * (n + words))
 		return {};
 	frame_view v{b.subspan(16, n * 4), b.subspan(16 + n * 4, words * 4)};
 	for (uint32_t i = 0; i < n; i++)
@@ -117,7 +133,8 @@ inline std::optional<frame_view> parse_frame(layout l, std::span<const uint8_t> 
 			if (packed && !l.packed_native)
 				return {};
 			const uint32_t offset = d & 0x0fffffffu;
-			if (offset % 5 || uint64_t(offset) + (packed ? 515u : native_rgb_words) > words)
+			const uint32_t count = checker ? (packed ? 256u : 512u) : (packed ? 515u : native_rgb_words);
+			if ((!checker && offset % 5) || uint64_t(offset) + count > words)
 				return {};
 			continue;
 		}
@@ -127,8 +144,8 @@ inline std::optional<frame_view> parse_frame(layout l, std::span<const uint8_t> 
 				return {};
 			continue;
 		} // inline 0xRRGGBB
-		uint32_t offset = d & 0x3fffffffu, count = 80u >> (mode * 2);
-		if (offset % 5 || uint64_t(offset) + count > words)
+		uint32_t offset = d & 0x3fffffffu, count = (checker ? 48u : 80u) >> (mode * 2);
+		if ((!checker && offset % 5) || uint64_t(offset) + count > words)
 			return {};
 	}
 	return v;

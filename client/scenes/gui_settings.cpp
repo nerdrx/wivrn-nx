@@ -863,6 +863,18 @@ void settings_streaming(const settings_context & ctx)
 	});
 
 	list.push_back({
+	        .id = "##nx_checkerboard",
+	        .label = _("Checkerboard half-refresh (experimental)"),
+	        .description = _("Direct NX Warp only. Alternates fresh samples each frame to reduce bandwidth. May shimmer in motion. Reconnect to apply."),
+	        .ui = ui_kind::toggle,
+	        .get_bool = [&config] { return config.nx_checkerboard; },
+	        .set_bool = [&config](bool v) { config.nx_checkerboard = v; config.save(); },
+	        .default_bool = default_config.nx_checkerboard,
+	        .enabled = [&ctx] { return not ctx.in_game; },
+	        .disabled_tooltip = disconnect_tip,
+	});
+
+	list.push_back({
 	        .id = "##frame_smoothing",
 	        .label = _("Frame smoothing"),
 	        .description = _("When a newly decoded frame first appears, show it blended half and half with the frame it replaces, then show it alone on the refreshes after that. It splits the jump between two decoded frames into two smaller jumps, which reads as a short motion blur instead of a hard step.\n\nThis hides a low decoded frame rate, it does not raise one: no frames are created, nothing is interpolated, and every image on screen is still a real decoded frame or a blend of two of them.\n\nThe two frames were drawn for two different head poses, so the blend fades itself out as soon as the head moves between them, and is off entirely during any real head motion — otherwise the older frame would show as a ghost. What it smooths is therefore movement in the scene while you hold still, not movement of your head, which the headset's own reprojection already handles. Useful when the decoder runs well under the display rate, as NX Warp does; pointless when it keeps up. Applies immediately."),

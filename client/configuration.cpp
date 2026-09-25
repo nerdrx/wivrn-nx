@@ -350,6 +350,7 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("comfort_vignette", &configuration::comfort_vignette),
 	        scalar("nxwarp", &configuration::nxwarp),
 	        scalar("nxwarp_lz4_hc", &configuration::nxwarp_lz4_hc),
+	        scalar("nx_checkerboard", &configuration::nx_checkerboard),
 	        scalar("frame_smoothing", &configuration::frame_smoothing),
 	        scalar("motion_smoothing", &configuration::motion_smoothing),
 	        scalar("motion_smoothing_server", &configuration::motion_smoothing_server),
@@ -469,6 +470,20 @@ float configuration::get_default_stream_scale() const
 	if (check_feature(feature::eye_gaze))
 		return 0.3;
 	return 0.5;
+}
+
+bool configuration::effective_nx_checkerboard() const
+{
+#ifdef __ANDROID__
+	char value[PROP_VALUE_MAX] = {};
+	if (__system_property_get("debug.wivrn.test.nx_checkerboard", value) > 0)
+	{
+		const std::string_view setting(value);
+		if (setting == "0") return false;
+		if (setting == "1") return true;
+	}
+#endif
+	return nx_checkerboard;
 }
 
 // Non-persistent controller switch for controlled headset experiments. Set

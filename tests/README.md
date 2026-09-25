@@ -65,3 +65,24 @@ below a 5% remaining gap.
 The nine model cases, compared with baseline `66a5e6e6`, recovered in 2.4–7.2 seconds. No server or Pico was used,
 and no live validation is implied. Results:
 [v2 budget matrix](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-24/v2-budget).
+
+
+## Direct checkerboard half-refresh
+
+```sh
+g++ -std=c++20 -fsanitize=address,undefined -fno-omit-frame-pointer \
+  -Icommon tests/direct_checkerboard_test.cpp -o /tmp/direct_checkerboard_test
+/tmp/direct_checkerboard_test
+
+g++ -std=c++20 -O2 -Icommon tests/direct_checkerboard_bench.cpp \
+  -llz4 -lzstd -o /tmp/direct_checkerboard_bench
+/tmp/direct_checkerboard_bench frame1.nxdf frame2.nxdf
+```
+
+The first test requires assertions (do not compile with `NDEBUG`). It checks
+both phases for all palette modes and native RGB888/RGB565, stream versions,
+legacy rejection, truncation, offset overflow and reserved flags. The benchmark
+round-trips LZ4/Zstd bytes exactly and prints CSV; its timings exclude packing,
+transport and headset presentation. Fixture geometry must match the defaults
+in the harness. `direct_checkerboard_motion.cpp` is a CPU reconstruction of the
+wire format for synthetic previews, not a GPU/headset timing test.

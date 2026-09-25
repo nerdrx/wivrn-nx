@@ -1390,6 +1390,12 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		{
 			pc.motion[0] = float(input.direct_extent.width ? input.direct_extent.width : input.rect_rgb.extent.width);
 			pc.motion[1] = float(input.direct_extent.height ? input.direct_extent.height : input.rect_rgb.extent.height);
+			// Direct shader reuses its otherwise-unused glow constants for checker
+			// metadata; the ordinary reprojection path retains the post-processing values.
+			pc.glow = {float(input.direct_tile_count),
+			           float(input.direct_history_block_offset_words),
+			           float(input.direct_checker),
+			           input.direct_history_valid ? float(input.direct_history_checker + 1) : 0.f};
 		}
 		device.updateDescriptorSets(descriptor_writes, {});
 

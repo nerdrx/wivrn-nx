@@ -369,7 +369,7 @@ public:
 		if (geometry.motion_regions)
 			U_LOG_I("nxwarp: regional motion residual enabled (NX_DIRECT_MOTION_REGIONS=1; four fixed native-centre regions)");
 		if (geometry.native_row_predictor)
-			U_LOG_I("nxwarp: native row prediction enabled (NX_DIRECT_ROW_PREDICTOR=1; 5% winner gate)");
+			U_LOG_I("nxwarp: native row prediction enabled (NX_DIRECT_ROW_PREDICTOR=1; 5 percent winner gate)");
 		if (safety_enabled)
 		{
 			const uint32_t sw = ((source_width / 4 + 31) / 32) * 32;

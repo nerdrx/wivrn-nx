@@ -55,6 +55,7 @@
 
 #include "decoder/decoder.h"
 #include "nxwarp_direct.h"
+#include "nxwarp_direct_motion.h"
 #include "decoder/nxwarp/nxwarp_reassemble.h"
 
 #include "utils/sync_queue.h"
@@ -180,6 +181,9 @@ class nxwarp_decoder : public decoder
 	bool direct_safety = false;
 	bool direct_safety_loss_test = false;
 	std::vector<uint8_t> direct_unpacked;
+	// Worker-only exact coded frames, before checker merging or presentation.
+	wivrn::nxwarp_direct::motion_reference_cache direct_motion_references;
+	uint64_t direct_motion_frames = 0, direct_motion_missing = 0;
 	uint64_t direct_zstd_frames = 0, direct_predicted_frames = 0;
 	uint64_t direct_lz4_frames = 0, direct_lz4_raw_frames = 0, direct_lz4_input_bytes = 0, direct_lz4_output_bytes = 0;
 	double direct_lz4_ms = 0;

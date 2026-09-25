@@ -511,3 +511,36 @@ Defaults remain unchanged. Desktop equivalents use `WIVRN_NX_` followed by
 Pico isolated RGBA measurements and source:
 [experiments](https://github.com/nerdrx/nx-warp/tree/main/bench/results/90fps-2026-09-10).
 Those draw timings are not live NV12 or motion-to-photon latency.
+
+## Experimental exact motion compression
+
+`NX_DIRECT_MOTION=1` enables native RGB888 motion residuals on direct streams
+with `NX_DIRECT_NATIVE_CENTER=1`, `NX_DIRECT_NATIVE_RGB888=1`,
+`NX_DIRECT_ZSTD=1`, and `NX_DIRECT_PREDICTOR=1`. Install the matching client
+first: NXDB feature bit 64 advertises the new NXMV envelope, and older clients
+reject that stream. RGB565 and checkerboard streams keep independent coding.
+Unset `NX_DIRECT_MOTION` or set it to `0` to restore independent coding.
+
+The sender estimates an integer translation within ±16 pixels, subtracts the
+predicted native pixels, and compresses the exact correction. It compares the
+complete candidate against the existing independent encoding and sends NXMV
+only when it saves at least 10%. This preserves the encoded NXDF bytes exactly;
+it does not extrapolate the displayed image or improve source image quality.
+Both encoding candidates cost PC time. Rotations and large motion often fall
+back to independent detail.
+
+References use transport frame IDs, not compositor frame indices. Only positive
+decode acknowledgements make a reference eligible, at an age of 1–8 sent frames.
+Every eighth wire frame is independent. Each endpoint bounds retained raw frames
+to 16 entries and 4 MiB per entry; cached bytes precede display processing.
+Missing references reject dependent detail and notify the sender. The safety
+prefix is always independent. A reset clears reference state; this is not a
+guarantee of uninterrupted full-quality delivery under packet loss.
+
+The standalone protocol test covers exact reconstruction, metadata rejection,
+cache expiry, wraparound, reset, and unsupported representations:
+
+```sh
+g++ -std=c++23 -O2 -ffast-math -Wall -Wextra -Werror -I. tests/direct_motion_test.cpp -o /tmp/direct_motion_test
+/tmp/direct_motion_test
+```

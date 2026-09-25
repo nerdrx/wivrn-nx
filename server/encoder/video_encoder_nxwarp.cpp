@@ -2209,7 +2209,45 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	bool report_fallback = codec_direct_blocks
 	                               ? false
 	                               : held_fallback_reset.exchange(false, std::memory_order_relaxed);
-	if (not codec_direct_blocks)
+	if (codec_direct_blocks)
+	{
+		std::vector<uint16_t> ids;
+		uint16_t abase = 0;
+		uint32_t amask = 0;
+		const bool reset_client = client_holds_nothing.exchange(false, std::memory_order_relaxed);
+		const bool reset_fallback = held_fallback_reset.exchange(false, std::memory_order_relaxed);
+		const bool reset_direct = reset_client || reset_fallback;
+		{
+			std::lock_guard lock(not_held_mutex);
+			ids.swap(not_held_ids);
+			if (reset_direct)
+			{
+				// ACK state belongs to the client that just lost its reference set.
+				// Drop it with the codec cache so replayed feedback cannot bless stale IDs.
+				ack_base = 0;
+				ack_mask = 0;
+				ack_valid = false;
+				ids.clear();
+			}
+			else if (ack_valid)
+			{
+				abase = ack_base;
+				amask = ack_mask;
+			}
+		}
+		if (reset_direct)
+			codec->reset_direct_references();
+		else
+		{
+			if (amask)
+				codec->set_direct_held_ack(abase, amask);
+			// Apply negatives after the positive window. A repeated ACK never restores
+			// an erased cache slot; only newly encoded raw frames can populate it.
+			for (uint16_t id: ids)
+				codec->forget_direct_frame(id);
+		}
+	}
+	else
 	{
 		std::vector<uint16_t> ids;
 		uint16_t abase = 0;
@@ -2432,6 +2470,10 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	frame_timing->encode_begin = headset_clock().to_headset(os_monotonic_get_ns());
 	const auto t_enc0 = std::chrono::steady_clock::now();
 	std::span<const uint8_t> bitstream;
+	// Direct-motion references use the tentative WIRE id that will be committed
+	// only if this frame is packetized. Never key them by compositor frame_index.
+	if (codec_direct_blocks)
+		codec->set_wire_frame_id(frame_id16);
 	if (codec_uses_vk_queue)
 	{
 		std::unique_lock lock(vk.queue.mutex);

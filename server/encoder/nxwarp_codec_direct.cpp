@@ -8,8 +8,10 @@
 #include "nxwarp_direct_compression_cache.h"
 #include "nxwarp_direct_layout.h"
 #include "nxwarp_direct_lz4.h"
+#include "nxwarp_direct_motion.h"
 #include "nxwarp_direct_native.h"
 #include "nxwarp_direct_zstd.h"
+#include "util/u_logging.h"
 #include "wivrn-server_shaders.h"
 #include <array>
 #include <atomic>
@@ -40,6 +42,7 @@ nxwarp_direct::layout direct_geometry(const nxwarp_codec_config & c)
 	l.packed_native = enabled("NX_DIRECT_NATIVE_RGB565") && !enabled("NX_DIRECT_NATIVE_RGB888");
 	l.zstd = l.native_center && enabled("NX_DIRECT_ZSTD");
 	l.predictor = l.zstd && enabled("NX_DIRECT_PREDICTOR");
+	l.motion = l.native_center && !l.packed_native && l.zstd && l.predictor && !l.checkerboard && enabled("NX_DIRECT_MOTION");
 	return l;
 }
 class direct_codec final : public nxwarp_codec
@@ -71,9 +74,16 @@ class direct_codec final : public nxwarp_codec
 	bool lz4_enabled = false;
 	std::atomic_bool lz4_hc = false;
 	std::vector<uint8_t> compressed, cached_raw, native_frame, zstd_compressed, zstd_predicted, predictor_scratch;
+	std::vector<uint8_t> motion_baseline;
 	std::vector<uint8_t> checker_frame;
 	uint64_t checker_sequence = 0;
 	nxwarp_direct::exact_compression_cache compression_cache;
+	nxwarp_direct::motion_reference_cache motion_references;
+	std::vector<uint8_t> motion_wire;
+	uint16_t wire_frame_id = 0, held_ack_base = 0;
+	uint32_t held_ack_mask = 0;
+	bool wire_frame_id_valid = false, held_ack_valid = false;
+	uint64_t motion_attempts = 0, motion_selected = 0, motion_saved_bytes = 0;
 	bool compression_cache_enabled = true;
 	std::span<const uint32_t> native_pixels;
 	float native_radius = 0;
@@ -106,6 +116,76 @@ class direct_codec final : public nxwarp_codec
 		if (compression_cache_enabled)
 			compression_cache.store(raw, policy, fast);
 		return fast;
+	}
+	std::span<const uint8_t> pack_detail_motion(std::span<const uint8_t> raw, bool hc)
+	{
+		auto baseline = pack_detail(raw, compressed, hc);
+		if (!geometry.motion)
+			return baseline;
+
+		// Cache only the exact, decoder-ready NXDF bytes; failed sends are harmless
+		// because a reference is usable only after the matching positive ACK.
+		const bool checker = nxwarp_direct::checker_frame(raw);
+		const bool current_cached = !checker && wire_frame_id_valid &&
+		                            motion_references.put(geometry, wire_frame_id, raw);
+		if (checker || !wire_frame_id_valid || (wire_frame_id & 7u) == 0 || !held_ack_valid)
+			return baseline;
+		const auto * current = motion_references.find(wire_frame_id);
+		if (!current_cached || !current)
+			return baseline;
+
+		const nxwarp_direct::motion_reference * reference = nullptr;
+		uint16_t reference_id = 0;
+		uint16_t age_best = UINT16_MAX;
+		for (uint32_t k = 0; k < 32; ++k)
+		{
+			if (!(held_ack_mask & (1u << k)))
+				continue;
+			const uint16_t id = uint16_t(held_ack_base - k);
+			const uint16_t age = uint16_t(wire_frame_id - id);
+			if (!age || age > 8 || age >= age_best)
+				continue;
+			if (const auto * candidate = motion_references.find(id))
+			{
+				reference = candidate;
+				reference_id = id;
+				age_best = age;
+			}
+		}
+		if (!reference)
+			return baseline;
+
+		const auto vector = nxwarp_direct::estimate_motion(geometry, reference->raw, reference->native, raw, current->native);
+		if (vector.hits < 256 || !std::isfinite(vector.sad))
+			return baseline;
+
+		// pack_detail reuses its output buffers. Own the incumbent before compressing
+		// the residual, or the second pass would overwrite the comparison bytes.
+		motion_baseline.assign(baseline.begin(), baseline.end());
+		auto residual = nxwarp_direct::motion_residual(geometry, reference->raw, reference->native,
+		                                                   raw, current->native, vector.dx, vector.dy);
+		if (residual.empty())
+			return baseline;
+		const auto body = pack_detail(residual, compressed, hc);
+		motion_wire = nxwarp_direct::make_motion_wire(vector.dx, vector.dy, reference_id, body);
+		++motion_attempts;
+		if (motion_wire.empty() || motion_wire.size() * 100 > motion_baseline.size() * 90)
+		{
+			if ((motion_attempts & 255u) == 0)
+				U_LOG_I("nxwarp: direct motion selected=%llu/%llu saved=%llu bytes",
+				        (unsigned long long)motion_selected,
+				        (unsigned long long)motion_attempts,
+				        (unsigned long long)motion_saved_bytes);
+			return motion_baseline;
+		}
+		++motion_selected;
+		motion_saved_bytes += motion_baseline.size() - motion_wire.size();
+		if ((motion_attempts & 255u) == 0)
+			U_LOG_I("nxwarp: direct motion selected=%llu/%llu saved=%llu bytes",
+			        (unsigned long long)motion_selected,
+			        (unsigned long long)motion_attempts,
+			        (unsigned long long)motion_saved_bytes);
+		return motion_wire;
 	}
 	std::span<const uint8_t> finish_frame(std::span<const uint8_t> wire)
 	{
@@ -223,6 +303,8 @@ public:
 			throw std::runtime_error("NX direct native centre requires paired LZ4 safety stream >=256 pixels");
 		if (header.empty())
 			throw std::runtime_error("NX direct: eye geometry must be multiples of 32, <=4096");
+		if (geometry.motion)
+			U_LOG_I("nxwarp: direct motion residual enabled (NX_DIRECT_MOTION=1; native RGB888 predictor stream)");
 		if (safety_enabled)
 		{
 			const uint32_t sw = ((source_width / 4 + 31) / 32) * 32;
@@ -313,6 +395,34 @@ public:
 	bool direct_blocks() const override
 	{
 		return true;
+	}
+	void set_wire_frame_id(uint16_t id) override
+	{
+		if (!geometry.motion)
+			return;
+		wire_frame_id = id;
+		wire_frame_id_valid = true;
+		// An encode that later fails to send may be retried with this same wire id.
+		// Discard any uncommitted bytes left under that id before rebuilding it.
+		motion_references.erase(id);
+	}
+	void set_direct_held_ack(uint16_t base, uint32_t mask) override
+	{
+		held_ack_base = base;
+		held_ack_mask = mask;
+		held_ack_valid = true;
+	}
+	void forget_direct_frame(uint16_t id) override
+	{
+		motion_references.erase(id);
+	}
+	void reset_direct_references() override
+	{
+		motion_references.clear();
+		held_ack_base = 0;
+		held_ack_mask = 0;
+		held_ack_valid = false;
+		wire_frame_id_valid = false;
 	}
 	bool accepts_image() const override
 	{
@@ -462,7 +572,7 @@ public:
 		{
 			if (!lz4_enabled)
 				return finish_frame(raw);
-			return finish_frame(pack_detail(raw, compressed, use_hc));
+			return finish_frame(geometry.motion ? pack_detail_motion(raw, use_hc) : pack_detail(raw, compressed, use_hc));
 		}
 		std::span<const uint8_t> safety_wire = safety_raw;
 		std::span<const uint8_t> detail_wire = raw;
@@ -471,7 +581,7 @@ public:
 			// The child owns and caches its optional LZ4 result, so do not
 			// revisit its mapped Vulkan memory or wrap an existing NXDL envelope.
 			safety_wire = safety_raw;
-			detail_wire = pack_detail(raw, compressed, use_hc);
+			detail_wire = geometry.motion ? pack_detail_motion(raw, use_hc) : pack_detail(raw, compressed, use_hc);
 		}
 		frame.clear();
 		frame.reserve(32 + safety_wire.size() + detail_wire.size());

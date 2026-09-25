@@ -19,6 +19,7 @@ struct layout
 	bool zstd = false;
 	bool predictor = false;
 	bool checkerboard = false;
+	bool motion = false;
 	bool valid() const
 	{
 		return width && height && width <= 4096 && height <= 4096 &&
@@ -61,7 +62,8 @@ inline bool is_stream(std::span<const uint8_t> b)
 // Add 32 to a base stream version to permit alternating checkerboard samples.
 inline std::vector<uint8_t> stream_header(layout l, bool trusted_lan = false, bool lz4 = false, bool safety = false)
 {
-	if (!l.valid() || (l.zstd && !l.native_center) || (l.predictor && !l.zstd) || (l.native_center && (l.packed_native || l.zstd) && l.native_side != 256))
+	if (!l.valid() || (l.zstd && !l.native_center) || (l.predictor && !l.zstd) || (l.native_center && (l.packed_native || l.zstd) && l.native_side != 256) ||
+	    (l.motion && (!l.native_center || l.packed_native || !l.zstd || !l.predictor || l.checkerboard)))
 		return {};
 	std::vector<uint8_t> b;
 	b.reserve(32);
@@ -74,25 +76,31 @@ inline std::vector<uint8_t> stream_header(layout l, bool trusted_lan = false, bo
 	                                                                                                  : 9u)
 	                                      : (safety ? 5u : lz4 ? 3u
 	                                                           : 1u);
-	for (uint32_t v: {stream_magic, base + (trusted_lan ? 1u : 0u) + (l.checkerboard ? 32u : 0u), l.width, l.height, l.eyes, l.tile_count(), l.max_block_words(), l.max_frame_bytes()})
+	for (uint32_t v: {stream_magic, base + (trusted_lan ? 1u : 0u) + (l.checkerboard ? 32u : 0u) + (l.motion ? 64u : 0u), l.width, l.height, l.eyes, l.tile_count(), l.max_block_words(), l.max_frame_bytes()})
 		append32(b, v);
 	return b;
 }
 inline std::optional<layout> parse_stream(std::span<const uint8_t> b)
 {
-	if (b.size() != 32 || !is_stream(b) || read32(b, 4) > 52)
+	if (b.size() != 32 || !is_stream(b))
 		return {};
-	const uint32_t stream_version = read32(b, 4) & 31u;
+	const uint32_t flags = read32(b, 4);
+	if (flags & ~(31u | 32u | 64u))
+		return {};
+	const uint32_t stream_version = flags & 31u;
 	if (stream_version < 1 || stream_version > 20)
 		return {};
+	const bool motion = flags & 64u, checkerboard = flags & 32u;
 	const bool native = stream_version >= 7;
 	const bool safety = stream_version >= 5;
 	if (native && !safety)
 		return {};
 	layout l{read32(b, 8), read32(b, 12), read32(b, 16), native, stream_version >= 9 ? 256u : 128u,
 	          (stream_version >= 11 && stream_version <= 12) || (stream_version >= 15 && stream_version <= 16) || stream_version >= 19,
-	          stream_version >= 13, stream_version >= 17, read32(b, 4) >= 32};
-	if (!l.valid() || (native && (l.eyes != 2 || l.width < l.native_side || l.height < l.native_side)) || read32(b, 20) != l.tile_count() || read32(b, 24) != l.max_block_words() || read32(b, 28) != l.max_frame_bytes())
+	          stream_version >= 13, stream_version >= 17, checkerboard, motion};
+	if (!l.valid() || (native && (l.eyes != 2 || l.width < l.native_side || l.height < l.native_side)) ||
+	    (motion && (!native || l.packed_native || !l.zstd || !l.predictor || checkerboard)) ||
+	    read32(b, 20) != l.tile_count() || read32(b, 24) != l.max_block_words() || read32(b, 28) != l.max_frame_bytes())
 		return {};
 	return l;
 }

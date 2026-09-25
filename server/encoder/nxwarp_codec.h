@@ -346,6 +346,12 @@ public:
 
 	// Independent direct blocks use byte budgeting, not transform quantisation.
 	virtual bool direct_blocks() const { return false; }
+	// Optional direct-motion references are keyed by the frame id carried on the wire.
+	// The default backend has no external reference cache.
+	virtual void set_wire_frame_id(uint16_t) {}
+	virtual void set_direct_held_ack(uint16_t, uint32_t) {}
+	virtual void forget_direct_frame(uint16_t) {}
+	virtual void reset_direct_references() {}
 	virtual void set_target_bitrate(uint32_t, float) {}
 	virtual void set_lz4_hc(bool) {}
 	virtual void set_native_center(std::span<const uint32_t>) {}

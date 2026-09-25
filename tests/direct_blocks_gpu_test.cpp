@@ -418,6 +418,83 @@ int main(int argc, char ** argv)
 		            encode_ms, safe.size(), safety_raw, sh->safety_bytes, detail_raw, sh->detail_bytes);
 	}
 #ifdef NX_DIRECT_TEST_NATIVE
+	#ifdef NX_DIRECT_TEST_MOTION
+	// Exercise the production codec's opt-in motion envelope through the same
+	// Vulkan offscreen fixture. Keep this behind a separate translation-unit
+	// wrapper so the ordinary native-centre fixture stays unchanged.
+	setenv("NX_DIRECT_NATIVE_RGB888", "1", 1);
+	unsetenv("NX_DIRECT_NATIVE_RGB565");
+	setenv("NX_DIRECT_ZSTD", "1", 1);
+	setenv("NX_DIRECT_PREDICTOR", "1", 1);
+	setenv("NX_DIRECT_MOTION", "1", 1);
+	cfg.direct_native_center = true;
+	cfg.direct_lz4 = true;
+	cfg.safety = true;
+	auto native_codec = wivrn::nxwarp_codec::make_direct(cfg, instance, gpu, device, queue, family);
+	native_codec->set_target_bitrate(700'000'000u, 90);
+	const wivrn::nxwarp_direct::layout nl{w, h, 2, true, 256, false, true, true, false, true};
+	auto shifted_pixels = [](int shift) {
+		std::vector<uint32_t> pixels(2 * 256 * 256);
+		for (unsigned eye = 0; eye < 2; ++eye)
+			for (unsigned y = 0; y < 256; ++y)
+				for (unsigned x = 0; x < 256; ++x)
+				{
+					const unsigned sx = unsigned(std::clamp(int(x) - shift, 0, 255));
+					uint32_t v = sx * 0x9e3779b9u ^ y * 0x85ebca6bu ^ (sx * y + 0x27d4eb2du);
+					v ^= v >> 16; v *= 0x7feb352du; v ^= v >> 15;
+					pixels[eye * 256 * 256 + y * 256 + x] = v & 0xffffffu;
+				}
+		return pixels;
+	};
+	auto encode = [&](uint16_t id, int shift) {
+		auto pixels_now = shifted_pixels(shift);
+		native_codec->set_native_center(pixels_now);
+		native_codec->set_wire_frame_id(id);
+		auto wire_now = native_codec->encode_image_pair(image, 0, 1, 0);
+		return std::vector<uint8_t>(wire_now.begin(), wire_now.end());
+	};
+	auto detail_of = [&](const std::vector<uint8_t> & wire_now) {
+		auto safe = std::span<const uint8_t>(wire_now);
+		auto sh = wivrn::nxwarp_direct::parse_safety_header(nl, safe); assert(sh && sh->total_bytes() == safe.size());
+		return safe.subspan(sh->prefix_bytes(), sh->detail_bytes);
+	};
+	auto unpack = [&](std::span<const uint8_t> detail) {
+		std::vector<uint8_t> raw_now;
+		if (wivrn::nxwarp_direct::is_zstd(detail))
+			assert(wivrn::nxwarp_direct::decompress_zstd(nl, detail, raw_now));
+		else if (wivrn::nxwarp_direct::is_lz4(detail))
+			assert(wivrn::nxwarp_direct::decompress_lz4(nl, detail, raw_now));
+		else
+			raw_now.assign(detail.begin(), detail.end());
+		assert(wivrn::nxwarp_direct::parse_frame(nl, raw_now));
+		return raw_now;
+	};
+	const auto no_ack = encode(1, 0);
+	assert(!wivrn::nxwarp_direct::is_motion(detail_of(no_ack)));
+	const auto no_ack_next = encode(2, 8);
+	assert(!wivrn::nxwarp_direct::is_motion(detail_of(no_ack_next)));
+	native_codec->set_direct_held_ack(1, 1u);
+	const auto motion_wire = encode(3, 8);
+	const auto motion_detail = detail_of(motion_wire);
+	assert(wivrn::nxwarp_direct::is_motion(motion_detail));
+	const auto mh = wivrn::nxwarp_direct::parse_motion_wire(motion_detail); assert(mh && mh->reference == 1);
+	const auto reference_raw = unpack(detail_of(no_ack));
+	wivrn::nxwarp_direct::motion_native_info reference_info;
+	assert(wivrn::nxwarp_direct::build_motion_native(nl, reference_raw, reference_info));
+	auto restored = unpack(mh->body);
+	assert(wivrn::nxwarp_direct::restore_motion(nl, reference_raw, reference_info, restored, mh->dx, mh->dy));
+	native_codec->forget_direct_frame(1);
+	const auto rejected_ref = encode(4, 8);
+	assert(!wivrn::nxwarp_direct::is_motion(detail_of(rejected_ref)));
+	assert(restored == unpack(detail_of(rejected_ref)));
+	const auto anchor = encode(8, 8);
+	assert(!wivrn::nxwarp_direct::is_motion(detail_of(anchor)));
+	native_codec->reset_direct_references();
+	const auto after_reset = encode(9, 8);
+	assert(!wivrn::nxwarp_direct::is_motion(detail_of(after_reset)));
+	std::printf("native motion GPU codec: no-ack, ACKed-reference exact decode, anchor and reset ok\n");
+	native_codec.reset();
+	#else
 	// Deliberately different native RGB source: one-pixel red/green checks.
 	// NV12 source above is solid red/blue, so reconstructed chroma cannot pass this.
 	cfg.direct_native_center = true;
@@ -457,6 +534,7 @@ int main(int argc, char ** argv)
 	}
 	std::printf("native centre: circular 64px-radius core exact, envelope %zu bytes\n",wire.size());
 	native_codec.reset();
+	#endif
 #endif
 	packed_codec.reset();
 	codec.reset();

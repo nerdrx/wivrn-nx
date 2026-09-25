@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
+#include <memory>
 #include <random>
 #include <vector>
 
@@ -95,5 +96,24 @@ int main()
 		h[4] = uint8_t(version);
 		require(parse_stream(h).has_value(), "zstd predictor stream parse");
 	}
+	// Reusing a workspace must not introduce history dependencies or change bytes.
+	std::unique_ptr<ZSTD_CCtx, decltype(&ZSTD_freeCCtx)> context{ZSTD_createCCtx(), ZSTD_freeCCtx};
+	require(bool(context), "context allocated");
+	std::vector<uint8_t> fresh, reused, fresh_scratch, reused_scratch;
+	for (const size_t size : {size_t(65536), size_t(16384), size_t(131072), size_t(65536)})
+		for (unsigned kind = 0; kind < 3; ++kind)
+		{
+			std::vector<uint8_t> input(size);
+			for (size_t i = 0; i < size; ++i)
+				input[i] = kind == 0 ? 0 : kind == 1 ? uint8_t((i / 4) ^ (i >> 9)) : uint8_t(rng());
+			for (bool predictor : {false, true})
+			{
+				const auto a = compress_zstd_impl(input, fresh, &fresh_scratch, predictor);
+				const auto b = compress_zstd_impl(input, reused, &reused_scratch, predictor, context.get());
+				require(a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin()), "reused context exact wire equivalence");
+				if (is_zstd(b))
+					require(decompress_zstd(predicted, b, decoded) && decoded == input, "reused context independent decode");
+			}
+		}
 	std::puts("NXDZ v2 predictor roundtrip/bounds/fallback: PASS");
 }

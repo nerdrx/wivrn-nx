@@ -115,9 +115,11 @@ inline motion_vector estimate_motion(layout l, std::span<const uint8_t> old, con
 	best.sad = std::numeric_limits<double>::max();
 	if (!motion_native_layout(l) || old_info.pixel.size() != l.tile_count() || now_info.pixel.size() != l.tile_count())
 		return best;
-	struct sample { uint8_t eye; int x, y; };
+	struct sample { uint8_t eye; int x, y; const uint8_t * current; };
 	std::array<sample, 512> samples{};
 	size_t count = 0;
+	uint64_t best_cost = std::numeric_limits<uint64_t>::max();
+	size_t best_hits = 0;
 	const int rx = std::min(64, int(l.width / 4)), ry = std::min(64, int(l.height / 4));
 	for (unsigned eye = 0; eye < l.eyes; ++eye)
 		for (int y = int(l.height / 2) - ry; y < int(l.height / 2) + ry; y += 8)
@@ -125,7 +127,7 @@ inline motion_vector estimate_motion(layout l, std::span<const uint8_t> old, con
 			{
 				const uint8_t *a, *b;
 				if (count < samples.size() && motion_pixel(l, now, now_info, eye, x, y, a) && motion_pixel(l, old, old_info, eye, x, y, b))
-					samples[count++] = {uint8_t(eye), x, y};
+					samples[count++] = {uint8_t(eye), x, y, a};
 			}
 	auto test = [&](int dx, int dy) {
 		uint64_t cost = 0;
@@ -133,17 +135,25 @@ inline motion_vector estimate_motion(layout l, std::span<const uint8_t> old, con
 		for (size_t i = 0; i < count; ++i)
 		{
 			const auto & s = samples[i];
-			const uint8_t *a, *b;
-			if (!motion_pixel(l, now, now_info, s.eye, s.x, s.y, a) || !motion_pixel(l, old, old_info, s.eye, s.x + dx, s.y + dy, b))
+			const uint8_t *b;
+			if (!motion_pixel(l, old, old_info, s.eye, s.x + dx, s.y + dy, b))
 				continue;
-			cost += unsigned(std::abs(int(a[0]) - int(b[0]))) + unsigned(std::abs(int(a[1]) - int(b[1]))) + unsigned(std::abs(int(a[2]) - int(b[2])));
+			cost += unsigned(std::abs(int(s.current[0]) - int(b[0]))) + unsigned(std::abs(int(s.current[1]) - int(b[1]))) + unsigned(std::abs(int(s.current[2]) - int(b[2])));
 			++hits;
+			// Even if every remaining sample matched at zero cost, this candidate
+			// cannot beat or tie the incumbent. Keep equality for tie-break logic.
+			if (best_hits && cost * best_hits > best_cost * count)
+				return;
 		}
 		if (!count || hits < (count + 1) / 2)
 			return;
 		const double score = double(cost) / double(hits * 3);
 		if (score < best.sad || (score == best.sad && std::abs(dx) + std::abs(dy) < std::abs(best.dx) + std::abs(best.dy)))
+		{
 			best = {dx, dy, score, hits};
+			best_cost = cost;
+			best_hits = hits;
+		}
 	};
 	for (int dy = -motion_search_radius; dy <= motion_search_radius; dy += 4)
 		for (int dx = -motion_search_radius; dx <= motion_search_radius; dx += 4)
@@ -154,6 +164,8 @@ inline motion_vector estimate_motion(layout l, std::span<const uint8_t> old, con
 			test(dx, dy);
 	return best;
 }
+
+inline void motion_sub_bytes(uint8_t * dst, const uint8_t * current, const uint8_t * previous, size_t n);
 
 inline std::vector<uint8_t> motion_residual(layout l, std::span<const uint8_t> old, const motion_native_info & old_info,
 	                                        std::span<const uint8_t> now, const motion_native_info & now_info, int dx, int dy)
@@ -174,14 +186,30 @@ inline std::vector<uint8_t> motion_residual(layout l, std::span<const uint8_t> o
 		const unsigned eye = rem / int(l.width / 32);
 		const int tx = rem % int(l.width / 32);
 		for (int y = 0; y < 32; ++y)
-			for (int x = 0; x < 32; ++x)
+		{
+			const int sy = ty * 32 + y + dy;
+			if (sy < 0 || sy >= int(l.height))
+				continue;
+			int x = 0;
+			while (x < 32)
 			{
+				const int sx = tx * 32 + x + dx;
+				if (sx < 0 || sx >= int(l.width))
+				{
+					++x;
+					continue;
+				}
 				const uint8_t *src = nullptr;
-				motion_pixel(l, old, old_info, eye, tx * 32 + x + dx, ty * 32 + y + dy, src);
-				const size_t p = size_t(dst) + (size_t(y) * 32 + x) * 4;
-				for (unsigned c = 0; c < 4; ++c)
-					residual[p + c] = uint8_t(now[p + c] - (src ? src[c] : 0));
+				const bool has_source = motion_pixel(l, old, old_info, eye, sx, sy, src);
+				const int end = std::min(32, x + 32 - (sx & 31));
+				if (has_source)
+				{
+					const size_t dest = size_t(dst) + (size_t(y) * 32 + size_t(x)) * 4;
+					motion_sub_bytes(residual.data() + dest, now.data() + dest, src, size_t(end - x) * 4);
+				}
+				x = end;
 			}
+		}
 	}
 	return residual;
 }
@@ -195,6 +223,17 @@ inline void motion_add_bytes(uint8_t * dst, const uint8_t * src, size_t n)
 #endif
 	for (; i < n; ++i)
 		dst[i] = uint8_t(dst[i] + src[i]);
+}
+
+inline void motion_sub_bytes(uint8_t * dst, const uint8_t * current, const uint8_t * previous, size_t n)
+{
+	size_t i = 0;
+#ifdef __aarch64__
+	for (; i + 16 <= n; i += 16)
+		vst1q_u8(dst + i, vsubq_u8(vld1q_u8(current + i), vld1q_u8(previous + i)));
+#endif
+	for (; i < n; ++i)
+		dst[i] = uint8_t(current[i] - previous[i]);
 }
 
 inline bool restore_motion(layout l, std::span<const uint8_t> old, const motion_native_info & old_info,

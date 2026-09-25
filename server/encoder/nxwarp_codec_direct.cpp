@@ -74,6 +74,8 @@ class direct_codec final : public nxwarp_codec
 	bool lz4_enabled = false;
 	std::atomic_bool lz4_hc = false;
 	std::vector<uint8_t> compressed, cached_raw, native_frame, zstd_compressed, zstd_predicted, predictor_scratch;
+	// One workspace per encoder; each call still produces an independent frame.
+	std::unique_ptr<ZSTD_CCtx, decltype(&ZSTD_freeCCtx)> zstd_context{nullptr, ZSTD_freeCCtx};
 	std::vector<uint8_t> motion_baseline;
 	std::vector<uint8_t> checker_frame;
 	uint64_t checker_sequence = 0;
@@ -98,10 +100,10 @@ class direct_codec final : public nxwarp_codec
 		auto fast = hc ? nxwarp_direct::compress_lz4_hc(raw, out) : nxwarp_direct::compress_lz4(raw, out);
 		if (geometry.zstd)
 		{
-			auto dense = nxwarp_direct::compress_zstd(raw, zstd_compressed);
+			auto dense = nxwarp_direct::compress_zstd(raw, zstd_compressed, zstd_context.get());
 			if (geometry.predictor)
 			{
-				auto predicted = nxwarp_direct::compress_zstd_predicted(raw, zstd_predicted, predictor_scratch);
+				auto predicted = nxwarp_direct::compress_zstd_predicted(raw, zstd_predicted, predictor_scratch, zstd_context.get());
 				// Spend PC work only when it removes at least 5% more wire bytes.
 				if (predicted.size() * 100 <= dense.size() * 95)
 					dense = predicted;
@@ -159,14 +161,17 @@ class direct_codec final : public nxwarp_codec
 		if (vector.hits < 256 || !std::isfinite(vector.sad))
 			return baseline;
 
-		// pack_detail reuses its output buffers. Own the incumbent before compressing
-		// the residual, or the second pass would overwrite the comparison bytes.
+		// The residual reuses predictor buffers. Own the incumbent before compressing
+		// it, or the second pass could overwrite the comparison bytes.
 		motion_baseline.assign(baseline.begin(), baseline.end());
 		auto residual = nxwarp_direct::motion_residual(geometry, reference->raw, reference->native,
 		                                                   raw, current->native, vector.dx, vector.dy);
 		if (residual.empty())
 			return baseline;
-		const auto body = pack_detail(residual, compressed, hc);
+		// Keep the full independent selector as fallback, but try only predicted
+		// Zstd for the temporal residual. Repeating all three compressors costs
+		// more than motion search; the same 10% whole-envelope gate still applies.
+		const auto body = nxwarp_direct::compress_zstd_predicted(residual, zstd_predicted, predictor_scratch, zstd_context.get());
 		motion_wire = nxwarp_direct::make_motion_wire(vector.dx, vector.dy, reference_id, body);
 		++motion_attempts;
 		if (motion_wire.empty() || motion_wire.size() * 100 > motion_baseline.size() * 90)
@@ -293,6 +298,8 @@ public:
 	        geometry{direct_geometry(c)}, source_width(c.source_width ? c.source_width : c.width), source_height(c.source_height ? c.source_height : c.height), physical(p), device(d), queue(q), family(f), header(nxwarp_direct::stream_header(geometry, c.trusted_lan, c.direct_lz4, c.safety)), lz4_enabled(c.direct_lz4), safety_enabled(c.safety)
 	{
 		lz4_hc = false;
+		if (geometry.zstd)
+			zstd_context.reset(ZSTD_createCCtx()); // Allocation failure retains the one-shot fallback.
 		const char * cache_env = std::getenv("NX_DIRECT_COMPRESSION_CACHE");
 		compression_cache_enabled = !cache_env || std::strcmp(cache_env, "0") != 0;
 		const char * wire_env = std::getenv("NX_DIRECT_WIRE_ADMISSION");

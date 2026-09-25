@@ -529,6 +529,16 @@ it does not extrapolate the displayed image or improve source image quality.
 Both encoding candidates cost PC time. Rotations and large motion often fall
 back to independent detail.
 
+The encoder caches sampled current pixels and stops evaluating a shift only
+when an integer lower bound proves it cannot beat or tie the current best.
+It subtracts contiguous pixel spans and reuses one Zstd workspace per codec.
+These optimizations preserve the search order, selected vector, and correction
+bytes. The residual uses a single predicted-Zstd trial instead of repeating
+the independent frame's three-compressor selector. If its complete envelope
+does not save 10%, the original independent encoding is sent. A different
+residual compressor might save more on untested content, so this trades some
+search for lower PC cost. No decoder or stream-format change is required.
+
 References use transport frame IDs, not compositor frame indices. Only positive
 decode acknowledgements make a reference eligible, at an age of 1–8 sent frames.
 Every eighth wire frame is independent. Each endpoint bounds retained raw frames
@@ -538,7 +548,9 @@ prefix is always independent. A reset clears reference state; this is not a
 guarantee of uninterrupted full-quality delivery under packet loss.
 
 The standalone protocol test covers exact reconstruction, metadata rejection,
-cache expiry, wraparound, reset, and unsupported representations:
+cache expiry, wraparound, reset, unsupported representations, and equivalence
+to the original scalar search/residual implementation under sparse samples,
+ties, scene cuts, and sub-grid shifts:
 
 ```sh
 g++ -std=c++23 -O2 -ffast-math -Wall -Wextra -Werror -I. tests/direct_motion_test.cpp -o /tmp/direct_motion_test

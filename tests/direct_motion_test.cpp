@@ -1,12 +1,177 @@
 #include "common/nxwarp_direct_motion.h"
 
+#include <algorithm>
 #include <array>
 #include <cassert>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <vector>
 
 using namespace wivrn::nxwarp_direct;
+
+static motion_vector scalar_estimate(layout l, std::span<const uint8_t> old, const motion_native_info & oi,
+	                                std::span<const uint8_t> now, const motion_native_info & ni, bool * varying_hits = nullptr)
+{
+	motion_vector best;
+	best.sad = std::numeric_limits<double>::max();
+	struct sample { uint8_t eye; int x, y; };
+	std::array<sample, 512> samples{};
+	size_t count = 0;
+	size_t first_hits = std::numeric_limits<size_t>::max();
+	const int rx = std::min(64, int(l.width / 4)), ry = std::min(64, int(l.height / 4));
+	for (unsigned eye = 0; eye < l.eyes; ++eye)
+		for (int y = int(l.height / 2) - ry; y < int(l.height / 2) + ry; y += 8)
+			for (int x = int(l.width / 2) - rx; x < int(l.width / 2) + rx; x += 8)
+			{
+				const uint8_t *a, *b;
+				if (count < samples.size() && motion_pixel(l, now, ni, eye, x, y, a) && motion_pixel(l, old, oi, eye, x, y, b))
+					samples[count++] = {uint8_t(eye), x, y};
+			}
+	auto test = [&](int dx, int dy) {
+		uint64_t cost = 0;
+		size_t hits = 0;
+		for (size_t i = 0; i < count; ++i)
+		{
+			const auto & s = samples[i];
+			const uint8_t *a, *b;
+			if (!motion_pixel(l, now, ni, s.eye, s.x, s.y, a) || !motion_pixel(l, old, oi, s.eye, s.x + dx, s.y + dy, b))
+				continue;
+			cost += unsigned(std::abs(int(a[0]) - int(b[0]))) + unsigned(std::abs(int(a[1]) - int(b[1]))) + unsigned(std::abs(int(a[2]) - int(b[2])));
+			++hits;
+		}
+		if (!count || hits < (count + 1) / 2)
+			return;
+		if (first_hits == std::numeric_limits<size_t>::max())
+			first_hits = hits;
+		else if (varying_hits && first_hits != hits)
+			*varying_hits = true;
+		const double score = double(cost) / double(hits * 3);
+		if (score < best.sad || (score == best.sad && std::abs(dx) + std::abs(dy) < std::abs(best.dx) + std::abs(best.dy)))
+			best = {dx, dy, score, hits};
+	};
+	for (int dy = -motion_search_radius; dy <= motion_search_radius; dy += 4)
+		for (int dx = -motion_search_radius; dx <= motion_search_radius; dx += 4)
+			test(dx, dy);
+	const int cx = best.dx, cy = best.dy;
+	for (int dy = std::max(-motion_search_radius, cy - 3); dy <= std::min(motion_search_radius, cy + 3); ++dy)
+		for (int dx = std::max(-motion_search_radius, cx - 3); dx <= std::min(motion_search_radius, cx + 3); ++dx)
+			test(dx, dy);
+	return best;
+}
+
+static std::vector<uint8_t> scalar_residual(layout l, std::span<const uint8_t> old, const motion_native_info & oi,
+	                                       std::span<const uint8_t> now, const motion_native_info & ni, int dx, int dy)
+{
+	std::vector<uint8_t> result(now.begin(), now.end());
+	for (uint32_t tile = 0; tile < l.tile_count(); ++tile)
+	{
+		const int32_t dst = ni.pixel[tile];
+		if (dst < 0)
+			continue;
+		const int ty = int(tile / (l.width / 32 * l.eyes)), rem = int(tile % (l.width / 32 * l.eyes));
+		const unsigned eye = rem / int(l.width / 32);
+		const int tx = rem % int(l.width / 32);
+		for (int y = 0; y < 32; ++y)
+			for (int x = 0; x < 32; ++x)
+			{
+				const uint8_t *src = nullptr;
+				motion_pixel(l, old, oi, eye, tx * 32 + x + dx, ty * 32 + y + dy, src);
+				const size_t p = size_t(dst) + (size_t(y) * 32 + x) * 4;
+				for (unsigned c = 0; c < 4; ++c)
+					result[p + c] = uint8_t(now[p + c] - (src ? src[c] : 0));
+			}
+	}
+	return result;
+}
+
+static void sparsify(layout l, std::vector<uint8_t> & raw, unsigned phase)
+{
+	const auto frame = parse_frame(l, raw);
+	assert(frame);
+	unsigned native_index = 0;
+	for (size_t i = 0; i < frame->descriptors.size() / 4; ++i)
+		if (read32(frame->descriptors, i * 4) & 0x20000000u)
+		{
+			if (native_index++ % 4 == phase)
+				for (unsigned b = 0; b < 4; ++b)
+					raw[16 + i * 4 + b] = uint8_t(0xc0112233u >> (8 * b));
+		}
+}
+
+static void invert_native(layout l, std::vector<uint8_t> & raw)
+{
+	motion_native_info info;
+	assert(build_motion_native(l, raw, info));
+	for (int32_t base: info.pixel)
+		if (base >= 0)
+			for (size_t i = 0; i < 4096; ++i)
+				raw[size_t(base) + i] = uint8_t(255 - raw[size_t(base) + i]);
+}
+
+static std::vector<uint8_t> make_frame(layout l, int shift_x = 0, int shift_y = 0, bool checker = false, bool overlap = false);
+
+static std::vector<uint8_t> make_flat_frame(layout l)
+{
+	auto raw = make_frame(l);
+	motion_native_info info;
+	assert(build_motion_native(l, raw, info));
+	for (int32_t base: info.pixel)
+		if (base >= 0)
+			std::fill_n(raw.begin() + base, 4096, uint8_t(0x55));
+	return raw;
+}
+
+static motion_vector compare_pair(layout l, const std::vector<uint8_t> & old, const std::vector<uint8_t> & now, bool * varying_hits = nullptr)
+{
+	motion_native_info oi, ni;
+	assert(build_motion_native(l, old, oi) && build_motion_native(l, now, ni));
+	const auto expected = scalar_estimate(l, old, oi, now, ni, varying_hits);
+	const auto actual = estimate_motion(l, old, oi, now, ni);
+	assert(actual.dx == expected.dx && actual.dy == expected.dy && actual.sad == expected.sad && actual.hits == expected.hits);
+	const auto expected_residual = scalar_residual(l, old, oi, now, ni, actual.dx, actual.dy);
+	auto residual = motion_residual(l, old, oi, now, ni, actual.dx, actual.dy);
+	assert(residual == expected_residual);
+	assert(restore_motion(l, old, oi, residual, actual.dx, actual.dy) && residual == now);
+	return actual;
+}
+
+static double percentile(std::vector<double> values, size_t n)
+{
+	std::sort(values.begin(), values.end());
+	return values[(values.size() * n + 99) / 100 - 1];
+}
+
+static void benchmark_motion(layout l, const std::vector<uint8_t> & old, const std::vector<uint8_t> & now)
+{
+	motion_native_info oi, ni;
+	assert(build_motion_native(l, old, oi) && build_motion_native(l, now, ni));
+	std::vector<double> old_search, new_search, old_residual, new_residual;
+	for (unsigned i = 0; i < 30; ++i)
+	{
+		auto t = std::chrono::steady_clock::now();
+		const auto baseline = scalar_estimate(l, old, oi, now, ni);
+		double elapsed = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t).count();
+		if (i >= 6) old_search.push_back(elapsed);
+		t = std::chrono::steady_clock::now();
+		const auto optimized = estimate_motion(l, old, oi, now, ni);
+		elapsed = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t).count();
+		assert(optimized.dx == baseline.dx && optimized.dy == baseline.dy && optimized.sad == baseline.sad && optimized.hits == baseline.hits);
+		if (i >= 6) new_search.push_back(elapsed);
+		t = std::chrono::steady_clock::now();
+		const auto expected = scalar_residual(l, old, oi, now, ni, optimized.dx, optimized.dy);
+		elapsed = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t).count();
+		if (i >= 6) old_residual.push_back(elapsed);
+		t = std::chrono::steady_clock::now();
+		const auto actual = motion_residual(l, old, oi, now, ni, optimized.dx, optimized.dy);
+		elapsed = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t).count();
+		assert(actual == expected);
+		if (i >= 6) new_residual.push_back(elapsed);
+	}
+	std::printf("motion CPU us p50/p95: search scalar %.1f/%.1f optimized %.1f/%.1f; residual scalar %.1f/%.1f spans %.1f/%.1f\n",
+	            percentile(old_search, 50), percentile(old_search, 95), percentile(new_search, 50), percentile(new_search, 95),
+	            percentile(old_residual, 50), percentile(old_residual, 95), percentile(new_residual, 50), percentile(new_residual, 95));
+}
 
 static layout motion_layout()
 {
@@ -22,7 +187,7 @@ static uint8_t pattern(unsigned eye, int x, int y, unsigned c)
 	return uint8_t(v >> 24);
 }
 
-static std::vector<uint8_t> make_frame(layout l, int shift_x = 0, int shift_y = 0, bool checker = false, bool overlap = false)
+static std::vector<uint8_t> make_frame(layout l, int shift_x, int shift_y, bool checker, bool overlap)
 {
 	const uint32_t cols = l.width / 32, rows = l.height / 32, tile_count = l.tile_count();
 	const int x0 = int(l.width - l.native_side) / 2, y0 = int(l.height - l.native_side) / 2;
@@ -131,6 +296,26 @@ static void test_roundtrip_and_layout()
 		residual = motion_residual(l, old, old_info, now, now_info, dx, dy);
 		assert(!residual.empty() && restore_motion(l, old, old_info, residual, dx, dy) && residual == now);
 	}
+	compare_pair(l, old, make_frame(l, 8, -4));
+	compare_pair(l, old, old);
+	compare_pair(l, old, make_frame(l, 16, 16));
+	for (auto [dx, dy]: {std::pair{7, -3}, std::pair{-5, 11}, std::pair{13, 2}})
+		compare_pair(l, old, make_frame(l, dx, dy));
+	auto flat = make_flat_frame(l);
+	const auto flat_vector = compare_pair(l, flat, flat);
+	assert(flat_vector.dx == 0 && flat_vector.dy == 0 && flat_vector.sad == 0);
+	auto sparse_reference = old, sparse_current = make_frame(l, 8, -4);
+	sparsify(l, sparse_reference, 0);
+	sparsify(l, sparse_current, 1);
+	compare_pair(l, sparse_reference, make_frame(l, 8, -4));
+	compare_pair(l, old, sparse_current);
+	bool varying_hits = false;
+	compare_pair(l, sparse_reference, sparse_current, &varying_hits);
+	assert(varying_hits);
+	auto scene_cut = make_frame(l);
+	invert_native(l, scene_cut);
+	compare_pair(l, old, scene_cut);
+	benchmark_motion(l, old, make_frame(l, 8, -4));
 	auto aliased = make_frame(l, 0, 0, false, true);
 	assert(parse_frame(l, aliased));
 	assert(!build_motion_native(l, aliased, now_info));

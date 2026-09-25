@@ -16,7 +16,7 @@ inline bool is_zstd(std::span<const uint8_t> b)
 }
 
 inline std::span<const uint8_t> compress_zstd_impl(std::span<const uint8_t> raw, std::vector<uint8_t> & out,
-														 std::vector<uint8_t> * scratch, bool predictor)
+														 std::vector<uint8_t> * scratch, bool predictor, ZSTD_CCtx * context = nullptr)
 {
 	const auto original = raw;
 	out.clear();
@@ -38,7 +38,8 @@ inline std::span<const uint8_t> compress_zstd_impl(std::span<const uint8_t> raw,
 	if (ZSTD_isError(bound) || bound > UINT32_MAX - 16u)
 		return original;
 	out.resize(16 + bound);
-	const size_t packed = ZSTD_compress(out.data() + 16, bound, raw.data(), raw.size(), 3);
+	const size_t packed = context ? ZSTD_compressCCtx(context, out.data() + 16, bound, raw.data(), raw.size(), 3) :
+	                                ZSTD_compress(out.data() + 16, bound, raw.data(), raw.size(), 3);
 	if (ZSTD_isError(packed) || packed > UINT32_MAX || 16u + packed > raw.size() ||
 	    (16u + packed) * 100u > raw.size() * 95u)
 	{
@@ -56,15 +57,15 @@ inline std::span<const uint8_t> compress_zstd_impl(std::span<const uint8_t> raw,
 	return out;
 }
 
-inline std::span<const uint8_t> compress_zstd(std::span<const uint8_t> raw, std::vector<uint8_t> & out)
+inline std::span<const uint8_t> compress_zstd(std::span<const uint8_t> raw, std::vector<uint8_t> & out, ZSTD_CCtx * context = nullptr)
 {
-	return compress_zstd_impl(raw, out, nullptr, false);
+	return compress_zstd_impl(raw, out, nullptr, false, context);
 }
 
 inline std::span<const uint8_t> compress_zstd_predicted(std::span<const uint8_t> raw, std::vector<uint8_t> & out,
-												 std::vector<uint8_t> & scratch)
+												 std::vector<uint8_t> & scratch, ZSTD_CCtx * context = nullptr)
 {
-	return compress_zstd_impl(raw, out, &scratch, true);
+	return compress_zstd_impl(raw, out, &scratch, true, context);
 }
 
 inline bool decompress_zstd(layout l, std::span<const uint8_t> b, std::vector<uint8_t> & out)

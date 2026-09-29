@@ -23,6 +23,7 @@
 #include "vk/allocation.h"
 #include "vk/fwd.h"
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
@@ -44,6 +45,9 @@ struct loaded_image
 	vk::ImageViewType image_view_type;
 	bool is_alpha_premultiplied;
 };
+
+// Decode a JPEG into tightly packed sRGB RGBA pixels.
+std::vector<uint8_t> decode_jpeg_rgba(std::span<const std::byte> bytes, uint32_t & width, uint32_t & height);
 
 struct image_loader
 {

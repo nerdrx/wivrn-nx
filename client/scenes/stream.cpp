@@ -901,6 +901,16 @@ void scenes::stream::handle_base_frame(uint8_t stream_index, const std::shared_p
 	(void)handle;
 }
 
+void scenes::stream::push_periphery_rgba(uint64_t frame_id, uint8_t eye, uint32_t width, uint32_t height,
+                                         std::vector<uint8_t> rgba)
+{
+	if (eye >= periphery_frames.size() || width != 544 || height != 544 || rgba.size() != size_t(width) * height * 4)
+		return;
+	auto pixels = std::make_shared<const std::vector<uint8_t>>(std::move(rgba));
+	std::lock_guard lock(frames_mutex);
+	periphery_frames[eye][frame_id % periphery_frames[eye].size()] = {frame_id, std::move(pixels)};
+}
+
 void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_ptr<shard_accumulator::blit_handle> handle)
 {
 	assert(handle);
@@ -2077,6 +2087,15 @@ void scenes::stream::render(const XrFrameState & frame_state)
 				images[v].direct_blocks = blit_handle->direct_blocks;
 				images[v].direct_blocks_bytes = blit_handle->direct_blocks_bytes;
 				images[v].direct_checker_merged = blit_handle->direct_checker_merged;
+				{
+					std::lock_guard lock(frames_mutex);
+					const auto & periphery = periphery_frames[v][blit_handle->feedback.frame_index % periphery_frames[v].size()];
+					if (periphery.frame_id == blit_handle->feedback.frame_index)
+					{
+						images[v].periphery_frame_id = periphery.frame_id;
+						images[v].periphery_rgba = periphery.rgba;
+					}
+				}
 			}
 		}
 		else

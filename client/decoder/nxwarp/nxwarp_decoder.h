@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <chrono>
+#include <span>
 
 // decoder_nxwarp: the NX Warp (nxvc) codec inside the WiVRn NX client.
 //
@@ -65,8 +66,10 @@
 #include <array>
 #include <atomic>
 #include <deque>
+#include <vector>
 #include <memory>
 #include <thread>
+#include <mutex>
 
 #include "nxwarp_host.h"
 
@@ -367,6 +370,33 @@ class nxwarp_decoder : public decoder
 	// thread only, like everything else it is next to.
 	std::vector<nxt::TileOutput> rx_tiles;
 	nxwarp_wire::reassemble_report last_hole;
+	struct periphery_chunks
+	{
+		bool used = false;
+		uint32_t frame = 0, total_bytes = 0;
+		uint8_t eye = 0;
+		uint16_t x = 0, y = 0, width = 0, height = 0;
+		std::chrono::steady_clock::time_point updated{};
+		std::vector<std::vector<uint8_t>> chunks;
+		size_t received = 0;
+	};
+	std::array<periphery_chunks, 4> periphery_rx{};
+	void push_periphery_chunk(std::span<const uint8_t> payload);
+	struct periphery_decode_job
+	{
+		uint64_t frame_id = 0;
+		uint8_t eye = 0;
+		std::vector<uint8_t> jpeg;
+	};
+	utils::sync_queue<periphery_decode_job> periphery_jobs;
+	std::thread periphery_worker;
+	std::atomic<unsigned> periphery_queued{0};
+	std::mutex periphery_stats_mutex;
+	uint64_t periphery_stat_received = 0, periphery_stat_dropped = 0, periphery_stat_missing = 0;
+	uint64_t periphery_stat_decoded = 0, periphery_stat_invalid = 0;
+	std::vector<uint32_t> periphery_decode_us_samples;
+	std::array<uint16_t, 2> periphery_last_frame{};
+	std::array<bool, 2> periphery_have_last_frame{};
 	// --- how fast frames actually arrive -------------------------------------
 	//
 	// When the previous frame unit was handed toward the worker, and a smoothed

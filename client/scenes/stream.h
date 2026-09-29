@@ -242,6 +242,12 @@ private:
 
 	// for frames inside accumulator images
 	std::mutex frames_mutex;
+	struct periphery_frame
+	{
+		uint64_t frame_id = uint64_t(-1);
+		std::shared_ptr<const std::vector<uint8_t>> rgba;
+	};
+	std::array<std::array<periphery_frame, 4>, 2> periphery_frames;
 	std::condition_variable frames_ready;
 	uint64_t ready_wait_attempts = 0, ready_wait_successes = 0, ready_wait_ns = 0;
 	uint64_t selection_older_than_available = 0;
@@ -744,6 +750,8 @@ public:
 	        std::optional<reconnect_info> reconnect_target = std::nullopt);
 
 	void render(const XrFrameState &) override;
+	void push_periphery_rgba(uint64_t frame_id, uint8_t eye, uint32_t width, uint32_t height,
+	                         std::vector<uint8_t> rgba);
 	// Whether just-in-time display scheduling runs; see the definition in stream.cpp.
 	static bool jit_enabled();
 	// Whether the re-present cache is on; see the definition in stream.cpp.

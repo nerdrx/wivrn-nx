@@ -27,6 +27,7 @@
 #include <ktx.h>
 #include <ktxvulkan.h>
 #include <memory>
+#include <limits>
 #include <span>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
@@ -44,6 +45,23 @@
 #include "stb_image.h"
 
 using stbi_ptr = std::unique_ptr<void, decltype([](void * pixels) { stbi_image_free(pixels); })>;
+
+std::vector<uint8_t> decode_jpeg_rgba(std::span<const std::byte> bytes, uint32_t & width, uint32_t & height)
+{
+	if (bytes.empty() || bytes.size() > size_t(std::numeric_limits<int>::max()))
+		return {};
+	int w = 0, h = 0;
+	const auto * input = reinterpret_cast<const stbi_uc *>(bytes.data());
+	if (!stbi_info_from_memory(input, int(bytes.size()), &w, &h, nullptr) || w != 544 || h != 544)
+		return {};
+	stbi_ptr pixels(stbi_load_from_memory(input, int(bytes.size()), &w, &h, nullptr, STBI_rgb_alpha));
+	if (!pixels || w <= 0 || h <= 0 || uint64_t(w) * uint64_t(h) > SIZE_MAX / 4)
+		return {};
+	width = uint32_t(w);
+	height = uint32_t(h);
+	const auto * begin = static_cast<const uint8_t *>(pixels.get());
+	return {begin, begin + size_t(w) * size_t(h) * 4};
+}
 
 namespace
 {

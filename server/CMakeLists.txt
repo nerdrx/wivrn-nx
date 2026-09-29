@@ -189,6 +189,7 @@ if (WIVRN_BUILD_SERVER)
 	endif()
 
 	if(WIVRN_USE_NXWARP)
+		find_package(JPEG REQUIRED)
 		target_sources(
 			wivrn-server
 			PRIVATE encoder/video_encoder_nxwarp.cpp
@@ -197,7 +198,7 @@ if (WIVRN_BUILD_SERVER)
 				# The monado-process end of the two-second statistics hop.
 				encoder/nxwarp_stats_publish.cpp
 			)
-		target_link_libraries(wivrn-server PRIVATE nxvc::ref nxvc::transport)
+		target_link_libraries(wivrn-server PRIVATE nxvc::ref nxvc::transport JPEG::JPEG)
 
 		# The Vulkan compute encoder behind `"backend": "vk"`. Optional for the
 		# same reason the Vulkan decoder is optional below: an nxvc built with
@@ -329,6 +330,7 @@ if (WIVRN_BUILD_SERVER)
 			target_link_libraries(wivrn-nxwarp-e2e PRIVATE
 				nxvc::ref
 				nxvc::transport
+				JPEG::JPEG
 				nxvc::vk_decoder
 				nxvc::vk_common
 				wivrn-common

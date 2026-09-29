@@ -16,6 +16,7 @@ layout(set = 0, binding = 0) uniform sampler2D rgb[alpha + 1];
 layout(set = 0, binding = 3, std430) readonly buffer direct_tiles_t { uint tile[]; } tiles;
 layout(set = 0, binding = 4, std430) readonly buffer direct_blocks_t { uint block[]; } blocks;
 layout(set = 0, binding = 5, std430) readonly buffer direct_dummy_t { uint dummy[]; } direct_meta;
+layout(set = 0, binding = 7) uniform sampler2D periphery;
 layout(location = 0) in vec4 inUV;
 layout(location = 1) in vec4 inPosition;
 layout(location = 0) out vec4 outColor;
@@ -57,6 +58,17 @@ void main() {
     vec2 uv = clamp(inUV.xy, vec2(0), vec2(0.999999));
 	uint merged = glow.x > 0.5 ? 1u : 0u;
 	vec3 c = sample_block(uvec2(uv * motion.xy), merged);
+	if (glow.y > 0.5) {
+		float x0 = motion.w, x1 = deband.w;
+		vec2 eye_uv = vec2((uv.x - x0) / max(x1 - x0, 1e-6), uv.y);
+		vec2 from_centre = vec2((eye_uv.x - 0.5) * motion.x * (x1 - x0), (eye_uv.y - 0.5) * motion.y);
+		float radius = length(from_centre);
+		if (radius > 128.0) {
+			float t = clamp((radius - 128.0) / 256.0, 0.0, 1.0);
+			t = t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+			c = mix(c, texture(periphery, eye_uv).rgb, t);
+		}
+	}
     if (do_srgb) c = srgb_linear(c);
     outColor = vec4(c * scale.rgb + bias.rgb, 1.0);
 }

@@ -25,6 +25,7 @@
 #include <chrono>
 
 #include "nxwarp_packetize.h"
+#include "nxwarp_jpeg_packet.h"
 
 // The lens-mask geometry, shared with the compositor's foveation pass and with edge bleed.
 // Header only; it links nothing and knows nothing about Vulkan or OpenXR.
@@ -43,6 +44,8 @@
 #include <cstdlib>
 #include <ctime>
 #include <cstring>
+#include <cstdio>
+#include <csetjmp>
 #include <format>
 #include <limits>
 #include <optional>
@@ -51,8 +54,72 @@
 #include <string>
 #include <utility>
 
+#include <jpeglib.h>
+
 namespace
 {
+struct jpeg_error_state
+{
+	jpeg_error_mgr base;
+	std::jmp_buf jump;
+};
+
+void jpeg_fail(j_common_ptr cinfo)
+{
+	std::longjmp(reinterpret_cast<jpeg_error_state *>(cinfo->err)->jump, 1);
+}
+
+std::vector<uint8_t> make_q20_jpeg(const uint8_t * y, const uint8_t * cbcr, uint32_t width, uint32_t height)
+{
+	constexpr uint32_t out_w = 544, out_h = 544;
+	if (width < out_w || height < out_h)
+		return {};
+	std::vector<uint8_t> rgb(size_t(out_w) * out_h * 3);
+	for (uint32_t oy = 0; oy < out_h; ++oy)
+		for (uint32_t ox = 0; ox < out_w; ++ox)
+		{
+			const uint32_t sx = ox * width / out_w, sy = oy * height / out_h;
+			const int yy = int(y[size_t(sy) * width + sx]);
+			const size_t uv = size_t(sy / 2) * width + (sx / 2) * 2;
+			const int u = int(cbcr[uv]) - 128, v = int(cbcr[uv + 1]) - 128;
+			const size_t p = (size_t(oy) * out_w + ox) * 3;
+			rgb[p] = uint8_t(std::clamp(yy + ((403 * v + 128) >> 8), 0, 255));
+			rgb[p + 1] = uint8_t(std::clamp(yy - ((48 * u + 120 * v + 128) >> 8), 0, 255));
+			rgb[p + 2] = uint8_t(std::clamp(yy + ((475 * u + 128) >> 8), 0, 255));
+		}
+
+	jpeg_compress_struct cinfo{};
+	jpeg_error_state error{};
+	cinfo.err = jpeg_std_error(&error.base);
+	error.base.error_exit = jpeg_fail;
+	if (setjmp(error.jump))
+	{
+		jpeg_destroy_compress(&cinfo);
+		throw std::runtime_error("NX Warp: JPEG compression failed");
+	}
+	jpeg_create_compress(&cinfo);
+	unsigned char * output = nullptr;
+	unsigned long output_size = 0;
+	jpeg_mem_dest(&cinfo, &output, &output_size);
+	cinfo.image_width = out_w;
+	cinfo.image_height = out_h;
+	cinfo.input_components = 3;
+	cinfo.in_color_space = JCS_RGB;
+	jpeg_set_defaults(&cinfo);
+	jpeg_set_quality(&cinfo, 20, TRUE);
+	jpeg_start_compress(&cinfo, TRUE);
+	while (cinfo.next_scanline < cinfo.image_height)
+	{
+		JSAMPROW row = rgb.data() + size_t(cinfo.next_scanline) * out_w * 3;
+		jpeg_write_scanlines(&cinfo, &row, 1);
+	}
+	jpeg_finish_compress(&cinfo);
+	std::vector<uint8_t> result(output, output + output_size);
+	free(output);
+	jpeg_destroy_compress(&cinfo);
+	return result;
+}
+
 uint8_t direct_tail_packets_env()
 {
 	static const uint8_t value = [] {
@@ -945,6 +1012,10 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	}
 
 	codec_reads_image = codec->accepts_image();
+	if (const char * env = std::getenv("NX_WARP_JPEG_PERIPHERY"))
+		jpeg_periphery_enabled = stream_idx == 0 && std::strcmp(env, "1") == 0;
+	if (jpeg_periphery_enabled)
+		U_LOG_I("nxwarp: Q20 JPEG periphery enabled (544x544, full-resolution NV12 staging)");
 	codec_direct_blocks = codec->direct_blocks();
 	U_LOG_I("nxwarp: stream %d backend: %s%s",
 	        int(stream_idx),
@@ -1015,7 +1086,19 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 			                .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
 			                .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
 			        },
-			        std::format("nxwarp stream {} buffer", stream_idx));
+				        std::format("nxwarp stream {} buffer", stream_idx));
+		else if (jpeg_periphery_enabled)
+			in[i].jpeg_buffer = buffer_allocation(
+			        vk.device,
+			        {
+				        .size = buffer_size * stereo_eyes,
+				        .usage = vk::BufferUsageFlagBits::eTransferDst,
+			        },
+			        {
+				        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
+				        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+			        },
+			        std::format("nxwarp JPEG source {}", stream_idx));
 		in[i].fence = vk::raii::Fence(vk.device, vk::FenceCreateInfo{.flags = vk::FenceCreateFlagBits::eSignaled});
 	}
 
@@ -1664,11 +1747,46 @@ void wivrn::video_encoder_nxwarp::present_image(
 	if (codec_reads_image)
 	{
 		in[slot].image = y_cbcr;
+		if (jpeg_periphery_enabled)
+		{
+			vk::ImageMemoryBarrier2 jpeg_barrier{
+			        .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+			        .srcAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
+			        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+			        .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+			        .image = y_cbcr,
+			        .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor,
+			                             .baseMipLevel = 0, .levelCount = 1,
+			                             .baseArrayLayer = 0, .layerCount = stereo_eyes == 2 ? std::max(src_layer, src_layer_right) + 1 : src_layer + 1},
+			};
+			cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &jpeg_barrier});
+		const vk::DeviceSize eye_bytes = vk::DeviceSize(extent.width) * extent.height * 3 / 2;
+		const std::array layers{src_layer, stereo_eyes == 2 ? src_layer_right : src_layer};
+		for (uint32_t e = 0; e < stereo_eyes; ++e)
+		{
+			const std::array regions{
+			        vk::BufferImageCopy{
+			                .bufferOffset = eye_bytes * e,
+			                .imageSubresource = {.aspectMask = vk::ImageAspectFlagBits::ePlane0,
+			                                     .baseArrayLayer = layers[e], .layerCount = 1},
+			                .imageExtent = {.width = extent.width, .height = extent.height, .depth = 1},
+			        },
+			        vk::BufferImageCopy{
+			                .bufferOffset = eye_bytes * e + vk::DeviceSize(extent.width) * extent.height,
+			                .imageSubresource = {.aspectMask = vk::ImageAspectFlagBits::ePlane1,
+			                                     .baseArrayLayer = layers[e], .layerCount = 1},
+			                .imageExtent = {.width = extent.width / 2, .height = extent.height / 2, .depth = 1},
+			        },
+			};
+			cmd.copyImageToBuffer(y_cbcr, vk::ImageLayout::eGeneral, vk::Buffer(in[slot].jpeg_buffer), regions);
+		}
+		}
 		cmd.end();
 
 		std::unique_lock lock(vk.queue.mutex);
 		vk::CommandBufferSubmitInfo cmd_info{.commandBuffer = *cmd};
-		compositor_sem.stageMask = vk::PipelineStageFlagBits2::eComputeShader;
+		compositor_sem.stageMask = vk::PipelineStageFlagBits2::eComputeShader |
+		                           (jpeg_periphery_enabled ? vk::PipelineStageFlagBits2::eTransfer : vk::PipelineStageFlagBits2{});
 
 		vk.device.resetFences(*in[slot].fence);
 		vk.queue.queue.submit2(vk::SubmitInfo2{
@@ -2048,6 +2166,7 @@ void wivrn::video_encoder_nxwarp::flatten_masked_tiles(uint8_t * y_base, size_t 
 
 std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(uint8_t slot, uint64_t frame_id)
 {
+	const auto fence_wait_started = std::chrono::steady_clock::now();
 	if (vk.device.waitForFences(*in[slot].fence, true, 1'000'000'000) == vk::Result::eTimeout)
 	{
 		U_LOG_W("nxwarp: timeout on stream %d", int(stream_idx));
@@ -2055,6 +2174,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	}
 	if (not in[slot].have_view_info)
 		return {};
+	const double fence_wait_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fence_wait_started).count();
 
 	// --- the pace ----------------------------------------------------------
 	//
@@ -2090,15 +2210,6 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		direct_quality_budget = std::clamp(bitrate, 1u, 1'000'000'000u);
 		fps = std::isfinite(fps) ? std::clamp(fps, 1.f, 240.f) : 90.f;
 		direct_quality_period = int64_t(1e9 / double(fps));
-		codec->set_target_bitrate(direct_quality_budget, fps);
-		if (not codec->admit_frame(os_monotonic_get_ns()))
-		{
-			++prof_paced_out;
-			++paced_out_total;
-			in[slot].have_view_info = false;
-			in[slot].native_center = {};
-			return {};
-		}
 	}
 
 	const auto & view_info = in[slot].view_info;
@@ -2128,10 +2239,13 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// planes on the device. That readback and this loop were most of what
 	// encode() cost at 1088x1088.
 	const uint8_t * y = nullptr;
+	const uint8_t * source_nv12 = nullptr;
+	std::array<std::vector<uint8_t>, 2> periphery_jpeg;
 	const size_t cw = extent.width / 2;
 	if (not codec_reads_image)
 	{
 		const uint8_t * base = (const uint8_t *)in[slot].buffer.map();
+		source_nv12 = base;
 		y = base;
 		const uint8_t * cbcr = base + size_t(extent.width) * extent.height;
 		const size_t ch = extent.height / 2;
@@ -2173,6 +2287,67 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		// foveation pass (server/compositor/foveation.cpp).
 		if (lens_mask_enabled and not lens_skip_map.empty())
 			flatten_masked_tiles((uint8_t *)base, extent.width, cw);
+	}
+	else if (jpeg_periphery_enabled)
+		source_nv12 = (const uint8_t *)in[slot].jpeg_buffer.map();
+
+	const auto jpeg_started = std::chrono::steady_clock::now();
+	const size_t eye_bytes = size_t(extent.width) * extent.height * 3 / 2;
+	const uint32_t jpeg_eyes = codec_reads_image ? stereo_eyes : 1;
+	if (jpeg_periphery_enabled)
+	for (uint32_t e = 0; e < jpeg_eyes; ++e)
+	{
+		const uint8_t * eye_nv12 = source_nv12 + eye_bytes * e;
+		periphery_jpeg[e] = make_q20_jpeg(
+		        eye_nv12,
+		        eye_nv12 + size_t(extent.width) * extent.height,
+		        extent.width,
+		        extent.height);
+	}
+	uint64_t jpeg_bytes = 0;
+	for (const auto & jpeg: periphery_jpeg)
+		jpeg_bytes += jpeg.size();
+	float jpeg_fps = pending_framerate.load(std::memory_order_relaxed);
+	if (!(jpeg_fps > 0)) jpeg_fps = rc_fps;
+	jpeg_fps = std::isfinite(jpeg_fps) ? std::clamp(jpeg_fps, 1.f, 240.f) : 90.f;
+	const uint32_t jpeg_bps = uint32_t(std::min<double>(UINT32_MAX, std::ceil(double(jpeg_bytes) * 8.0 * jpeg_fps)));
+	if (codec_direct_blocks && jpeg_bps)
+	{
+		const uint32_t total_bps = pending_bitrate.load(std::memory_order_relaxed)
+		                                   ? pending_bitrate.load(std::memory_order_relaxed)
+		                                   : uint32_t(std::max(0.0, path_bps));
+		direct_quality_budget = total_bps > jpeg_bps ? total_bps - jpeg_bps : 1;
+	}
+	if (codec_direct_blocks)
+	{
+		codec->set_target_bitrate(direct_quality_budget, jpeg_fps);
+		if (not codec->admit_frame(os_monotonic_get_ns()))
+		{
+			++prof_paced_out;
+			++paced_out_total;
+			in[slot].have_view_info = false;
+			in[slot].native_center = {};
+			return {};
+		}
+	}
+	const double jpeg_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - jpeg_started).count();
+	if (jpeg_periphery_enabled)
+	{
+		static uint32_t profile_frames = 0;
+		static double profile_ms = 0;
+		static double profile_capture_ms = 0;
+		static uint64_t profile_bytes = 0;
+		++profile_frames;
+		profile_ms += jpeg_ms;
+		profile_capture_ms += fence_wait_ms;
+		profile_bytes += jpeg_bytes;
+		if (profile_frames >= 180)
+		{
+			U_LOG_I("nxwarp: JPEG periphery 544x544 compress %.2f ms, staging fence wait %.2f ms, %.0f bytes/frame at %u fps",
+			        profile_ms / profile_frames, profile_capture_ms / profile_frames,
+			        double(profile_bytes) / profile_frames, unsigned(jpeg_fps));
+			profile_frames = 0; profile_ms = 0; profile_capture_ms = 0; profile_bytes = 0;
+		}
 	}
 
 	// --- what the client actually holds of the previous frame -------------
@@ -3090,6 +3265,36 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		           },
 		           last, direct_quality_budget, direct_quality_period);
 		packet_sent += bytes;
+	}
+	// NXVC owns the central reconstruction; the independently delivered JPEG
+	// supplies a 2:1 full-eye base image for peripheral detail. Chunk below the
+	// UDP MTU and key both representations with the same NXVC wire frame id.
+	constexpr size_t jpeg_chunk = nxwarp_jpeg_chunk_size;
+	for (uint32_t e = 0; e < periphery_jpeg.size(); ++e)
+	{
+		const auto & jpeg = periphery_jpeg[e];
+		if (jpeg.empty() or jpeg.size() > UINT32_MAX or jpeg.size() > 1024 * 1024)
+			continue;
+		const uint32_t count = uint32_t((jpeg.size() + jpeg_chunk - 1) / jpeg_chunk);
+		if (count > UINT16_MAX)
+			continue;
+		for (uint32_t part = 0; part < count; ++part)
+		{
+			const size_t begin = size_t(part) * jpeg_chunk;
+			const size_t bytes = std::min(jpeg_chunk, jpeg.size() - begin);
+			auto payload = nxwarp_jpeg_chunk_payload(
+			        frame_id16, uint8_t(stereo_eyes == 2 ? e : eye), 544, 544,
+			        uint16_t(part), uint16_t(count), uint32_t(jpeg.size()),
+			        std::span(jpeg).subspan(begin, bytes));
+			if (payload.empty())
+				break;
+			const bool jpeg_frame_end = e + 1 == periphery_jpeg.size() && part + 1 == count;
+			SendPacket(to_headset::nxwarp_datagram{
+			                   .stream_item_idx = stream_idx,
+			                   .path_id = to_headset::nxwarp_periphery_path,
+			                   .payload = std::move(payload),
+		           }, jpeg_frame_end, jpeg_bps, int64_t(1e9 / jpeg_fps));
+		}
 	}
 	if (codec_direct_blocks && direct_tail_packets)
 		direct_tail_packets_sent += SendTailPadding(direct_tail_packets);

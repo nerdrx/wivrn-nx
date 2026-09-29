@@ -90,6 +90,9 @@ class video_encoder_nxwarp : public video_encoder
 		vk::raii::Fence fence = nullptr;
 		vk::raii::CommandBuffer cmd = nullptr;
 		buffer_allocation buffer;
+		// NXJ2's low-resolution periphery source, copied alongside the compositor
+		// image so JPEG compression never stalls the render thread.
+		buffer_allocation jpeg_buffer;
 		// The compositor image this slot was presented with, for the codec that
 		// reads it directly. Not owned: it belongs to the compositor, and the
 		// slot state machine is what keeps it alive and unwritten until encode()
@@ -125,6 +128,7 @@ class video_encoder_nxwarp : public video_encoder
 	// Set once from the codec, and it decides the shape of present_image, of
 	// encode(), and of what this class allocates per slot.
 	bool codec_reads_image = false;
+	bool jpeg_periphery_enabled = false;
 
 	// The transport. No sockets in it: it hands back datagram buffers and this
 	// class puts them on WiVRn's stream socket.

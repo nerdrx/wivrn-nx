@@ -125,7 +125,6 @@ class video_encoder_nxwarp : public video_encoder
 	// Set once from the codec, and it decides the shape of present_image, of
 	// encode(), and of what this class allocates per slot.
 	bool codec_reads_image = false;
-	bool jpeg_periphery_enabled = false;
 
 	// The transport. No sockets in it: it hands back datagram buffers and this
 	// class puts them on WiVRn's stream socket.

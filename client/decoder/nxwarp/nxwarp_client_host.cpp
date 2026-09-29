@@ -98,13 +98,6 @@ void nxwarp_application_host::publish(shard_accumulator * accumulator, std::shar
 		scene->push_blit_handle(accumulator, std::move(handle));
 }
 
-void nxwarp_application_host::on_periphery_rgba(uint64_t frame_id, uint8_t eye, uint32_t width,
-                                                 uint32_t height, std::vector<uint8_t> rgba)
-{
-	if (auto scene = weak_scene.lock())
-		scene->push_periphery_rgba(frame_id, eye, width, height, std::move(rgba));
-}
-
 // The constructor the client's decoder factory calls. It lives here rather than in
 // nxwarp_decoder.cpp so that nothing in the decoder's own translation unit refers to
 // nxwarp_application_host — which is what lets wivrn-nxwarp-e2e link the decoder while

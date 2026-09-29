@@ -56,8 +56,6 @@ public:
 	void report_frame_not_held(uint8_t stream_index, uint16_t frame_id,
 	                           wivrn::from_headset::nxwarp_frame_not_held::reason why) override;
 	void publish(shard_accumulator * accumulator, std::shared_ptr<decoder::blit_handle> handle) override;
-	void on_periphery_rgba(uint64_t frame_id, uint8_t eye, uint32_t width, uint32_t height,
-	                       std::vector<uint8_t> rgba) override;
 };
 
 } // namespace wivrn

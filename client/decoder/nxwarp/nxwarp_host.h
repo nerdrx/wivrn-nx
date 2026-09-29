@@ -102,9 +102,6 @@ public:
 	// stream without guessing at the order they close in.
 	virtual void on_frame_unit(uint16_t frame_id, std::span<const uint8_t>) {}
 
-	// A complete same-frame periphery image, decoded to tightly packed sRGB RGBA.
-	virtual void on_periphery_rgba(uint64_t, uint8_t, uint32_t, uint32_t, std::vector<uint8_t>) {}
-
 	// A frame that will never be decoded: it closed with a hole. The feedback carries
 	// the frame's index, its stream and the arrival of its first datagram, and no
 	// sent_to_decoder -- which is precisely how every other decoder in this client

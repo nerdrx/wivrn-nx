@@ -15,9 +15,7 @@
 #include "nxwarp_direct_zstd.h"
 #include "nxwarp_stream_grid.h"
 #include "nxwarp_decoder.h"
-#include "nxwarp_jpeg_packet.h"
 #include "application.h"
-#include "render/image_loader.h"
 
 #ifdef __ANDROID__
 #include <sys/system_properties.h>
@@ -33,9 +31,7 @@
 #include <chrono>
 #include <cmath>
 #include <algorithm>
-#include <cstring>
 #include <string>
-#include <utility>
 
 // Shared by every NX Warp stream in the process (see the push site).
 static std::atomic<uint32_t> g_decode_stride{1};
@@ -442,38 +438,6 @@ nxwarp_decoder::nxwarp_decoder(vk::raii::Device & device,
 			spdlog::error("nxwarp decoder worker: {}", e.what());
 		}
 	});
-
-	periphery_worker = std::thread([this]() {
-		try
-		{
-			while (true)
-			{
-				auto job = periphery_jobs.pop();
-				periphery_queued.fetch_sub(1, std::memory_order_relaxed);
-				const auto begin = std::chrono::steady_clock::now();
-				uint32_t width = 0, height = 0;
-				auto rgba = decode_jpeg_rgba(std::as_bytes(std::span(job.jpeg)), width, height);
-				const bool valid = width == wivrn::nxwarp_jpeg_side && height == wivrn::nxwarp_jpeg_side &&
-				                   rgba.size() == size_t(wivrn::nxwarp_jpeg_side) * wivrn::nxwarp_jpeg_side * 4u;
-				const uint32_t decode_us = uint32_t(std::chrono::duration_cast<std::chrono::microseconds>(
-				        std::chrono::steady_clock::now() - begin).count());
-				{
-					std::lock_guard lock(periphery_stats_mutex);
-					(valid ? periphery_stat_decoded : periphery_stat_invalid)++;
-					periphery_decode_us_samples.push_back(decode_us);
-				}
-				if (valid)
-					this->host.on_periphery_rgba(job.frame_id, job.eye, width, height, std::move(rgba));
-			}
-		}
-		catch (const utils::sync_queue_closed &)
-		{
-		}
-		catch (const std::exception & e)
-		{
-			spdlog::error("nxwarp periphery JPEG worker: {}", e.what());
-		}
-	});
 }
 
 // The pool of images the worker copies decoded pictures into, sized to `extent`.
@@ -679,11 +643,8 @@ void nxwarp_decoder::build_image_pool()
 nxwarp_decoder::~nxwarp_decoder()
 {
 	jobs.close();
-	periphery_jobs.close();
 	if (worker.joinable())
 		worker.join();
-	if (periphery_worker.joinable())
-		periphery_worker.join();
 	if (nxvc)
 		nxvc_vk_decoder_destroy(nxvc);
 	spdlog::info("nxwarp[{}]: {} frames decoded, {} dropped with a hole, {} refused by the codec, {} published with no view_info",
@@ -1082,140 +1043,8 @@ bool nxwarp_decoder::on_direct_stream_header(std::span<const uint8_t> header)
 	return true;
 }
 
-void nxwarp_decoder::push_periphery_chunk(std::span<const uint8_t> p)
-{
-	constexpr size_t header = 25;
-	constexpr uint32_t max_jpeg = wivrn::nxwarp_jpeg_max_bytes;
-	if (p.size() <= header || std::memcmp(p.data(), "NXJ2", 4) != 0)
-		return;
-	auto be16 = [&](size_t i) { return uint16_t((uint16_t(p[i]) << 8) | p[i + 1]); };
-	auto be32 = [&](size_t i) { return (uint32_t(p[i]) << 24) | (uint32_t(p[i + 1]) << 16) | (uint32_t(p[i + 2]) << 8) | p[i + 3]; };
-	const uint32_t frame = be32(4), total = be32(21);
-	const uint8_t eye = p[8];
-	const uint16_t x = be16(9), y = be16(11), width = be16(13), height = be16(15);
-	const uint16_t index = be16(17), count = be16(19);
-	if (eye > 1 || total == 0 || total > max_jpeg || !count || count > 2048 || index >= count)
-		return;
-
-	const auto now = std::chrono::steady_clock::now();
-	periphery_chunks * a = nullptr;
-	for (auto & slot : periphery_rx)
-	{
-		if (slot.used && now - slot.updated > std::chrono::milliseconds(200))
-			slot = {};
-		if (slot.used && slot.frame == frame && slot.eye == eye)
-			a = &slot;
-	}
-	if (!a)
-	{
-		a = &*std::min_element(periphery_rx.begin(), periphery_rx.end(), [](const auto & l, const auto & r) {
-			if (l.used != r.used) return !l.used;
-			return l.updated < r.updated;
-		});
-		*a = {};
-		a->used = true;
-		a->frame = frame;
-		a->eye = eye;
-		a->total_bytes = total;
-		a->x = x; a->y = y; a->width = width; a->height = height;
-		a->chunks.resize(count);
-	}
-	if (a->total_bytes != total || a->x != x || a->y != y || a->width != width || a->height != height || a->chunks.size() != count)
-	{
-		*a = {};
-		return;
-	}
-	a->updated = now;
-	if (a->chunks[index].empty())
-	{
-		a->chunks[index].assign(p.begin() + header, p.end());
-		a->received += a->chunks[index].size();
-		if (a->received > total)
-		{
-			*a = {};
-			return;
-		}
-	}
-	if (std::ranges::any_of(a->chunks, [](const auto & part) { return part.empty(); }))
-		return;
-	if (a->received != total || x != 0 || y != 0 || width != wivrn::nxwarp_jpeg_side || height != wivrn::nxwarp_jpeg_side)
-	{
-		*a = {};
-		return;
-	}
-	std::vector<uint8_t> jpeg;
-	jpeg.reserve(total);
-	for (const auto & part : a->chunks)
-		jpeg.insert(jpeg.end(), part.begin(), part.end());
-	const uint16_t frame16 = uint16_t(frame);
-	*a = {};
-	std::vector<uint32_t> decode_samples;
-	uint64_t received = 0, dropped = 0, missing = 0, decoded = 0, invalid = 0;
-	bool report = false;
-	uint64_t frame_missing = 0;
-	if (periphery_have_last_frame[eye])
-	{
-		const uint16_t delta = uint16_t(frame16 - periphery_last_frame[eye]);
-		if (delta > 1 && delta < 0x8000)
-			frame_missing = delta - 1;
-	}
-	if (!periphery_have_last_frame[eye] || seq_lt(periphery_last_frame[eye], frame16))
-	{
-		periphery_last_frame[eye] = frame16;
-		periphery_have_last_frame[eye] = true;
-	}
-	{
-		std::lock_guard lock(periphery_stats_mutex);
-		++periphery_stat_received;
-		periphery_stat_missing += frame_missing;
-		if (periphery_stat_received >= 180)
-		{
-			report = true;
-			received = std::exchange(periphery_stat_received, 0);
-			dropped = std::exchange(periphery_stat_dropped, 0);
-			missing = std::exchange(periphery_stat_missing, 0);
-			decoded = std::exchange(periphery_stat_decoded, 0);
-			invalid = std::exchange(periphery_stat_invalid, 0);
-			decode_samples = std::move(periphery_decode_us_samples);
-			periphery_decode_us_samples.clear();
-		}
-	}
-	unsigned queued = periphery_queued.load(std::memory_order_relaxed);
-	while (queued < 2 && !periphery_queued.compare_exchange_weak(queued, queued + 1,
-	                                                            std::memory_order_relaxed))
-	{}
-	if (queued >= 2)
-	{
-		std::lock_guard lock(periphery_stats_mutex);
-		++periphery_stat_dropped;
-	}
-	else
-		periphery_jobs.push(periphery_decode_job{
-		        .frame_id = wire_frame_index(frame16),
-		        .eye = eye,
-		        .jpeg = std::move(jpeg),
-		});
-	if (report)
-	{
-		double mean_us = 0;
-		for (auto us : decode_samples)
-			mean_us += us;
-		if (!decode_samples.empty())
-			mean_us /= double(decode_samples.size());
-		std::ranges::sort(decode_samples);
-		const uint32_t p50_us = decode_samples.empty() ? 0 : decode_samples[(decode_samples.size() - 1) / 2];
-		spdlog::info("nxwarp[{}]: periphery JPEG rx={} queued_drop={} missing={} decoded={} invalid={} decode_us_mean={:.1f} p50={}",
-		             stream_index, received, dropped, missing, decoded, invalid, mean_us, p50_us);
-	}
-}
-
 void nxwarp_decoder::push_datagram(to_headset::nxwarp_datagram && dg)
 {
-	if (dg.path_id == to_headset::nxwarp_periphery_path)
-	{
-		push_periphery_chunk(dg.payload);
-		return;
-	}
 	if (dg.path_id == kStreamHeaderPath)
 	{
 		on_stream_header(dg.payload);

@@ -18,11 +18,9 @@
  */
 
 #include <cmath>
-#include <chrono>
 #include <cstdlib>
 #include <glm/gtc/packing.hpp>
 #include "stream_defoveator.h"
-#include "nxwarp_jpeg_packet.h"
 
 #include <algorithm>
 #include "application.h"
@@ -260,12 +258,6 @@ stream_defoveator::pipeline_t & stream_defoveator::ensure_pipeline(size_t view, 
 	                .stageFlags = vk::ShaderStageFlagBits::eFragment,
 	                .pImmutableSamplers = &*atlas_sampler,
 	        },
-	        vk::DescriptorSetLayoutBinding{
-	                .binding = 7,
-	                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
-	                .descriptorCount = 1,
-	                .stageFlags = vk::ShaderStageFlagBits::eFragment,
-	        },
 	};
 
 	target.descriptor_set_layout = device.createDescriptorSetLayout(vk::DescriptorSetLayoutCreateInfo{
@@ -458,8 +450,7 @@ stream_defoveator::stream_defoveator(
 				}
 			buffer_allocation staging(device, vk::BufferCreateInfo{.size = pixels.size(), .usage = vk::BufferUsageFlagBits::eTransferSrc},
 					VmaAllocationCreateInfo{.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT, .usage = VMA_MEMORY_USAGE_AUTO});
-			if (vmaCopyMemoryToAllocation(vk_allocator::instance(), pixels.data(), staging, 0, pixels.size()) != VK_SUCCESS)
-				throw std::runtime_error("FDM map upload failed");
+			vk::resultCheck(static_cast<vk::Result>(vmaCopyMemoryToAllocation(vk_allocator::instance(), pixels.data(), staging, 0, pixels.size())), "FDM map upload");
 			vk::raii::CommandPool pool(device, vk::CommandPoolCreateInfo{.flags = vk::CommandPoolCreateFlagBits::eTransient, .queueFamilyIndex = application::get_vk_queue_family_index()});
 			auto cb = std::move(device.allocateCommandBuffers({.commandPool = *pool, .level = vk::CommandBufferLevel::ePrimary, .commandBufferCount = 1})[0]);
 			cb.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
@@ -530,7 +521,7 @@ stream_defoveator::stream_defoveator(
 	                .type = vk::DescriptorType::eCombinedImageSampler,
 	                // rgb, alpha, the motion field, the previous frame and the two
 	                // atlas planes, for both variants
-                .descriptorCount = view_count * 28,
+	                .descriptorCount = view_count * 24,
 	        },
 	        // [atlas prototype] the per-tile table
 	        vk::DescriptorPoolSize{
@@ -564,14 +555,6 @@ stream_defoveator::stream_defoveator(
 	});
 
 	motion_sampler = device.createSampler(vk::SamplerCreateInfo{
-	        .magFilter = vk::Filter::eLinear,
-	        .minFilter = vk::Filter::eLinear,
-	        .mipmapMode = vk::SamplerMipmapMode::eNearest,
-	        .addressModeU = vk::SamplerAddressMode::eClampToEdge,
-	        .addressModeV = vk::SamplerAddressMode::eClampToEdge,
-	        .addressModeW = vk::SamplerAddressMode::eClampToEdge,
-	});
-	periphery_sampler = device.createSampler(vk::SamplerCreateInfo{
 	        .magFilter = vk::Filter::eLinear,
 	        .minFilter = vk::Filter::eLinear,
 	        .mipmapMode = vk::SamplerMipmapMode::eNearest,
@@ -753,64 +736,6 @@ void stream_defoveator::ensure_motion_image(vk::raii::CommandBuffer & command_bu
 	motion_height = height;
 	motion_frame = uint64_t(-1);
 	motion_ready = false;
-}
-
-void stream_defoveator::ensure_periphery_image(vk::raii::CommandBuffer & command_buffer, size_t eye, const input & in)
-{
-	if (!in.periphery_rgba || in.periphery_frame_id == uint64_t(-1) ||
-	    periphery_uploaded_frame[eye] == in.periphery_frame_id)
-		return;
-	constexpr uint32_t side = wivrn::nxwarp_jpeg_side;
-	constexpr size_t bytes = size_t(side) * side * 4;
-	if (in.periphery_rgba->size() != bytes)
-		return;
-	if (!periphery_image)
-	{
-		periphery_image = image_allocation(device, vk::ImageCreateInfo{
-		        .imageType = vk::ImageType::e2D,
-		        .format = vk::Format::eR8G8B8A8Unorm,
-		        .extent = {side, side, 1}, .mipLevels = 1, .arrayLayers = 2,
-		        .samples = vk::SampleCountFlagBits::e1,
-		        .usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst,
-		}, VmaAllocationCreateInfo{.usage = VMA_MEMORY_USAGE_AUTO});
-		periphery_views.reserve(2);
-		for (uint32_t layer = 0; layer < 2; ++layer)
-			periphery_views.emplace_back(device, vk::ImageViewCreateInfo{
-			        .image = periphery_image, .viewType = vk::ImageViewType::e2D,
-			        .format = vk::Format::eR8G8B8A8Unorm,
-			        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, layer, 1},
-			});
-		for (auto & staging: periphery_staging)
-			staging = buffer_allocation(device, vk::BufferCreateInfo{
-			        .size = bytes, .usage = vk::BufferUsageFlagBits::eTransferSrc,
-			}, VmaAllocationCreateInfo{
-			        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
-			        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
-			});
-	}
-	const auto upload_start = std::chrono::steady_clock::now();
-	if (vmaCopyMemoryToAllocation(vk_allocator::instance(), in.periphery_rgba->data(), periphery_staging[eye], 0, bytes) != VK_SUCCESS)
-		throw std::runtime_error("NX periphery staging upload failed");
-	periphery_staging_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - upload_start).count();
-	++periphery_uploads;
-	vk::ImageMemoryBarrier barrier{
-	        .srcAccessMask = periphery_layout[eye] == vk::ImageLayout::eUndefined ? vk::AccessFlags{} : vk::AccessFlagBits::eShaderRead,
-	        .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
-	        .oldLayout = periphery_layout[eye], .newLayout = vk::ImageLayout::eTransferDstOptimal,
-	        .image = periphery_image,
-	        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, uint32_t(eye), 1},
-	};
-	command_buffer.pipelineBarrier(periphery_layout[eye] == vk::ImageLayout::eUndefined ? vk::PipelineStageFlagBits::eTopOfPipe : vk::PipelineStageFlagBits::eFragmentShader,
-	                               vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, barrier);
-	command_buffer.copyBufferToImage(periphery_staging[eye], periphery_image, vk::ImageLayout::eTransferDstOptimal,
-	        vk::BufferImageCopy{.imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, uint32_t(eye), 1}, .imageExtent = {side, side, 1}});
-	barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
-	barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead;
-	barrier.oldLayout = vk::ImageLayout::eTransferDstOptimal;
-	barrier.newLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
-	command_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eFragmentShader, {}, {}, {}, barrier);
-	periphery_layout[eye] = vk::ImageLayout::eShaderReadOnlyOptimal;
-	periphery_uploaded_frame[eye] = in.periphery_frame_id;
 }
 
 // Total source pixels one foveation run covers, which is the picture's size in the decoded
@@ -1265,23 +1190,6 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 	{
 		const auto & input = inputs[view];
 		const bool direct = input.direct_valid && input.direct_tiles != nullptr && input.direct_blocks != nullptr;
-		if (direct)
-			ensure_periphery_image(command_buffer, view, input);
-		const bool periphery_active = input.periphery_rgba && periphery_image &&
-	                              periphery_uploaded_frame[view] == input.periphery_frame_id;
-		if (direct)
-		{
-			++periphery_observed;
-			periphery_used += periphery_active;
-			if (periphery_observed >= 360)
-			{
-				spdlog::info("NX JPEG periphery: applied {}/{} eye frames, staging upload {:.3f} ms avg over {} uploads",
-				             periphery_used, periphery_observed,
-				             periphery_uploads ? periphery_staging_ms / periphery_uploads : 0.0, periphery_uploads);
-				periphery_observed = periphery_used = periphery_uploads = 0;
-				periphery_staging_ms = 0;
-			}
-		}
 		const bool atlas_r8 = !direct && input.atlas_valid && input.atlas_table != nullptr && input.atlas_table_bytes != 0;
 		const bool use_unorm = unorm_baked && atlas_r8;
 		vk::RenderPassBeginInfo begin_info{
@@ -1378,11 +1286,6 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		        .imageView = *atlas_rgba8_view ? *atlas_rgba8_view : *motion_views[view],
 		        .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
 		};
-		vk::DescriptorImageInfo periphery_info{
-	        .sampler = *periphery_sampler,
-	        .imageView = periphery_active ? *periphery_views[view] : *motion_views[view],
-	        .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
-		};
 		vk::DescriptorBufferInfo atlas_table_info{
 		        .buffer = atlas_r8 ? input.atlas_table : (atlas_table_buffer ? vk::Buffer(atlas_table_buffer) : vk::Buffer(buffer)),
 		        .offset = 0,
@@ -1445,13 +1348,6 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 		                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
 		                .pImageInfo = &atlas_rgba8_info,
 		        },
-		        vk::WriteDescriptorSet{
-		                .dstSet = pipeline.ds,
-		                .dstBinding = 7,
-		                .descriptorCount = 1,
-		                .descriptorType = vk::DescriptorType::eCombinedImageSampler,
-		                .pImageInfo = &periphery_info,
-		        },
 		};
 
 		vert_pc pc{
@@ -1498,7 +1394,7 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 			// metadata. Keep glow.z zero: the shared vertex shader interprets it
 			// as edge-bleed geometry scaling. Checker phase must never occupy it.
 			// The ordinary reprojection path retains the post-processing values.
-			pc.glow = {input.direct_checker_merged ? 1.f : 0.f, periphery_active ? 1.f : 0.f, 0.f, 0.f};
+			pc.glow = {input.direct_checker_merged ? 1.f : 0.f, 0.f, 0.f, 0.f};
 
 		}
 		device.updateDescriptorSets(descriptor_writes, {});

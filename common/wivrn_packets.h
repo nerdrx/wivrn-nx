@@ -1879,7 +1879,6 @@ struct running_applications
 //         chain is whole again.
 inline constexpr uint8_t nxwarp_stream_header_path = 0xFF;
 inline constexpr uint8_t nxwarp_resync_path = 0xFE;
-inline constexpr uint8_t nxwarp_periphery_path = 0xFD;
 
 struct nxwarp_datagram
 {

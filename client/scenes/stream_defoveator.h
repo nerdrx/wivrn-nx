@@ -163,14 +163,6 @@ private:
 	bool motion_ready = false;
 
 	void ensure_motion_image(vk::raii::CommandBuffer & command_buffer, uint32_t width, uint32_t height);
-	image_allocation periphery_image;
-	std::vector<vk::raii::ImageView> periphery_views;
-	std::array<buffer_allocation, 2> periphery_staging;
-	std::array<uint64_t, 2> periphery_uploaded_frame{uint64_t(-1), uint64_t(-1)};
-	std::array<vk::ImageLayout, 2> periphery_layout{vk::ImageLayout::eUndefined, vk::ImageLayout::eUndefined};
-	vk::raii::Sampler periphery_sampler = nullptr;
-	uint64_t periphery_observed = 0, periphery_used = 0, periphery_uploads = 0;
-	double periphery_staging_ms = 0;
 
 	// Destination images
 	// Static app-owned density map. Declared before framebuffers so it outlives them.
@@ -224,11 +216,7 @@ public:
 		vk::Buffer direct_blocks = nullptr;
 		vk::DeviceSize direct_blocks_bytes = 0;
 		bool direct_checker_merged = false;
-		// Optional decoded 1088x1088 JPEG periphery for this exact NX frame/eye.
-		std::shared_ptr<const std::vector<uint8_t>> periphery_rgba;
-		uint64_t periphery_frame_id = uint64_t(-1);
 	};
-	void ensure_periphery_image(vk::raii::CommandBuffer & command_buffer, size_t eye, const input & input);
 
 	// Post-processing folded into the defoveation pass, all values are neutral by default
 	struct post_processing

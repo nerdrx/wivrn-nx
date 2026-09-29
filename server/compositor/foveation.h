@@ -38,7 +38,6 @@ struct vk_bundle;
 class foveation
 {
 	std::mutex mutex;
-	bool jpeg_no_foveation = false;
 
 	const vk::Extent3D foveated_size; // per eye
 
@@ -106,8 +105,6 @@ class foveation
 		xrt_rect src[2] = {};
 		xrt_fov fovs[2] = {};
 		float eye_x[2] = {};
-		bool native_center_enabled = false;
-		bool jpeg_periphery_enabled = false;
 
 		from_headset::override_foveation_center manual_foveation = {};
 		shape_params shape = {};
@@ -122,9 +119,7 @@ class foveation
 	        bool flip_y,
 	        std::array<xrt_rect, 2> src_rect,
 	        std::array<xrt_fov, 2> src_fov,
-	        vk::Buffer native_center,
-	        bool native_center_enabled,
-	        bool jpeg_periphery_enabled);
+	        vk::Buffer native_center);
 
 public:
 	foveation(wivrn::vk_bundle &,
@@ -158,8 +153,6 @@ public:
 	        std::array<xrt_rect, 2> src_rect,
 	        std::array<xrt_fov, 2> src_fov,
 	        bool alpha,
-	        vk::Buffer native_center,
-	        bool native_center_enabled,
-	        bool jpeg_periphery_enabled);
+	        vk::Buffer native_center = nullptr);
 };
 } // namespace wivrn

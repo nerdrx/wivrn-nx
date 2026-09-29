@@ -25,7 +25,6 @@
 #include <chrono>
 
 #include "nxwarp_packetize.h"
-#include "nxwarp_jpeg_packet.h"
 
 // The lens-mask geometry, shared with the compositor's foveation pass and with edge bleed.
 // Header only; it links nothing and knows nothing about Vulkan or OpenXR.
@@ -44,8 +43,6 @@
 #include <cstdlib>
 #include <ctime>
 #include <cstring>
-#include <cstdio>
-#include <csetjmp>
 #include <format>
 #include <limits>
 #include <optional>
@@ -54,57 +51,8 @@
 #include <string>
 #include <utility>
 
-#include <jpeglib.h>
-
 namespace
 {
-struct jpeg_error_state
-{
-	jpeg_error_mgr base;
-	std::jmp_buf jump;
-};
-
-void jpeg_fail(j_common_ptr cinfo)
-{
-	std::longjmp(reinterpret_cast<jpeg_error_state *>(cinfo->err)->jump, 1);
-}
-
-std::vector<uint8_t> make_q20_jpeg(const uint32_t * rgbx)
-{
-	constexpr uint32_t out_w = 1088, out_h = 1088;
-
-	jpeg_compress_struct cinfo{};
-	jpeg_error_state error{};
-	cinfo.err = jpeg_std_error(&error.base);
-	error.base.error_exit = jpeg_fail;
-	if (setjmp(error.jump))
-	{
-		jpeg_destroy_compress(&cinfo);
-		throw std::runtime_error("NX Warp: JPEG compression failed");
-	}
-	jpeg_create_compress(&cinfo);
-	unsigned char * output = nullptr;
-	unsigned long output_size = 0;
-	jpeg_mem_dest(&cinfo, &output, &output_size);
-	cinfo.image_width = out_w;
-	cinfo.image_height = out_h;
-	cinfo.input_components = 4;
-	cinfo.in_color_space = JCS_EXT_BGRX;
-	jpeg_set_defaults(&cinfo);
-	jpeg_set_quality(&cinfo, 20, TRUE);
-	jpeg_start_compress(&cinfo, TRUE);
-	while (cinfo.next_scanline < cinfo.image_height)
-	{
-		JSAMPROW row = reinterpret_cast<JSAMPROW>(const_cast<uint32_t *>(rgbx + size_t(cinfo.next_scanline) * out_w));
-		jpeg_write_scanlines(&cinfo, &row, 1);
-	}
-	jpeg_finish_compress(&cinfo);
-	std::vector<uint8_t> result(output, output + output_size);
-	free(output);
-	jpeg_destroy_compress(&cinfo);
-	return result;
-}
-
 uint8_t direct_tail_packets_env()
 {
 	static const uint8_t value = [] {
@@ -997,11 +945,6 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 	}
 
 	codec_reads_image = codec->accepts_image();
-	if (const char * env = std::getenv("NX_WARP_JPEG_PERIPHERY"))
-		jpeg_periphery_enabled = stream_idx == 0 && std::strcmp(env, "1") == 0 &&
-		                         extent.width >= 1088 && extent.height >= 1088;
-	if (jpeg_periphery_enabled)
-		U_LOG_I("nxwarp: native-source Q20 JPEG periphery enabled (1088x1088 per eye, GPU sampled)");
 	codec_direct_blocks = codec->direct_blocks();
 	U_LOG_I("nxwarp: stream %d backend: %s%s",
 	        int(stream_idx),
@@ -1072,7 +1015,7 @@ wivrn::video_encoder_nxwarp::video_encoder_nxwarp(
 			                .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
 			                .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
 			        },
-				        std::format("nxwarp stream {} buffer", stream_idx));
+			        std::format("nxwarp stream {} buffer", stream_idx));
 		in[i].fence = vk::raii::Fence(vk.device, vk::FenceCreateInfo{.flags = vk::FenceCreateFlagBits::eSignaled});
 	}
 
@@ -2105,7 +2048,6 @@ void wivrn::video_encoder_nxwarp::flatten_masked_tiles(uint8_t * y_base, size_t 
 
 std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(uint8_t slot, uint64_t frame_id)
 {
-	const auto fence_wait_started = std::chrono::steady_clock::now();
 	if (vk.device.waitForFences(*in[slot].fence, true, 1'000'000'000) == vk::Result::eTimeout)
 	{
 		U_LOG_W("nxwarp: timeout on stream %d", int(stream_idx));
@@ -2113,7 +2055,6 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	}
 	if (not in[slot].have_view_info)
 		return {};
-	const double fence_wait_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fence_wait_started).count();
 
 	// --- the pace ----------------------------------------------------------
 	//
@@ -2149,6 +2090,15 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		direct_quality_budget = std::clamp(bitrate, 1u, 1'000'000'000u);
 		fps = std::isfinite(fps) ? std::clamp(fps, 1.f, 240.f) : 90.f;
 		direct_quality_period = int64_t(1e9 / double(fps));
+		codec->set_target_bitrate(direct_quality_budget, fps);
+		if (not codec->admit_frame(os_monotonic_get_ns()))
+		{
+			++prof_paced_out;
+			++paced_out_total;
+			in[slot].have_view_info = false;
+			in[slot].native_center = {};
+			return {};
+		}
 	}
 
 	const auto & view_info = in[slot].view_info;
@@ -2178,7 +2128,6 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	// planes on the device. That readback and this loop were most of what
 	// encode() cost at 1088x1088.
 	const uint8_t * y = nullptr;
-	std::array<std::vector<uint8_t>, 2> periphery_jpeg;
 	const size_t cw = extent.width / 2;
 	if (not codec_reads_image)
 	{
@@ -2224,66 +2173,6 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		// foveation pass (server/compositor/foveation.cpp).
 		if (lens_mask_enabled and not lens_skip_map.empty())
 			flatten_masked_tiles((uint8_t *)base, extent.width, cw);
-	}
-	const auto jpeg_started = std::chrono::steady_clock::now();
-	const uint32_t jpeg_eyes = stereo_eyes;
-	if (jpeg_periphery_enabled)
-	{
-		constexpr size_t center_words = 2u * 256u * 256u;
-		constexpr size_t per_eye_words = 1088u * 1088u;
-		if (in[slot].native_center.size() >= center_words + per_eye_words * jpeg_eyes)
-		{
-			const uint32_t * capture = in[slot].native_center.data() + center_words;
-			for (uint32_t e = 0; e < jpeg_eyes; ++e)
-				periphery_jpeg[e] = make_q20_jpeg(capture + per_eye_words * e);
-		}
-		else
-			U_LOG_W("nxwarp: native JPEG capture buffer missing; omitting periphery JPEG");
-	}
-	uint64_t jpeg_bytes = 0;
-	for (const auto & jpeg: periphery_jpeg)
-		jpeg_bytes += jpeg.size();
-	float jpeg_fps = pending_framerate.load(std::memory_order_relaxed);
-	if (!(jpeg_fps > 0)) jpeg_fps = rc_fps;
-	jpeg_fps = std::isfinite(jpeg_fps) ? std::clamp(jpeg_fps, 1.f, 240.f) : 90.f;
-	const uint32_t jpeg_bps = uint32_t(std::min<double>(UINT32_MAX, std::ceil(double(jpeg_bytes) * 8.0 * jpeg_fps)));
-	if (codec_direct_blocks && jpeg_bps)
-	{
-		const uint32_t total_bps = pending_bitrate.load(std::memory_order_relaxed)
-		                                   ? pending_bitrate.load(std::memory_order_relaxed)
-		                                   : uint32_t(std::max(0.0, path_bps));
-		direct_quality_budget = total_bps > jpeg_bps ? total_bps - jpeg_bps : 1;
-	}
-	if (codec_direct_blocks)
-	{
-		codec->set_target_bitrate(direct_quality_budget, jpeg_fps);
-		if (not codec->admit_frame(os_monotonic_get_ns()))
-		{
-			++prof_paced_out;
-			++paced_out_total;
-			in[slot].have_view_info = false;
-			in[slot].native_center = {};
-			return {};
-		}
-	}
-	const double jpeg_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - jpeg_started).count();
-	if (jpeg_periphery_enabled)
-	{
-		static uint32_t profile_frames = 0;
-		static double profile_ms = 0;
-		static double profile_capture_ms = 0;
-		static uint64_t profile_bytes = 0;
-		++profile_frames;
-		profile_ms += jpeg_ms;
-		profile_capture_ms += fence_wait_ms;
-		profile_bytes += jpeg_bytes;
-		if (profile_frames >= 180)
-		{
-			U_LOG_I("nxwarp: native JPEG periphery 1088x1088 compress %.2f ms, capture fence wait %.2f ms, %.0f bytes/frame at %u fps",
-			        profile_ms / profile_frames, profile_capture_ms / profile_frames,
-			        double(profile_bytes) / profile_frames, unsigned(jpeg_fps));
-			profile_frames = 0; profile_ms = 0; profile_capture_ms = 0; profile_bytes = 0;
-		}
 	}
 
 	// --- what the client actually holds of the previous frame -------------
@@ -2588,9 +2477,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 	if (codec_uses_vk_queue)
 	{
 		std::unique_lock lock(vk.queue.mutex);
-		codec->set_native_center(in[slot].native_center.empty()
-		                                 ? std::span<const uint32_t>{}
-		                                 : in[slot].native_center.first(2u * 256u * 256u));
+		codec->set_native_center(in[slot].native_center);
 		// With the eyes paired the codec takes BOTH array layers and brings
 		// them together itself; at one eye this is encode_image(image,
 		// src_layer) exactly as before.
@@ -3203,36 +3090,6 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_nxwarp::encode(ui
 		           },
 		           last, direct_quality_budget, direct_quality_period);
 		packet_sent += bytes;
-	}
-	// NXVC owns the central reconstruction; the independently delivered JPEG
-	// supplies a 2:1 full-eye base image for peripheral detail. Chunk below the
-	// UDP MTU and key both representations with the same NXVC wire frame id.
-	constexpr size_t jpeg_chunk = nxwarp_jpeg_chunk_size;
-	for (uint32_t e = 0; e < periphery_jpeg.size(); ++e)
-	{
-		const auto & jpeg = periphery_jpeg[e];
-		if (jpeg.empty() or jpeg.size() > UINT32_MAX or jpeg.size() > nxwarp_jpeg_max_bytes)
-			continue;
-		const uint32_t count = uint32_t((jpeg.size() + jpeg_chunk - 1) / jpeg_chunk);
-		if (count > UINT16_MAX)
-			continue;
-		for (uint32_t part = 0; part < count; ++part)
-		{
-			const size_t begin = size_t(part) * jpeg_chunk;
-			const size_t bytes = std::min(jpeg_chunk, jpeg.size() - begin);
-			auto payload = nxwarp_jpeg_chunk_payload(
-		        frame_id16, uint8_t(stereo_eyes == 2 ? e : eye), nxwarp_jpeg_side, nxwarp_jpeg_side,
-			        uint16_t(part), uint16_t(count), uint32_t(jpeg.size()),
-			        std::span(jpeg).subspan(begin, bytes));
-			if (payload.empty())
-				break;
-			const bool jpeg_frame_end = e + 1 == periphery_jpeg.size() && part + 1 == count;
-			SendPacket(to_headset::nxwarp_datagram{
-			                   .stream_item_idx = stream_idx,
-			                   .path_id = to_headset::nxwarp_periphery_path,
-			                   .payload = std::move(payload),
-		           }, jpeg_frame_end, jpeg_bps, int64_t(1e9 / jpeg_fps));
-		}
 	}
 	if (codec_direct_blocks && direct_tail_packets)
 		direct_tail_packets_sent += SendTailPadding(direct_tail_packets);

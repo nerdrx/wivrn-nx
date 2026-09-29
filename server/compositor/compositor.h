@@ -61,8 +61,6 @@ public:
 		// Optional per-frame RGB centre, written by foveation before YCbCr reduction.
 		// One packed RGB888 word per pixel, eye-major (128x128x2).
 		buffer_allocation native_center;
-		bool native_center_enabled = false;
-		bool jpeg_periphery_enabled = false;
 		vk::raii::ImageView view_y;
 		vk::raii::ImageView view_cbcr;
 		to_headset::video_stream_data_shard::view_info_t view_info{};

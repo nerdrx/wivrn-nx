@@ -37,7 +37,6 @@
 #include "audio/audio.h"
 #include "boost/pfr/core.hpp"
 #include "decoder/nxwarp/nxwarp_decoder.h"
-#include "nxwarp_jpeg_packet.h"
 #include "decoder/decoder.h"
 #include "decoder/shard_accumulator.h"
 #include "render/image_writer.h"
@@ -900,17 +899,6 @@ void scenes::stream::handle_base_frame(uint8_t stream_index, const std::shared_p
 {
 	(void)stream_index;
 	(void)handle;
-}
-
-void scenes::stream::push_periphery_rgba(uint64_t frame_id, uint8_t eye, uint32_t width, uint32_t height,
-                                         std::vector<uint8_t> rgba)
-{
-	if (eye >= periphery_frames.size() || width != wivrn::nxwarp_jpeg_side ||
-	    height != wivrn::nxwarp_jpeg_side || rgba.size() != size_t(width) * height * 4)
-		return;
-	auto pixels = std::make_shared<const std::vector<uint8_t>>(std::move(rgba));
-	std::lock_guard lock(frames_mutex);
-	periphery_frames[eye][frame_id % periphery_frames[eye].size()] = {frame_id, std::move(pixels)};
 }
 
 void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_ptr<shard_accumulator::blit_handle> handle)
@@ -2089,20 +2077,6 @@ void scenes::stream::render(const XrFrameState & frame_state)
 				images[v].direct_blocks = blit_handle->direct_blocks;
 				images[v].direct_blocks_bytes = blit_handle->direct_blocks_bytes;
 				images[v].direct_checker_merged = blit_handle->direct_checker_merged;
-				{
-					std::lock_guard lock(frames_mutex);
-					const periphery_frame * newest = nullptr;
-					for (const auto & periphery : periphery_frames[v])
-						if (periphery.rgba && periphery.frame_id <= blit_handle->feedback.frame_index &&
-						    blit_handle->feedback.frame_index - periphery.frame_id <= 2 &&
-						    (!newest || periphery.frame_id > newest->frame_id))
-							newest = &periphery;
-					if (newest)
-					{
-						images[v].periphery_frame_id = newest->frame_id;
-						images[v].periphery_rgba = newest->rgba;
-					}
-				}
 			}
 		}
 		else

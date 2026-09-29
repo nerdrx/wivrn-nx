@@ -31,6 +31,8 @@
 
 #include <array>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <ranges>
 #include <vulkan/vulkan_raii.hpp>
 #include <vulkan/vulkan_structs.hpp>
@@ -58,6 +60,12 @@ struct ubo_data
 	uint32_t native_center_origin_x;
 	uint32_t native_center_origin_y;
 	uint32_t native_center_size;
+	uint32_t jpeg_periphery_on;
+	uint32_t jpeg_periphery_pad[3];
+	int32_t source_rect[2][4];
+	uint32_t source_flip_y[2];
+	uint32_t no_foveation_on;
+	uint32_t destination_size[2];
 };
 
 vk::raii::Sampler make_sampler(wivrn::vk_bundle & vk)
@@ -491,6 +499,16 @@ namespace wivrn
 
 void foveation::compute_params()
 {
+	if (jpeg_no_foveation)
+	{
+		for (auto & p: params)
+		{
+			p.x = {uint16_t(foveated_size.width)};
+			p.y = {uint16_t(foveated_size.height)};
+		}
+		compute_lens_mask();
+		return;
+	}
 	auto e = yaw_pitch(gaze);
 
 	if (manual_foveation.enabled)
@@ -536,7 +554,7 @@ void foveation::compute_params()
 void foveation::compute_lens_mask()
 {
 	lens_mask_tiles = {};
-	if (not lens_mask_enabled)
+	if (not lens_mask_enabled or jpeg_no_foveation)
 		return;
 
 	for (size_t i = 0; i < 2; ++i)
@@ -614,6 +632,11 @@ foveation::foveation(wivrn::vk_bundle & bundle, vk::Extent3D foveated_size) :
                                .release())
 {
 	bundle.name(descriptor_set, "foveation descriptor set");
+	const char * jpeg = std::getenv("NX_WARP_JPEG_PERIPHERY");
+	const char * no_foveation = std::getenv("NX_WARP_JPEG_NO_FOVEATION");
+	jpeg_no_foveation = jpeg and no_foveation and std::strcmp(jpeg, "1") == 0 and std::strcmp(no_foveation, "1") == 0;
+	if (jpeg_no_foveation)
+		U_LOG_I("foveation: disabled for NX Warp JPEG native-source test");
 }
 
 void foveation::update_tracking(const from_headset::tracking & tracking)
@@ -704,7 +727,9 @@ void foveation::update_ubo(
         bool flip_y,
         std::array<xrt_rect, 2> src_rect,
         std::array<xrt_fov, 2> src_fov,
-        vk::Buffer native_center)
+        vk::Buffer native_center,
+        bool native_center_enabled,
+        bool jpeg_periphery_enabled)
 {
 	// Check if the last value is still valid
 	std::lock_guard lock(mutex);
@@ -722,7 +747,9 @@ void foveation::update_ubo(
 	    // Foveation v2: a changed curve shape re-quantises the spans without touching the
 	    // encode size, so it is picked up here and applied live on the next frame.
 	    std::abs(last.shape.strength - shape.strength) < 0.0005 and
-	    std::abs(last.shape.render_scale - shape.render_scale) < 0.0005)
+	    std::abs(last.shape.render_scale - shape.render_scale) < 0.0005 and
+	    last.native_center_enabled == native_center_enabled and
+	    last.jpeg_periphery_enabled == jpeg_periphery_enabled)
 		return;
 
 	last = {
@@ -731,6 +758,8 @@ void foveation::update_ubo(
 	        .src = {src_rect[0], src_rect[1]},
 	        .fovs = {src_fov[0], src_fov[1]},
 	        .eye_x = {eye_x[0], eye_x[1]},
+	        .native_center_enabled = native_center_enabled,
+	        .jpeg_periphery_enabled = jpeg_periphery_enabled,
 	        .manual_foveation = manual_foveation,
 	        .shape = shape,
 	};
@@ -787,7 +816,20 @@ void foveation::update_ubo(
 	ubo.mask_cols = lens_mask_tiles[0].cols;
 	ubo.mask_on = 0;
 	ubo.mask_pad[0] = ubo.mask_pad[1] = 0;
-	ubo.native_center_on = native_center ? 1u : 0u;
+	ubo.native_center_on = native_center_enabled ? 1u : 0u;
+	ubo.jpeg_periphery_on = jpeg_periphery_enabled ? 1u : 0u;
+	std::fill(std::begin(ubo.jpeg_periphery_pad), std::end(ubo.jpeg_periphery_pad), 0u);
+	for (size_t view = 0; view < 2; ++view)
+	{
+		ubo.source_rect[view][0] = src_rect[view].offset.w;
+		ubo.source_rect[view][1] = src_rect[view].offset.h;
+		ubo.source_rect[view][2] = src_rect[view].extent.w;
+		ubo.source_rect[view][3] = src_rect[view].extent.h;
+		ubo.source_flip_y[view] = flip_y ? 1u : 0u;
+	}
+	ubo.no_foveation_on = jpeg_periphery_enabled and jpeg_no_foveation ? 1u : 0u;
+	ubo.destination_size[0] = foveated_size.width;
+	ubo.destination_size[1] = foveated_size.height;
 	ubo.native_center_origin_x = (foveated_size.width / 2u - 128u) & ~31u;
 	ubo.native_center_origin_y = (foveated_size.height / 2u - 128u) & ~31u;
 	ubo.native_center_size = native_center ? 256u : 0u;
@@ -831,9 +873,11 @@ std::array<to_headset::foveation_parameter, 2> foveation::foveate(
         std::array<xrt_rect, 2> src_rect,
         std::array<xrt_fov, 2> src_fov,
 	bool alpha,
-	vk::Buffer native_center)
+	vk::Buffer native_center,
+	bool native_center_enabled,
+	bool jpeg_periphery_enabled)
 {
-	update_ubo(cmd, flip_y, src_rect, src_fov, native_center);
+	update_ubo(cmd, flip_y, src_rect, src_fov, native_center, native_center_enabled, jpeg_periphery_enabled);
 
 	std::array src_image_info{
 	        vk::DescriptorImageInfo{
@@ -911,7 +955,6 @@ std::array<to_headset::foveation_parameter, 2> foveation::foveate(
 	cmd.dispatch(divide_and_round_up(foveated_size.width, 8),
 	             divide_and_round_up(foveated_size.height, 8),
 	             2);
-
 	return params;
 }
 } // namespace wivrn

@@ -224,7 +224,7 @@ public:
 		vk::Buffer direct_blocks = nullptr;
 		vk::DeviceSize direct_blocks_bytes = 0;
 		bool direct_checker_merged = false;
-		// Optional decoded 544x544 JPEG periphery for this exact NX frame/eye.
+		// Optional decoded 1088x1088 JPEG periphery for this exact NX frame/eye.
 		std::shared_ptr<const std::vector<uint8_t>> periphery_rgba;
 		uint64_t periphery_frame_id = uint64_t(-1);
 	};

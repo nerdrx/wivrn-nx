@@ -18,6 +18,8 @@ namespace wivrn
 inline constexpr size_t nxwarp_jpeg_header_size = 25;
 inline constexpr size_t nxwarp_jpeg_payload_limit = 1100;
 inline constexpr size_t nxwarp_jpeg_chunk_size = nxwarp_jpeg_payload_limit - nxwarp_jpeg_header_size;
+inline constexpr uint16_t nxwarp_jpeg_side = 1088;
+inline constexpr uint32_t nxwarp_jpeg_max_bytes = 2 * 1024 * 1024;
 
 // Build one bounded NXJ2 UDP payload. Empty result means invalid metadata/chunk.
 inline std::vector<uint8_t> nxwarp_jpeg_chunk_payload(uint32_t frame,
@@ -29,8 +31,8 @@ inline std::vector<uint8_t> nxwarp_jpeg_chunk_payload(uint32_t frame,
                                                        uint32_t total_bytes,
                                                        std::span<const uint8_t> chunk)
 {
-	if (eye > 1 || width != 544 || height != 544 || !count || count > 2048 || index >= count ||
-	    !total_bytes || total_bytes > 1024 * 1024)
+	if (eye > 1 || width != nxwarp_jpeg_side || height != nxwarp_jpeg_side || !count || count > 2048 || index >= count ||
+	    !total_bytes || total_bytes > nxwarp_jpeg_max_bytes)
 		return {};
 	const size_t expected_count = (total_bytes + nxwarp_jpeg_chunk_size - 1) / nxwarp_jpeg_chunk_size;
 	const size_t expected_bytes = index + 1 == count

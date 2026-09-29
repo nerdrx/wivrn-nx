@@ -18,6 +18,7 @@
  */
 
 #include "image_loader.h"
+#include "nxwarp_jpeg_packet.h"
 
 #include "application.h"
 #include "utils/thread_safe.h"
@@ -52,7 +53,8 @@ std::vector<uint8_t> decode_jpeg_rgba(std::span<const std::byte> bytes, uint32_t
 		return {};
 	int w = 0, h = 0;
 	const auto * input = reinterpret_cast<const stbi_uc *>(bytes.data());
-	if (!stbi_info_from_memory(input, int(bytes.size()), &w, &h, nullptr) || w != 544 || h != 544)
+	if (!stbi_info_from_memory(input, int(bytes.size()), &w, &h, nullptr) ||
+	    w != wivrn::nxwarp_jpeg_side || h != wivrn::nxwarp_jpeg_side)
 		return {};
 	stbi_ptr pixels(stbi_load_from_memory(input, int(bytes.size()), &w, &h, nullptr, STBI_rgb_alpha));
 	if (!pixels || w <= 0 || h <= 0 || uint64_t(w) * uint64_t(h) > SIZE_MAX / 4)

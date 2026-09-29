@@ -228,6 +228,10 @@ std::array<wivrn::compositor::image, 2> make_images(wivrn::vk_bundle & vk, vk::C
 		const char * value = std::getenv("NX_DIRECT_NATIVE_CENTER");
 		return value and std::string_view(value) == "1";
 	}() and encoders[0].width >= 256 and encoders[0].height >= 256;
+	const bool jpeg_periphery = [] {
+		const char * value = std::getenv("NX_WARP_JPEG_PERIPHERY");
+		return value and std::string_view(value) == "1";
+	}() and encoders[0].width >= 1088 and encoders[0].height >= 1088;
 
 	vk::StructureChain image_info{
 	        vk::ImageCreateInfo{
@@ -274,11 +278,11 @@ std::array<wivrn::compositor::image, 2> make_images(wivrn::vk_bundle & vk, vk::C
 		};
 		vk::Image vk_image{image};
 		buffer_allocation native_buffer;
-		if (native_center)
+		if (native_center or jpeg_periphery)
 			native_buffer = buffer_allocation{
 			        vk.device,
 			        {
-			                .size = 2u * 256u * 256u * sizeof(uint32_t),
+			                .size = (2u * 256u * 256u + (jpeg_periphery ? 2u * 1088u * 1088u : 0u)) * sizeof(uint32_t),
 			                .usage = vk::BufferUsageFlagBits::eStorageBuffer,
 			        },
 			        VmaAllocationCreateInfo{
@@ -286,11 +290,13 @@ std::array<wivrn::compositor::image, 2> make_images(wivrn::vk_bundle & vk, vk::C
 			                .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
 			                .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
 			        },
-			        std::format("native RGB centre {}", i),
+			        std::format("native compositor capture {}", i),
 			};
 		return wivrn::compositor::image{
 		        .image{std::move(image)},
 		        .native_center{std::move(native_buffer)},
+		        .native_center_enabled{native_center},
+		        .jpeg_periphery_enabled{jpeg_periphery},
 		        .view_y{
 		                vk.device,
 		                {
@@ -964,7 +970,9 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	        src_rect,
 	        src_fov,
 	        view_info.alpha,
-	        images[i].native_center);
+	        images[i].native_center,
+	        images[i].native_center_enabled,
+	        images[i].jpeg_periphery_enabled);
 
 	if (images[i].native_center)
 	{
@@ -1141,7 +1149,10 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 			continue;
 		}
 		encoder->present_native_center(
-		        images[i].native_center ? std::span<const uint32_t>(images[i].native_center.data<uint32_t>(), 2u * 256u * 256u) : std::span<const uint32_t>{});
+		        images[i].native_center ? std::span<const uint32_t>(
+		                images[i].native_center.data<uint32_t>(),
+		                2u * 256u * 256u + (encoder->stream_idx == 0 && images[i].jpeg_periphery_enabled ? 2u * 1088u * 1088u : 0u))
+	                                      : std::span<const uint32_t>{});
 		encoder->present_image(
 		        images[i].image,
 		        sem_info,

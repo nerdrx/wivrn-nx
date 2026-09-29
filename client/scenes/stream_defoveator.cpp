@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <glm/gtc/packing.hpp>
 #include "stream_defoveator.h"
+#include "nxwarp_jpeg_packet.h"
 
 #include <algorithm>
 #include "application.h"
@@ -759,7 +760,7 @@ void stream_defoveator::ensure_periphery_image(vk::raii::CommandBuffer & command
 	if (!in.periphery_rgba || in.periphery_frame_id == uint64_t(-1) ||
 	    periphery_uploaded_frame[eye] == in.periphery_frame_id)
 		return;
-	constexpr uint32_t side = 544;
+	constexpr uint32_t side = wivrn::nxwarp_jpeg_side;
 	constexpr size_t bytes = size_t(side) * side * 4;
 	if (in.periphery_rgba->size() != bytes)
 		return;

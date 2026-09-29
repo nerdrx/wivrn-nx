@@ -15,6 +15,7 @@
 #include "nxwarp_direct_zstd.h"
 #include "nxwarp_stream_grid.h"
 #include "nxwarp_decoder.h"
+#include "nxwarp_jpeg_packet.h"
 #include "application.h"
 #include "render/image_loader.h"
 
@@ -452,7 +453,8 @@ nxwarp_decoder::nxwarp_decoder(vk::raii::Device & device,
 				const auto begin = std::chrono::steady_clock::now();
 				uint32_t width = 0, height = 0;
 				auto rgba = decode_jpeg_rgba(std::as_bytes(std::span(job.jpeg)), width, height);
-				const bool valid = width == 544 && height == 544 && rgba.size() == 544u * 544u * 4u;
+				const bool valid = width == wivrn::nxwarp_jpeg_side && height == wivrn::nxwarp_jpeg_side &&
+				                   rgba.size() == size_t(wivrn::nxwarp_jpeg_side) * wivrn::nxwarp_jpeg_side * 4u;
 				const uint32_t decode_us = uint32_t(std::chrono::duration_cast<std::chrono::microseconds>(
 				        std::chrono::steady_clock::now() - begin).count());
 				{
@@ -1083,7 +1085,7 @@ bool nxwarp_decoder::on_direct_stream_header(std::span<const uint8_t> header)
 void nxwarp_decoder::push_periphery_chunk(std::span<const uint8_t> p)
 {
 	constexpr size_t header = 25;
-	constexpr uint32_t max_jpeg = 1024 * 1024;
+	constexpr uint32_t max_jpeg = wivrn::nxwarp_jpeg_max_bytes;
 	if (p.size() <= header || std::memcmp(p.data(), "NXJ2", 4) != 0)
 		return;
 	auto be16 = [&](size_t i) { return uint16_t((uint16_t(p[i]) << 8) | p[i + 1]); };
@@ -1136,7 +1138,7 @@ void nxwarp_decoder::push_periphery_chunk(std::span<const uint8_t> p)
 	}
 	if (std::ranges::any_of(a->chunks, [](const auto & part) { return part.empty(); }))
 		return;
-	if (a->received != total || x != 0 || y != 0 || width != 544 || height != 544)
+	if (a->received != total || x != 0 || y != 0 || width != wivrn::nxwarp_jpeg_side || height != wivrn::nxwarp_jpeg_side)
 	{
 		*a = {};
 		return;

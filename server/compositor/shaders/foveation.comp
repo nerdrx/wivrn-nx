@@ -51,6 +51,13 @@ layout(set = 0, binding = 1, std430) buffer restrict Config
 	uint native_center_origin_x;
 	uint native_center_origin_y;
 	uint native_center_size;
+	uint jpeg_periphery_on;
+	uint jpeg_periphery_pad[3];
+	ivec4 source_rect[2]; // x, y, width, height; signed extent carries rect flips
+	uint source_flip_y[2];
+	uint no_foveation_on;
+	uint destination_width;
+	uint destination_height;
 } ubo;
 
 layout(set = 0, binding = 2) uniform writeonly restrict image2DArray luma;
@@ -119,6 +126,19 @@ void main()
 	uint id = gl_SubgroupID * gl_SubgroupSize + gl_SubgroupInvocationID;
 	uint iy = gl_WorkGroupID.y * gl_WorkGroupSize.y + ARmpRed8x8_y(id);
 	uint ix = gl_WorkGroupID.x * gl_WorkGroupSize.x + ARmpRed8x8_x(id);
+	if (ubo.jpeg_periphery_on != 0u && ix < 1088u && iy < 1088u)
+	{
+		ivec4 rect = ubo.source_rect[iz];
+		vec2 t = (vec2(ix, iy) + 0.5) / 1088.0;
+		if (ubo.source_flip_y[iz] != 0u)
+			t.y = 1.0 - t.y;
+		vec2 source_px = vec2(rect.xy) + t * vec2(rect.zw);
+		vec2 source_uv = source_px / vec2(textureSize(source[iz], 0));
+		vec3 rgb = clamp(from_linear_to_srgb(texture(source[iz], source_uv).rgb), 0.0, 1.0);
+		uvec3 bytes = uvec3(round(rgb * 255.0));
+		uint offset = 2u * 256u * 256u + iz * 1088u * 1088u + iy * 1088u + ix;
+		native_center.rgb[offset] = (bytes.r << 16u) | (bytes.g << 8u) | bytes.b;
+	}
 
 	uint ymin = ubo.y[MAX_DIM * iz + iy];
 	uint ymax = ubo.y[MAX_DIM * iz + iy + 1];
@@ -137,10 +157,26 @@ void main()
 
 	vec4 colour = vec4(0);
 	uint count = 0;
-	for (uint y = ymin ; y < ymax; y += ystep) {
-		for (uint x = xmin ; x < xmax; x += xstep) {
-			colour += texelFetch(source[iz], ivec2(x, y), 0);
-			++count;
+	if (ubo.no_foveation_on != 0u)
+	{
+		if (ix >= ubo.destination_width || iy >= ubo.destination_height)
+			return;
+		ivec4 rect = ubo.source_rect[iz];
+		vec2 t = (vec2(ix, iy) + 0.5) / vec2(ubo.destination_width, ubo.destination_height);
+		if (ubo.source_flip_y[iz] != 0u)
+			t.y = 1.0 - t.y;
+		vec2 source_px = vec2(rect.xy) + t * vec2(rect.zw);
+		vec2 source_uv = source_px / vec2(textureSize(source[iz], 0));
+		colour = texture(source[iz], source_uv);
+		count = 1u;
+	}
+	else
+	{
+		for (uint y = ymin ; y < ymax; y += ystep) {
+			for (uint x = xmin ; x < xmax; x += xstep) {
+				colour += texelFetch(source[iz], ivec2(x, y), 0);
+				++count;
+			}
 		}
 	}
 	colour /= max(count, 1);

@@ -1007,9 +1007,13 @@ void application::initialize_vulkan()
 	// on the drivers it was tried on; the validation layers call it
 	// VUID-VkShaderModuleCreateInfo-pCode-08740. Asked for only where the device offers
 	// it, so a headset without them still starts and simply cannot decode NX Warp.
-	const bool have_shader_int16 = bool(vk_physical_device.getFeatures().shaderInt16);
+	const auto supported_features = vk_physical_device.getFeatures();
+	const bool have_shader_int16 = bool(supported_features.shaderInt16);
 
 	vk::PhysicalDeviceFeatures device_features{
+	        // PyroWave writes unformatted storage images, including R16F intermediates.
+	        .shaderStorageImageExtendedFormats = supported_features.shaderStorageImageExtendedFormats,
+	        .shaderStorageImageWriteWithoutFormat = supported_features.shaderStorageImageWriteWithoutFormat,
 	        .shaderClipDistance = true,
 	        .shaderInt16 = have_shader_int16,
 	};

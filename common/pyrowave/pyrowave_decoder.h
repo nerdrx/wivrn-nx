@@ -131,6 +131,8 @@ class Decoder : public WaveletBuffers
 public:
 	using ViewBuffers = std::array<vk::ImageView, 3>;
 
+	// The caller must enable shaderStorageImageWriteWithoutFormat and, where
+	// supported, shaderStorageImageExtendedFormats on the logical device.
 	Decoder(vk::raii::PhysicalDevice & phys_dev, vk::raii::Device & device, int width, int height, ChromaSubsampling chroma, bool fragment_path = false);
 	~Decoder();
 

@@ -49,6 +49,7 @@
 #include "video_encoder_vulkan_h265.h"
 #endif
 #include "video_encoder_raw.h"
+#include "video_encoder_pyrowave.h"
 #if WIVRN_USE_NXWARP
 #include "video_encoder_nxwarp.h"
 #endif
@@ -250,6 +251,8 @@ std::unique_ptr<video_encoder> video_encoder::create(
 				throw std::runtime_error("raw codec only supported on raw encoder");
 			case video_codec::nxwarp:
 				throw std::runtime_error("nxwarp codec only supported on the nxwarp encoder");
+			case video_codec::pyrowave:
+				throw std::runtime_error("pyrowave codec only supported on the pyrowave encoder");
 		}
 #else
 		throw std::runtime_error("Vulkan video encode not enabled");
@@ -292,6 +295,12 @@ std::unique_ptr<video_encoder> video_encoder::create(
 #else
 		throw std::runtime_error("NX Warp encoder not enabled");
 #endif
+	}
+	if (settings.encoder_name == encoder_pyrowave)
+	{
+		if (settings.codec != video_codec::pyrowave)
+			throw std::runtime_error("PyroWave encoder requires the PyroWave codec");
+		res = std::make_unique<video_encoder_pyrowave>(wivrn_vk, settings, stream_idx);
 	}
 
 	if (not res)
@@ -337,6 +346,9 @@ std::unique_ptr<video_encoder> video_encoder::create(
 			case nxwarp:
 				file += ".nxv";
 				break;
+			case pyrowave:
+				file += ".pyro";
+				break;
 		}
 		res->video_dump.open(file);
 	}
@@ -377,7 +389,8 @@ video_encoder::video_encoder(vk_bundle & vk,
 	// Only a hardware encoder has somewhere to fall to. The software one is the
 	// floor, and the raw "encoder" is a debugging tool whose whole point is that it
 	// does not compress.
-	watchdog.set_eligible(settings.encoder_name != encoder_x264 and settings.encoder_name != encoder_raw);
+	watchdog.set_eligible(settings.encoder_name != encoder_x264 and settings.encoder_name != encoder_raw and
+	                       settings.encoder_name != encoder_nxwarp and settings.encoder_name != encoder_pyrowave);
 
 	// So that pacing has a frame period from the very first frame, before the
 	// headset has had a chance to change the refresh rate. Deliberately not

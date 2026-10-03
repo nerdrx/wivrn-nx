@@ -208,6 +208,9 @@ enum video_codec
 	// deliberate — a headset that does not know this codec must not negotiate with
 	// a server that does — but it means client and server ship together.
 	nxwarp,
+	// Experimental Vulkan wavelet decoder. Kept after hardware codecs so automatic
+	// negotiation retains the existing hardware/NX Warp preference order.
+	pyrowave,
 };
 
 // What a stream IS, said on the wire instead of inferred from its index.

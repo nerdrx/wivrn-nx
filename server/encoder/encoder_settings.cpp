@@ -129,6 +129,7 @@ static void split_bitrate(std::array<wivrn::encoder_settings, num_streams> & enc
 			case wivrn::av1:
 			case wivrn::raw:
 			case wivrn::nxwarp:
+			case wivrn::pyrowave:
 				break;
 		}
 		encoder.bitrate = w;
@@ -282,6 +283,7 @@ class prober
 				U_LOG_D("Vulkan video encode for AV1 is not implemented in WiVRn");
 			case raw:
 			case nxwarp:
+			case pyrowave:
 				return false;
 		}
 		U_LOG_E("Invalid codec %d", int(codec));
@@ -314,6 +316,9 @@ public:
 			throw std::runtime_error("nxwarp encoder was requested but this server was built without it");
 #endif
 		}
+		// PyroWave is explicitly selected, never a hardware-encoder fallback.
+		if (config.codec == video_codec::pyrowave or config.name == encoder_pyrowave)
+			return {encoder_pyrowave, video_codec::pyrowave};
 
 #if WIVRN_USE_NVENC
 		if ((nvidia and config.name.empty()) or config.name == encoder_nvenc)
@@ -408,6 +413,13 @@ std::array<encoder_settings, num_streams> get_encoder_settings(wivrn::vk_bundle 
 		dst.ref_invalidation = config.ref_invalidation and settings.ref_invalidation;
 
 		std::tie(dst.encoder_name, dst.codec) = prober.select_encoder(src);
+	}
+	// A single encoder choice is also copied to the passthrough alpha slot.
+	// PyroWave codes pictures, not alpha; keep that rarely used slot functional.
+	if (res[2].encoder_name == encoder_pyrowave)
+	{
+		res[2].encoder_name = encoder_raw;
+		res[2].codec = video_codec::raw;
 	}
 
 	// Reduced resolution streaming: the headset can ask for the eye images to be encoded at

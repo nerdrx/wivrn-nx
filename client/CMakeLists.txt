@@ -230,6 +230,7 @@ file(GLOB LOCAL_SOURCE CONFIGURE_DEPENDS
     "*.cpp"
     "decoder/*.cpp"
     "decoder/nxwarp/*.cpp"
+    "decoder/pyrowave/*.cpp"
     "scenes/*.cpp"
     "utils/*.cpp"
     "vk/*.cpp"
@@ -258,6 +259,7 @@ target_link_libraries(wivrn
     Vulkan::Vulkan
     wivrn-common
     wivrn-external
+    pyrowave
 )
 
 if(WIVRN_HAVE_NXWARP)

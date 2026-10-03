@@ -114,6 +114,8 @@ static const char * codec_label(wivrn::video_codec c, bool nx_motion = false)
 			return "Raw";
 		case wivrn::video_codec::nxwarp:
 			return "Native NXVC";
+		case wivrn::video_codec::pyrowave:
+			return "PyroWave";
 	}
 	return "?";
 }

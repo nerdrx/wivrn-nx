@@ -153,6 +153,10 @@ public:
 	        allocation(allocation), resource(std::move(resource))
 	{}
 
+	basic_allocation(RaiiType && resource, const CreateInfo & create_info, VmaAllocation allocation) :
+	        allocation(allocation), resource(std::move(resource)), create_info(create_info)
+	{}
+
 	basic_allocation(VmaAllocation allocation, vk::raii::Device & device, RaiiType::CppType resource) :
 	        allocation(allocation), resource(RaiiType{device, resource})
 	{}

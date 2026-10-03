@@ -54,6 +54,7 @@ inline const char * encoder_x264 = "x264";
 inline const char * encoder_vulkan = "vulkan";
 inline const char * encoder_raw = "raw";
 inline const char * encoder_nxwarp = "nxwarp";
+inline const char * encoder_pyrowave = "pyrowave";
 
 class video_encoder
 {

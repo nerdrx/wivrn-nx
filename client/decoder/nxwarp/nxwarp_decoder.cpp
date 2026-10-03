@@ -505,7 +505,7 @@ void nxwarp_decoder::build_image_pool()
 			image_info.flags = vk::ImageCreateFlagBits::eMutableFormat | vk::ImageCreateFlagBits::eExtendedUsage;
 			image_info.imageType = vk::ImageType::e2D;
 			image_info.format = output_format;
-			image_info.extent = {.width = extent.width, .height = extent.height, .depth = 1};
+			image_info.extent = vk::Extent3D{.width = extent.width, .height = extent.height, .depth = 1};
 			image_info.mipLevels = 1;
 			image_info.arrayLayers = 1;
 			image_info.tiling = vk::ImageTiling::eOptimal;
@@ -1004,7 +1004,7 @@ bool nxwarp_decoder::on_direct_stream_header(std::span<const uint8_t> header)
 	spdlog::info("nxwarp[{}]: native row predictor {}", stream_index, direct_layout.native_row_predictor);
 	spdlog::info("nxwarp[{}]: partial direct recovery {} (at most 10% retained tiles, history at most 50 ms, stable-neighbor guard)",
 	             stream_index, direct_partial_recovery);
-	native_extent = {.width = direct_layout.width * direct_layout.eyes, .height = direct_layout.height};
+	native_extent = vk::Extent2D{.width = direct_layout.width * direct_layout.eyes, .height = direct_layout.height};
 	extent = native_extent;
 	sampler_ = make_rgba_sampler(device);
 	host_sync = true;

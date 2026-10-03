@@ -86,6 +86,7 @@ static auto encode_guid(video_codec codec)
 			return NV_ENC_CODEC_AV1_GUID;
 		case raw:
 		case nxwarp:
+		case pyrowave:
 			break;
 	}
 	throw std::out_of_range("Invalid codec " + std::to_string(codec));
@@ -397,6 +398,7 @@ video_encoder_nvenc::video_encoder_nvenc(
 			break;
 		case video_codec::raw:
 		case video_codec::nxwarp:
+		case video_codec::pyrowave:
 			throw std::runtime_error("codec not supported for nvenc");
 	}
 
@@ -728,6 +730,7 @@ std::optional<video_encoder::data> video_encoder_nvenc::encode(uint8_t slot, uin
 					break;
 				case video_codec::raw:
 				case video_codec::nxwarp:
+				case video_codec::pyrowave:
 					break;
 			}
 			break;

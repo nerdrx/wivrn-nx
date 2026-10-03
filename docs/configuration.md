@@ -492,18 +492,32 @@ Identifier of the encoder, one of
   Only built when the server was configured with `-DWIVRN_USE_NXWARP=ON`, and never chosen
   automatically — it runs on the CPU reference codec today and would lose to any hardware
   encoder on the machine. See below.
+* `pyrowave`: experimental GPU wavelet codec. Requires a matching client build; never chosen automatically.
 
 ### `codec`
 Default value: best supported by both headset and encoder of `av1`, `h264`, `h265`.
 
-One of `h264`, `h265`, `av1`, `raw`, `nxwarp`.
+One of `h264`, `h265`, `av1`, `raw`, `nxwarp`, `pyrowave`.
 
 Not all encoders support every codec:
 - `x264` encoder only supports `h264` codec
 - `vulkan` encoder supports `h264` and `h265` codecs
 - `raw` encoder only supports `raw` codec
 - `nxwarp` encoder only supports `nxwarp` codec
-- `nvenc` and `vaapi` support all codecs, except `raw` and `nxwarp`
+- `pyrowave` encoder only supports `pyrowave` codec (8-bit YUV 4:2:0, one eye per stream)
+- `nvenc` and `vaapi` support all codecs, except `raw`, `nxwarp` and `pyrowave`
+
+### PyroWave probe
+
+`"encoder": "pyrowave"` selects the GPU wavelet experiment on a matching server and headset.
+It uses WiVRn's ordinary video shards, packet pacing and bitrate feedback; the encoder's
+byte target follows bitrate changes. It does not fall back to a hardware codec mid-session.
+The passthrough alpha slot uses the raw codec when a single PyroWave encoder choice is
+applied to all streams.
+This option changes the protocol hash, so both ends must use this build. It has **not** been
+validated on a Pico yet. For a full-image comparison, set headset render scale and server
+`stream_scale` to 1, and disable foveation and adaptive foveation. Otherwise the wavelet
+encoder receives an already downsampled or foveated image.
 
 ### NX Warp
 

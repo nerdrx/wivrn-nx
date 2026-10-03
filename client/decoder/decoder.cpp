@@ -26,6 +26,7 @@
 #include "decoder/ffmpeg/ffmpeg_decoder.h"
 #endif
 #include "decoder/nxwarp/nxwarp_decoder.h"
+#include "decoder/pyrowave/decoder.h"
 #include "decoder/raw_decoder.h"
 
 wivrn::decoder::~decoder() = default;
@@ -85,6 +86,15 @@ std::shared_ptr<wivrn::decoder> wivrn::decoder::make(
 			        stream_index,
 			        scene,
 			        acc);
+		case pyrowave:
+			return std::make_shared<wivrn::pyrowave_decoder>(
+			        device,
+			        phys_dev,
+			        vk_queue_family_index,
+			        description,
+			        stream_index,
+			        scene,
+			        acc);
 	}
 	__builtin_unreachable();
 }
@@ -105,6 +115,7 @@ static std::vector<wivrn::video_codec> supported_codecs_()
 	// configuration::nxwarp and scenes::stream's headset_info.
 	res.push_back(wivrn::video_codec::nxwarp);
 #endif
+	res.push_back(wivrn::video_codec::pyrowave);
 	res.push_back(wivrn::video_codec::raw);
 	return res;
 }

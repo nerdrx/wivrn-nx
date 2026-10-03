@@ -116,6 +116,7 @@ if (WIVRN_BUILD_SERVER)
 			encoder/idr_handler.cpp
 			encoder/video_encoder.cpp
 			encoder/video_encoder_raw.cpp
+			encoder/video_encoder_pyrowave.cpp
 
 			driver/app_pacer.cpp
 			driver/bitrate_controller.cpp
@@ -426,6 +427,7 @@ if (WIVRN_BUILD_SERVER)
 			wivrn-common
 			wivrn-common-server
 			wivrn-external
+			pyrowave
 			nlohmann_json::nlohmann_json
 		)
 

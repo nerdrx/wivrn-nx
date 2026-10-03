@@ -36,6 +36,7 @@
 #include "scenes/atlas_tile_grid.h"
 
 #include <cstddef>
+#include <stdexcept>
 #include <vk_mem_alloc.h>
 #include <vulkan/vulkan_core.h>
 #include <vulkan/vulkan_raii.hpp>
@@ -450,7 +451,8 @@ stream_defoveator::stream_defoveator(
 				}
 			buffer_allocation staging(device, vk::BufferCreateInfo{.size = pixels.size(), .usage = vk::BufferUsageFlagBits::eTransferSrc},
 					VmaAllocationCreateInfo{.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT, .usage = VMA_MEMORY_USAGE_AUTO});
-			vk::resultCheck(static_cast<vk::Result>(vmaCopyMemoryToAllocation(vk_allocator::instance(), pixels.data(), staging, 0, pixels.size())), "FDM map upload");
+			if (vmaCopyMemoryToAllocation(vk_allocator::instance(), pixels.data(), staging, 0, pixels.size()) != VK_SUCCESS)
+				throw std::runtime_error("FDM map upload failed");
 			vk::raii::CommandPool pool(device, vk::CommandPoolCreateInfo{.flags = vk::CommandPoolCreateFlagBits::eTransient, .queueFamilyIndex = application::get_vk_queue_family_index()});
 			auto cb = std::move(device.allocateCommandBuffers({.commandPool = *pool, .level = vk::CommandBufferLevel::ePrimary, .commandBufferCount = 1})[0]);
 			cb.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});

@@ -558,6 +558,7 @@ void scenes::stream::send_initial_control_packets(wivrn_session & net, float gue
 				case h264:
 				case raw:
 				case nxwarp:
+				case pyrowave:
 					break;
 				case h265:
 				case av1:

@@ -107,3 +107,7 @@ FetchContent_Declare(nx_zstd
 FetchContent_MakeAvailable(nx_zstd)
 set_target_properties(libzstd_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(wivrn-common PUBLIC libzstd_static)
+
+if (WIVRN_BUILD_SERVER OR WIVRN_BUILD_CLIENT)
+    add_subdirectory(pyrowave)
+endif()

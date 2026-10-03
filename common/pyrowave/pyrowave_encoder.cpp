@@ -160,6 +160,7 @@ Encoder::Encoder(vk::raii::PhysicalDevice & phys_dev, vk::raii::Device & device,
         ds_pool(make_descriptor_pool(device))
 {
 	auto [prop, prop11, prop13] = phys_dev.getProperties2<vk::PhysicalDeviceProperties2, vk::PhysicalDeviceVulkan11Properties, vk::PhysicalDeviceVulkan13Properties>();
+	SubgroupSizeProperties subgroup_prop{prop13.minSubgroupSize, prop13.maxSubgroupSize, prop13.requiredSubgroupSizeStages};
 	auto ops = prop11.subgroupSupportedOperations;
 	constexpr auto required_features =
 	        vk::SubgroupFeatureFlagBits::eArithmetic |
@@ -188,9 +189,9 @@ Encoder::Encoder(vk::raii::PhysicalDevice & phys_dev, vk::raii::Device & device,
 		throw std::runtime_error("Missing computeFullSubgroups feature");
 
 	// This should cover any HW I care about.
-	if (!supports_subgroup_size_log2(prop13, true, 4, 4) &&
-	    !supports_subgroup_size_log2(prop13, true, 5, 5) &&
-	    !supports_subgroup_size_log2(prop13, true, 6, 6))
+	if (!supports_subgroup_size_log2(subgroup_prop, true, 4, 4) &&
+	    !supports_subgroup_size_log2(subgroup_prop, true, 5, 5) &&
+	    !supports_subgroup_size_log2(subgroup_prop, true, 6, 6))
 		throw std::runtime_error("Device does not have the required subgroup properties");
 
 	// init block meta
@@ -305,7 +306,7 @@ Encoder::Encoder(vk::raii::PhysicalDevice & phys_dev, vk::raii::Device & device,
 		        .layout = *block_packing_.layout,
 		};
 		pipeline_subgroup_info psi;
-		psi.set_subgroup_size(prop13, info, 4, 6);
+		psi.set_subgroup_size(subgroup_prop, info, 4, 6);
 		block_packing_.pipeline = device.createComputePipeline(
 		        nullptr, // FIXME: cache
 		        info);
@@ -403,20 +404,20 @@ Encoder::Encoder(vk::raii::PhysicalDevice & phys_dev, vk::raii::Device & device,
 		        .layout = *resolve_rdo_.layout,
 		};
 		pipeline_subgroup_info psi;
-		if (supports_subgroup_size_log2(prop13, true, 6, 6))
+		if (supports_subgroup_size_log2(subgroup_prop, true, 6, 6))
 		{
 			block_space_subdivision = 64;
-			psi.set_subgroup_size(prop13, info, 6, 6);
+			psi.set_subgroup_size(subgroup_prop, info, 6, 6);
 		}
-		else if (supports_subgroup_size_log2(prop13, true, 4, 4))
+		else if (supports_subgroup_size_log2(subgroup_prop, true, 4, 4))
 		{
 			block_space_subdivision = 16;
-			psi.set_subgroup_size(prop13, info, 4, 4);
+			psi.set_subgroup_size(subgroup_prop, info, 4, 4);
 		}
-		else if (supports_subgroup_size_log2(prop13, true, 5, 5))
+		else if (supports_subgroup_size_log2(subgroup_prop, true, 5, 5))
 		{
 			block_space_subdivision = 32;
-			psi.set_subgroup_size(prop13, info, 5, 5);
+			psi.set_subgroup_size(subgroup_prop, info, 5, 5);
 		}
 		else
 		{
@@ -499,9 +500,9 @@ Encoder::Encoder(vk::raii::PhysicalDevice & phys_dev, vk::raii::Device & device,
 		        .layout = *analyze_rdo_.layout,
 		};
 		pipeline_subgroup_info psi;
-		if (supports_subgroup_size_log2(prop13, true, 4, 6))
+		if (supports_subgroup_size_log2(subgroup_prop, true, 4, 6))
 		{
-			psi.set_subgroup_size(prop13, info, 4, 6);
+			psi.set_subgroup_size(subgroup_prop, info, 4, 6);
 		}
 		else
 		{
@@ -615,9 +616,9 @@ Encoder::Encoder(vk::raii::PhysicalDevice & phys_dev, vk::raii::Device & device,
 		        },
 		        .layout = *quant_.layout,
 		};
-		assert(supports_subgroup_size_log2(prop13, true, 3, 7));
+		assert(supports_subgroup_size_log2(subgroup_prop, true, 3, 7));
 		pipeline_subgroup_info psi;
-		psi.set_subgroup_size(prop13, info, 3, 7);
+		psi.set_subgroup_size(subgroup_prop, info, 3, 7);
 		quant_.pipeline = device.createComputePipeline(
 		        nullptr, // FIXME: cache
 		        info);
@@ -732,7 +733,7 @@ Encoder::Encoder(vk::raii::PhysicalDevice & phys_dev, vk::raii::Device & device,
 		};
 		pipeline_subgroup_info psi;
 		// Only need simple 2-lane swaps.
-		psi.set_subgroup_size(prop13, info, 2, 7);
+		psi.set_subgroup_size(subgroup_prop, info, 2, 7);
 		dwt_.pipeline = device.createComputePipeline(
 		        nullptr, // FIXME: cache
 		        info);

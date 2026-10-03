@@ -163,8 +163,15 @@ static inline auto get_height(const image_allocation & img, uint32_t lod = 0)
 	return std::max<uint32_t>(1u, img.info().extent.height >> lod);
 }
 
+struct SubgroupSizeProperties
+{
+	uint32_t minSubgroupSize;
+	uint32_t maxSubgroupSize;
+	vk::ShaderStageFlags requiredSubgroupSizeStages;
+};
+
 bool supports_subgroup_size_log2(
-        vk::PhysicalDeviceVulkan13Properties const & prop13,
+        SubgroupSizeProperties const & prop,
         bool subgroup_full_group,
         uint8_t subgroup_minimum_size_log2,
         uint8_t subgroup_maximum_size_log2,
@@ -177,14 +184,14 @@ struct pipeline_subgroup_info
 	vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo info{};
 
 	void set_subgroup_size(
-	        vk::PhysicalDeviceVulkan13Properties const & prop13,
+	        SubgroupSizeProperties const & prop,
 	        vk::ComputePipelineCreateInfo & pipeline_info,
 	        uint8_t subgroup_minimum_size_log2,
 	        uint8_t subgroup_maximum_size_log2)
 	{
 		const uint32_t min_subgroups = 1u << subgroup_minimum_size_log2;
 		const uint32_t max_subgroups = 1u << subgroup_maximum_size_log2;
-		if (min_subgroups <= prop13.minSubgroupSize and max_subgroups >= prop13.maxSubgroupSize)
+		if (min_subgroups <= prop.minSubgroupSize and max_subgroups >= prop.maxSubgroupSize)
 		{
 			pipeline_info.stage.flags |= vk::PipelineShaderStageCreateFlagBits::eAllowVaryingSubgroupSize;
 		}
@@ -193,8 +200,8 @@ struct pipeline_subgroup_info
 			info.pNext = const_cast<void *>(pipeline_info.stage.pNext);
 			pipeline_info.stage.pNext = &info;
 			// Pick a fixed subgroup size. Prefer smallest subgroup size.
-			if (min_subgroups < prop13.minSubgroupSize)
-				info.requiredSubgroupSize = prop13.minSubgroupSize;
+			if (min_subgroups < prop.minSubgroupSize)
+				info.requiredSubgroupSize = prop.minSubgroupSize;
 			else
 				info.requiredSubgroupSize = min_subgroups;
 		}

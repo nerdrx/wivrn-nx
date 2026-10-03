@@ -25,7 +25,7 @@ vk::raii::ShaderModule load_shader(vk::raii::Device & device, const std::string 
 }
 
 bool supports_subgroup_size_log2(
-        vk::PhysicalDeviceVulkan13Properties const & prop13,
+        SubgroupSizeProperties const & prop,
         bool subgroup_full_group,
         uint8_t subgroup_minimum_size_log2,
         uint8_t subgroup_maximum_size_log2,
@@ -34,22 +34,22 @@ bool supports_subgroup_size_log2(
 	uint32_t min_subgroups = 1u << subgroup_minimum_size_log2;
 	uint32_t max_subgroups = 1u << subgroup_maximum_size_log2;
 
-	bool full_range = min_subgroups <= prop13.minSubgroupSize &&
-	                  max_subgroups >= prop13.maxSubgroupSize;
+	bool full_range = min_subgroups <= prop.minSubgroupSize &&
+	                  max_subgroups >= prop.maxSubgroupSize;
 
 	// We can use VARYING size.
 	if (full_range)
 		return true;
 
-	if (min_subgroups > prop13.maxSubgroupSize ||
-	    max_subgroups < prop13.minSubgroupSize)
+	if (min_subgroups > prop.maxSubgroupSize ||
+	    max_subgroups < prop.minSubgroupSize)
 	{
 		// No overlap in requested subgroup size and available subgroup size.
 		return false;
 	}
 
 	// We need requiredSubgroupSizeStages support here.
-	return (prop13.requiredSubgroupSizeStages & stage) != vk::ShaderStageFlags{};
+	return (prop.requiredSubgroupSizeStages & stage) != vk::ShaderStageFlags{};
 }
 
 Configuration::Configuration()

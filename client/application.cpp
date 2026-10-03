@@ -838,6 +838,7 @@ void application::initialize_vulkan()
 	optional_device_extensions.emplace(VK_IMG_FILTER_CUBIC_EXTENSION_NAME);
 	optional_device_extensions.emplace(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
 	optional_device_extensions.emplace(VK_EXT_FRAGMENT_DENSITY_MAP_EXTENSION_NAME);
+	optional_device_extensions.emplace(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
 
 #ifdef __ANDROID__
 	vk_device_extensions.push_back(VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
@@ -1034,7 +1035,9 @@ void application::initialize_vulkan()
 	        // VkPhysicalDeviceVulkan11Features, which needs a 1.2 device: this one is
 	        // core in 1.1 and available as VK_KHR_16bit_storage below that, and the
 	        // headset's Vulkan version is whatever the OpenXR runtime asked for.
-	        vk::PhysicalDevice16BitStorageFeatures{}};
+	        vk::PhysicalDevice16BitStorageFeatures{},
+	        vk::PhysicalDeviceSubgroupSizeControlFeaturesEXT{},
+	        vk::PhysicalDeviceVulkan13Features{}};
 
 	auto check_feature_flag = [&](auto feature_flag, const char * extension_name) -> bool {
 		using FeatureStruct = class_from_member_t<decltype(feature_flag)>;
@@ -1054,6 +1057,46 @@ void application::initialize_vulkan()
 
 	check_feature_flag(&vk::PhysicalDeviceTimelineSemaphoreFeaturesKHR::timelineSemaphore, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
 	check_feature_flag(&vk::PhysicalDeviceIndexTypeUint8FeaturesEXT::indexTypeUint8, VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME);
+	if (utils::contains(vk_device_extensions, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME))
+	{
+		auto available = vk_physical_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceSubgroupSizeControlFeaturesEXT>()
+		                         .get<vk::PhysicalDeviceSubgroupSizeControlFeaturesEXT>();
+		if (available.subgroupSizeControl && available.computeFullSubgroups)
+		{
+			auto & enabled = device_create_info.get<vk::PhysicalDeviceSubgroupSizeControlFeaturesEXT>();
+			enabled.subgroupSizeControl = true;
+			enabled.computeFullSubgroups = true;
+			device_create_info.unlink<vk::PhysicalDeviceVulkan13Features>();
+		}
+		else
+		{
+			device_create_info.unlink<vk::PhysicalDeviceSubgroupSizeControlFeaturesEXT>();
+			device_create_info.unlink<vk::PhysicalDeviceVulkan13Features>();
+		}
+	}
+	else if (VK_VERSION_MAJOR(physical_device_properties.apiVersion) > 1 ||
+	         (VK_VERSION_MAJOR(physical_device_properties.apiVersion) == 1 && VK_VERSION_MINOR(physical_device_properties.apiVersion) >= 3))
+	{
+		auto available = vk_physical_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan13Features>()
+		                         .get<vk::PhysicalDeviceVulkan13Features>();
+		if (available.subgroupSizeControl && available.computeFullSubgroups)
+		{
+			auto & enabled = device_create_info.get<vk::PhysicalDeviceVulkan13Features>();
+			enabled.subgroupSizeControl = true;
+			enabled.computeFullSubgroups = true;
+			device_create_info.unlink<vk::PhysicalDeviceSubgroupSizeControlFeaturesEXT>();
+		}
+		else
+		{
+			device_create_info.unlink<vk::PhysicalDeviceSubgroupSizeControlFeaturesEXT>();
+			device_create_info.unlink<vk::PhysicalDeviceVulkan13Features>();
+		}
+	}
+	else
+	{
+		device_create_info.unlink<vk::PhysicalDeviceSubgroupSizeControlFeaturesEXT>();
+		device_create_info.unlink<vk::PhysicalDeviceVulkan13Features>();
+	}
 	int fdm_mode = 0;
 #ifdef __ANDROID__
 	char fdm_value[PROP_VALUE_MAX] = {};

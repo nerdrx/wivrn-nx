@@ -437,7 +437,25 @@ Decoder::Decoder(
         phys_dev(phys_dev),
         ds_pool(nullptr)
 {
-	auto [prop, prop11, prop13] = phys_dev.getProperties2<vk::PhysicalDeviceProperties2, vk::PhysicalDeviceVulkan11Properties, vk::PhysicalDeviceVulkan13Properties>();
+	auto [prop, prop11] = phys_dev.getProperties2<vk::PhysicalDeviceProperties2, vk::PhysicalDeviceVulkan11Properties>();
+	SubgroupSizeProperties subgroup_prop{};
+	if (VK_VERSION_MAJOR(prop.properties.apiVersion) > 1 ||
+	    (VK_VERSION_MAJOR(prop.properties.apiVersion) == 1 && VK_VERSION_MINOR(prop.properties.apiVersion) >= 3))
+	{
+		auto prop13 = phys_dev.getProperties2<vk::PhysicalDeviceProperties2, vk::PhysicalDeviceVulkan13Properties>().get<vk::PhysicalDeviceVulkan13Properties>();
+		subgroup_prop = {prop13.minSubgroupSize, prop13.maxSubgroupSize, prop13.requiredSubgroupSizeStages};
+	}
+	else
+	{
+		auto extensions = phys_dev.enumerateDeviceExtensionProperties();
+		if (std::ranges::none_of(extensions, [](auto const & extension) {
+			    return strcmp(extension.extensionName.data(), VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME) == 0;
+		    }))
+			throw std::runtime_error("Device does not support subgroup size control");
+		auto subgroup = phys_dev.getProperties2<vk::PhysicalDeviceProperties2, vk::PhysicalDeviceSubgroupSizeControlPropertiesEXT>().get<vk::PhysicalDeviceSubgroupSizeControlPropertiesEXT>();
+		subgroup_prop = {subgroup.minSubgroupSize, subgroup.maxSubgroupSize, subgroup.requiredSubgroupSizeStages};
+	}
+	auto [feat, feat12] = phys_dev.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan12Features>();
 	auto ops = prop11.subgroupSupportedOperations;
 	constexpr auto required_features =
 	        vk::SubgroupFeatureFlagBits::eVote |
@@ -452,10 +470,8 @@ Decoder::Decoder(
 		throw std::runtime_error("There are missing subgroup features. Device supports " + vk::to_string(ops) + ", but requires " + vk::to_string(required_features) + ".");
 	}
 
-	auto [feat, feat12, feat13] = phys_dev.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan12Features, vk::PhysicalDeviceVulkan13Features>();
-
 	// The decoder is more lenient.
-	if (!supports_subgroup_size_log2(prop13, true, 2, 7))
+	if (!supports_subgroup_size_log2(subgroup_prop, true, 2, 7))
 		throw std::runtime_error("Device does not have the required subgroup properties");
 
 	// If the GPU is sufficiently competent with texel buffers, we can use that as a fallback to 8-bit storage.
@@ -694,10 +710,10 @@ Decoder::Decoder(
 		        .layout = *p.layout,
 		};
 		pipeline_subgroup_info psi;
-		if (supports_subgroup_size_log2(prop13, true, 4, 7))
-			psi.set_subgroup_size(prop13, info, 4, 7);
+		if (supports_subgroup_size_log2(subgroup_prop, true, 4, 7))
+			psi.set_subgroup_size(subgroup_prop, info, 4, 7);
 		else
-			psi.set_subgroup_size(prop13, info, 2, 7);
+			psi.set_subgroup_size(subgroup_prop, info, 2, 7);
 		p.pipeline = device.createComputePipeline(
 		        nullptr, // FIXME: cache
 		        info);
@@ -1891,16 +1907,14 @@ bool Decoder::idwt_fragment(vk::raii::CommandBuffer & cmd, const ViewBuffers & v
 		// since renderArea is non-overlapping.
 		if (output_level == 0 && chroma == ChromaSubsampling::Chroma420)
 		{
-			vk::MemoryBarrier2 by_region{
-			        .srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
-			        .srcAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
-			        .dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
-			        .dstAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
+			vk::MemoryBarrier by_region{
+			        .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+			        .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
 			};
-			vk::DependencyInfo dep{
-			        .dependencyFlags = vk::DependencyFlagBits::eByRegion,
-			        .memoryBarrierCount = 1,
-			        .pMemoryBarriers = &by_region,
+			auto barrier = [&] {
+				cmd.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
+				                    vk::PipelineStageFlagBits::eColorAttachmentOutput,
+				                    vk::DependencyFlagBits::eByRegion, by_region, {}, {});
 			};
 
 			// Need vertical fixup (very common for 1080p).
@@ -1909,7 +1923,7 @@ bool Decoder::idwt_fragment(vk::raii::CommandBuffer & cmd, const ViewBuffers & v
 			if (render_height < extent.height)
 			{
 				// Insert a simple by_region barrier to ensure we follow Vulkan rules for RW access.
-				cmd.pipelineBarrier2(dep);
+				barrier();
 
 				cmd.beginRenderPass(vk::RenderPassBeginInfo{
 				                            .renderPass = pipeline.rp,
@@ -1941,7 +1955,7 @@ bool Decoder::idwt_fragment(vk::raii::CommandBuffer & cmd, const ViewBuffers & v
 			// Need horizontal fixup (very rare).
 			if (render_width < extent.width)
 			{
-				cmd.pipelineBarrier2(dep);
+				barrier();
 
 				cmd.beginRenderPass(vk::RenderPassBeginInfo{
 				                            .renderPass = pipeline.rp,

@@ -66,6 +66,7 @@ NLOHMANN_JSON_SERIALIZE_ENUM(
                 {av1, "AV1"},
                 {raw, "raw"},
                 {nxwarp, "nxwarp"},
+                {pyrowave, "pyrowave"},
         })
 
 NLOHMANN_JSON_SERIALIZE_ENUM(

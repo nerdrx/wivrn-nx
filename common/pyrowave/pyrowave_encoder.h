@@ -36,6 +36,9 @@ public:
 
 public:
 	using ViewBuffers = std::array<vk::ImageView, 3>;
+	// The adopted device must enable shaderInt16, 8/16-bit storage-buffer
+	// access, full compute subgroups and subgroup-size control. Enable supported
+	// shaderFloat16 and storage-image capabilities used by the selected shaders.
 	Encoder(vk::raii::PhysicalDevice & phys_dev, vk::raii::Device & device, int width, int height, ChromaSubsampling chroma);
 	~Encoder();
 

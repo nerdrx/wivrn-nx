@@ -2144,7 +2144,7 @@ bool Decoder::decode(vk::raii::CommandBuffer & cmd, DecoderInput & input, const 
 			        input.dequant_staging,
 			        input.dequant_offset_buffer,
 			        vk::BufferCopy{
-			                .size = vk::WholeSize,
+			                .size = input.dequant_data.size_bytes(),
 			        });
 		std::vector<vk::ImageMemoryBarrier> image_barriers;
 		if (input.need_image_transition)

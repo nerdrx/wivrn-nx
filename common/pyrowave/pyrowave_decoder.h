@@ -133,6 +133,8 @@ public:
 
 	// The caller must enable shaderStorageImageWriteWithoutFormat and, where
 	// supported, shaderStorageImageExtendedFormats on the logical device.
+	// Buffer payload and FP16 shader variants also require the corresponding
+	// supported 8/16-bit storage-buffer and shaderFloat16 capabilities enabled.
 	Decoder(vk::raii::PhysicalDevice & phys_dev, vk::raii::Device & device, int width, int height, ChromaSubsampling chroma, bool fragment_path = false);
 	~Decoder();
 

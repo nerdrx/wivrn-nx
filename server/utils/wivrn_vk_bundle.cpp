@@ -327,6 +327,18 @@ wivrn::vk_bundle::vk_bundle() :
 		std::get<vk::PhysicalDeviceVulkan12Features>(feat).timelineSemaphore = phys_feat12.timelineSemaphore;
 		std::get<vk::PhysicalDeviceVulkan13Features>(feat).synchronization2 = phys_feat13.synchronization2;
 
+		// PyroWave selects shader variants from physical support. Enable the
+		// corresponding logical-device capabilities before handing it this device.
+		auto & feat12 = std::get<vk::PhysicalDeviceVulkan12Features>(feat);
+		auto & feat13 = std::get<vk::PhysicalDeviceVulkan13Features>(feat);
+		feat12.storageBuffer8BitAccess = phys_feat12.storageBuffer8BitAccess;
+		feat12.shaderFloat16 = phys_feat12.shaderFloat16;
+		feat13.subgroupSizeControl = phys_feat13.subgroupSizeControl;
+		feat13.computeFullSubgroups = phys_feat13.computeFullSubgroups;
+		auto & core_features = std::get<vk::PhysicalDeviceFeatures2>(feat).features;
+		core_features.shaderStorageImageExtendedFormats = phys_feat.features.shaderStorageImageExtendedFormats;
+		core_features.shaderStorageImageWriteWithoutFormat = phys_feat.features.shaderStorageImageWriteWithoutFormat;
+
 		if (not phys_feat13.synchronization2)
 			throw std::runtime_error("GPU does not support Vulkan synchronization2 feature");
 		if (not phys_feat12.timelineSemaphore)

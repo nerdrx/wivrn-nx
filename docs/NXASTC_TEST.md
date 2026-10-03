@@ -61,3 +61,20 @@ This first integration uses fixed block quality: the bitrate slider does not
 change ASTC dimensions or endpoint precision. Compressed byte rate depends on
 scene content. The experiment needs live network and presentation measurements
 before it can claim a sustained 90 FPS result.
+
+## Native Vulkan header pin
+
+The C Monado compositor and C++ WiVRn server must compile against the same
+Vulkan header version. The system headers were 1.4.357 while the local Vulkan
+SDK headers were 1.4.309; mixing them changed embedded `vk_bundle`/`comp_base`
+layouts by eight bytes and left Monado's swapchain command-pool mutex
+uninitialized. Configure both targets with the local headers and dependency
+prefix, then build the server and matching runtime:
+
+```sh
+cmake --preset server \
+  -DWIVRN_USE_SYSTEM_BOOST=OFF \
+  -DVulkan_INCLUDE_DIR=/run/media/nerdrx/Lex/claude/tools/local/include \
+  -DCMAKE_PREFIX_PATH='/run/media/nerdrx/Lex/claude/nx-scratch/nxwarp-atlas-live-build/install;/run/media/nerdrx/Lex/claude/tools/local'
+cmake --build build-server --target wivrn-server openxr_wivrn -j12
+```

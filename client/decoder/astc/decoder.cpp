@@ -78,6 +78,9 @@ astc_decoder::astc_decoder(vk::raii::Device & device,
 		throw std::runtime_error("ASTC 8x8 lacks optimal sampled, linear-filter, or transfer-destination support");
 	if (!extent.width || !extent.height || raw_bytes > std::numeric_limits<uint32_t>::max() || raw_bytes > INT_MAX)
 		throw std::runtime_error("invalid ASTC stream dimensions");
+	// LZ4 performs backward-reference reads while writing. Keep those accesses in
+	// ordinary CPU-cached memory, then do one forward copy into VMA's write staging.
+	cpu_scratch.resize(size_t(raw_bytes));
 
 	for (size_t i = 0; i < images.size(); ++i)
 	{
@@ -117,10 +120,6 @@ astc_decoder::astc_decoder(vk::raii::Device & device,
 		        },
 		        "ASTC packet staging");
 		item.mapped = item.staging.data<uint8_t>();
-		item.semaphore = vk::raii::Semaphore(device, vk::StructureChain{
-		                                                      vk::SemaphoreCreateInfo{},
-		                                                      vk::SemaphoreTypeCreateInfo{.semaphoreType = vk::SemaphoreType::eTimeline},
-		                                              }.get());
 	}
 	worker = std::thread([this, queue_family_index] { worker_function(queue_family_index); });
 }
@@ -251,11 +250,20 @@ void astc_decoder::worker_function(uint32_t queue_family_index)
 			if (parsed->compressed)
 			{
 				const int written = LZ4_decompress_safe(reinterpret_cast<const char *>(payload),
-				                                        reinterpret_cast<char *>(item->mapped),
+				                                        reinterpret_cast<char *>(cpu_scratch.data()),
 				                                        int(parsed->payload_bytes),
 				                                        int(parsed->raw_bytes));
 				if (written != int(parsed->raw_bytes))
+				{
+					spdlog::warn("ASTC LZ4 decode mismatch frame={} decoded={} raw={} payload={} packet={}",
+					             current.feedback.frame_index,
+					             written,
+					             parsed->raw_bytes,
+					             parsed->payload_bytes,
+					             current.packet.size());
 					throw std::runtime_error("ASTC LZ4 payload did not decode to exact block length");
+				}
+				std::memcpy(item->mapped, cpu_scratch.data(), parsed->raw_bytes);
 			}
 			else
 				std::memcpy(item->mapped, payload, parsed->raw_bytes);
@@ -308,18 +316,10 @@ void astc_decoder::worker_function(uint32_t queue_family_index)
 			cmd.end();
 			device.resetFences(*fence);
 			application::get_queue().lock()->submit(
-			        vk::StructureChain{
-			                vk::SubmitInfo{
-			                        .commandBufferCount = 1,
-			                        .pCommandBuffers = &*cmd,
-			                        .signalSemaphoreCount = 1,
-			                        .pSignalSemaphores = &*item->semaphore,
-			                },
-			                vk::TimelineSemaphoreSubmitInfo{
-			                        .signalSemaphoreValueCount = 1,
-			                        .pSignalSemaphoreValues = &++item->semaphore_value,
-			                },
-			        }.get(),
+			        vk::SubmitInfo{
+			                .commandBufferCount = 1,
+			                .pCommandBuffers = &*cmd,
+			        },
 			        *fence);
 			submitted = true;
 			waited = device.waitForFences(*fence, true, UINT64_MAX);
@@ -333,7 +333,7 @@ void astc_decoder::worker_function(uint32_t queue_family_index)
 			                                                item->pixels,
 			                                                extent,
 			                                                item->layout,
-			                                                *item->semaphore,
+			                                                nullptr,
 			                                                item->semaphore_value,
 			                                                item->free);
 			if (auto scene = weak_scene.lock())

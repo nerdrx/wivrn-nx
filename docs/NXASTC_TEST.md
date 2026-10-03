@@ -26,7 +26,9 @@ adb shell setprop debug.wivrn.nx.test_codec nxastc
 
 Restart the client after setting this property. It requests the device's native
 recommended eye extent, 90 Hz, one source frame per refresh, eight-bit colour,
-and motion smoothing off, without rewriting the user's saved profile. Unsupported
+and motion smoothing off, without rewriting the user's saved profile. The
+experimental profile is opaque VR: passthrough alpha is disabled on both ends.
+Unsupported
 ASTC devices reject this override. Clear it with:
 
 ```sh
@@ -47,20 +49,39 @@ filtered live stream against an isolated decoder microbenchmark.
 - Decoder completion telemetry uses the same frame's actual post-upload timestamp.
 - ASTC texture support and linear sampling support are checked before advertising
   the codec. The normal headset pose reprojection remains in place.
+- The upload fence completes before publishing a texture. The presentation pass
+  therefore needs no additional decoder timeline semaphore; the tested Pico
+  driver rejected that redundant object with `vkCreateSemaphore: Incomplete`.
 
 ## Validation and current limits
 
 The native PC server and matching OpenXR runtime build successfully. The Android
 API 29 arm64 client builds with warnings treated as errors. Standalone packet
-tests and shader compilation pass. A same-signature update was installed on the
-connected Pico on 2026-10-03; the matching server is listening. At launch, the
-Pico Guardian activity blocked the application switch, so live image quality,
-delivered frame rate, and latency remain unverified until a real scene is running.
+tests and shader compilation pass. On 2026-10-04, same-signature Pico updates
+resolved decoder creation and the unused alpha decoder. WayVR starts against the
+matching native runtime and delivered textures reach the headset presentation pass.
 
-This first integration uses fixed block quality: the bitrate slider does not
-change ASTC dimensions or endpoint precision. Compressed byte rate depends on
-scene content. The experiment needs live network and presentation measurements
-before it can claim a sustained 90 FPS result.
+LZ4 now decompresses into reusable cached CPU memory before copying blocks to the
+upload buffer. Its backreferences read previously written bytes, so decompressing
+directly into sequential-write GPU staging memory was unnecessarily expensive.
+
+The user's isolated live test runs with the built-in `--no-encrypt` server option.
+One two-second window reported 180 fresh source updates and 180 submitted layers
+(89.7 iterations/s), with 1.9 ms reported decode time. The adjacent window reported
+142 fresh updates across 179 layers, so this is **not sustained 90 FPS proof**.
+Neither timestamp sums nor runtime estimates are optical photon-latency measurements.
+
+ASTC endpoint precision now responds to the controller/slider budget using actual
+packet bytes, stepping between six and four bits with hysteresis. Dimensions remain
+native. This has a limited reduction range: earlier dark-frame measurements reduced
+LZ4 bytes by 7.4% at five bits and 14.5% at four bits. Targets below this quality floor
+are not enforced by this control; stronger rate control remains necessary.
+
+Captured server and headset packets proved the former encrypted recovery bug: the
+server packet decompressed correctly, while the received packet differed across
+one shard and produced too few decoded bytes. UDP encryption mutates borrowed
+payload spans; parity and retransmission history must snapshot their plaintext
+before either socket sends them. The recovery path now uses that pre-send snapshot.
 
 ## Native Vulkan header pin
 

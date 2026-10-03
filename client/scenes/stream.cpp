@@ -595,6 +595,7 @@ void scenes::stream::send_initial_control_packets(wivrn_session & net, float gue
 			if (!std::ranges::contains(supported, video_codec::nxastc))
 				throw std::runtime_error("ASTC test requested on an unsupported device");
 			info.supported_codecs = {video_codec::nxastc};
+			info.passthrough = false;
 			auto view = application::get_hmd_traits().override_view(system.view_configuration_views(viewconfig)[0]);
 			info.render_eye_width = info.stream_eye_width = view.recommendedImageRectWidth;
 			info.render_eye_height = info.stream_eye_height = view.recommendedImageRectHeight;
@@ -3401,6 +3402,17 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 		// like any other and gets a decoder like any other -- what makes it different
 		// is only what happens to the frames afterwards.
 		auto [width, height] = description.stream_size(stream_index);
+		// The ASTC experiment sends only the two full-eye colour streams. The
+		// current stream description always derives an alpha extent from `width`
+		// and `height`, even when the server has no alpha encoder, so that unused
+		// slot must be skipped explicitly (otherwise raw_decoder creates a timeline
+		// semaphore on devices whose driver rejects it).
+		if (description.role_of(uint8_t(stream_index)) == stream_role::alpha &&
+		    description.codec[0] == video_codec::nxastc && description.codec[1] == video_codec::nxastc)
+		{
+			item = accumulator_images{};
+			continue;
+		}
 		if (width == 0 or height == 0)
 		{
 			item = accumulator_images{};

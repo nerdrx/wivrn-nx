@@ -891,6 +891,12 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		shard.payload = {begin, next};
 		const uint32_t payload_bytes = uint32_t(next - begin);
 		frame_bytes += payload_bytes;
+		// The socket serializes large payloads as borrowed spans and encrypts those
+		// spans in place. Snapshot recovery bytes before either path sends this shard;
+		// otherwise parity/history may capture ciphertext instead of the frame bytes.
+		const bool history_active = history.enabled() and not control;
+		if (fec_active or history_active)
+			fec::encode_blob(shard, history_blob);
 
 		// Striping (multipath stage 3): everything past the split point goes over the
 		// secondary path instead, where it travels in parallel with what is still
@@ -942,9 +948,8 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		// covers the same group whichever path carried it, which is exactly what
 		// lets the headset rebuild a lost UDP shard from copies that arrived over
 		// the tunnel.
-		std::span<const uint8_t> fec_blob;
 		if (fec_active)
-			fec_blob = fec_group.add(shard, on_primary);
+			fec_group.add_blob(shard, history_blob, on_primary);
 		if (fec_active and fec_group.block_full())
 			send_parity();
 
@@ -955,15 +960,9 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		// answering that over Wi-Fi would spend the lossy path's bandwidth on a shard
 		// already in flight over the other. The blob is the same encoding the parity
 		// scheme uses, so a retransmission is a decode_blob and nothing more.
-		if (history.enabled() and not control and on_primary)
+		if (history_active and on_primary)
 		{
-			if (fec_active)
-				history.push(shard.frame_idx, shard.shard_idx, fec_blob, on_primary);
-			else
-			{
-				fec::encode_blob(shard, history_blob);
-				history.push(shard.frame_idx, shard.shard_idx, history_blob, on_primary);
-			}
+			history.push(shard.frame_idx, shard.shard_idx, history_blob, on_primary);
 		}
 		++shard.shard_idx;
 		shard.view_info.reset();

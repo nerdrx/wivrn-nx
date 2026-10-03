@@ -451,6 +451,10 @@ std::array<encoder_settings, num_streams> get_encoder_settings(wivrn::vk_bundle 
 	// The explicit ASTC experiment codes the whole rendered eye. Its texture
 	// must not inherit the older NXVC profile's foveation or reduced size.
 	const bool native_astc = res[0].codec == video_codec::nxastc && res[1].codec == video_codec::nxastc;
+	// The native ASTC experiment streams opaque eyes only. Do not allocate an
+	// unused raw alpha encoder (or its headset decoder) for this profile.
+	if (native_astc)
+		res[2].enabled = false;
 	const auto encode = native_astc
 	                            ? stream_encode_size(info.render_eye_width, info.render_eye_height, 1.f, 1.f)
 	                            : stream_encode_size(info.stream_eye_width,

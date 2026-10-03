@@ -316,6 +316,15 @@ public:
 	// reset(), or destruction if the bytes need to outlive that operation.
 	std::span<const uint8_t> add(const data_shard & shard, bool on_primary = true)
 	{
+		encode_blob(shard, scratch);
+		return add_blob(shard, scratch, on_primary);
+	}
+
+	// Capture recovery bytes before sending: socket encryption may mutate borrowed
+	// payload spans in place, so encoding the shard after send can put ciphertext
+	// into parity and retransmission history.
+	std::span<const uint8_t> add_blob(const data_shard & shard, std::span<const uint8_t> blob, bool on_primary = true)
+	{
 		// A block that was left half drained, or one this shard does not continue,
 		// is over: the indices a parity would name would not be the ones it covers.
 		if (count and (cursor != 0 or shard.shard_idx != uint16_t(block_first + count)))
@@ -325,16 +334,15 @@ public:
 
 		group & g = groups[count % d];
 
-		encode_blob(shard, scratch);
-		if (g.parity.size() < scratch.size())
-			g.parity.resize(scratch.size(), 0);
-		for (size_t i = 0; i < scratch.size(); ++i)
-			g.parity[i] ^= scratch[i];
+		if (g.parity.size() < blob.size())
+			g.parity.resize(blob.size(), 0);
+		for (size_t i = 0; i < blob.size(); ++i)
+			g.parity[i] ^= blob[i];
 
-		g.sizes.push_back(uint16_t(scratch.size()));
+		g.sizes.push_back(uint16_t(blob.size()));
 		g.on_primary = g.on_primary or on_primary;
 		++count;
-		return scratch;
+		return blob;
 	}
 
 	// Next parity shard the open block still owes, or nothing once it owes none —

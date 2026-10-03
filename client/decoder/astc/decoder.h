@@ -36,7 +36,6 @@ class astc_decoder final : public decoder
 		uint8_t * mapped = nullptr;
 		vk::ImageLayout layout = vk::ImageLayout::eUndefined;
 		std::atomic_bool free = true;
-		vk::raii::Semaphore semaphore = nullptr;
 		uint64_t semaphore_value = 0;
 	};
 	struct frame
@@ -51,6 +50,7 @@ class astc_decoder final : public decoder
 	std::array<image, image_count> images;
 	vk::Extent2D extent;
 	vk::DeviceSize raw_bytes;
+	std::vector<uint8_t> cpu_scratch;
 	std::weak_ptr<scenes::stream> weak_scene;
 	shard_accumulator * accumulator;
 

@@ -31,6 +31,8 @@ class video_encoder_astc : public video_encoder
 	std::unordered_map<VkImage, std::array<vk::raii::ImageView, 2>> image_views;
 	std::array<slot_t, num_slots> slots;
 	std::vector<uint8_t> compressed;
+	std::atomic_uint32_t quality_bits{6};
+	const float initial_fps;
 
 public:
 	video_encoder_astc(vk_bundle & vk, const encoder_settings & settings, uint8_t stream_idx);

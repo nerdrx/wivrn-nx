@@ -364,6 +364,59 @@ void test_round_trip()
 	CHECK(detached and detached->shard_idx == 3);
 }
 
+void test_recovery_blob_survives_send_mutation()
+{
+	std::printf("Part B2: recovery snapshot survives in-place send encryption\n");
+	constexpr size_t shard_count = fec::group_size;
+	std::vector<std::vector<uint8_t>> sent_payloads(shard_count), original_payloads(shard_count);
+	std::vector<std::vector<uint8_t>> recovery_blobs(shard_count);
+	std::vector<data_shard> original_shards(shard_count);
+	fec::group_builder builder;
+	builder.reset(0, 99);
+	for (size_t i = 0; i < shard_count; ++i)
+	{
+		sent_payloads[i].resize(128 + i);
+		for (size_t j = 0; j < sent_payloads[i].size(); ++j)
+			sent_payloads[i][j] = uint8_t(i * 29 + j * 7);
+		original_payloads[i] = sent_payloads[i];
+		data_shard shard;
+		shard.stream_item_idx = 0;
+		shard.frame_idx = 99;
+		shard.shard_idx = uint16_t(i);
+		if (i == 0)
+			shard.view_info = make_view_info();
+		if (i + 1 == shard_count)
+			shard.timing_info = timing_info_t{1, 2, 3, 4};
+		shard.payload = sent_payloads[i];
+		original_shards[i] = shard;
+		original_shards[i].payload = original_payloads[i];
+		fec::encode_blob(shard, recovery_blobs[i]); // before UDP encryption mutates the borrowed span
+		for (uint8_t & b: sent_payloads[i])
+			b ^= 0xa5; // the socket send happens before the recovery blob is consumed
+		builder.add_blob(shard, recovery_blobs[i], true);
+	}
+	auto parity = builder.take();
+	CHECK(parity.has_value());
+	if (not parity)
+		return;
+	std::vector<uint8_t> parity_payload(parity->payload.begin(), parity->payload.end());
+	parity->payload = parity_payload;
+
+	const size_t dropped = 3;
+	auto rebuilt = fec::reconstruct(*parity, [&](uint16_t idx) -> const data_shard * {
+		return idx == dropped ? nullptr : &original_shards[idx];
+	});
+	CHECK(rebuilt.has_value());
+	CHECK(rebuilt and same_shard(*rebuilt, original_shards[dropped]));
+	const auto saved_last = fec::decode_blob(0, 99, uint16_t(shard_count - 1), recovery_blobs.back());
+	CHECK(same_shard(saved_last, original_shards.back()));
+	std::vector<uint8_t> encrypted_blob;
+	data_shard mutated = original_shards[dropped];
+	mutated.payload = sent_payloads[dropped];
+	fec::encode_blob(mutated, encrypted_blob);
+	CHECK(encrypted_blob != recovery_blobs[dropped]); // snapshot is preserved across the send mutation
+}
+
 void test_graceful_failure()
 {
 	std::printf("Part C: what a single parity cannot do\n");
@@ -857,6 +910,7 @@ int main()
 {
 	test_group_construction();
 	test_round_trip();
+	test_recovery_blob_survives_send_mutation();
 	test_graceful_failure();
 	test_dedup();
 	test_variable_group_sizes();

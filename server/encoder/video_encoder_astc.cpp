@@ -105,7 +105,8 @@ wivrn::video_encoder_astc::video_encoder_astc(vk_bundle & vk, const encoder_sett
         ds_layout(make_ds_layout(vk)),
         pipeline_layout(make_pipeline_layout(vk, *ds_layout)),
         pipeline(make_pipeline(vk, *pipeline_layout)),
-        ds_pool(make_ds_pool(vk))
+        ds_pool(make_ds_pool(vk)),
+        initial_fps(settings.fps)
 {
 	if (settings.bit_depth != 8 || settings.eyes != 1)
 		throw std::runtime_error("NX ASTC requires 8-bit single-eye streams");
@@ -166,7 +167,7 @@ void wivrn::video_encoder_astc::present_image(vk::Image image, vk::SemaphoreSubm
 	cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
 	cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *pipeline);
 	cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *pipeline_layout, 0, s.descriptor_set, {});
-	push_constants pc{extent.width, extent.height, 3, 6};
+	push_constants pc{extent.width, extent.height, 3, quality_bits.load(std::memory_order_relaxed)};
 	cmd.pushConstants(*pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0, vk::ArrayProxy<const push_constants>{pc});
 	const uint32_t blocks_x = (extent.width + 7) / 8, blocks_y = (extent.height + 7) / 8;
 	cmd.dispatch((blocks_x * blocks_y + 63) / 64, 1, 1);
@@ -196,6 +197,22 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_astc::encode(uint
 	const int n = LZ4_compress_default(reinterpret_cast<const char *>(raw), reinterpret_cast<char *>(compressed.data()), raw_size, compressed.size());
 	const bool use_lz4 = n > 0 && uint32_t(n) < raw_size;
 	const uint32_t payload_size = use_lz4 ? uint32_t(n) : raw_size;
+	// Move one endpoint-precision step at a time using actual prior-frame bytes.
+	// Four bits is the floor: beyond that the shader's fixed ASTC mode is unchanged.
+	const uint32_t bitrate = pending_bitrate.load(std::memory_order_relaxed);
+	const float fps = pending_framerate.load(std::memory_order_relaxed) > 0
+	                          ? pending_framerate.load(std::memory_order_relaxed)
+	                          : initial_fps;
+	if (fps > 0 && bitrate > 0)
+	{
+		const double target_bytes = double(bitrate) / (8.0 * double(fps));
+		const double actual_bytes = double(payload_size + nxastc_packet::header_size);
+		uint32_t bits = quality_bits.load(std::memory_order_relaxed);
+		if (actual_bytes > target_bytes * 1.10 && bits > 4)
+			quality_bits.store(bits - 1, std::memory_order_relaxed);
+		else if (actual_bytes < target_bytes * 0.70 && bits < 6)
+			quality_bits.store(bits + 1, std::memory_order_relaxed);
+	}
 	auto packet = std::make_shared<std::vector<uint8_t>>(nxastc_packet::header_size + payload_size);
 	auto header = nxastc_packet::make_header(extent.width, extent.height, payload_size, use_lz4);
 	std::memcpy(packet->data(), header.data(), header.size());

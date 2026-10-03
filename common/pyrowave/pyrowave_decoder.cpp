@@ -2025,6 +2025,16 @@ bool Decoder::idwt_fragment(vk::raii::CommandBuffer & cmd, const ViewBuffers & v
 
 bool Decoder::decode(vk::raii::CommandBuffer & cmd, DecoderInput & input, const ViewBuffers & views)
 {
+	// Host-visible allocations are not necessarily coherent (notably on Adreno).
+	// Make the CPU-written block offsets and payload visible before GPU reads.
+	auto flush_input = [](buffer_allocation & direct, buffer_allocation & staging) {
+		auto & source = staging ? staging : direct;
+		if (source && (source.properties() & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
+			CHECK_VK(vmaFlushAllocation(vk_allocator::instance(), static_cast<VmaAllocation>(source), 0, source.info().size));
+	};
+	flush_input(input.dequant_offset_buffer, input.dequant_staging);
+	flush_input(input.payload_data, input.payload_staging);
+
 	size_t storage_mode = 0;
 	if (*input.r8_image and *input.r16_image and *input.r32_image)
 		storage_mode = 2;

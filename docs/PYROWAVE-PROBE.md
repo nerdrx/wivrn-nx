@@ -36,7 +36,10 @@ With correct output, native 4352 × 2176 stereo took 20.35 ms GPU p50 /
 20.66 ms p95 after two warmups, including 7.46 ms dequantization and
 12.88 ms inverse wavelet/output at p50. A uniformly scaled, nonfoveated
 2688 × 1344 image took 8.75 / 8.77 ms GPU, while its synchronous CPU call
-took 12.66 / 23.45 ms. Neither proves 90 fresh frames/s in the viewer;
+took 12.66 / 23.45 ms. A separate 60-decode cycle of six synthetic-pan
+frames at that size took 8.59 / 9.23 ms GPU and 19.96 / 23.77 ms for the
+synchronous CPU call after six warmups. Neither proves 90 fresh frames/s
+in the viewer;
 the native decode exceeds an 11.11 ms frame budget by itself. Lowering the
 native packet target fivefold from 500 to 100 Mbit/s saved only about 0.91 ms
 GPU in paired short runs. Reconstruction cost dominates compressed byte count.

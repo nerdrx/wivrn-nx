@@ -281,7 +281,7 @@ void pyrowave_decoder::worker_function(uint32_t queue_family_index)
 				item->current_layout = vk::ImageLayout::eGeneral;
 				vk::ImageMemoryBarrier barrier{
 				        .srcAccessMask = vk::AccessFlagBits::eNone,
-				        .dstAccessMask = vk::AccessFlagBits::eMemoryWrite,
+				        .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
 				        .oldLayout = vk::ImageLayout::eUndefined,
 				        .newLayout = vk::ImageLayout::eGeneral,
 				        .image = item->image,
@@ -293,7 +293,7 @@ void pyrowave_decoder::worker_function(uint32_t queue_family_index)
 				};
 				cmd_buf.pipelineBarrier(
 				        vk::PipelineStageFlagBits::eAllCommands,
-				        vk::PipelineStageFlagBits::eTransfer,
+				        vk::PipelineStageFlagBits::eColorAttachmentOutput,
 				        {},
 				        {},
 				        {},
@@ -302,8 +302,8 @@ void pyrowave_decoder::worker_function(uint32_t queue_family_index)
 			dec.decode(cmd_buf, *input, views);
 			{
 				vk::ImageMemoryBarrier barrier{
-				        .srcAccessMask = vk::AccessFlagBits::eMemoryWrite,
-				        .dstAccessMask = vk::AccessFlagBits::eMemoryRead,
+				        .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+				        .dstAccessMask = vk::AccessFlagBits::eShaderRead,
 				        .oldLayout = vk::ImageLayout::eGeneral,
 				        .newLayout = vk::ImageLayout::eGeneral,
 				        .image = item->image,
@@ -314,7 +314,7 @@ void pyrowave_decoder::worker_function(uint32_t queue_family_index)
 				        },
 				};
 				cmd_buf.pipelineBarrier(
-				        vk::PipelineStageFlagBits::eComputeShader,
+				        vk::PipelineStageFlagBits::eColorAttachmentOutput,
 				        vk::PipelineStageFlagBits::eFragmentShader,
 				        {},
 				        {},

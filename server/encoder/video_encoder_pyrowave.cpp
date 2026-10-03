@@ -143,8 +143,14 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_pyrowave::encode(
 	}
 	if (!s.valid)
 		return {};
-	const void * meta = s.meta_staging ? s.meta_staging.map() : s.meta.map();
-	const void * bitstream = s.bitstream_staging ? s.bitstream_staging.map() : s.bitstream.map();
+	// The GPU may have written non-coherent host-visible memory, including the
+	// transfer staging buffers. The fence only establishes completion.
+	auto & readable_meta = s.meta_staging ? s.meta_staging : s.meta;
+	auto & readable_bitstream = s.bitstream_staging ? s.bitstream_staging : s.bitstream;
+	vmaInvalidateAllocation(vk_allocator::instance(), readable_meta, 0, VK_WHOLE_SIZE);
+	vmaInvalidateAllocation(vk_allocator::instance(), readable_bitstream, 0, VK_WHOLE_SIZE);
+	const void * meta = readable_meta.map();
+	const void * bitstream = readable_bitstream.map();
 	const size_t count = encoder.compute_num_packets(meta, 8 * 1024);
 	packets.resize(count);
 	packet_buffer.resize(8 * 1024 * 1024);

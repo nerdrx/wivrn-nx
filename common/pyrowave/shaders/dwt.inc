@@ -110,7 +110,17 @@ void forward_transform8x2()
 		values[i] = v;
 	}
 
-	// CDF 9/7 lifting steps.
+#ifdef PYROWAVE_HAAR_FORMAT
+// Paired Haar transform. This changes the bitstream representation.
+	for (int i = 0; i < PADDED_SIZE; i += 2)
+	{
+		VEC2 a = values[i + 0];
+		VEC2 b = values[i + 1];
+		values[i + 0] = (a + b) * FLOAT(0.5);
+		values[i + 1] = (a - b) * FLOAT(0.5);
+	}
+#else
+// CDF 9/7 lifting steps.
 	// Arith go brrr.
 	for (int i = 1; i < PADDED_SIZE - 1; i += 2)
 		values[i] += ALPHA * (values[i - 1] + values[i + 1]);
@@ -121,7 +131,8 @@ void forward_transform8x2()
 	for (int i = 4; i < PADDED_SIZE - 4; i += 2)
 		values[i] += DELTA * (values[i - 1] + values[i + 1]);
 
-	// Avoid WAR hazard.
+	#endif
+// Avoid WAR hazard.
 	barrier();
 
 	for (int i = APRON_HALF; i < PADDED_SIZE_HALF - APRON_HALF; i++)
@@ -129,9 +140,11 @@ void forward_transform8x2()
 		VEC2 a = values[2 * i + 0];
 		VEC2 b = values[2 * i + 1];
 
+#ifndef PYROWAVE_HAAR_FORMAT
 		// Filter kernel rescale.
 		a *= inv_K;
 		b *= K;
+#endif
 
 		// Transpose the 2x2 block.
 		VEC2 t0 = VEC2(a.x, b.x);
@@ -161,7 +174,17 @@ void forward_transform4x2(bool active_lane, int y_offset)
 			values[i] = v;
 		}
 
-		// CDF 9/7 lifting steps.
+#ifdef PYROWAVE_HAAR_FORMAT
+// Paired Haar transform. This changes the bitstream representation.
+		for (int i = 0; i < PADDED_SIZE; i += 2)
+		{
+			VEC2 a = values[i + 0];
+			VEC2 b = values[i + 1];
+			values[i + 0] = (a + b) * FLOAT(0.5);
+			values[i + 1] = (a - b) * FLOAT(0.5);
+		}
+#else
+// CDF 9/7 lifting steps.
 		// Arith go brrr.
 		for (int i = 1; i < PADDED_SIZE - 1; i += 2)
 			values[i] += ALPHA * (values[i - 1] + values[i + 1]);
@@ -171,6 +194,7 @@ void forward_transform4x2(bool active_lane, int y_offset)
 			values[i] += GAMMA * (values[i - 1] + values[i + 1]);
 		for (int i = 4; i < PADDED_SIZE - 4; i += 2)
 			values[i] += DELTA * (values[i - 1] + values[i + 1]);
+	#endif
 	}
 
 	// Avoid WAR hazard.
@@ -183,9 +207,11 @@ void forward_transform4x2(bool active_lane, int y_offset)
 			VEC2 a = values[2 * i + 0];
 			VEC2 b = values[2 * i + 1];
 
+#ifndef PYROWAVE_HAAR_FORMAT
 			// Filter kernel rescale.
 			a *= inv_K;
 			b *= K;
+#endif
 
 			// Transpose the 2x2 block.
 			VEC2 t0 = VEC2(a.x, b.x);

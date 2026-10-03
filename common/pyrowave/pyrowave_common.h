@@ -42,6 +42,7 @@ static_assert(sizeof(BitstreamHeader) == 8, "BitstreamHeader is not 8 bytes.");
 enum
 {
 	BITSTREAM_EXTENDED_CODE_START_OF_FRAME = 0,
+	BITSTREAM_EXTENDED_CODE_START_OF_FRAME_HAAR = 1,
 };
 
 enum

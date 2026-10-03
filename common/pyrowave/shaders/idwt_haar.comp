@@ -1,0 +1,70 @@
+#version 450
+// Copyright (c) 2025 Hans-Kristian Arntzen
+// SPDX-License-Identifier: MIT
+// Paired Haar bitstream experiment; not compatible with CDF 9/7 streams.
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(constant_id = 0) const bool DCShift = false;
+layout(constant_id = 1) const bool CropOutput = false;
+layout(set = 0, binding = 0) uniform sampler2DArray uHigh;
+layout(set = 0, binding = 1) writeonly uniform image2D uOutput;
+layout(set = 0, binding = 2) uniform sampler2DArray uLow;
+layout(push_constant) uniform Registers
+{
+    ivec2 resolution;       // Coefficient dimensions, transposed by caller.
+    vec2 inv_resolution;    // Preserved push-constant ABI.
+};
+
+float band(int level, ivec2 coord, int layer)
+{
+    if (level <= 1)
+        return texelFetch(uHigh, ivec3(coord, layer), level).r;
+    return texelFetch(uLow, ivec3(coord, layer), level - 2).r;
+}
+
+void main()
+{
+    ivec2 dispatch_coord = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(dispatch_coord, resolution)))
+        return;
+
+    // Preserve the faster transposed dispatch while sampling native coordinates.
+    ivec2 p = dispatch_coord.yx;
+    ivec2 output_base = p * 2;
+    ivec2 output_size = CropOutput ? imageSize(uOutput) : ivec2(0);
+    if (CropOutput && any(greaterThanEqual(output_base, output_size)))
+        return;
+    int base_level = int(inv_resolution.x + 0.5);
+    float ll = texelFetch(uLow, ivec3(p >> (4 - base_level), 0), 2).r;
+    for (int level = 4; level > base_level; --level)
+    {
+        int relative_level = level - base_level;
+        ivec2 coord = p >> relative_level;
+        float sx = ((p.x >> (relative_level - 1)) & 1) == 0 ? 1.0 : -1.0;
+        float sy = ((p.y >> (relative_level - 1)) & 1) == 0 ? 1.0 : -1.0;
+        float hl = band(level, coord, 1);
+        float lh = band(level, coord, 2);
+        float hh = band(level, coord, 3);
+        ll += hl * sx + lh * sy + hh * sx * sy;
+    }
+
+    float hl = band(base_level, p, 1);
+    float lh = band(base_level, p, 2);
+    float hh = band(base_level, p, 3);
+    vec4 pixels = vec4(
+        ll + hl + lh + hh,
+        ll - hl + lh - hh,
+        ll + hl - lh - hh,
+        ll - hl - lh + hh);
+    if (DCShift)
+        pixels += vec4(0.5);
+
+    imageStore(uOutput, output_base, vec4(pixels.x));
+    if (!CropOutput || output_base.x + 1 < output_size.x)
+        imageStore(uOutput, output_base + ivec2(1, 0), vec4(pixels.y));
+    if (!CropOutput || output_base.y + 1 < output_size.y)
+    {
+        imageStore(uOutput, output_base + ivec2(0, 1), vec4(pixels.z));
+        if (!CropOutput || output_base.x + 1 < output_size.x)
+            imageStore(uOutput, output_base + ivec2(1, 1), vec4(pixels.w));
+    }
+}

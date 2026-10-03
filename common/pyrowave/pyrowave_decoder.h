@@ -127,6 +127,9 @@ class Decoder : public WaveletBuffers
 	pipeline dequant_[3];
 	pipeline idwt_;
 	vk::raii::Pipeline idwt_dcshift = nullptr;
+	// Unconditional members keep the public class layout identical in both builds.
+	vk::raii::ImageView fused_high_views[NumComponents] = {nullptr, nullptr, nullptr};
+	vk::raii::ImageView fused_low_views[NumComponents] = {nullptr, nullptr, nullptr};
 
 public:
 	using ViewBuffers = std::array<vk::ImageView, 3>;
@@ -137,6 +140,11 @@ public:
 	// supported 8/16-bit storage-buffer and shaderFloat16 capabilities enabled.
 	Decoder(vk::raii::PhysicalDevice & phys_dev, vk::raii::Device & device, int width, int height, ChromaSubsampling chroma, bool fragment_path = false);
 	~Decoder();
+
+	bool uses_fragment_path() const
+	{
+		return fragment_path;
+	}
 
 	bool decode(vk::raii::CommandBuffer & cmd, DecoderInput & input, const ViewBuffers & views);
 

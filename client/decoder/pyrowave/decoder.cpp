@@ -274,14 +274,20 @@ void pyrowave_decoder::worker_function(uint32_t queue_family_index)
 			cmd_buf.reset();
 			cmd_buf.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
 			cmd_buf.resetQueryPool(*qp, 0, 2);
-			cmd_buf.writeTimestamp(vk::PipelineStageFlagBits::eComputeShader, *qp, 0);
+			cmd_buf.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, *qp, 0);
+			const auto output_stage = dec.uses_fragment_path()
+			                                  ? vk::PipelineStageFlagBits::eColorAttachmentOutput
+			                                  : vk::PipelineStageFlagBits::eComputeShader;
+			const auto output_access = dec.uses_fragment_path()
+			                                   ? vk::AccessFlagBits::eColorAttachmentWrite
+			                                   : vk::AccessFlagBits::eShaderWrite;
 
 			if (item->current_layout != vk::ImageLayout::eGeneral)
 			{
 				item->current_layout = vk::ImageLayout::eGeneral;
 				vk::ImageMemoryBarrier barrier{
 				        .srcAccessMask = vk::AccessFlagBits::eNone,
-				        .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+				        .dstAccessMask = output_access,
 				        .oldLayout = vk::ImageLayout::eUndefined,
 				        .newLayout = vk::ImageLayout::eGeneral,
 				        .image = item->image,
@@ -293,7 +299,7 @@ void pyrowave_decoder::worker_function(uint32_t queue_family_index)
 				};
 				cmd_buf.pipelineBarrier(
 				        vk::PipelineStageFlagBits::eAllCommands,
-				        vk::PipelineStageFlagBits::eColorAttachmentOutput,
+				        output_stage,
 				        {},
 				        {},
 				        {},
@@ -302,7 +308,7 @@ void pyrowave_decoder::worker_function(uint32_t queue_family_index)
 			dec.decode(cmd_buf, *input, views);
 			{
 				vk::ImageMemoryBarrier barrier{
-				        .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+				        .srcAccessMask = output_access,
 				        .dstAccessMask = vk::AccessFlagBits::eShaderRead,
 				        .oldLayout = vk::ImageLayout::eGeneral,
 				        .newLayout = vk::ImageLayout::eGeneral,
@@ -314,14 +320,14 @@ void pyrowave_decoder::worker_function(uint32_t queue_family_index)
 				        },
 				};
 				cmd_buf.pipelineBarrier(
-				        vk::PipelineStageFlagBits::eColorAttachmentOutput,
+				        output_stage,
 				        vk::PipelineStageFlagBits::eFragmentShader,
 				        {},
 				        {},
 				        {},
 				        barrier);
 			}
-			cmd_buf.writeTimestamp(vk::PipelineStageFlagBits::eComputeShader, *qp, 1);
+			cmd_buf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *qp, 1);
 			cmd_buf.end();
 
 			application::get_queue().lock()->submit(

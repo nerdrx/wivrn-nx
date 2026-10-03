@@ -48,7 +48,12 @@ static vk::raii::DescriptorPool make_descriptor_pool(vk::raii::Device & device, 
 	        },
 	        vk::DescriptorPoolSize{
 	                .type = vk::DescriptorType::eCombinedImageSampler,
-	                .descriptorCount = idwt,
+	                .descriptorCount = idwt *
+#ifdef PYROWAVE_HAAR_FORMAT
+			                   2,
+#else
+			                   1,
+#endif
 	        },
 	        vk::DescriptorPoolSize{
 	                .type = vk::DescriptorType::eStorageImage,
@@ -394,7 +399,11 @@ bool DecoderInput::push_data(std::span<const uint8_t> data)
 				last_seq = header.sequence;
 			}
 
+#ifdef PYROWAVE_HAAR_FORMAT
+			if (seq.code == BITSTREAM_EXTENDED_CODE_START_OF_FRAME_HAAR)
+#else
 			if (seq.code == BITSTREAM_EXTENDED_CODE_START_OF_FRAME)
+#endif
 			{
 				if (seq.width_minus_1 + 1 != decoder.width || seq.height_minus_1 + 1 != decoder.height)
 				{
@@ -431,9 +440,13 @@ Decoder::Decoder(
         int width,
         int height,
         ChromaSubsampling chroma,
-        bool fragment_path) :
+        [[maybe_unused]] bool use_fragment_path) :
         WaveletBuffers(device, width, height, chroma),
-        fragment_path(fragment_path),
+#ifdef PYROWAVE_HAAR_FORMAT
+        fragment_path(false), // Haar packets require the paired compute inverse.
+#else
+        fragment_path(use_fragment_path),
+#endif
         phys_dev(phys_dev),
         ds_pool(nullptr)
 {
@@ -490,6 +503,12 @@ Decoder::Decoder(
 
 	if (not(feat12.storageBuffer8BitAccess or use_readonly_texel_buffer))
 		throw std::runtime_error("Missing storageBuffer8BitAccess feature");
+
+#ifdef PYROWAVE_HAAR_FORMAT
+	static_assert(DecompositionLevels == 5, "fused Haar shader expects five levels");
+	if (Configuration::get().get_precision() != 1 || wavelet_img_high_res.info().mipLevels != 2 || wavelet_img_low_res.info().mipLevels != 3)
+		throw std::runtime_error("fused Haar inverse requires precision 1 with two high and three low mips");
+#endif
 
 	ds_pool = make_descriptor_pool(device, use_readonly_texel_buffer, fragment_path);
 
@@ -1292,6 +1311,13 @@ Decoder::Decoder(
 	}
 	else
 	{
+#ifdef PYROWAVE_HAAR_FORMAT
+		std::array bindings{
+		        vk::DescriptorSetLayoutBinding{.binding = 0, .descriptorType = vk::DescriptorType::eCombinedImageSampler, .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eCompute},
+		        vk::DescriptorSetLayoutBinding{.binding = 1, .descriptorType = vk::DescriptorType::eStorageImage, .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eCompute},
+		        vk::DescriptorSetLayoutBinding{.binding = 2, .descriptorType = vk::DescriptorType::eCombinedImageSampler, .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eCompute},
+		};
+#else
 		std::array bindings{
 		        vk::DescriptorSetLayoutBinding{
 		                .binding = 0,
@@ -1306,6 +1332,7 @@ Decoder::Decoder(
 		                .stageFlags = vk::ShaderStageFlagBits::eCompute,
 		        },
 		};
+#endif
 		idwt_.ds_layout = device.createDescriptorSetLayout({
 		        .bindingCount = bindings.size(),
 		        .pBindings = bindings.data(),
@@ -1322,22 +1349,36 @@ Decoder::Decoder(
 		        .pushConstantRangeCount = 1,
 		        .pPushConstantRanges = &pc,
 		});
-		VkBool32 dc_shift = false;
-		vk::SpecializationMapEntry sp_entry{
-		        .constantID = 0,
-		        .size = sizeof(dc_shift),
+		VkBool32 dc_shift[] = {false, width % Alignment != 0 || height % Alignment != 0};
+		std::array sp_entries{
+		        vk::SpecializationMapEntry{.constantID = 0, .offset = 0, .size = sizeof(VkBool32)},
+		        vk::SpecializationMapEntry{.constantID = 1, .offset = sizeof(VkBool32), .size = sizeof(VkBool32)},
 		};
 		vk::SpecializationInfo sp{
-		        .mapEntryCount = 1,
-		        .pMapEntries = &sp_entry,
+#ifdef PYROWAVE_HAAR_FORMAT
+		        .mapEntryCount = 2,
+		        .pMapEntries = sp_entries.data(),
 		        .dataSize = sizeof(dc_shift),
-		        .pData = &dc_shift,
+#else
+		        .mapEntryCount = 1,
+		        .pMapEntries = sp_entries.data(),
+		        .dataSize = sizeof(VkBool32),
+#endif
+		        .pData = dc_shift,
 		};
 
+#ifdef PYROWAVE_HAAR_FORMAT
+		auto shader = load_shader(device, "idwt_haar");
+#else
 		auto shader = load_shader(device, std::string("idwt_" XSTR(PYROWAVE_PRECISION)) + (feat12.shaderFloat16 ? "_fp16" : ""));
+#endif
 		vk::ComputePipelineCreateInfo info{
 		        .stage = {
+#ifdef PYROWAVE_HAAR_FORMAT
+		                .flags = {},
+#else
 		                .flags = vk::PipelineShaderStageCreateFlagBits::eRequireFullSubgroups,
+#endif
 		                .stage = vk::ShaderStageFlagBits::eCompute,
 		                .module = *shader,
 		                .pName = "main",
@@ -1349,11 +1390,37 @@ Decoder::Decoder(
 		        nullptr, // FIXME: cache
 		        info);
 
-		dc_shift = true;
+		dc_shift[0] = true;
 		idwt_dcshift = device.createComputePipeline(
 		        nullptr, // FIXME: cache
 		        info);
 
+#ifdef PYROWAVE_HAAR_FORMAT
+		for (int c = 0; c < NumComponents; c++)
+		{
+			// Level 1 is guaranteed to reference the high-resolution image even
+			// when 4:2:0 does not need a level-0 chroma output view.
+			auto high_info = component_layer_views_info[c][1];
+			high_info.viewType = vk::ImageViewType::e2DArray;
+			high_info.subresourceRange.baseMipLevel = 0;
+			high_info.subresourceRange.levelCount = 2;
+			fused_high_views[c] = device.createImageView(high_info);
+			auto low_info = component_layer_views_info[c][2];
+			low_info.viewType = vk::ImageViewType::e2DArray;
+			low_info.subresourceRange.levelCount = DecompositionLevels - 2;
+			fused_low_views[c] = device.createImageView(low_info);
+			auto set = idwt_.ds[c][0] = allocate_descriptor_set(*idwt_.ds_layout);
+			std::array<vk::DescriptorImageInfo, 2> tex{{
+			        {.sampler = *mirror_repeat_sampler, .imageView = *fused_high_views[c], .imageLayout = vk::ImageLayout::eGeneral},
+			        {.sampler = *mirror_repeat_sampler, .imageView = *fused_low_views[c], .imageLayout = vk::ImageLayout::eGeneral},
+			}};
+			std::array<vk::WriteDescriptorSet, 2> writes{{
+			        {.dstSet = set, .dstBinding = 0, .descriptorCount = 1, .descriptorType = vk::DescriptorType::eCombinedImageSampler, .pImageInfo = &tex[0]},
+			        {.dstSet = set, .dstBinding = 2, .descriptorCount = 1, .descriptorType = vk::DescriptorType::eCombinedImageSampler, .pImageInfo = &tex[1]},
+			}};
+			device.updateDescriptorSets(writes, {});
+		}
+#else
 		for (int input_level = DecompositionLevels - 1; input_level >= 0; input_level--)
 		{
 			for (int c = 0; c < NumComponents; c++)
@@ -1396,6 +1463,7 @@ Decoder::Decoder(
 				device.updateDescriptorSets(descriptor_write, {});
 			}
 		}
+#endif
 	}
 }
 
@@ -1545,10 +1613,27 @@ bool Decoder::idwt(vk::raii::CommandBuffer & cmd, const ViewBuffers & views)
 	// auto start_idwt = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
 	IDwtPushData push{};
-
+#ifdef PYROWAVE_HAAR_FORMAT
+	cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *idwt_dcshift);
+	for (int c = 0; c < NumComponents; c++)
+	{
+		int base_level = chroma == ChromaSubsampling::Chroma420 && c != 0 ? 1 : 0;
+		push.resolution[0] = component_ll_dim[c][base_level].height;
+		push.resolution[1] = component_ll_dim[c][base_level].width;
+		push.inv_resolution[0] = float(base_level); // Haar-only base mip selector.
+		push.inv_resolution[1] = 0.0f;
+		cmd.pushConstants<IDwtPushData>(*idwt_.layout, vk::ShaderStageFlagBits::eCompute, 0, push);
+		vk::DescriptorImageInfo storage{.imageView = views[c], .imageLayout = vk::ImageLayout::eGeneral};
+		vk::WriteDescriptorSet write{.dstSet = idwt_.ds[c][0], .dstBinding = 1, .descriptorCount = 1, .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &storage};
+		device.updateDescriptorSets(write, {});
+		cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *idwt_.layout, 0, idwt_.ds[c][0], {});
+		cmd.dispatch((push.resolution[0] + 15) / 16, (push.resolution[1] + 15) / 16, 1);
+	}
+	return true;
+#else
 	for (int input_level = DecompositionLevels - 1; input_level >= 0; input_level--)
 	{
-		// Transposed.
+		// Transposed for the CDF gather inverse.
 		push.resolution[0] = component_ll_dim[0][input_level].height;
 		push.resolution[1] = component_ll_dim[0][input_level].width;
 		push.inv_resolution[0] = 1.0f / float(push.resolution[0]);
@@ -1649,6 +1734,7 @@ bool Decoder::idwt(vk::raii::CommandBuffer & cmd, const ViewBuffers & views)
 	// auto end_idwt = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 	// device->register_time_interval("GPU", std::move(start_idwt), std::move(end_idwt), "iDWT");
 	return true;
+#endif
 }
 
 bool Decoder::idwt_fragment(vk::raii::CommandBuffer & cmd, const ViewBuffers & views)
@@ -1914,7 +2000,10 @@ bool Decoder::idwt_fragment(vk::raii::CommandBuffer & cmd, const ViewBuffers & v
 			auto barrier = [&] {
 				cmd.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput,
 				                    vk::PipelineStageFlagBits::eColorAttachmentOutput,
-				                    vk::DependencyFlagBits::eByRegion, by_region, {}, {});
+				                    vk::DependencyFlagBits::eByRegion,
+				                    by_region,
+				                    {},
+				                    {});
 			};
 
 			// Need vertical fixup (very common for 1080p).

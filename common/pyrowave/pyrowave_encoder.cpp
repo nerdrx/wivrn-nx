@@ -159,6 +159,10 @@ Encoder::Encoder(vk::raii::PhysicalDevice & phys_dev, vk::raii::Device & device,
         WaveletBuffers(device, width, height, chroma),
         ds_pool(make_descriptor_pool(device))
 {
+#ifdef PYROWAVE_HAAR_FORMAT
+	if (Configuration::get().get_precision() != 1)
+		throw std::runtime_error("paired Haar format requires precision 1");
+#endif
 	auto [prop, prop11, prop13] = phys_dev.getProperties2<vk::PhysicalDeviceProperties2, vk::PhysicalDeviceVulkan11Properties, vk::PhysicalDeviceVulkan13Properties>();
 	SubgroupSizeProperties subgroup_prop{prop13.minSubgroupSize, prop13.maxSubgroupSize, prop13.requiredSubgroupSizeStages};
 	auto ops = prop11.subgroupSupportedOperations;
@@ -720,7 +724,11 @@ Encoder::Encoder(vk::raii::PhysicalDevice & phys_dev, vk::raii::Device & device,
 		        .pData = &dc_shift,
 		};
 
+#ifdef PYROWAVE_HAAR_FORMAT
+		auto shader = load_shader(device, std::string("dwt_haar_" XSTR(PYROWAVE_PRECISION)));
+#else
 		auto shader = load_shader(device, std::string("dwt_" XSTR(PYROWAVE_PRECISION)) + (feat12.shaderFloat16 ? "_fp16" : ""));
+#endif
 		vk::ComputePipelineCreateInfo info{
 		        .stage = {
 		                .flags = vk::PipelineShaderStageCreateFlagBits::eRequireFullSubgroups,
@@ -1428,7 +1436,11 @@ size_t Encoder::packetize(Packet * packets, size_t packet_boundary, void * outpu
 	header.height_minus_1 = height - 1;
 	header.sequence = reinterpret_cast<const BitstreamHeader *>(input_bitstream + meta[0].offset_u32)->sequence;
 	header.extended = 1;
+#ifdef PYROWAVE_HAAR_FORMAT
+	header.code = BITSTREAM_EXTENDED_CODE_START_OF_FRAME_HAAR;
+#else
 	header.code = BITSTREAM_EXTENDED_CODE_START_OF_FRAME;
+#endif
 	header.total_blocks = num_non_zero_blocks;
 	header.chroma_resolution = chroma == ChromaSubsampling::Chroma444 ? CHROMA_RESOLUTION_444 : CHROMA_RESOLUTION_420;
 

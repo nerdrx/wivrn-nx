@@ -221,9 +221,12 @@ void main()
 {
     uint local_index = gl_SubgroupID * gl_SubgroupSize + gl_SubgroupInvocationID;
 
-    int block_index_32x32 = int(registers.block_offset_32x32 +
-        gl_WorkGroupID.y * registers.block_stride_32x32 +
-        gl_WorkGroupID.x);
+    // Match init_block_meta's consecutive 32x32 tile ranges, including partial edge tiles.
+    int band_tile_count = registers.block_stride_32x32 * ((registers.resolution.y + 31) / 32);
+    int block_index_32x32 = registers.block_offset_32x32 +
+        int(gl_WorkGroupID.z) * band_tile_count +
+        int(gl_WorkGroupID.y) * registers.block_stride_32x32 +
+        int(gl_WorkGroupID.x);
 
     uint block_local_index = bitfieldExtract(local_index, 0, 3);
     uint block_x = bitfieldExtract(local_index, 3, 2);
@@ -243,7 +246,7 @@ void main()
     {
         for (int j = 0; j < 2; j++)
             for (int i = 0; i < 4; i++)
-                imageStore(uDequantImg, ivec3(coord + ivec2(i, j), registers.output_layer), vec4(0.0));
+                imageStore(uDequantImg, ivec3(coord + ivec2(i, j), registers.output_layer + int(gl_WorkGroupID.z)), vec4(0.0));
         return;
     }
 
@@ -387,5 +390,5 @@ void main()
     // Write output.
     for (int j = 0; j < 2; j++)
         for (int i = 0; i < 4; i++)
-            imageStore(uDequantImg, ivec3(coord + ivec2(i, j), registers.output_layer), vec4(v[j][i]));
+            imageStore(uDequantImg, ivec3(coord + ivec2(i, j), registers.output_layer + int(gl_WorkGroupID.z)), vec4(v[j][i]));
 }

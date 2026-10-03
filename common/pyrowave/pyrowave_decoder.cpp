@@ -1539,18 +1539,17 @@ bool Decoder::dequant(vk::raii::CommandBuffer & cmd, size_t storage_mode)
 
 			begin_label(cmd, std::format("level {} - component {}", level, component).c_str());
 
-			for (int band = (level == DecompositionLevels - 1 ? 0 : 1); band < 4; band++)
-			{
-				push.resolution[0] = get_width(wavelet_img_high_res, level);
-				push.resolution[1] = get_height(wavelet_img_high_res, level);
-				push.output_layer = band;
-				push.block_offset_32x32 = block_meta[component][level][band].block_offset_32x32;
-				push.block_stride_32x32 = block_meta[component][level][band].block_stride_32x32;
-				cmd.pushConstants<DequantizerPushData>(*p.layout, vk::ShaderStageFlagBits::eCompute, 0, push);
-
-				cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *p.layout, 0, p.ds[component][level], {});
-				cmd.dispatch((push.resolution[0] + 31) / 32, (push.resolution[1] + 31) / 32, 1);
-			}
+			// init_block_meta packs equal-sized bands consecutively; dispatch Z selects each band.
+			int first_band = level == DecompositionLevels - 1 ? 0 : 1;
+			int band_count = 4 - first_band;
+			push.resolution[0] = get_width(wavelet_img_high_res, level);
+			push.resolution[1] = get_height(wavelet_img_high_res, level);
+			push.output_layer = first_band;
+			push.block_offset_32x32 = block_meta[component][level][first_band].block_offset_32x32;
+			push.block_stride_32x32 = block_meta[component][level][first_band].block_stride_32x32;
+			cmd.pushConstants<DequantizerPushData>(*p.layout, vk::ShaderStageFlagBits::eCompute, 0, push);
+			cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *p.layout, 0, p.ds[component][level], {});
+			cmd.dispatch((push.resolution[0] + 31) / 32, (push.resolution[1] + 31) / 32, band_count);
 
 			end_label(cmd);
 		}

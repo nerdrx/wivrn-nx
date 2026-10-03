@@ -57,6 +57,24 @@ Pico and desktop Haar output matched byte-for-byte. These isolated static
 decode timings still exceed the 11.11 ms 90 Hz frame budget and exclude
 transport, presentation, encoder cost, and photon latency.
 
+Band batching subsequently reduced dequantization dispatches from 42 to 13
+for 4:2:0 (48 to 15 for 4:4:4). Each dispatch processes consecutive bands
+through its Z dimension; the payload and reconstruction arithmetic are
+unchanged. This also applies to the standard CDF decoder. Pico CDF output
+matched its previous device baseline exactly.
+
+Three short control/candidate/control runs measured approximately 2.5% less
+GPU time. The integrated Haar build measured **12.16 ms GPU p50 / 12.71 ms
+p95** on the static native fixture. A six-packet synthetic translation test
+measured **12.23 / 12.75 ms**; all 18 Pico readback planes matched the host
+reference byte-for-byte. These timings used 12 warmups and 30 samples, with
+readback tested separately. Synthetic translations are not live VR proof.
+Both Android `wivrn` module builds linked with Haar enabled and disabled;
+no APK was installed. The default remains CDF with Haar disabled.
+
+Descriptor update batching, sign-scan barrier removal, and narrower CPU
+flush ranges showed no convincing repeatable benefit and are not integrated.
+
 Clearing coefficient images and skipping zero writes made reconstruction
 slower; it is not integrated. Alternate dispatch layouts and typed final
 stores showed no convincing benefit. A correct 4x4 output variant was roughly

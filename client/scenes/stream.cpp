@@ -559,6 +559,7 @@ void scenes::stream::send_initial_control_packets(wivrn_session & net, float gue
 				case raw:
 				case nxwarp:
 				case pyrowave:
+				case nxastc:
 					break;
 				case h265:
 				case av1:
@@ -583,6 +584,30 @@ void scenes::stream::send_initial_control_packets(wivrn_session & net, float gue
 			if (config.nxwarp)
 				cs.insert(cs.begin(), video_codec::nxwarp);
 		}
+
+#ifdef __ANDROID__
+		// Isolated ADB test override; preserve the user's saved codec/profile.
+		char test_codec[PROP_VALUE_MAX] = {};
+		if (__system_property_get("debug.wivrn.nx.test_codec", test_codec) > 0 &&
+		    std::string_view(test_codec) == "nxastc")
+		{
+			const auto supported = decoder::supported_codecs();
+			if (!std::ranges::contains(supported, video_codec::nxastc))
+				throw std::runtime_error("ASTC test requested on an unsupported device");
+			info.supported_codecs = {video_codec::nxastc};
+			auto view = application::get_hmd_traits().override_view(system.view_configuration_views(viewconfig)[0]);
+			info.render_eye_width = info.stream_eye_width = view.recommendedImageRectWidth;
+			info.render_eye_height = info.stream_eye_height = view.recommendedImageRectHeight;
+			info.settings.render_scale = 1.f;
+			info.settings.foveation_strength = 0.f;
+			info.settings.foveation_adaptive = false;
+			info.settings.motion_smoothing = false;
+			info.settings.motion_smoothing_mode = wivrn::motion_mode::off;
+			info.settings.fps_divider = 1;
+			info.settings.preferred_refresh_rate = 90.f;
+			info.bit_depth = 8;
+		}
+#endif
 
 		return info;
 	}());

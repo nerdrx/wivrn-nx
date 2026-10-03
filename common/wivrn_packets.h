@@ -211,6 +211,8 @@ enum video_codec
 	// Experimental Vulkan wavelet decoder. Kept after hardware codecs so automatic
 	// negotiation retains the existing hardware/NX Warp preference order.
 	pyrowave,
+	// Opt-in standard ASTC 8x8 + LZ4 texture stream; requires a matching client.
+	nxastc,
 };
 
 // What a stream IS, said on the wire instead of inferred from its index.

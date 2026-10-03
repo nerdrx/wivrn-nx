@@ -249,6 +249,9 @@ std::array<wivrn::compositor::image, 2> make_images(wivrn::vk_bundle & vk, vk::C
 	                .pViewFormats = formats.data(),
 	        },
 	};
+	// The ASTC encoder reads the compositor planes through sampled image views.
+	if (std::ranges::contains(encoders, wivrn::encoder_astc, &wivrn::encoder_settings::encoder_name))
+		image_info.get().usage |= vk::ImageUsageFlagBits::eSampled;
 #if WIVRN_USE_VULKAN_ENCODE
 	if (
 	        std::get<vk::PhysicalDeviceVideoMaintenance1FeaturesKHR>(vk.feat).videoMaintenance1 and
@@ -2221,6 +2224,11 @@ void compositor::update_foveation_center_override(const from_headset::override_f
 
 void compositor::update_foveation_shape()
 {
+	if (settings[0].codec == video_codec::nxastc && settings[1].codec == video_codec::nxastc)
+	{
+		foveation.set_shape(0.f, 1.f);
+		return;
+	}
 	float base;
 	bool adaptive;
 	{

@@ -1011,6 +1011,7 @@ void application::initialize_vulkan()
 	const bool have_shader_int16 = bool(supported_features.shaderInt16);
 
 	vk::PhysicalDeviceFeatures device_features{
+	        .textureCompressionASTC_LDR = supported_features.textureCompressionASTC_LDR,
 	        // PyroWave writes unformatted storage images, including R16F intermediates.
 	        .shaderStorageImageExtendedFormats = supported_features.shaderStorageImageExtendedFormats,
 	        .shaderStorageImageWriteWithoutFormat = supported_features.shaderStorageImageWriteWithoutFormat,

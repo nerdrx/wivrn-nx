@@ -113,10 +113,12 @@ if (WIVRN_BUILD_SERVER)
 			compositor/quad_converter.cpp
 
 			encoder/encoder_settings.cpp
+			encoder/pair_compose.cpp
 			encoder/idr_handler.cpp
 			encoder/video_encoder.cpp
 			encoder/video_encoder_raw.cpp
 			encoder/video_encoder_pyrowave.cpp
+			encoder/video_encoder_astc.cpp
 
 			driver/app_pacer.cpp
 			driver/bitrate_controller.cpp
@@ -206,7 +208,7 @@ if (WIVRN_BUILD_SERVER)
 		# server built against one simply has no "vk" backend to offer and says
 		# so at construction rather than failing to configure.
 		if (TARGET nxvc::vk_encoder)
-			target_sources(wivrn-server PRIVATE encoder/nxwarp_codec_vk.cpp encoder/nxwarp_codec_direct.cpp encoder/pair_compose.cpp)
+			target_sources(wivrn-server PRIVATE encoder/nxwarp_codec_vk.cpp encoder/nxwarp_codec_direct.cpp)
 			target_link_libraries(wivrn-server PRIVATE nxvc::vk_encoder nxvc::vk_common)
 			target_compile_definitions(wivrn-server PRIVATE WIVRN_NXWARP_VK_ENCODER)
             if(WIVRN_NXVC_ATLAS_ENCODE)
@@ -445,6 +447,7 @@ if (WIVRN_BUILD_SERVER)
 			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/motion_warp.comp"
 			"${CMAKE_CURRENT_SOURCE_DIR}/compositor/shaders/quad_convert.comp"
             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/direct_blocks_encode.comp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/astc_encode.comp"
 		)
 
 	target_compile_definitions(wivrn-server PRIVATE JSON_DIAGNOSTICS=1)

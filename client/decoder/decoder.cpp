@@ -17,6 +17,7 @@
  */
 
 #include "decoder.h"
+#include "application.h"
 
 #include <stdexcept>
 
@@ -27,6 +28,7 @@
 #endif
 #include "decoder/nxwarp/nxwarp_decoder.h"
 #include "decoder/pyrowave/decoder.h"
+#include "decoder/astc/decoder.h"
 #include "decoder/raw_decoder.h"
 
 wivrn::decoder::~decoder() = default;
@@ -86,6 +88,8 @@ std::shared_ptr<wivrn::decoder> wivrn::decoder::make(
 			        stream_index,
 			        scene,
 			        acc);
+		case nxastc:
+			return std::make_shared<wivrn::astc_decoder>(device, phys_dev, vk_queue_family_index, description, stream_index, scene, acc);
 		case pyrowave:
 			return std::make_shared<wivrn::pyrowave_decoder>(
 			        device,
@@ -117,6 +121,14 @@ static std::vector<wivrn::video_codec> supported_codecs_()
 #endif
 	res.push_back(wivrn::video_codec::pyrowave);
 	res.push_back(wivrn::video_codec::raw);
+	const auto & physical_device = application::get_physical_device();
+	const auto astc_features = physical_device.getFeatures();
+	const auto astc_format = physical_device.getFormatProperties(vk::Format::eAstc8x8UnormBlock).optimalTilingFeatures;
+	const auto required_astc_format = vk::FormatFeatureFlagBits::eSampledImage |
+	                                  vk::FormatFeatureFlagBits::eSampledImageFilterLinear |
+	                                  vk::FormatFeatureFlagBits::eTransferDst;
+	if (astc_features.textureCompressionASTC_LDR && (astc_format & required_astc_format) == required_astc_format)
+		res.push_back(wivrn::video_codec::nxastc);
 	return res;
 }
 

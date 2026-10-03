@@ -366,6 +366,8 @@ void settings_streaming(const settings_context & ctx)
 				return _C("Codec", "AV1");
 			case wivrn::nxwarp:
 				return _C("Codec", "NX Warp");
+			case wivrn::nxastc:
+				return _C("Codec", "NXVC ASTC (experimental)");
 			case wivrn::pyrowave:
 				return _C("Codec", "PyroWave (experimental)");
 			case wivrn::raw:

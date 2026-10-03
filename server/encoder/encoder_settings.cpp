@@ -130,6 +130,7 @@ static void split_bitrate(std::array<wivrn::encoder_settings, num_streams> & enc
 			case wivrn::raw:
 			case wivrn::nxwarp:
 			case wivrn::pyrowave:
+			case wivrn::nxastc:
 				break;
 		}
 		encoder.bitrate = w;
@@ -284,6 +285,7 @@ class prober
 			case raw:
 			case nxwarp:
 			case pyrowave:
+			case nxastc:
 				return false;
 		}
 		U_LOG_E("Invalid codec %d", int(codec));
@@ -316,6 +318,13 @@ public:
 			throw std::runtime_error("nxwarp encoder was requested but this server was built without it");
 #endif
 		}
+		if (config.codec == video_codec::nxastc or config.name == encoder_astc)
+		{
+			if (!std::ranges::contains(info.supported_codecs, video_codec::nxastc))
+				throw std::runtime_error("NX ASTC requires a matching ASTC-capable client");
+			return {encoder_astc, video_codec::nxastc};
+		}
+
 		// PyroWave is explicitly selected, never a hardware-encoder fallback.
 		if (config.codec == video_codec::pyrowave or config.name == encoder_pyrowave)
 			return {encoder_pyrowave, video_codec::pyrowave};
@@ -416,7 +425,7 @@ std::array<encoder_settings, num_streams> get_encoder_settings(wivrn::vk_bundle 
 	}
 	// A single encoder choice is also copied to the passthrough alpha slot.
 	// PyroWave codes pictures, not alpha; keep that rarely used slot functional.
-	if (res[2].encoder_name == encoder_pyrowave)
+	if (res[2].encoder_name == encoder_pyrowave || res[2].encoder_name == encoder_astc)
 	{
 		res[2].encoder_name = encoder_raw;
 		res[2].codec = video_codec::raw;
@@ -439,14 +448,21 @@ std::array<encoder_settings, num_streams> get_encoder_settings(wivrn::vk_bundle 
 	// so both apply on connection.
 	// stream_encode_size() is the whole derivation, kept pure and dependency free in
 	// stream_scale.h so it can be unit tested without a Vulkan device or a session.
-	const auto encode = stream_encode_size(info.stream_eye_width,
-	                                       info.stream_eye_height,
-	                                       settings.render_scale,
-	                                       config.stream_scale);
+	// The explicit ASTC experiment codes the whole rendered eye. Its texture
+	// must not inherit the older NXVC profile's foveation or reduced size.
+	const bool native_astc = res[0].codec == video_codec::nxastc && res[1].codec == video_codec::nxastc;
+	const auto encode = native_astc
+	                            ? stream_encode_size(info.render_eye_width, info.render_eye_height, 1.f, 1.f)
+	                            : stream_encode_size(info.stream_eye_width,
+	                                                 info.stream_eye_height,
+	                                                 settings.render_scale,
+	                                                 config.stream_scale);
 	const float render_scale = encode.scale;
 	auto width = encode.width;
 	auto height = encode.height;
-	if (config.stream_scale < 1.0f)
+	if (native_astc)
+		U_LOG_I("nxastc: native full-eye %ux%u, no spatial foveation", unsigned(width), unsigned(height));
+	else if (config.stream_scale < 1.0f)
 		U_LOG_I("nxwarp: stream 0 encodes %ux%u per eye (stream_scale %.3g, headset asked %ux%u)",
 		        unsigned(width),
 		        unsigned(height),
@@ -637,6 +653,7 @@ std::array<encoder_settings, num_streams> get_encoder_settings(wivrn::vk_bundle 
 	auto enabled_encoders = res | std::views::filter(&encoder_settings::enabled);
 	if (std::ranges::contains(enabled_encoders, video_codec::h264, &encoder_settings::codec) or
 	    std::ranges::contains(enabled_encoders, video_codec::raw, &encoder_settings::codec) or
+	    std::ranges::contains(enabled_encoders, video_codec::nxastc, &encoder_settings::codec) or
 	    // NX Warp v1 is an 8-bit bitstream: NXVC_TOOL_BITDEPTH10 is defined but not
 	    // implemented by the reference codec, which rejects bit_depth 10 outright.
 	    std::ranges::contains(enabled_encoders, video_codec::nxwarp, &encoder_settings::codec))

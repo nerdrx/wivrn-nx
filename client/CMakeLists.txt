@@ -231,6 +231,7 @@ file(GLOB LOCAL_SOURCE CONFIGURE_DEPENDS
     "decoder/*.cpp"
     "decoder/nxwarp/*.cpp"
     "decoder/pyrowave/*.cpp"
+    "decoder/astc/*.cpp"
     "scenes/*.cpp"
     "utils/*.cpp"
     "vk/*.cpp"

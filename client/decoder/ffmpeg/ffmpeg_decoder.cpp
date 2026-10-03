@@ -59,6 +59,7 @@ static AVCodecID codec_id(wivrn::video_codec codec)
 		case c::raw:
 		case c::nxwarp:
 		case c::pyrowave:
+		case c::nxastc:
 			// Neither is an libavcodec codec: raw is uncompressed and NX Warp is decoded
 			// on the GPU by client/decoder/nxwarp/; PyroWave has its own Vulkan decoder.
 			break;

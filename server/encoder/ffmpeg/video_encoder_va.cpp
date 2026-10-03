@@ -71,6 +71,7 @@ const char * encoder(video_codec codec)
 		case video_codec::raw:
 		case video_codec::nxwarp:
 		case video_codec::pyrowave:
+		case video_codec::nxastc:
 			break;
 	}
 	throw std::runtime_error("invalid codec " + std::to_string(int(codec)));
@@ -264,6 +265,7 @@ video_encoder_va::video_encoder_va(wivrn::vk_bundle & vk,
 		case video_codec::raw:
 		case video_codec::nxwarp:
 		case video_codec::pyrowave:
+		case video_codec::nxastc:
 			throw std::runtime_error("codec not supported for vaapi");
 	}
 	if (settings.sharp_text)

@@ -1133,7 +1133,8 @@ void on_headset_info_packet(const wivrn::from_headset::headset_info_packet & inf
 	        {h265, "h265"},
 	        {av1, "av1"},
 	        {nxwarp, "nxwarp"},
-	        {pyrowave, "pyrowave"}};
+	        {pyrowave, "pyrowave"},
+	        {nxastc, "nxastc"}};
 	for (video_codec codec: info.supported_codecs)
 	{
 		auto it = codec_names.find(codec);

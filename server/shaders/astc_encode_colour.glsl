@@ -9,8 +9,8 @@ uint quint22(uint a, uint b, uint c) {
     return (a & 31u) | ((t & 7u) << 5u) | ((b & 31u) << 8u) | (((t >> 3u) & 3u) << 13u) |
            ((c & 31u) << 15u) | (((t >> 5u) & 3u) << 20u);
 }
-uint interp4(uint grid[16], uint texel) {
-    uvec4 r = astcInterp4[texel];
+uint interp4(uint grid[16], uint texel, uint side) {
+    uvec4 r = side==6u?astc6Interp4[texel]:astcInterp4[texel];
     uint v = 8u;
     for (int k = 0; k < 4; k++) {
         uint p = r[k], w = p >> 5u;
@@ -20,7 +20,8 @@ uint interp4(uint grid[16], uint texel) {
     return v >> 4;
 }
 bool dualCandidate(vec3 pix[64], float baselineError, vec3 mean, mat3 cov,
-                   out uvec4 result, out float score) {
+                   out uvec4 result, out float score, uint side) {
+    uint count=side*side;
     float residual[3];
     for (int c = 0; c < 3; c++) {
         int a = (c + 1) % 3, b = (c + 2) % 3;
@@ -36,13 +37,13 @@ bool dualCandidate(vec3 pix[64], float baselineError, vec3 mean, mat3 cov,
                : residual[1] >= residual[2]                             ? 1u
                                                                         : 2u;
     float chroma = 0, meanRG = 0, meanBG = 0;
-    for (uint i = 0u; i < 64u; i++) {
+    for (uint i = 0u; i < count; i++) {
         float rg = pix[i].r - pix[i].g, bg = pix[i].b - pix[i].g;
         chroma += rg * rg + bg * bg;
-        meanRG += rg / 64.0;
-        meanBG += bg / 64.0;
+        meanRG += rg / float(count);
+        meanBG += bg / float(count);
     }
-    chroma = chroma / 64.0 - meanRG * meanRG - meanBG * meanBG;
+    chroma = chroma / float(count) - meanRG * meanRG - meanBG * meanBG;
     if (chroma < 500.0)
         return false;
     uint ca = (ccs + 1u) % 3u, cb = (ccs + 2u) % 3u;
@@ -56,7 +57,7 @@ bool dualCandidate(vec3 pix[64], float baselineError, vec3 mean, mat3 cov,
     float loT = 1e30, hiT = -1e30;
     vec3 lo = vec3(0), hi = vec3(0);
     float cLo = 255.0, cHi = 0.0;
-    for (uint i = 0u; i < 64u; i++) {
+    for (uint i = 0u; i < count; i++) {
         float t = (pix[i][ca] - ma) * ax + (pix[i][cb] - mb) * ay;
         if (t < loT) {
             loT = t;
@@ -96,14 +97,14 @@ bool dualCandidate(vec3 pix[64], float baselineError, vec3 mean, mat3 cov,
         rhs0[j] = 0;
         rhs1[j] = 0;
     }
-    for (uint i = 0u; i < 64u; i++) {
+    for (uint i = 0u; i < count; i++) {
         float denShared = max(axis[ca] * axis[ca] + axis[cb] * axis[cb], 1e-8);
         float t0 = clamp(((pix[i][ca] - e0[ca]) * axis[ca] + (pix[i][cb] - e0[cb]) * axis[cb]) /
                              denShared,
                          0.0, 1.0),
               span = e1[ccs] - e0[ccs],
               t1 = abs(span) > 1e-8 ? clamp((pix[i][ccs] - e0[ccs]) / span, 0.0, 1.0) : 0.0;
-        uvec4 r = astcInterp4[i];
+        uvec4 r = side==6u?astc6Interp4[i]:astcInterp4[i];
         for (int k = 0; k < 4; k++) {
             uint v = r[k], wt = v >> 5u;
             if (wt != 0u) {
@@ -117,15 +118,15 @@ bool dualCandidate(vec3 pix[64], float baselineError, vec3 mean, mat3 cov,
     for (int j = 0; j < 16; j++) {
         float x = 0, y = 0;
         for (int k = 0; k < 16; k++) {
-            x += astc4x4Inverse[j * 16 + k] * rhs0[k];
-            y += astc4x4Inverse[j * 16 + k] * rhs1[k];
+            x += (side==6u?astc6Inverse4[j*16+k]:astc4x4Inverse[j*16+k]) * rhs0[k];
+            y += (side==6u?astc6Inverse4[j*16+k]:astc4x4Inverse[j*16+k]) * rhs1[k];
         }
         g0[j] = wt4[nearestWeight4(round(clamp(x, 0.0, 1.0) * 64.0))];
         g1[j] = wt4[nearestWeight4(round(clamp(y, 0.0, 1.0) * 64.0))];
     }
     float err = 0;
-    for (uint i = 0u; i < 64u; i++) {
-        uint w0 = interp4(g0, i), w1 = interp4(g1, i);
+    for (uint i = 0u; i < count; i++) {
+        uint w0 = interp4(g0, i, side), w1 = interp4(g1, i, side);
         vec3 q;
         for (uint c = 0u; c < 3u; c++) {
             uint w = c == ccs ? w1 : w0;
@@ -151,8 +152,8 @@ bool dualCandidate(vec3 pix[64], float baselineError, vec3 mean, mat3 cov,
 }
 
 const uint weightDecode[8] = uint[8](0u, 9u, 18u, 27u, 37u, 46u, 55u, 64u);
-uint interpolate5(in uint grid[25], uint texel) {
-    uvec4 r = astcInterp5[texel];
+uint interpolate5(in uint grid[25], uint texel, uint side) {
+    uvec4 r = side==6u?astc6Interp5[texel]:astcInterp5[texel];
     uint v = 8u;
     for (int k = 0; k < 4; k++) {
         uint p = r[k], w = p >> 5u;

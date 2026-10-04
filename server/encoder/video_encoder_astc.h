@@ -21,6 +21,7 @@ class video_encoder_astc : public video_encoder
 		buffer_allocation blocks, readback;
 		vk::DescriptorSet descriptor_set{};
 		uint32_t quality = 6;
+		uint32_t block = 8;
 		bool valid = false;
 	};
 
@@ -41,7 +42,8 @@ class video_encoder_astc : public video_encoder
 	std::array<double, 4> sampled_cpu_ms{};
 	uint64_t sampled_bytes = 0;
 	uint32_t sampled_frames = 0;
-	std::array<uint32_t, 7> sampled_quality{};
+	uint32_t sampled_expansion_drops = 0;
+	std::array<uint32_t, astc_rate_control::rungs> sampled_quality{};
 	std::array<uint32_t, 3> sampled_encoding{};
 	const float initial_fps;
 	const bool direct_rgb_input;

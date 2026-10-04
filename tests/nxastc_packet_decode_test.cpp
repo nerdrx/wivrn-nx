@@ -1,6 +1,7 @@
 #include "../common/nxastc_packet_decode.h"
 
 #include <cassert>
+#include <algorithm>
 #include <cstdio>
 #include <lz4.h>
 #include <utility>
@@ -24,6 +25,28 @@ int main()
 	for (size_t i = 0; i < raw.size(); ++i)
 		raw[i] = uint8_t((i / 16) % 7);
 	std::vector<uint8_t> output(raw_size);
+
+	// The shared decoder scratch buffer is sized for 4x4, but each packet
+	// must decode into exactly its own footprint-sized prefix.
+	std::vector<uint8_t> scratch(block_bytes(width, height, 4));
+	for (uint8_t block : {4, 6, 8})
+	{
+		std::vector<uint8_t> source(block_bytes(width, height, block), block);
+		std::vector<uint8_t> packed(ZSTD_compressBound(source.size()));
+		const size_t n = ZSTD_compress(packed.data(), packed.size(), source.data(), source.size(), 3);
+		assert(!ZSTD_isError(n) && n < source.size());
+		packed.resize(n);
+		auto header = make_header(width, height, uint32_t(n), compression::zstd, block);
+		std::vector<uint8_t> packet(header.begin(), header.end());
+		packet.insert(packet.end(), packed.begin(), packed.end());
+		auto h = parse_packet(packet);
+		assert(h && h->block == block);
+		auto output_prefix = std::span<uint8_t>(scratch).first(h->raw_bytes);
+		assert(decode_payload(*h, packed, output_prefix) == decode_status::ok);
+		assert(std::equal(source.begin(), source.end(), output_prefix.begin()));
+		if (block != 4)
+			assert(decode_payload(*h, packed, scratch) == decode_status::length_mismatch);
+	}
 
 	// v1 raw remains byte-for-byte parseable and decodable.
 	auto raw_packet = packet_bytes(width, height, compression::none, raw);

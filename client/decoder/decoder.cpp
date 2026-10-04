@@ -19,6 +19,8 @@
 #include "decoder.h"
 #include "application.h"
 
+#include <algorithm>
+#include <array>
 #include <stdexcept>
 
 #ifdef __ANDROID__
@@ -123,11 +125,15 @@ static std::vector<wivrn::video_codec> supported_codecs_()
 	res.push_back(wivrn::video_codec::raw);
 	const auto & physical_device = application::get_physical_device();
 	const auto astc_features = physical_device.getFeatures();
-	const auto astc_format = physical_device.getFormatProperties(vk::Format::eAstc8x8UnormBlock).optimalTilingFeatures;
 	const auto required_astc_format = vk::FormatFeatureFlagBits::eSampledImage |
 	                                  vk::FormatFeatureFlagBits::eSampledImageFilterLinear |
 	                                  vk::FormatFeatureFlagBits::eTransferDst;
-	if (astc_features.textureCompressionASTC_LDR && (astc_format & required_astc_format) == required_astc_format)
+	const std::array astc_formats{vk::Format::eAstc4x4UnormBlock, vk::Format::eAstc6x6UnormBlock, vk::Format::eAstc8x8UnormBlock};
+	const bool all_astc_formats_supported = std::all_of(astc_formats.begin(), astc_formats.end(), [&](vk::Format format) {
+		const auto features = physical_device.getFormatProperties(format).optimalTilingFeatures;
+		return (features & required_astc_format) == required_astc_format;
+	});
+	if (astc_features.textureCompressionASTC_LDR && all_astc_formats_supported)
 		res.push_back(wivrn::video_codec::nxastc);
 	return res;
 }

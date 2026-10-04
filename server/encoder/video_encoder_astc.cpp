@@ -16,7 +16,7 @@ namespace
 {
 struct push_constants
 {
-	uint32_t width, height, fit, quality, direct_rgb;
+	uint32_t width, height, fit, quality, direct_rgb, block;
 };
 
 vk::raii::CommandPool make_command_pool(wivrn::vk_bundle & vk)
@@ -112,10 +112,10 @@ wivrn::video_encoder_astc::video_encoder_astc(vk_bundle & vk, const encoder_sett
 {
 	if (settings.bit_depth != 8 || settings.eyes != 1)
 		throw std::runtime_error("NX ASTC requires 8-bit single-eye streams");
-	const uint64_t bytes = nxastc_packet::block_bytes(extent.width, extent.height);
+	const uint64_t bytes = nxastc_packet::block_bytes(extent.width, extent.height, 4);
 	if (bytes > UINT32_MAX)
 		throw std::runtime_error("NX ASTC frame is too large");
-	U_LOG_I("nxastc: stream %u, %ux%u, ASTC 8x8 fit3 adaptive q0-q6, independent LZ4/Zstd packets",
+	U_LOG_I("nxastc: stream %u, %ux%u, ASTC 8x8/6x6/4x4 fit3 adaptive q0-q8, independent LZ4/Zstd packets",
 	        unsigned(stream_idx), unsigned(extent.width), unsigned(extent.height));
 	auto cmds = vk.device.allocateCommandBuffers({.commandPool = *cmd_pool, .commandBufferCount = num_slots});
 	std::array layouts{*ds_layout, *ds_layout};
@@ -174,13 +174,14 @@ void wivrn::video_encoder_astc::present_image(vk::Image image, vk::SemaphoreSubm
 	cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *pipeline);
 	cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *pipeline_layout, 0, s.descriptor_set, {});
 	s.quality = quality.load(std::memory_order_relaxed);
-	push_constants pc{extent.width, extent.height, 3, s.quality, direct_rgb_input ? 1u : 0u};
+	s.block = astc_rate_control::block(s.quality);
+	push_constants pc{extent.width, extent.height, 3, std::min(s.quality, 6u), direct_rgb_input ? 1u : 0u, s.block};
 	cmd.pushConstants(*pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0, vk::ArrayProxy<const push_constants>{pc});
-	const uint32_t blocks_x = (extent.width + 7) / 8, blocks_y = (extent.height + 7) / 8;
+	const uint32_t blocks_x = (extent.width + s.block - 1) / s.block, blocks_y = (extent.height + s.block - 1) / s.block;
 	cmd.dispatch((blocks_x * blocks_y + 63) / 64, 1, 1);
 	vk::BufferMemoryBarrier2 barrier{.srcStageMask = vk::PipelineStageFlagBits2::eComputeShader, .srcAccessMask = vk::AccessFlagBits2::eShaderWrite, .dstStageMask = vk::PipelineStageFlagBits2::eTransfer, .dstAccessMask = vk::AccessFlagBits2::eTransferRead, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .buffer = s.blocks, .offset = 0, .size = s.blocks.info().size};
 	cmd.pipelineBarrier2(vk::DependencyInfo{.bufferMemoryBarrierCount = 1, .pBufferMemoryBarriers = &barrier});
-	cmd.copyBuffer(s.blocks, s.readback, vk::BufferCopy{.size = s.blocks.info().size});
+	cmd.copyBuffer(s.blocks, s.readback, vk::BufferCopy{.size = nxastc_packet::block_bytes(extent.width, extent.height, s.block)});
 	vk::BufferMemoryBarrier2 host_barrier{.srcStageMask = vk::PipelineStageFlagBits2::eTransfer, .srcAccessMask = vk::AccessFlagBits2::eTransferWrite, .dstStageMask = vk::PipelineStageFlagBits2::eHost, .dstAccessMask = vk::AccessFlagBits2::eHostRead, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .buffer = s.readback, .offset = 0, .size = s.readback.info().size};
 	cmd.pipelineBarrier2(vk::DependencyInfo{.bufferMemoryBarrierCount = 1, .pBufferMemoryBarriers = &host_barrier});
 	cmd.end();
@@ -199,7 +200,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_astc::encode(uint
 	if (vk.device.waitForFences(*s.fence, true, 1'000'000'000) == vk::Result::eTimeout || !s.valid)
 		return {};
 	vmaInvalidateAllocation(vk_allocator::instance(), s.readback, 0, VK_WHOLE_SIZE);
-	const uint32_t raw_size = uint32_t(nxastc_packet::block_bytes(extent.width, extent.height));
+	const uint32_t raw_size = uint32_t(nxastc_packet::block_bytes(extent.width, extent.height, s.block));
 	const auto * raw = s.readback.data<const uint8_t>();
 	const auto lz4_begin = std::chrono::steady_clock::now();
 	compressed.resize(LZ4_compressBound(raw_size));
@@ -224,7 +225,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_astc::encode(uint
 	}
 	const auto pack_begin = std::chrono::steady_clock::now();
 	auto packet = std::make_shared<std::vector<uint8_t>>(nxastc_packet::header_size + payload_size);
-	auto header = nxastc_packet::make_header(extent.width, extent.height, payload_size, encoding);
+	auto header = nxastc_packet::make_header(extent.width, extent.height, payload_size, encoding, uint8_t(s.block));
 	std::memcpy(packet->data(), header.data(), header.size());
 	std::memcpy(packet->data() + header.size(), payload, payload_size);
 	const auto cpu_end = std::chrono::steady_clock::now();
@@ -237,30 +238,36 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_astc::encode(uint
 	const uint32_t bitrate = pending_bitrate.load(std::memory_order_relaxed);
 	const float live_fps = pending_framerate.load(std::memory_order_relaxed);
 	const float fps = live_fps > 0 ? live_fps : initial_fps;
+	bool expansion_over_budget = false;
 	if (fps > 0 && bitrate > 0)
 	{
 		const double target_bytes = double(bitrate) / (8.0 * double(fps));
 		const double actual_bytes = double(payload_size + nxastc_packet::header_size);
 		quality.store(rate_control.update(s.quality, uint32_t(actual_bytes), uint32_t(target_bytes)), std::memory_order_relaxed);
+		// A failed footprint probe must not turn into a large network burst.
+		expansion_over_budget = s.quality >= 7 && actual_bytes > target_bytes;
 	}
 	sampled_bytes += payload_size + nxastc_packet::header_size;
+	sampled_expansion_drops += expansion_over_budget;
 	++sampled_quality[s.quality];
 	++sampled_encoding[uint8_t(encoding)];
 	if (++sampled_frames == 180)
 	{
-		U_LOG_I("nxastc: stream %u mean packet %llu bytes, target %.0f bytes; q0-q6 %u/%u/%u/%u/%u/%u/%u, raw/lz4/zstd %u/%u/%u",
+		U_LOG_I("nxastc: stream %u mean packet %llu bytes, target %.0f bytes; q0-q8 %u/%u/%u/%u/%u/%u/%u/%u/%u, raw/lz4/zstd %u/%u/%u; over-budget expansion drops %u",
 		        unsigned(stream_idx), static_cast<unsigned long long>(sampled_bytes / sampled_frames),
 		        fps > 0 ? double(bitrate) / (8.0 * fps) : 0.0,
 		        sampled_quality[0], sampled_quality[1], sampled_quality[2], sampled_quality[3],
-		        sampled_quality[4], sampled_quality[5], sampled_quality[6],
-		        sampled_encoding[0], sampled_encoding[1], sampled_encoding[2]);
+		        sampled_quality[4], sampled_quality[5], sampled_quality[6], sampled_quality[7], sampled_quality[8],
+		        sampled_encoding[0], sampled_encoding[1], sampled_encoding[2], sampled_expansion_drops);
 		U_LOG_I("nxastc: stream %u CPU ms/frame fence+invalidate %.3f, lz4 %.3f, zstd %.3f, packet %.3f",
 		        unsigned(stream_idx), sampled_cpu_ms[0] / sampled_frames, sampled_cpu_ms[1] / sampled_frames,
 		        sampled_cpu_ms[2] / sampled_frames, sampled_cpu_ms[3] / sampled_frames);
 		sampled_cpu_ms.fill(0);
-		sampled_bytes = sampled_frames = 0;
+		sampled_bytes = sampled_frames = sampled_expansion_drops = 0;
 		sampled_quality.fill(0);
 		sampled_encoding.fill(0);
 	}
+	if (expansion_over_budget)
+		return {};
 	return data{.encoder = this, .span = std::span<uint8_t>(*packet), .mem = packet};
 }

@@ -7,7 +7,9 @@ namespace wivrn
 {
 struct astc_rate_control
 {
-	static constexpr uint32_t rungs = 7;
+	static constexpr uint32_t rungs = 9;
+	// Rungs 0..6 tune 8x8; 7 and 8 keep q6 detail in 6x6 and 4x4 blocks.
+	static constexpr uint32_t block(uint32_t quality) { return quality == 8 ? 4 : quality == 7 ? 6 : 8; }
 	static constexpr uint8_t expiry_frames = 30;
 	std::array<uint32_t, rungs> bytes{};
 	std::array<uint8_t, rungs> age{};
@@ -39,8 +41,12 @@ struct astc_rate_control
 	                         ? uint32_t((uint64_t(bytes[quality]) * 7 + sample_bytes) / 8)
 	                         : sample_bytes;
 		age[quality] = 0;
+		// Do not let an old low EMA immediately re-select a footprint whose
+		// latest packet exceeded this budget.
+		if (sample_bytes > target_bytes && quality >= 7)
+			bytes[quality] = sample_bytes;
 		uint32_t next = quality;
-		const uint64_t downshift_limit = uint64_t(target_bytes) * 110 / 100;
+		const uint64_t downshift_limit = uint64_t(target_bytes) * (quality >= 7 ? 100 : 110) / 100;
 		const bool measured_over_budget = bytes[quality] > downshift_limit;
 		const bool current_frame_over_budget = sample_bytes > downshift_limit;
 		if ((measured_over_budget || current_frame_over_budget) && quality > 0)
@@ -58,6 +64,18 @@ struct astc_rate_control
 				const uint32_t steps = uint64_t(sample_bytes) * 100 > uint64_t(target_bytes) * 150 ? 2 : 1;
 				next = quality > steps ? quality - steps : 0;
 			}
+		}
+		else if (quality >= 6)
+		{
+			// Prefer the smallest recently measured footprint that fits, even
+			// when the current footprint has less than 30% spare budget.
+			for (uint32_t candidate = rungs; candidate-- > quality + 1;)
+				if (bytes[candidate] && uint64_t(bytes[candidate]) * 100 <= uint64_t(target_bytes) * 95)
+					return candidate;
+			const uint32_t candidate = quality + 1;
+			if (candidate < rungs && uint64_t(bytes[quality]) * 100 < uint64_t(target_bytes) * 70 &&
+			    (!bytes[candidate] || uint64_t(bytes[candidate]) * 100 <= uint64_t(target_bytes) * 95))
+				next = candidate;
 		}
 		else if (uint64_t(bytes[quality]) * 100 < uint64_t(target_bytes) * 70 && quality + 1 < rungs)
 		{

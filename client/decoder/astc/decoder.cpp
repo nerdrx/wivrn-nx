@@ -24,6 +24,17 @@
 
 namespace
 {
+constexpr std::array<uint8_t, 3> astc_blocks{4, 6, 8};
+constexpr size_t astc_pool_index(uint8_t block)
+{
+	return block == 4 ? 0 : block == 6 ? 1 : 2;
+}
+constexpr vk::Format astc_format(uint8_t block)
+{
+	return block == 4 ? vk::Format::eAstc4x4UnormBlock :
+	       block == 6 ? vk::Format::eAstc6x6UnormBlock : vk::Format::eAstc8x8UnormBlock;
+}
+
 struct astc_blit_handle final : wivrn::decoder::blit_handle
 {
 	std::atomic_bool & free;
@@ -61,21 +72,24 @@ astc_decoder::astc_decoder(vk::raii::Device & device,
                                  .maxAnisotropy = 1,
                          }),
         extent{description.stream_size(stream_index).first, description.stream_size(stream_index).second},
-        raw_bytes(nxastc_packet::block_bytes(extent.width, extent.height)),
+        stream_index(stream_index),
         weak_scene(scene),
         accumulator(accumulator)
 {
 	const auto features = physical_device.getFeatures();
 	if (!features.textureCompressionASTC_LDR)
 		throw std::runtime_error("ASTC LDR texture compression is unsupported by this Vulkan device");
-	const auto format = vk::Format::eAstc8x8UnormBlock;
-	const auto support = physical_device.getFormatProperties(format).optimalTilingFeatures;
 	const auto needed = vk::FormatFeatureFlagBits::eSampledImage |
 	                    vk::FormatFeatureFlagBits::eSampledImageFilterLinear |
 	                    vk::FormatFeatureFlagBits::eTransferDst;
-	if ((support & needed) != needed)
-		throw std::runtime_error("ASTC 8x8 lacks optimal sampled, linear-filter, or transfer-destination support");
-	if (!extent.width || !extent.height || raw_bytes > std::numeric_limits<uint32_t>::max() || raw_bytes > INT_MAX)
+	for (uint8_t block : astc_blocks)
+	{
+		const auto support = physical_device.getFormatProperties(astc_format(block)).optimalTilingFeatures;
+		if ((support & needed) != needed)
+			throw std::runtime_error(std::format("ASTC {}x{} lacks optimal sampled, linear-filter, or transfer-destination support", block, block));
+	}
+	const uint64_t max_raw_bytes = nxastc_packet::block_bytes(extent.width, extent.height, 4);
+	if (!extent.width || !extent.height || max_raw_bytes > std::numeric_limits<uint32_t>::max() || max_raw_bytes > INT_MAX)
 		throw std::runtime_error("invalid ASTC stream dimensions");
 #ifdef __ANDROID__
 	char sync_upload[PROP_VALUE_MAX] = {};
@@ -88,47 +102,7 @@ astc_decoder::astc_decoder(vk::raii::Device & device,
 #endif
 	// LZ4/Zstd read backward references while writing. Pico measurements favour
 	// ordinary CPU memory plus one forward copy, even when VMA reports HOST_CACHED.
-	cpu_scratch.resize(size_t(raw_bytes));
-
-	for (size_t i = 0; i < images.size(); ++i)
-	{
-		auto & item = images[i];
-		item.pixels = image_allocation(
-		        device,
-		        vk::ImageCreateInfo{
-		                .imageType = vk::ImageType::e2D,
-		                .format = format,
-		                .extent = {extent.width, extent.height, 1},
-		                .mipLevels = 1,
-		                .arrayLayers = 1,
-		                .tiling = vk::ImageTiling::eOptimal,
-		                .usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst,
-		        },
-		        {.usage = VMA_MEMORY_USAGE_AUTO},
-		        std::format("ASTC decoder {} image {}", stream_index, i));
-		item.view = vk::raii::ImageView(device, vk::ImageViewCreateInfo{
-		                                               .image = item.pixels,
-		                                               .viewType = vk::ImageViewType::e2D,
-		                                               .format = format,
-		                                               .subresourceRange = {
-		                                                       .aspectMask = vk::ImageAspectFlagBits::eColor,
-		                                                       .levelCount = 1,
-		                                                       .layerCount = 1,
-		                                               },
-		                                       });
-		item.staging = buffer_allocation(
-		        device,
-		        vk::BufferCreateInfo{
-		                .size = raw_bytes,
-		                .usage = vk::BufferUsageFlagBits::eTransferSrc,
-		        },
-		        {
-		                .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
-		                .usage = VMA_MEMORY_USAGE_AUTO,
-		        },
-		        "ASTC packet staging");
-		item.mapped = item.staging.data<uint8_t>();
-	}
+	cpu_scratch.resize(size_t(max_raw_bytes));
 	spdlog::info("ASTC upload handoff: {}", async_upload_enabled ? "same-queue async" : "synchronous fence");
 	worker = std::thread([this, queue_family_index] { worker_function(queue_family_index); });
 }
@@ -165,7 +139,7 @@ void astc_decoder::push_data(std::span<std::span<const uint8_t>> data, uint64_t 
 		have_frame = true;
 		invalid_frame = false;
 	}
-	const size_t max_packet = size_t(raw_bytes) + nxastc_packet::header_size;
+	const size_t max_packet = size_t(nxastc_packet::block_bytes(extent.width, extent.height, 4)) + nxastc_packet::header_size;
 	for (auto part: data)
 	{
 		if (part.size() > max_packet - std::min(max_packet, assembling.size()))
@@ -191,7 +165,8 @@ void astc_decoder::frame_completed(const from_headset::feedback & feedback,
 		return;
 	}
 	auto header = nxastc_packet::parse_packet(assembling);
-	if (!header || header->width != extent.width || header->height != extent.height || header->raw_bytes != raw_bytes)
+	if (!header || header->width != extent.width || header->height != extent.height ||
+	    header->raw_bytes != nxastc_packet::block_bytes(extent.width, extent.height, header->block))
 	{
 		spdlog::warn("ASTC decoder drops invalid packet for frame {}", assembling_frame);
 		assembling.clear();
@@ -210,9 +185,58 @@ void astc_decoder::frame_completed(const from_headset::feedback & feedback,
 	wake.notify_one();
 }
 
-astc_decoder::image * astc_decoder::get_free()
+void astc_decoder::initialize_pool(uint8_t block)
 {
-	for (auto & item: images)
+	const size_t pool = astc_pool_index(block);
+	if (pool_initialized[pool])
+		return;
+	const auto format = astc_format(block);
+	const vk::DeviceSize bytes = nxastc_packet::block_bytes(extent.width, extent.height, block);
+	for (size_t i = 0; i < image_count; ++i)
+	{
+		auto & item = images[pool][i];
+		item.pixels = image_allocation(
+		        device,
+		        vk::ImageCreateInfo{
+		                .imageType = vk::ImageType::e2D,
+		                .format = format,
+		                .extent = {extent.width, extent.height, 1},
+		                .mipLevels = 1,
+		                .arrayLayers = 1,
+		                .tiling = vk::ImageTiling::eOptimal,
+		                .usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst,
+		        },
+		        {.usage = VMA_MEMORY_USAGE_AUTO},
+		        std::format("ASTC {}x{} decoder {} image {}", block, block, stream_index, i));
+		item.view = vk::raii::ImageView(device, vk::ImageViewCreateInfo{
+		                                               .image = item.pixels,
+		                                               .viewType = vk::ImageViewType::e2D,
+		                                               .format = format,
+		                                               .subresourceRange = {
+		                                                       .aspectMask = vk::ImageAspectFlagBits::eColor,
+		                                                       .levelCount = 1,
+		                                                       .layerCount = 1,
+		                                               },
+		                                       });
+		item.staging = buffer_allocation(
+		        device,
+		        vk::BufferCreateInfo{.size = bytes, .usage = vk::BufferUsageFlagBits::eTransferSrc},
+		        {
+		                .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+		                .usage = VMA_MEMORY_USAGE_AUTO,
+		        },
+		        "ASTC packet staging");
+		item.mapped = item.staging.data<uint8_t>();
+	}
+	pool_initialized[pool] = true;
+	spdlog::info("ASTC {}x{} image pool ready: {} raw bytes/frame", block, block, bytes);
+}
+
+astc_decoder::image * astc_decoder::get_free(uint8_t block)
+{
+	const size_t pool = astc_pool_index(block);
+	initialize_pool(block);
+	for (auto & item: images[pool])
 		if (item.upload_complete && item.free.exchange(false))
 			return &item;
 	return nullptr;
@@ -293,14 +317,15 @@ void astc_decoder::worker_function(uint32_t queue_family_index)
 		try
 		{
 			const auto parsed = nxastc_packet::parse_packet(current.packet);
-			if (!parsed || parsed->width != extent.width || parsed->height != extent.height || parsed->raw_bytes != raw_bytes)
+			if (!parsed || parsed->width != extent.width || parsed->height != extent.height ||
+			    parsed->raw_bytes != nxastc_packet::block_bytes(extent.width, extent.height, parsed->block))
 				throw std::runtime_error("invalid ASTC packet dimensions or length");
 			if (last_submitted && fence.getStatus() == vk::Result::eSuccess)
 			{
 				last_submitted->upload_complete = true;
 				last_submitted = nullptr;
 			}
-			item = get_free();
+			item = get_free(parsed->block);
 			if (!item)
 			{
 				spdlog::debug("ASTC image pool exhausted; dropping complete frame");
@@ -310,7 +335,7 @@ void astc_decoder::worker_function(uint32_t queue_family_index)
 			auto stage_start = steady_clock::now();
 			auto output = parsed->encoding == nxastc_packet::compression::none ?
 			                      std::span<uint8_t>(item->mapped, parsed->raw_bytes) :
-			                      std::span<uint8_t>(cpu_scratch);
+			                      std::span<uint8_t>(cpu_scratch).first(parsed->raw_bytes);
 			const auto decode = nxastc_packet::decode_payload(*parsed, payload, output);
 			if (decode != nxastc_packet::decode_status::ok)
 			{

@@ -199,25 +199,44 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_astc::encode(uint
 	if (vk.device.waitForFences(*s.fence, true, 1'000'000'000) == vk::Result::eTimeout || !s.valid)
 		return {};
 	vmaInvalidateAllocation(vk_allocator::instance(), s.readback, 0, VK_WHOLE_SIZE);
+	const auto fence_invalidate_end = std::chrono::steady_clock::now();
 	const uint32_t raw_size = uint32_t(nxastc_packet::block_bytes(extent.width, extent.height));
 	const auto * raw = s.readback.data<const uint8_t>();
-	const auto lz4_begin = std::chrono::steady_clock::now();
-	compressed.resize(LZ4_compressBound(raw_size));
-	const int n = LZ4_compress_default(reinterpret_cast<const char *>(raw), reinterpret_cast<char *>(compressed.data()), raw_size, compressed.size());
-	const bool use_lz4 = n > 0 && uint32_t(n) < raw_size;
-	uint32_t payload_size = use_lz4 ? uint32_t(n) : raw_size;
+	double lz4_ms = 0, zstd_ms = 0;
+	int lz4_size = 0;
+	size_t zstd_size = 0;
+	auto run_lz4 = [&] {
+		const auto begin = std::chrono::steady_clock::now();
+		compressed.resize(LZ4_compressBound(raw_size));
+		lz4_size = LZ4_compress_default(reinterpret_cast<const char *>(raw), reinterpret_cast<char *>(compressed.data()), raw_size, compressed.size());
+		lz4_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+	};
+	auto run_zstd = [&] {
+		const auto begin = std::chrono::steady_clock::now();
+		zstd_compressed.resize(ZSTD_compressBound(raw_size));
+		zstd_size = ZSTD_compressCCtx(zstd_context.get(), zstd_compressed.data(), zstd_compressed.size(), raw, raw_size, 3);
+		zstd_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+	};
+	// At high quality, a 2x raw-size win skips LZ4. This favors worker time
+	// over comparing codecs on that frame; weaker Zstd results use both codecs.
+	const bool prefer_zstd = s.quality >= 4 && bool(zstd_context);
+	if (prefer_zstd)
+		run_zstd();
+	if (!prefer_zstd || ZSTD_isError(zstd_size) || zstd_size == 0 || zstd_size > raw_size / 2)
+		run_lz4();
+	const bool use_lz4 = lz4_size > 0 && uint32_t(lz4_size) < raw_size;
+	uint32_t payload_size = use_lz4 ? uint32_t(lz4_size) : raw_size;
 	const uint8_t * payload = use_lz4 ? compressed.data() : raw;
-	const auto zstd_begin = std::chrono::steady_clock::now();
 	auto encoding = use_lz4 ? nxastc_packet::compression::lz4 : nxastc_packet::compression::none;
 	// Keep lossless packing independent of other frames. Reuse the context and
 	// output buffer; Zstd must save at least 10% to justify its CPU decode cost.
 	if (zstd_context)
 	{
-		zstd_compressed.resize(ZSTD_compressBound(raw_size));
-		const size_t packed = ZSTD_compressCCtx(zstd_context.get(), zstd_compressed.data(), zstd_compressed.size(), raw, raw_size, 3);
-		if (!ZSTD_isError(packed) && packed > 0 && packed * 100 <= uint64_t(payload_size) * 90)
+		if (!prefer_zstd)
+			run_zstd();
+		if (!ZSTD_isError(zstd_size) && zstd_size > 0 && zstd_size * 100 <= uint64_t(payload_size) * 90)
 		{
-			payload_size = uint32_t(packed);
+			payload_size = uint32_t(zstd_size);
 			payload = zstd_compressed.data();
 			encoding = nxastc_packet::compression::zstd;
 		}
@@ -228,9 +247,9 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_astc::encode(uint
 	std::memcpy(packet->data(), header.data(), header.size());
 	std::memcpy(packet->data() + header.size(), payload, payload_size);
 	const auto cpu_end = std::chrono::steady_clock::now();
-	sampled_cpu_ms[0] += std::chrono::duration<double, std::milli>(lz4_begin - cpu_begin).count();
-	sampled_cpu_ms[1] += std::chrono::duration<double, std::milli>(zstd_begin - lz4_begin).count();
-	sampled_cpu_ms[2] += std::chrono::duration<double, std::milli>(pack_begin - zstd_begin).count();
+	sampled_cpu_ms[0] += std::chrono::duration<double, std::milli>(fence_invalidate_end - cpu_begin).count();
+	sampled_cpu_ms[1] += lz4_ms;
+	sampled_cpu_ms[2] += zstd_ms;
 	sampled_cpu_ms[3] += std::chrono::duration<double, std::milli>(cpu_end - pack_begin).count();
 	// Choose the next ASTC quality rung from actual bytes; severe overruns can
 	// skip unmeasured rungs instead of waiting for the EMA to catch up.

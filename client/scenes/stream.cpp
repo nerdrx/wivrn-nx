@@ -95,7 +95,7 @@ static bool direct_nearest_enabled()
 		const char * value = std::getenv("WIVRN_NX_DIRECT_NEAREST");
 		const bool on = value && value[0] == '1';
 #endif
-		spdlog::info("NX direct selection mode: {}", on ? "nearest-target" : "newest-direct");
+		spdlog::info("NX independent selection mode: {}", on ? "nearest-target" : "newest-complete");
 		return on;
 	}();
 	return enabled;
@@ -1173,10 +1173,16 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, scenes::stream::deco
 			                                    return std::abs(frame->view_info.display_time - target);
 		                                    });
 
-		// Independent direct frames prioritize freshness. Their server display timestamps
+		// Independent direct and ASTC frames prioritize freshness. Their server display timestamps
 		// may be predicted ahead of this refresh; nearest-time selection otherwise keeps
 		// choosing an older decoded image even when a newer complete stereo pair is ready.
-		if (not direct_nearest_enabled() && std::ranges::all_of(common_frames, [](auto frame) { return frame->direct_valid; }))
+		// Honor an active de-jitter delay for ASTC. The common-frame intersection above keeps
+		// separately decoded eyes synchronized; choosing newest adds no GPU work.
+		const bool newest_astc = not alpha && dejitter.delay_ns() == 0 &&
+		                         video_stream_description &&
+		                         video_stream_description->codec[0] == video_codec::nxastc &&
+		                         video_stream_description->codec[1] == video_codec::nxastc;
+		if (not direct_nearest_enabled() && (newest_astc || std::ranges::all_of(common_frames, [](auto frame) { return frame->direct_valid; })))
 			min = std::ranges::max_element(common_frames, std::ranges::less{},
 			                              [](auto frame) { return frame->feedback.frame_index; });
 
@@ -3343,6 +3349,10 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 
 	spdlog::info("Creating decoders, size {}x{}", description.width, description.height);
 	video_stream_description = description;
+	if (description.codec[0] == video_codec::nxastc && description.codec[1] == video_codec::nxastc)
+		spdlog::info("ASTC frame selection: {} (de-jitter {})",
+		             direct_nearest_enabled() ? "nearest-target" : "newest-complete when playout delay is zero",
+		             application::get_config().dejitter ? "on" : "off");
 
 	// The roles first, before anything reads them: the decoder loop below and every gate
 	// in render() ask what a stream IS rather than where it sits. A description that never

@@ -1,4 +1,5 @@
 #include "video_encoder_astc.h"
+#include "astc_gpu_timing.h"
 #include "nxastc_compact.h"
 
 #include "encoder/encoder_settings.h"
@@ -10,9 +11,12 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <lz4.h>
 #include <stdexcept>
+#include <string_view>
 
 namespace
 {
@@ -140,6 +144,34 @@ wivrn::video_encoder_astc::video_encoder_astc(vk_bundle & vk, const encoder_sett
 	if (compact_enabled && !motion_delta_enabled)
 		U_LOG_I("nxastc: stream %u independent compact ASTC packing enabled (requires v4 client)", unsigned(stream_idx));
 	U_LOG_I("nxastc: stream %u independent Zstd level %d", unsigned(stream_idx), independent_zstd_level);
+	if (const char * option = std::getenv("WIVRN_NX_ASTC_GPU_TIMING"); option and std::string_view{option} == "1")
+	{
+		try
+		{
+			auto queue_properties = vk.physical_device.getQueueFamilyProperties();
+			const double period_ns = vk.physical_device.getProperties().limits.timestampPeriod;
+			const uint32_t valid_bits = vk.queue.family_index < queue_properties.size()
+			                                    ? queue_properties[vk.queue.family_index].timestampValidBits
+			                                    : 0;
+			if (vk.queue.family_index < queue_properties.size() &&
+			    valid_bits != 0 && valid_bits <= 64 &&
+			    period_ns > 0 && std::isfinite(period_ns))
+			{
+				gpu_timing_queries = vk::raii::QueryPool(vk.device, vk::QueryPoolCreateInfo{
+				                                                            .queryType = vk::QueryType::eTimestamp,
+				                                                            .queryCount = 2 * num_slots,
+				                                                    });
+				gpu_timestamp_valid_bits = valid_bits;
+				gpu_timestamp_period_ns = period_ns;
+			}
+		}
+		catch (const std::exception &)
+		{
+			// Timing is diagnostic only: a missing query pool must not disable encoding.
+		}
+		if (not *gpu_timing_queries)
+			U_LOG_W("nxastc: GPU timing unavailable on stream %u; encoding continues without samples", unsigned(stream_idx));
+	}
 	auto cmds = vk.device.allocateCommandBuffers({.commandPool = *cmd_pool, .commandBufferCount = num_slots});
 	std::array layouts{*ds_layout, *ds_layout};
 	auto sets = vk.device.allocateDescriptorSets({.descriptorPool = *ds_pool, .descriptorSetCount = num_slots, .pSetLayouts = layouts.data()});
@@ -185,6 +217,8 @@ void wivrn::video_encoder_astc::present_image(vk::Image image, vk::SemaphoreSubm
 		U_LOG_E("nxastc: slot fence timeout on stream %d", int(stream_idx));
 		return;
 	}
+	// Invalidate the previous slot generation before recording or submitting this one.
+	s.valid = false;
 	auto it = image_views.find(VkImage(image));
 	if (it == image_views.end())
 	{
@@ -215,12 +249,22 @@ void wivrn::video_encoder_astc::present_image(vk::Image image, vk::SemaphoreSubm
 	push_constants pc{extent.width, extent.height, 3, s.quality, direct_rgb_input ? 1u : 0u};
 	cmd.pushConstants(*pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0, vk::ArrayProxy<const push_constants>{pc});
 	const uint32_t blocks_x = (extent.width + 7) / 8, blocks_y = (extent.height + 7) / 8;
+	if (*gpu_timing_queries)
+	{
+		const uint32_t first_query = 2 * slot;
+		cmd.resetQueryPool(*gpu_timing_queries, first_query, 2);
+		// The submit's semaphore wait includes ComputeShader, so input is ready here.
+		cmd.writeTimestamp2(vk::PipelineStageFlagBits2::eComputeShader, *gpu_timing_queries, first_query);
+	}
 	cmd.dispatch((blocks_x * blocks_y + 63) / 64, 1, 1);
 	vk::BufferMemoryBarrier2 barrier{.srcStageMask = vk::PipelineStageFlagBits2::eComputeShader, .srcAccessMask = vk::AccessFlagBits2::eShaderWrite, .dstStageMask = vk::PipelineStageFlagBits2::eTransfer, .dstAccessMask = vk::AccessFlagBits2::eTransferRead, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .buffer = s.blocks, .offset = 0, .size = s.blocks.info().size};
 	cmd.pipelineBarrier2(vk::DependencyInfo{.bufferMemoryBarrierCount = 1, .pBufferMemoryBarriers = &barrier});
 	cmd.copyBuffer(s.blocks, s.readback, vk::BufferCopy{.size = s.blocks.info().size});
 	vk::BufferMemoryBarrier2 host_barrier{.srcStageMask = vk::PipelineStageFlagBits2::eTransfer, .srcAccessMask = vk::AccessFlagBits2::eTransferWrite, .dstStageMask = vk::PipelineStageFlagBits2::eHost, .dstAccessMask = vk::AccessFlagBits2::eHostRead, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .buffer = s.readback, .offset = 0, .size = s.readback.info().size};
 	cmd.pipelineBarrier2(vk::DependencyInfo{.bufferMemoryBarrierCount = 1, .pBufferMemoryBarriers = &host_barrier});
+	if (*gpu_timing_queries)
+		// End after readback transfer; this is compute-through-readback, not kernel-only time.
+		cmd.writeTimestamp2(vk::PipelineStageFlagBits2::eBottomOfPipe, *gpu_timing_queries, 2 * slot + 1);
 	cmd.end();
 	std::unique_lock lock(vk.queue.mutex);
 	semaphore.stageMask = vk::PipelineStageFlagBits2::eComputeShader | vk::PipelineStageFlagBits2::eTransfer;
@@ -236,6 +280,22 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_astc::encode(uint
 	auto & s = slots.at(slot);
 	if (vk.device.waitForFences(*s.fence, true, 1'000'000'000) == vk::Result::eTimeout || !s.valid)
 		return {};
+	std::optional<double> gpu_elapsed_ms;
+	if (*gpu_timing_queries)
+	{
+		try
+		{
+			auto [result, timestamps] = gpu_timing_queries.getResult<std::array<uint64_t, 2>>(
+			        2 * slot, 2, sizeof(uint64_t), vk::QueryResultFlagBits::e64);
+			if (result == vk::Result::eSuccess)
+				gpu_elapsed_ms = astc_gpu_timing::elapsed_ms(
+				        timestamps[0], timestamps[1], gpu_timestamp_valid_bits, gpu_timestamp_period_ns);
+		}
+		catch (const std::exception &)
+		{
+			// Ignore diagnostic readback errors; the already-completed ASTC image remains usable.
+		}
+	}
 	vmaInvalidateAllocation(vk_allocator::instance(), s.readback, 0, VK_WHOLE_SIZE);
 	const auto fence_invalidate_end = std::chrono::steady_clock::now();
 	const uint32_t raw_size = uint32_t(nxastc_packet::block_bytes(extent.width, extent.height));
@@ -410,6 +470,8 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_astc::encode(uint
 	else
 		++sampled_encoding[uint8_t(encoding)];
 	sampled_compact_ms += compact_ms;
+	if (gpu_elapsed_ms && sampled_gpu_count < sampled_gpu_ms.size())
+		sampled_gpu_ms[sampled_gpu_count++] = *gpu_elapsed_ms;
 	if (++sampled_frames == 180)
 	{
 		if (motion_delta_enabled)
@@ -427,10 +489,29 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_astc::encode(uint
 		U_LOG_I("nxastc: stream %u CPU ms/frame fence+invalidate %.3f, lz4 %.3f, zstd %.3f, packet %.3f",
 		        unsigned(stream_idx), sampled_cpu_ms[0] / sampled_frames, sampled_cpu_ms[1] / sampled_frames,
 		        sampled_cpu_ms[2] / sampled_frames, sampled_cpu_ms[3] / sampled_frames);
+		if (sampled_gpu_count)
+		{
+			auto sorted = sampled_gpu_ms;
+			std::sort(sorted.begin(), sorted.begin() + sampled_gpu_count);
+			double total = 0;
+			for (uint32_t i = 0; i < sampled_gpu_count; ++i)
+				total += sorted[i] / sampled_gpu_count;
+			const uint32_t p50 = (sampled_gpu_count - 1) / 2;
+			const uint32_t p95 = (sampled_gpu_count * 95 + 99) / 100 - 1;
+			U_LOG_I("nxastc: stream %u GPU compute-through-readback ms, n=%u mean=%.3f p50=%.3f p95=%.3f",
+			        unsigned(stream_idx),
+			        sampled_gpu_count,
+			        total,
+			        sorted[p50],
+			        sorted[p95]);
+		}
+		else if (*gpu_timing_queries)
+			U_LOG_I("nxastc: stream %u GPU compute-through-readback ms, n=0 (no valid samples)", unsigned(stream_idx));
 		if (compact_enabled && !motion_delta_enabled)
 			U_LOG_I("nxastc: stream %u compact packets %u/180, input packing CPU %.3f ms/frame",
 			        unsigned(stream_idx), sampled_compact_frames, sampled_compact_ms / sampled_frames);
 		sampled_cpu_ms.fill(0);
+		sampled_gpu_count = 0;
 		sampled_bytes = sampled_frames = 0;
 		sampled_quality.fill(0);
 		sampled_encoding.fill(0);

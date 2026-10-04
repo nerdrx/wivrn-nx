@@ -33,6 +33,9 @@ class video_encoder_astc : public video_encoder
 	vk::raii::PipelineLayout pipeline_layout;
 	vk::raii::Pipeline pipeline;
 	vk::raii::DescriptorPool ds_pool;
+	vk::raii::QueryPool gpu_timing_queries = nullptr;
+	uint32_t gpu_timestamp_valid_bits = 0;
+	double gpu_timestamp_period_ns = 0;
 	std::unordered_map<VkImage, std::array<vk::raii::ImageView, 2>> image_views;
 	std::array<slot_t, num_slots> slots;
 	std::vector<uint8_t> compressed;
@@ -42,6 +45,8 @@ class video_encoder_astc : public video_encoder
 	std::atomic_uint32_t quality{6};
 	astc_rate_control rate_control;
 	std::array<double, 4> sampled_cpu_ms{};
+	std::array<double, 180> sampled_gpu_ms{};
+	uint32_t sampled_gpu_count = 0;
 	uint64_t sampled_bytes = 0;
 	uint32_t sampled_frames = 0;
 	std::array<uint32_t, 7> sampled_quality{};

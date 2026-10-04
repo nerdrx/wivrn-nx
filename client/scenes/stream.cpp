@@ -1734,11 +1734,11 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	// the next one, and the pose on the panel is a whole interval fresher.
 	//
 	// The sleep is bounded by the pass's own measured cost plus a margin, and the
-	// scheduler only ever adapts towards starting EARLIER (client/scenes/stream_jit.h),
-	// so the worst it can do is the free-running loop it replaces. Nothing below this
+	// scheduler decreases its cap on an attributable miss and probes recovery slowly
+	// (client/scenes/stream_jit.h). Nothing below this
 	// point knows it happened; it is the same render() it always was, run later.
 #ifdef __ANDROID__
-	// Experimental startup-only bound; absent property preserves the scheduler.
+	// Startup-only user ceiling plus conservative native ASTC profile bounds.
 	if (jit.frames_seen == 0)
 	{
 		char cap[PROP_VALUE_MAX] = {};
@@ -1746,6 +1746,21 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		{
 			jit.max_sleep_ns = int64_t(std::clamp(std::atoi(cap), 0, 45000)) * 1000;
 			jit.sleep_cap_ns = jit.max_sleep_ns;
+		}
+		// Bound native ASTC warmup below half the predicted refresh period; a
+		// lower explicit user ceiling remains in effect.
+		{
+			std::shared_lock decoder_lock(decoder_mutex);
+			if (decoders[0].decoder and video_stream_description and
+			    video_stream_description->codec[0] == video_codec::nxastc and
+			    video_stream_description->codec[1] == video_codec::nxastc)
+			{
+				const int64_t profile_max = frame_state.predictedDisplayPeriod > 0
+				                                    ? frame_state.predictedDisplayPeriod / 2
+				                                    : jit.max_sleep_ns;
+				jit.max_sleep_ns = std::min(jit.max_sleep_ns, profile_max);
+				jit.sleep_cap_ns = std::min({jit.sleep_cap_ns, jit.max_sleep_ns, int64_t(2'000'000)});
+			}
 		}
 	}
 #endif

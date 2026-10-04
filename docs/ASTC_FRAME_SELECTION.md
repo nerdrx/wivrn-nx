@@ -12,6 +12,15 @@ the existing selection, and the diagnostic nearest override remains available.
 No image generation, reconstruction, GPU dispatch, history buffer or network change
 is required. This changes which already-decoded pair is presented.
 
+On Android, an initialized two-eye NX ASTC stream gets a 2 ms startup sleep-cap
+ceiling and a maximum sleep bounded to half the positive predicted display period
+until its first compositor GPU pass. A lower `debug.wivrn.nx.jit_max_sleep_us` setting
+is preserved. This is conservative tuning for this profile: native trials had one
+skipped refresh when gradual probes reached 11.4 ms, while measured 5–10 ms windows
+had none. Matched 500 µs and 2 ms cap runs also recorded no scheduler-attributed
+misses, though another gradual-recovery run saw startup misses. These results are not
+a no-miss guarantee or a general claim about other codecs or devices.
+
 Validation: Android native build and data-preserving signed APK update passed.
 The existing de-jitter test passed 41,096 checks. Short stationary Pico captures
 recorded no backward source transitions and approximately 90 render iterations/s.

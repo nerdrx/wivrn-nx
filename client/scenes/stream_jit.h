@@ -79,11 +79,10 @@ namespace wivrn
 // there is room for and the cap will not allow, for the rest of the session, with zero
 // misses reported in every window after.
 //
-// So the cap falls a whole refresh period on a miss and climbs one back after a long
-// clean run. The margin is what the guard constrains, and the margin is still
+// So the cap falls a whole refresh period on a miss and rises by at most 1 ms after a
+// long clean run. The margin is what the guard constrains, and the margin is still
 // widen-only: it never narrows, on any path. Decrease stays immediate and increase stays
-// slow, which is the same shape as the server's own bitrate controller and for the same
-// reason -- a mistake costs one frame, a recovery costs seconds.
+// gradual, because a mistake costs one frame and a recovery can take seconds.
 //
 // `skipped` is the one that needs a second control, and it is the reason `sleep_cap_ns`
 // exists next to the margin. A runtime paces xrWaitFrame against the frames it still has
@@ -93,9 +92,9 @@ namespace wivrn
 // return until this frame is submitted and the loop's RATE halves -- which is precisely
 // the failure the guard forbids, and it is invisible to a margin measured in
 // milliseconds. So the cap on the sleep is itself adaptive and RATCHETS DOWN one refresh
-// period at a time, never up. Whatever the pipeline depth turns out to be, the loop finds
-// it within a few frames and then stays on the safe side of it for the rest of the
-// session. Both adaptations move in the same direction: earlier, never later.
+// period at a time after an attributable miss; after a long clean run it probes upward
+// by at most 1 ms. Whatever the pipeline depth turns out to be, the loop moves down
+// quickly and tests recovery gradually.
 //
 // While `frames_seen` is below the warm-up count nothing sleeps at all: the scheduler is
 // only measuring what the pass costs on this device, at this resolution, with these
@@ -153,7 +152,7 @@ struct jit_scheduler
 	int64_t sleep_cap_ns = 45'000'000;
 	// Consecutive accounted frames with no attributable miss. Resets to zero on one.
 	uint64_t clean_run = 0;
-	// How long that run must be before the cap probes upward by one refresh period.
+	// How long that run must be before the cap probes upward by at most 1 ms.
 	// 256 frames is about three seconds at 90 Hz and six at the ~45 this device
 	// actually turns, so a recovery costs seconds and a mistake costs one frame.
 	uint64_t clean_run_to_probe = 256;
@@ -335,8 +334,8 @@ struct jit_scheduler
 		}
 
 		// Additive increase. A frame that could have been charged for a miss and was
-		// not is evidence the cap has room; enough of them in a row and it takes one
-		// refresh period back. Only frames that actually slept count, so a session
+		// not is evidence the cap has room; enough in a row probes upward by at most
+		// 1 ms. Only frames that actually slept count, so a session
 		// sitting at cap zero still probes (its sleep is below the attribution bar, so
 		// it cannot be blamed for anything either) but one that never sleeps because
 		// the budget already exceeds the slack does not climb on evidence it has not
@@ -349,7 +348,7 @@ struct jit_scheduler
 		if (clean_run >= clean_run_to_probe and sleep_cap_ns < max_sleep_ns)
 		{
 			clean_run = 0;
-			const int64_t step = period > 0 ? period : margin_skip_step_ns;
+			const int64_t step = std::min<int64_t>(period > 0 ? period : margin_skip_step_ns, 1'000'000);
 			sleep_cap_ns = std::min(max_sleep_ns, sleep_cap_ns + step);
 		}
 	}

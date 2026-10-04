@@ -47,6 +47,23 @@ int main()
 	assert(default_arg.sleep_cap_ns == explicit_true.sleep_cap_ns);
 	assert(default_arg.lead_n == explicit_true.lead_n);
 
+	// Recovery probes are gradual even at normal headset refresh periods, and stop
+	// exactly at the configured maximum. Miss-driven decrease remains one full period
+	// as checked by the cached skipped-refresh case above.
+	jit_scheduler probes;
+	probes.sleep_cap_ns = 500'000;
+	auto clean_probe = [&](jit_scheduler & scheduler) {
+		scheduler.clean_run = scheduler.clean_run_to_probe - 1;
+		scheduler.account(1'000'000, 0, 0, 50'000'000, false, period, false);
+	};
+	clean_probe(probes);
+	assert(probes.sleep_cap_ns == 1'500'000);
+	clean_probe(probes);
+	assert(probes.sleep_cap_ns == 2'500'000);
+	probes.sleep_cap_ns = probes.max_sleep_ns - 300'000;
+	clean_probe(probes);
+	assert(probes.sleep_cap_ns == probes.max_sleep_ns);
+
 	// A 12 ms spike every 200 submitted passes is covered by peak hold plus the
 	// existing miss-driven margin over a 1000-frame run.
 	jit_scheduler spikes;
@@ -65,5 +82,5 @@ int main()
 	assert(spikes.frames_seen == 1000);
 	assert(underbudget_spikes <= 1); // One first observed spike may widen the margin.
 
-	std::cout << "PASS: idle warmup, actual-pass warmup, idle peak hold, cached miss/cap accounting, default API semantics, and periodic-spike budget (1000 passes)\n";
+	std::cout << "PASS: idle/pass warmup, idle peak hold, cached miss/full-period decrease, default API semantics, gradual 1 ms cap probes, max clamp, and periodic-spike budget (1000 passes)\n";
 }

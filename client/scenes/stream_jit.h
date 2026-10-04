@@ -125,7 +125,7 @@ struct jit_scheduler
 	// in the future) cannot stall the render loop. Four refresh periods at 90 Hz.
 	int64_t max_sleep_ns = 45'000'000;
 
-	// Iterations spent measuring before the first sleep.
+	// Submitted GPU passes spent measuring before the first sleep.
 	uint64_t warmup_frames = 90;
 
 	// How fast the peak hold gives up a cost it is no longer seeing. 10 us a frame is
@@ -209,7 +209,7 @@ struct jit_scheduler
 		return std::min({sleep, max_sleep_ns, sleep_cap_ns});
 	}
 
-	// Called once per iteration after the frame has been submitted.
+	// Called once per refresh. Only newly submitted GPU passes train the cost hold.
 	//
 	//   cost      wall time from the end of the sleep to the end of the submission
 	//   budget    what sleep_ns() reserved for it on this frame (0 while warming up)
@@ -220,7 +220,10 @@ struct jit_scheduler
 	//                and a half periods since the previous iteration
 	//   period       the runtime's predicted display period, which is the step the
 	//                sleep cap ratchets down by
-	void account(int64_t cost, int64_t budget, int64_t slept_ns, int64_t lead, bool period_jump, int64_t period)
+	//   gpu_pass_submitted  whether this iteration provides a pass-cost sample;
+	//                       idle/cached refreshes still update deadline accounting
+	void account(int64_t cost, int64_t budget, int64_t slept_ns, int64_t lead, bool period_jump, int64_t period,
+	             bool gpu_pass_submitted = true)
 	{
 		const int64_t ceiling = period > 0 ? period * cost_ceiling_periods : 0;
 		// Two-speed decay, and the threshold is where it is for a reason that the
@@ -239,10 +242,13 @@ struct jit_scheduler
 		const int64_t decay = (fast_above > 0 and cost_peak_ns > fast_above)
 		                              ? std::max(cost_decay_ns_per_frame, cost_peak_ns / 256)
 		                              : cost_decay_ns_per_frame;
-		cost_peak_ns = std::max(cost, cost_peak_ns - decay);
-		if (ceiling > 0)
-			cost_peak_ns = std::min(cost_peak_ns, ceiling);
-		++frames_seen;
+		if (gpu_pass_submitted)
+		{
+			cost_peak_ns = std::max(cost, cost_peak_ns - decay);
+			if (ceiling > 0)
+				cost_peak_ns = std::min(cost_peak_ns, ceiling);
+			++frames_seen;
+		}
 
 		sleep_total_ns += slept_ns;
 		sleep_max_ns = std::max(sleep_max_ns, slept_ns);

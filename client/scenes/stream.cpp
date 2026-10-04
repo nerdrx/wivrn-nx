@@ -1715,6 +1715,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	const bool jit_period_jump = jit_period > 0 and jit_step > jit_period * 3 / 2 and jit_step < jit_period * 4;
 
 	const auto rp_t0 = std::chrono::steady_clock::now();
+	bool jit_gpu_pass_submitted = false;
 
 	// Accounted from a guard so that the early returns below are measured too: a
 	// refresh with nothing to show is still a refresh whose timing this chose.
@@ -1726,6 +1727,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		XrDuration period;
 		bool period_jump;
 		std::chrono::steady_clock::time_point t0;
+		bool & gpu_pass_submitted;
 
 		~jit_account()
 		{
@@ -1735,9 +1737,9 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			// Negative means the frame was handed over after the refresh it was
 			// meant for had already gone.
 			const int64_t lead = display_time - self.instance.now();
-			self.jit.account(cost, budget, slept, lead, period_jump, period);
+			self.jit.account(cost, budget, slept, lead, period_jump, period, gpu_pass_submitted);
 		}
-	} jit_guard{*this, jit_budget, jit_slept, frame_state.predictedDisplayTime, jit_period, jit_period_jump, rp_t0};
+	} jit_guard{*this, jit_budget, jit_slept, frame_state.predictedDisplayTime, jit_period, jit_period_jump, rp_t0, jit_gpu_pass_submitted};
 
 	const auto rp_ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
 	// A gap far longer than any display period means the loop was not running at all
@@ -2933,6 +2935,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			device.resetFences(*fence);
 			const auto rp_sub0 = std::chrono::steady_clock::now();
 			queue.lock()->submit(submit_info, *fence);
+			jit_gpu_pass_submitted = true;
 			g_rp.submit_ms += rp_ms(std::chrono::steady_clock::now() - rp_sub0);
 			query_pool_filled = true;
 			++g_rp.gpu_submissions;

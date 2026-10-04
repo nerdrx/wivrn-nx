@@ -36,7 +36,7 @@ class astc_decoder final : public decoder
 		uint8_t * mapped = nullptr;
 		vk::ImageLayout layout = vk::ImageLayout::eUndefined;
 		std::atomic_bool free = true;
-		uint64_t semaphore_value = 0;
+		bool upload_complete = true;
 	};
 	struct frame
 	{
@@ -53,6 +53,7 @@ class astc_decoder final : public decoder
 	std::vector<uint8_t> cpu_scratch;
 	std::weak_ptr<scenes::stream> weak_scene;
 	shard_accumulator * accumulator;
+	bool async_upload_enabled = true;
 
 	std::mutex mutex;
 	std::condition_variable wake;

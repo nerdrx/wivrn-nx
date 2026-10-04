@@ -31,6 +31,7 @@
 #include "stream.h"
 
 #include "utils/view_geometry.h"
+#include "utils/fresh_frame.h"
 #include "utils/motion_pose.h"
 
 #include "application.h"
@@ -894,6 +895,44 @@ bool scenes::stream::views_ready() const
 	return any;
 }
 
+bool scenes::stream::views_recently_ready(XrTime now) const
+{
+	constexpr XrDuration resume_grace = 250'000'000; // Allow phase skew; reject frames near the 1 s stall limit.
+	std::array<std::array<wivrn::fresh_frame_sample, image_buffer_size + 1>, decoder_count> views{};
+	size_t view_count = 0;
+	for (size_t i = 0; i < decoder_count; ++i)
+	{
+		if (not is_view(i) or not decoders[i].decoder)
+			continue;
+
+		auto & frames = views[view_count++];
+		size_t count = 0;
+		if (decoders[i].empty())
+		{
+			if (i != 0 || not eyes_in_one_stream() ||
+			    not safety_available.load(std::memory_order_relaxed) || not latest_safety_handle ||
+			    not latest_safety_handle->direct_valid || not latest_safety_handle->direct_safety)
+				return false;
+			frames[count++] = {
+			        .index = latest_safety_handle->feedback.frame_index,
+			        .received_at = latest_safety_handle->feedback.received_from_decoder,
+			        .valid = true,
+			};
+		}
+		else
+		{
+			for (const auto & frame: decoders[i].latest_frames)
+				if (frame)
+					frames[count++] = {
+					        .index = frame->feedback.frame_index,
+					        .received_at = frame->feedback.received_from_decoder,
+					        .valid = true,
+					};
+		}
+	}
+	return wivrn::has_recent_common_frame(views, view_count, now, resume_grace);
+}
+
 // One decoded frame of the hybrid base layer, and the ONLY place the client sees one.
 //
 // The base layer is a hardware-HEVC picture of the whole eye pair that the NX Warp decoder
@@ -1036,11 +1075,17 @@ void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_p
 		// all -- so waiting on it here would leave the scene stuck short of state::streaming
 		// for the whole session, which among other things never arms the stall watchdog and
 		// never stops the connecting overlay. Stream 0's own frame covers both eyes.
-		if (state_ != state::streaming and views_ready())
-		{
-			set_state(state::streaming);
-			spdlog::info("Stream scene ready at t={}", instance.now());
-		}
+		state previous = state_;
+		const XrTime now = instance.now();
+		bool ready = false;
+		if (previous == state::initializing)
+			ready = views_ready();
+		else if (previous == state::stalled)
+			ready = views_recently_ready(now);
+		if (ready and state_.compare_exchange_strong(previous, state::streaming))
+			spdlog::info("Stream state {} -> streaming at t={}",
+			             previous == state::stalled ? "stalled (fresh views)" : "initializing",
+			             now);
 	}
 
 	frames_ready.notify_all();
@@ -2008,8 +2053,10 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		// nor in the brief window after a successful adopt before the first fresh frame
 		// arrives: only run it in the steady streaming state. refresh_reconnect_watchdog()
 		// also bumps the held frames' timestamps forward on resume as a second guard.
-		if (state_ == state::streaming and blit_handle->feedback.blitted - blit_handle->feedback.received_from_decoder > 1'000'000'000)
-			set_state(state::stalled);
+		if (state_ == state::streaming and
+		    blit_handle->feedback.blitted - blit_handle->feedback.received_from_decoder > 1'000'000'000 and
+		    set_state(state::stalled))
+			spdlog::warn("Stream state streaming -> stalled: selected view frame exceeded 1000 ms age");
 		++blit_handle->feedback.times_displayed;
 		blit_handle->feedback.displayed = frame_state.predictedDisplayTime;
 
@@ -3336,6 +3383,27 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 	std::unique_lock lock(decoder_mutex);
 	if (not needs_decoder_reset && video_stream_description == description)
 		return;
+	// Retire rendering and release every retained handle before its decoder image pool.
+	// Join decoder workers without decoder_mutex: a final callback can be waiting on it.
+	if (device.waitForFences(*fence, VK_TRUE, UINT64_MAX) != vk::Result::eSuccess)
+		throw std::runtime_error("Vulkan fence wait failed before decoder replacement");
+	std::array<std::unique_ptr<shard_accumulator>, decoder_count> retired_decoders;
+	{
+		std::unique_lock frame_lock(frames_mutex);
+		current_blit_handles = {};
+		smoothing_blend_handles = {};
+		latest_safety_handle.reset();
+		safety_last_presented_handle.reset();
+		for (size_t i = 0; i < decoders.size(); ++i)
+		{
+			decoders[i].latest_frames = {};
+			retired_decoders[i] = std::move(decoders[i].decoder);
+		}
+	}
+	lock.unlock();
+	for (auto & decoder: retired_decoders)
+		decoder.reset();
+	lock.lock();
 	needs_decoder_reset = false;
     {
         auto field = motion_field.lock();

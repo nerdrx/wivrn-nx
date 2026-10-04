@@ -205,6 +205,10 @@ private:
 	// Callers must hold decoder_mutex.
 	bool views_ready() const;
 
+	// Each required view must have a decoded frame received within 250 ms for resume.
+	// Callers hold decoder_mutex and frames_mutex.
+	bool views_recently_ready(XrTime now) const;
+
 	// The one place a decoded base layer frame arrives. See stream.cpp.
 	void handle_base_frame(uint8_t stream_index, const std::shared_ptr<wivrn::shard_accumulator::blit_handle> & handle);
 
@@ -327,13 +331,13 @@ private:
 
 	std::atomic<state> state_ = state::initializing;
 
-	void set_state(state new_state)
+	bool set_state(state new_state)
 	{
 		state prev = state_;
-		if (prev == state::shutdown)
-			return;
+		if (prev == state::shutdown || prev == new_state)
+			return false;
 
-		state_.compare_exchange_strong(prev, new_state);
+		return state_.compare_exchange_strong(prev, new_state);
 	}
 
 	xr::swapchain swapchain;

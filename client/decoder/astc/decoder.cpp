@@ -13,12 +13,14 @@
 #include "nxastc_packet_decode.h"
 #include "scenes/stream.h"
 #include <spdlog/spdlog.h>
-#include <algorithm>
+#include <chrono>
 #include <climits>
-#include <cstring>
 #include <format>
 #include <limits>
 #include <stdexcept>
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 
 namespace
 {
@@ -32,10 +34,8 @@ struct astc_blit_handle final : wivrn::decoder::blit_handle
 	                 vk::Image image,
 	                 vk::Extent2D extent,
 	                 vk::ImageLayout & layout,
-	                 vk::Semaphore semaphore,
-	                 uint64_t & semaphore_value,
 	                 std::atomic_bool & free) :
-	        wivrn::decoder::blit_handle{feedback, view_info, view, image, extent, layout, semaphore, &semaphore_value}, free(free)
+	        wivrn::decoder::blit_handle{feedback, view_info, view, image, extent, layout, nullptr, nullptr}, free(free)
 	{}
 	~astc_blit_handle() { free = true; }
 };
@@ -77,6 +77,15 @@ astc_decoder::astc_decoder(vk::raii::Device & device,
 		throw std::runtime_error("ASTC 8x8 lacks optimal sampled, linear-filter, or transfer-destination support");
 	if (!extent.width || !extent.height || raw_bytes > std::numeric_limits<uint32_t>::max() || raw_bytes > INT_MAX)
 		throw std::runtime_error("invalid ASTC stream dimensions");
+#ifdef __ANDROID__
+	char sync_upload[PROP_VALUE_MAX] = {};
+	const bool force_sync_upload = __system_property_get("debug.wivrn.nx.astc_sync_upload", sync_upload) > 0 && sync_upload[0] == '1';
+	if (force_sync_upload)
+	{
+		async_upload_enabled = false;
+		spdlog::info("ASTC synchronous uploads forced by debug.wivrn.nx.astc_sync_upload");
+	}
+#endif
 	// LZ4 performs backward-reference reads while writing. Keep those accesses in
 	// ordinary CPU-cached memory, then do one forward copy into VMA's write staging.
 	cpu_scratch.resize(size_t(raw_bytes));
@@ -120,6 +129,7 @@ astc_decoder::astc_decoder(vk::raii::Device & device,
 		        "ASTC packet staging");
 		item.mapped = item.staging.data<uint8_t>();
 	}
+	spdlog::info("ASTC upload handoff: {}", async_upload_enabled ? "same-queue async" : "synchronous fence");
 	worker = std::thread([this, queue_family_index] { worker_function(queue_family_index); });
 }
 
@@ -203,13 +213,16 @@ void astc_decoder::frame_completed(const from_headset::feedback & feedback,
 astc_decoder::image * astc_decoder::get_free()
 {
 	for (auto & item: images)
-		if (item.free.exchange(false))
+		if (item.upload_complete && item.free.exchange(false))
 			return &item;
 	return nullptr;
 }
 
 void astc_decoder::worker_function(uint32_t queue_family_index)
 {
+	using steady_clock = std::chrono::steady_clock;
+	uint32_t timing_frames = 0;
+	uint64_t decode_copy_ns = 0, prewait_ns = 0, syncwait_ns = 0, handoff_ns = 0;
 	vk::raii::CommandPool command_pool(device, vk::CommandPoolCreateInfo{
 	                                                   .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
 	                                                   .queueFamilyIndex = queue_family_index,
@@ -219,26 +232,74 @@ void astc_decoder::worker_function(uint32_t queue_family_index)
 	        .commandBufferCount = 1,
 	})[0]));
 	vk::raii::Fence fence(device, vk::FenceCreateInfo{.flags = vk::FenceCreateFlagBits::eSignaled});
+	image * last_submitted = nullptr;
+	auto wait_upload_fence = [&]() noexcept {
+		try
+		{
+			return device.waitForFences(*fence, true, UINT64_MAX) == vk::Result::eSuccess;
+		}
+		catch (const std::exception & e)
+		{
+			spdlog::warn("ASTC upload fence wait failed: {}", e.what());
+		}
+		catch (...)
+		{
+			spdlog::warn("ASTC upload fence wait failed with an unknown Vulkan error");
+		}
+		return false;
+	};
+	auto drain_upload = [&]() noexcept {
+		if (!last_submitted)
+			return true;
+		if (!wait_upload_fence())
+		{
+			// A lost Vulkan device cannot guarantee completion; never mark the image reusable.
+			spdlog::warn("ASTC shutdown upload drain failed; device may be lost");
+			return false;
+		}
+		last_submitted->upload_complete = true;
+		last_submitted = nullptr;
+		return true;
+	};
 	while (true)
 	{
 		frame current;
+		bool stopping = false;
 		{
 			std::unique_lock lock(mutex);
 			wake.wait(lock, [&] { return exiting || !pending.empty(); });
 			if (exiting)
-				return;
-			current = std::move(pending.front());
-			pending.pop_front();
+				stopping = true;
+			else
+			{
+				current = std::move(pending.front());
+				pending.pop_front();
+			}
+		}
+		if (stopping)
+		{
+			// Release the mutex before waiting so teardown and packet delivery never
+			// block behind GPU completion. Drain before cmd/fence/pool are destroyed.
+			drain_upload();
+			return;
 		}
 
 		image * item = nullptr;
 		bool handed_off = false;
 		bool submitted = false;
+		bool fence_reset = false;
+		bool stop_worker = false;
+		uint64_t frame_decode_copy_ns = 0, frame_prewait_ns = 0, frame_syncwait_ns = 0, frame_handoff_ns = 0;
 		try
 		{
 			const auto parsed = nxastc_packet::parse_packet(current.packet);
 			if (!parsed || parsed->width != extent.width || parsed->height != extent.height || parsed->raw_bytes != raw_bytes)
 				throw std::runtime_error("invalid ASTC packet dimensions or length");
+			if (last_submitted && fence.getStatus() == vk::Result::eSuccess)
+			{
+				last_submitted->upload_complete = true;
+				last_submitted = nullptr;
+			}
 			item = get_free();
 			if (!item)
 			{
@@ -246,6 +307,7 @@ void astc_decoder::worker_function(uint32_t queue_family_index)
 				continue;
 			}
 			const auto payload = std::span<const uint8_t>(current.packet).subspan(nxastc_packet::header_size);
+			auto stage_start = steady_clock::now();
 			auto output = parsed->encoding == nxastc_packet::compression::none ?
 			                      std::span<uint8_t>(item->mapped, parsed->raw_bytes) :
 			                      std::span<uint8_t>(cpu_scratch);
@@ -263,14 +325,24 @@ void astc_decoder::worker_function(uint32_t queue_family_index)
 			}
 			if (parsed->encoding != nxastc_packet::compression::none)
 				std::memcpy(item->mapped, cpu_scratch.data(), parsed->raw_bytes);
+			frame_decode_copy_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(steady_clock::now() - stage_start).count();
 			if (vmaFlushAllocation(vk_allocator::instance(), static_cast<VmaAllocation>(item->staging), 0, parsed->raw_bytes) != VK_SUCCESS)
 				throw std::runtime_error("failed to flush ASTC staging buffer");
+			stage_start = steady_clock::now();
 			vk::Result waited = device.waitForFences(*fence, true, UINT64_MAX);
+			frame_prewait_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(steady_clock::now() - stage_start).count();
 			if (waited != vk::Result::eSuccess)
 				throw std::runtime_error("failed waiting for ASTC upload fence");
+			if (last_submitted)
+			{
+				last_submitted->upload_complete = true;
+				last_submitted = nullptr;
+			}
 			cmd.reset();
 			cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
 			const auto previous = item->layout;
+			// Upload and scene rendering submit to the same application queue. This barrier
+			// carries the transfer write into later fragment sampling submissions on that queue.
 			cmd.pipelineBarrier(
 			        previous == vk::ImageLayout::eUndefined ? vk::PipelineStageFlagBits::eTopOfPipe : vk::PipelineStageFlagBits::eFragmentShader,
 			        vk::PipelineStageFlagBits::eTransfer,
@@ -311,6 +383,8 @@ void astc_decoder::worker_function(uint32_t queue_family_index)
 			item->layout = vk::ImageLayout::eShaderReadOnlyOptimal;
 			cmd.end();
 			device.resetFences(*fence);
+			fence_reset = true;
+			item->upload_complete = false;
 			application::get_queue().lock()->submit(
 			        vk::SubmitInfo{
 			                .commandBufferCount = 1,
@@ -318,34 +392,82 @@ void astc_decoder::worker_function(uint32_t queue_family_index)
 			        },
 			        *fence);
 			submitted = true;
-			waited = device.waitForFences(*fence, true, UINT64_MAX);
-			if (waited != vk::Result::eSuccess)
-				throw std::runtime_error("failed waiting for ASTC upload fence");
+			fence_reset = false;
+			last_submitted = item;
+			stage_start = steady_clock::now();
+			if (!async_upload_enabled)
+			{
+				auto sync_start = steady_clock::now();
+				waited = device.waitForFences(*fence, true, UINT64_MAX);
+				frame_syncwait_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(steady_clock::now() - sync_start).count();
+				if (waited != vk::Result::eSuccess)
+					throw std::runtime_error("failed waiting for ASTC upload fence");
+				item->upload_complete = true;
+				last_submitted = nullptr;
+			}
+			// On async uploads, later scene submissions on this same queue are ordered by
+			// the transfer-to-fragment image barrier above; no timeline semaphore is needed.
 			current.feedback.received_from_decoder = application::get_xr_instance().now();
 
 			auto handle = std::make_shared<astc_blit_handle>(current.feedback,
 			                                                current.view_info,
-			                                                *item->view,
-			                                                item->pixels,
-			                                                extent,
-			                                                item->layout,
-			                                                nullptr,
-			                                                item->semaphore_value,
-			                                                item->free);
+		                                                *item->view,
+		                                                item->pixels,
+		                                                extent,
+		                                                item->layout,
+		                                                item->free);
 			if (auto scene = weak_scene.lock())
 			{
 				scene->push_blit_handle(accumulator, std::move(handle));
+				frame_handoff_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(steady_clock::now() - stage_start).count();
 				handed_off = true;
 			}
 
 		}
 		catch (const std::exception & e)
 		{
-			if (item && !handed_off && !submitted)
-				item->free = true;
+			if (fence_reset && !submitted)
+			{
+				// No submission owns the reset fence. Do not let the next frame wait
+				// forever on it; stop this worker rather than reuse an invalid upload path.
+				stop_worker = true;
+				if (item)
+				{
+					item->upload_complete = true;
+					item->free = true;
+				}
+			}
+			if (item && !handed_off)
+			{
+				if (submitted)
+				{
+					if (drain_upload())
+					{
+						item->upload_complete = true;
+						item->free = true;
+					}
+					else
+						stop_worker = true;
+				}
+				else
+					item->free = true;
+			}
 			spdlog::warn("ASTC decoder exception: {}", e.what());
 		}
+		if (handed_off && ++timing_frames == 180)
+		{
+			decode_copy_ns += frame_decode_copy_ns; prewait_ns += frame_prewait_ns; syncwait_ns += frame_syncwait_ns; handoff_ns += frame_handoff_ns;
+			spdlog::info("ASTC worker 180-frame mean us/frame: decode+staging-copy {:.1f}, prior-upload fence {:.1f}, sync post-submit fence {:.1f}, host submit-to-handoff {:.1f} ({}; async ends at host handoff, not GPU completion)", decode_copy_ns / 180000.0, prewait_ns / 180000.0, syncwait_ns / 180000.0, handoff_ns / 180000.0, async_upload_enabled ? "same-queue async" : "sync");
+			timing_frames = 0; decode_copy_ns = prewait_ns = syncwait_ns = handoff_ns = 0;
+		}
+		else if (handed_off)
+		{
+			decode_copy_ns += frame_decode_copy_ns; prewait_ns += frame_prewait_ns; syncwait_ns += frame_syncwait_ns; handoff_ns += frame_handoff_ns;
+		}
+		if (stop_worker)
+			break;
 	}
+	drain_upload();
 }
 
 std::vector<video_codec> astc_decoder::supported_codecs()

@@ -55,6 +55,12 @@ int main()
 	ack.observe(3, true); // Reordered feedback cannot rewind the reference.
 	ack.observe(100, false);
 	assert(ack.frame() == 5);
+	// Lost decode reports leave the ACK behind until an anchor recovers the stream.
+	ack.observe(6, false);
+	assert(ack.frame() == 5 && motion_reference_usable(13, ack.frame()));
+	assert(!motion_reference_usable(14, ack.frame())); // Encoder must send an anchor now.
+	ack.observe(13, true);
+	assert(ack.frame() == 13 && motion_reference_usable(14, ack.frame()));
 	ack.reset();
 	assert(ack.frame() == independent_frame);
 	ack.observe(independent_frame, true);

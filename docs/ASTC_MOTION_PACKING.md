@@ -33,6 +33,10 @@ On a Pico A8110, the production packet decoder reconstructed a tiled, photo-deri
 
 The native C++ prototype's stereo geometry was explicitly corrected from an erroneous 4×4-footprint-sized grid to 544×272 **8×8** blocks (4352×2176 pixels). Only corrected results are valid. Stronger independent Zstd levels saved about 2–5% while adding PC time; spatial XOR predictors increased packet bytes and were rejected.
 
+## Moving-scene follow-up
+
+A separate prerecorded 512×512 3D camera/object-motion clip does not reproduce the favorable wrapped-photo result. At a one-frame reference gap, 9/35 pairs pass the 15% admission rule, saving 4.34% aggregate payload; replaying the three-frame losing-probe cooldown reduces that to 1.55%. No pair passes at reference gaps of two, four or eight source frames. Wider search adds PC cost without fixing older-reference admission, so it is not integrated. These are offline fixed-gap fixtures, not live ACK/transport or native-headset measurements. The mode stays default off. See the NX Warp `motion-packing/stress` report for fixture bytes, graphs and rejected alternatives.
+
 ## Runnable checks
 
 ```sh

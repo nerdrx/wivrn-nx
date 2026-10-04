@@ -69,6 +69,13 @@ using parity_shard = to_headset::video_stream_parity_shard;
 using view_info_t = data_shard::view_info_t;
 using timing_info_t = data_shard::timing_info_t;
 
+struct bool_record
+{
+	uint32_t prefix;
+	bool enabled;
+	uint16_t suffix;
+};
+
 template <typename T>
 T round_trip(const T & value)
 {
@@ -415,6 +422,84 @@ void test_recovery_blob_survives_send_mutation()
 	mutated.payload = sent_payloads[dropped];
 	fec::encode_blob(mutated, encrypted_blob);
 	CHECK(encrypted_blob != recovery_blobs[dropped]); // snapshot is preserved across the send mutation
+}
+
+void test_span_xor_matches_encoded_blob()
+{
+	std::printf("Part B3: direct span XOR matches the recovery wire bytes\n");
+	for (size_t payload_size: {size_t(0), size_t(7), size_t(32), size_t(1400)})
+	{
+		data_shard shard;
+		shard.view_info = make_view_info();
+		shard.timing_info = timing_info_t{.send_begin = 11, .send_end = 22};
+		std::vector<uint8_t> payload(payload_size);
+		for (size_t i = 0; i < payload_size; ++i)
+			payload[i] = uint8_t(i * 37 + 9);
+		shard.payload = payload;
+		std::vector<uint8_t> expected;
+		fec::encode_blob(shard, expected);
+		std::vector<uint8_t> recovered(expected.size(), 0xa5);
+		CHECK(fec::xor_blob_into(shard, recovered, expected.size()));
+		for (size_t i = 0; i < expected.size(); ++i)
+			CHECK(uint8_t(recovered[i] ^ 0xa5) == expected[i]);
+		std::vector<uint8_t> unchanged(expected.size(), 0x5a);
+		CHECK(not fec::xor_blob_into(shard, unchanged, expected.size() + 1));
+		CHECK(std::ranges::all_of(unchanged, [](uint8_t b) { return b == 0x5a; }));
+	}
+}
+
+void test_malformed_bool_deserialization()
+{
+	std::printf("Part B4: malformed bool bytes are rejected before materialization\n");
+	for (uint8_t value: {uint8_t(0), uint8_t(1)})
+	{
+		auto memory = std::make_shared<uint8_t[]>(1);
+		memory[0] = value;
+		deserialization_packet packet{memory, std::span<uint8_t>(memory.get(), 1)};
+		CHECK(packet.deserialize<bool>() == (value != 0));
+	}
+	for (uint8_t value: {uint8_t(2), uint8_t(254), uint8_t(255)})
+	{
+		auto memory = std::make_shared<uint8_t[]>(1);
+		memory[0] = value;
+		deserialization_packet packet{memory, std::span<uint8_t>(memory.get(), 1)};
+		bool rejected = false;
+		try
+		{
+			(void)packet.deserialize<bool>();
+		}
+		catch (const deserialization_error &)
+		{
+			rejected = true;
+		}
+		CHECK(rejected);
+	}
+
+	// A bool between ordinary scalar fields must take the checked, ungrouped path.
+	bool_record original{.prefix = 0x12345678, .enabled = true, .suffix = 0x4321};
+	serialization_packet encoded;
+	encoded.serialize(original);
+	std::vector<uint8_t> bytes;
+	for (const auto span: static_cast<std::vector<std::span<uint8_t>> &>(encoded))
+		bytes.insert(bytes.end(), span.begin(), span.end());
+	CHECK(bytes.size() == sizeof(uint32_t) + sizeof(uint8_t) + sizeof(uint16_t));
+	if (bytes.size() == sizeof(uint32_t) + sizeof(uint8_t) + sizeof(uint16_t))
+	{
+		auto memory = std::make_shared<uint8_t[]>(bytes.size() + 1);
+		std::memcpy(memory.get(), bytes.data(), bytes.size());
+		memory[sizeof(uint32_t)] = 254;
+		deserialization_packet packet{memory, std::span<uint8_t>(memory.get(), bytes.size())};
+		bool rejected = false;
+		try
+		{
+			(void)packet.deserialize<bool_record>();
+		}
+		catch (const deserialization_error &)
+		{
+			rejected = true;
+		}
+		CHECK(rejected);
+	}
 }
 
 void test_graceful_failure()
@@ -911,6 +996,8 @@ int main()
 	test_group_construction();
 	test_round_trip();
 	test_recovery_blob_survives_send_mutation();
+	test_span_xor_matches_encoded_blob();
+	test_malformed_bool_deserialization();
 	test_graceful_failure();
 	test_dedup();
 	test_variable_group_sizes();

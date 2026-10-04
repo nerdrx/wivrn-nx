@@ -153,6 +153,36 @@ inline void encode_blob(const data_shard & shard, std::vector<uint8_t> & out)
 		out.insert(out.end(), span.begin(), span.end());
 }
 
+// XOR the exact encode_blob bytes without materializing a second full blob.
+// Keep serialization centralized so field order and wire representation cannot drift.
+inline bool xor_blob_into(const data_shard & shard, std::span<uint8_t> recovered, size_t expected_size)
+{
+	serialization_packet packet;
+	packet.serialize(shard.view_info);
+	packet.serialize(shard.timing_info);
+	packet.serialize(shard.payload);
+	auto & spans = static_cast<std::vector<std::span<uint8_t>> &>(packet);
+
+	size_t size = 0;
+	for (const auto span: spans)
+	{
+		if (span.size() > recovered.size() - std::min(recovered.size(), size))
+			return false;
+		size += span.size();
+	}
+	if (size != expected_size)
+		return false;
+
+	size_t offset = 0;
+	for (const auto span: spans)
+	{
+		for (size_t i = 0; i < span.size(); ++i)
+			recovered[offset + i] ^= span[i];
+		offset += span.size();
+	}
+	return true;
+}
+
 // Inverse of encode_blob. Throws deserialization_error on a blob that does not
 // decode; callers treat that as "no reconstruction" rather than as a fatal error,
 // since a corrupt or mismatched parity shard must never take the session down.
@@ -218,19 +248,14 @@ std::optional<data_shard> reconstruct(const parity_shard & parity, lookup && pre
 	// as the longest blob of the group and every blob was zero padded to it, so a
 	// present blob can never be longer than it.
 	std::vector<uint8_t> recovered(parity.payload.begin(), parity.payload.end());
-	std::vector<uint8_t> blob;
 	for (size_t i = 0; i < n; ++i)
 	{
 		if (i == missing)
 			continue;
 
 		const data_shard * shard = present(index_of(i));
-		encode_blob(*shard, blob);
-		if (blob.size() != parity.blob_size[i] or blob.size() > recovered.size())
+		if (not xor_blob_into(*shard, recovered, parity.blob_size[i]))
 			return {};
-
-		for (size_t b = 0; b < blob.size(); ++b)
-			recovered[b] ^= blob[b];
 	}
 
 	const size_t length = parity.blob_size[missing];

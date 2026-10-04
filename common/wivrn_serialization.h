@@ -489,6 +489,42 @@ struct serialization_traits<T, std::enable_if_t<std::is_arithmetic_v<T>>>
 	}
 };
 
+// A bool is one byte on the wire, but arbitrary byte values are not valid bool
+// representations. Keep it out of grouped raw aggregate reads so malformed input
+// is checked before any bool object is materialized.
+template <>
+struct serialization_traits<bool>
+{
+	static constexpr void type_hash(details::hash_context & h)
+	{
+		h.feed("uint");
+		h.feed(sizeof(bool) * 8);
+	}
+
+	static void serialize(bool value, serialization_packet & packet)
+	{
+		packet.serialize<uint8_t>(value ? 1 : 0);
+	}
+
+	static bool deserialize(deserialization_packet & packet)
+	{
+		const uint8_t value = packet.deserialize<uint8_t>();
+		if (value > 1)
+			throw deserialization_error(packet.initial_buffer);
+		return value != 0;
+	}
+
+	static bool consteval is_trivially_serializable()
+	{
+		return false;
+	}
+
+	static size_t size(bool)
+	{
+		return sizeof(uint8_t);
+	}
+};
+
 template <typename T>
 struct serialization_traits<T, std::enable_if_t<std::is_enum_v<T>>>
 {

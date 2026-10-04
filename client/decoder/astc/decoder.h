@@ -12,6 +12,7 @@
 #include "decoder/decoder.h"
 #include "vk/allocation.h"
 #include "wivrn_packets.h"
+#include "nxastc_motion.h"
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -51,6 +52,13 @@ class astc_decoder final : public decoder
 	vk::Extent2D extent;
 	vk::DeviceSize raw_bytes;
 	std::vector<uint8_t> cpu_scratch;
+	std::vector<uint8_t> motion_scratch;
+	struct decoded_reference
+	{
+		uint64_t frame_index = UINT64_MAX;
+		std::vector<uint8_t> blocks;
+	};
+	std::array<decoded_reference, nxastc_packet::motion_reference_capacity> references;
 	std::weak_ptr<scenes::stream> weak_scene;
 	shard_accumulator * accumulator;
 	bool async_upload_enabled = true;

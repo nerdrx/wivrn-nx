@@ -13,6 +13,7 @@
 #include "nxastc_packet_decode.h"
 #include "scenes/stream.h"
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <chrono>
 #include <climits>
 #include <format>
@@ -165,7 +166,7 @@ void astc_decoder::push_data(std::span<std::span<const uint8_t>> data, uint64_t 
 		have_frame = true;
 		invalid_frame = false;
 	}
-	const size_t max_packet = size_t(raw_bytes) + nxastc_packet::header_size;
+	const size_t max_packet = size_t(raw_bytes) + nxastc_packet::motion_header_size;
 	for (auto part: data)
 	{
 		if (part.size() > max_packet - std::min(max_packet, assembling.size()))
@@ -306,12 +307,28 @@ void astc_decoder::worker_function(uint32_t queue_family_index)
 				spdlog::debug("ASTC image pool exhausted; dropping complete frame");
 				continue;
 			}
-			const auto payload = std::span<const uint8_t>(current.packet).subspan(nxastc_packet::header_size);
+			const auto payload = std::span<const uint8_t>(current.packet).subspan(parsed->header_bytes);
+			const bool motion_packet = parsed->encoding == nxastc_packet::compression::motion_zstd ||
+			                           parsed->encoding == nxastc_packet::compression::motion_raw;
+			std::span<const uint8_t> reference;
+			if (motion_packet && parsed->reference_frame != UINT64_MAX)
+			{
+				if (!nxastc_packet::motion_reference_usable(current.feedback.frame_index, parsed->reference_frame))
+					throw std::runtime_error("ASTC motion reference is outside the allowed frame window");
+				for (const auto & cached: references)
+					if (cached.frame_index == parsed->reference_frame) reference = cached.blocks;
+				if (reference.empty())
+					throw std::runtime_error("ASTC motion reference unavailable; await independent frame");
+			}
 			auto stage_start = steady_clock::now();
 			auto output = parsed->encoding == nxastc_packet::compression::none ?
 			                      std::span<uint8_t>(item->mapped, parsed->raw_bytes) :
 			                      std::span<uint8_t>(cpu_scratch);
-			const auto decode = nxastc_packet::decode_payload(*parsed, payload, output);
+			if (motion_packet && parsed->reference_frame != UINT64_MAX)
+				motion_scratch.resize(size_t(parsed->raw_bytes / 16) * 17);
+			const auto decode = motion_packet
+			                  ? nxastc_packet::decode_motion_payload(*parsed, payload, reference, output, motion_scratch)
+			                  : nxastc_packet::decode_payload(*parsed, payload, output);
 			if (decode != nxastc_packet::decode_status::ok)
 			{
 				spdlog::warn("ASTC payload decode failed frame={} encoding={} raw={} payload={} packet={} reason={}",
@@ -325,6 +342,23 @@ void astc_decoder::worker_function(uint32_t queue_family_index)
 			}
 			if (parsed->encoding != nxastc_packet::compression::none)
 				std::memcpy(item->mapped, cpu_scratch.data(), parsed->raw_bytes);
+			if (motion_packet)
+			{
+				// Rotate reusable CPU buffers; do not copy the decoded frame a second time.
+				auto cached = std::min_element(references.begin(), references.end(), [](const auto & a, const auto & b) {
+					if (a.blocks.empty() != b.blocks.empty()) return a.blocks.empty();
+					return a.frame_index < b.frame_index;
+				});
+				const bool duplicate = std::any_of(references.begin(), references.end(), [&](const auto & entry) {
+					return !entry.blocks.empty() && entry.frame_index == current.feedback.frame_index;
+				});
+				if (!duplicate && (cached->blocks.empty() || current.feedback.frame_index > cached->frame_index))
+				{
+					cached->blocks.swap(cpu_scratch);
+					cached->frame_index = current.feedback.frame_index;
+					cpu_scratch.resize(raw_bytes);
+				}
+			}
 			frame_decode_copy_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(steady_clock::now() - stage_start).count();
 			if (vmaFlushAllocation(vk_allocator::instance(), static_cast<VmaAllocation>(item->staging), 0, parsed->raw_bytes) != VK_SUCCESS)
 				throw std::runtime_error("failed to flush ASTC staging buffer");

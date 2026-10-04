@@ -1,6 +1,7 @@
 #pragma once
 
 #include "nxastc_packet.h"
+#include "nxastc_motion.h"
 
 #include <climits>
 #include <cstring>
@@ -20,6 +21,8 @@ enum class decode_status
 	zstd_unknown_content_size,
 	zstd_wrong_content_size,
 	zstd_decode_error,
+	motion_bad_selector,
+	motion_reference_mismatch,
 };
 
 inline const char * decode_status_message(decode_status status)
@@ -34,6 +37,8 @@ inline const char * decode_status_message(decode_status status)
 	case decode_status::zstd_unknown_content_size: return "Zstd frame has no declared content size";
 	case decode_status::zstd_wrong_content_size: return "Zstd frame content size mismatch";
 	case decode_status::zstd_decode_error: return "Zstd payload did not decode to exact block length";
+	case decode_status::motion_bad_selector: return "motion selector is outside 0..8";
+	case decode_status::motion_reference_mismatch: return "motion reference or output length mismatch";
 	}
 	return "unknown ASTC payload error";
 }
@@ -81,5 +86,50 @@ inline decode_status decode_payload(const packet_header & header,
 	if (ZSTD_isError(decoded) || decoded != output.size())
 		return decode_status::zstd_decode_error;
 	return decode_status::ok;
+}
+
+inline decode_status decode_motion_payload(const packet_header & header,
+                                           std::span<const uint8_t> payload,
+                                           std::span<const uint8_t> reference,
+                                           std::span<uint8_t> output,
+                                           std::span<uint8_t> scratch)
+{
+	if (header.header_bytes != motion_header_size ||
+	    (header.encoding != compression::motion_raw && header.encoding != compression::motion_zstd) ||
+	    !header.width || !header.height || block_bytes(header.width, header.height) != header.raw_bytes ||
+	    payload.size() != header.payload_bytes || output.size() != header.raw_bytes)
+		return decode_status::length_mismatch;
+	const bool anchor = header.reference_frame == independent_frame;
+	if (header.encoding == compression::motion_raw)
+	{
+		if (!anchor || !reference.empty() || payload.size() != output.size())
+			return decode_status::motion_reference_mismatch;
+		std::memcpy(output.data(), payload.data(), output.size());
+		return decode_status::ok;
+	}
+	if (anchor)
+	{
+		if (!reference.empty())
+			return decode_status::motion_reference_mismatch;
+		auto zstd_header = header;
+		zstd_header.encoding = compression::zstd;
+		return decode_payload(zstd_header, payload, output);
+	}
+	const uint32_t block_width = uint32_t((uint64_t(header.width) + 7) / 8);
+	const uint32_t block_height = uint32_t((uint64_t(header.height) + 7) / 8);
+	size_t expected_raw = 0, expected_packed = 0;
+	if (!detail::motion_sizes(block_width, block_height, expected_raw, expected_packed) ||
+	    expected_raw != output.size() || reference.size() != expected_raw || scratch.size() != expected_packed ||
+	    expected_packed > std::numeric_limits<uint32_t>::max())
+		return decode_status::motion_reference_mismatch;
+	auto zstd_header = header;
+	zstd_header.encoding = compression::zstd;
+	zstd_header.raw_bytes = uint32_t(expected_packed);
+	const auto status = decode_payload(zstd_header, payload, scratch);
+	if (status != decode_status::ok)
+		return status;
+	if (reconstruct_motion_blocks(block_width, block_height, reference, scratch, output))
+		return decode_status::ok;
+	return decode_status::motion_bad_selector;
 }
 } // namespace wivrn::nxastc_packet

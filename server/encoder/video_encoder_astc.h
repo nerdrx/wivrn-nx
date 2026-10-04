@@ -2,10 +2,12 @@
 
 #include "video_encoder.h"
 #include "astc_rate_control.h"
+#include "nxastc_motion.h"
 #include "vk/allocation.h"
 
 #include <array>
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 #include <zstd.h>
@@ -43,12 +45,28 @@ class video_encoder_astc : public video_encoder
 	uint32_t sampled_frames = 0;
 	std::array<uint32_t, 7> sampled_quality{};
 	std::array<uint32_t, 3> sampled_encoding{};
+	struct motion_reference
+	{
+		uint64_t frame_index = 0;
+		bool valid = false;
+		std::vector<uint8_t> blocks;
+	};
+	std::array<motion_reference, nxastc_packet::motion_reference_capacity> motion_references;
+	std::mutex motion_mutex;
+	size_t motion_reference_next = 0;
+	uint8_t motion_probe_cooldown = 0;
+	std::vector<uint8_t> motion_scratch, motion_zstd_compressed;
+	double sampled_motion_candidate_ms = 0;
+	double sampled_worker_ms = 0;
+	uint32_t sampled_motion_wins = 0, sampled_motion_missing_ref = 0;
 	const float initial_fps;
 	const bool direct_rgb_input;
+	const bool motion_delta_enabled;
 
 public:
 	video_encoder_astc(vk_bundle & vk, const encoder_settings & settings, uint8_t stream_idx);
 	~video_encoder_astc() override;
+	void reset() override;
 	void present_image(vk::Image image, vk::SemaphoreSubmitInfo semaphore, uint8_t slot, uint64_t frame_index, const to_headset::video_stream_data_shard::view_info_t & view_info) override;
 	std::optional<data> encode(uint8_t slot, uint64_t frame_index) override;
 };

@@ -49,9 +49,11 @@ filtered live stream against an isolated decoder microbenchmark.
 - Decoder completion telemetry uses the same frame's actual post-upload timestamp.
 - ASTC texture support and linear sampling support are checked before advertising
   the codec. The normal headset pose reprojection remains in place.
-- The upload fence completes before publishing a texture. The presentation pass
-  therefore needs no additional decoder timeline semaphore; the tested Pico
-  driver rejected that redundant object with `vkCreateSemaphore: Incomplete`.
+- Asynchronous uploads and presentation use the same graphics queue. The
+  transfer-to-fragment barrier orders texture reads without a CPU post-submit
+  fence wait or an additional decoder timeline semaphore. Host handoff is not
+  GPU completion. The tested Pico driver rejected that redundant semaphore with
+  `vkCreateSemaphore: Incomplete`.
 
 ## Validation and current limits
 
@@ -152,3 +154,7 @@ cmake --preset server \
   -DCMAKE_PREFIX_PATH='/run/media/nerdrx/Lex/claude/nx-scratch/nxwarp-atlas-live-build/install;/run/media/nerdrx/Lex/claude/tools/local'
 cmake --build build-server --target wivrn-server openxr_wivrn -j12
 ```
+
+An optional, default-off v3 lossless motion-packing path is documented in
+[ASTC_MOTION_PACKING.md](ASTC_MOTION_PACKING.md). It requires matched builds and
+has standalone Pico CPU evidence, but no live-motion acceptance result yet.

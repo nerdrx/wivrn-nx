@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <lz4.h>
 #include <stdexcept>
@@ -188,17 +189,20 @@ void wivrn::video_encoder_astc::present_image(vk::Image image, vk::SemaphoreSubm
 
 std::optional<wivrn::video_encoder::data> wivrn::video_encoder_astc::encode(uint8_t slot, uint64_t)
 {
+	const auto cpu_begin = std::chrono::steady_clock::now();
 	auto & s = slots.at(slot);
 	if (vk.device.waitForFences(*s.fence, true, 1'000'000'000) == vk::Result::eTimeout || !s.valid)
 		return {};
 	vmaInvalidateAllocation(vk_allocator::instance(), s.readback, 0, VK_WHOLE_SIZE);
 	const uint32_t raw_size = uint32_t(nxastc_packet::block_bytes(extent.width, extent.height));
 	const auto * raw = s.readback.data<const uint8_t>();
+	const auto lz4_begin = std::chrono::steady_clock::now();
 	compressed.resize(LZ4_compressBound(raw_size));
 	const int n = LZ4_compress_default(reinterpret_cast<const char *>(raw), reinterpret_cast<char *>(compressed.data()), raw_size, compressed.size());
 	const bool use_lz4 = n > 0 && uint32_t(n) < raw_size;
 	uint32_t payload_size = use_lz4 ? uint32_t(n) : raw_size;
 	const uint8_t * payload = use_lz4 ? compressed.data() : raw;
+	const auto zstd_begin = std::chrono::steady_clock::now();
 	auto encoding = use_lz4 ? nxastc_packet::compression::lz4 : nxastc_packet::compression::none;
 	// Keep lossless packing independent of other frames. Reuse the context and
 	// output buffer; Zstd must save at least 10% to justify its CPU decode cost.
@@ -213,6 +217,16 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_astc::encode(uint
 			encoding = nxastc_packet::compression::zstd;
 		}
 	}
+	const auto pack_begin = std::chrono::steady_clock::now();
+	auto packet = std::make_shared<std::vector<uint8_t>>(nxastc_packet::header_size + payload_size);
+	auto header = nxastc_packet::make_header(extent.width, extent.height, payload_size, encoding);
+	std::memcpy(packet->data(), header.data(), header.size());
+	std::memcpy(packet->data() + header.size(), payload, payload_size);
+	const auto cpu_end = std::chrono::steady_clock::now();
+	sampled_cpu_ms[0] += std::chrono::duration<double, std::milli>(lz4_begin - cpu_begin).count();
+	sampled_cpu_ms[1] += std::chrono::duration<double, std::milli>(zstd_begin - lz4_begin).count();
+	sampled_cpu_ms[2] += std::chrono::duration<double, std::milli>(pack_begin - zstd_begin).count();
+	sampled_cpu_ms[3] += std::chrono::duration<double, std::milli>(cpu_end - pack_begin).count();
 	// Choose the next ASTC quality rung from actual bytes; severe overruns can
 	// skip unmeasured rungs instead of waiting for the EMA to catch up.
 	const uint32_t bitrate = pending_bitrate.load(std::memory_order_relaxed);
@@ -235,13 +249,13 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_astc::encode(uint
 		        sampled_quality[0], sampled_quality[1], sampled_quality[2], sampled_quality[3],
 		        sampled_quality[4], sampled_quality[5], sampled_quality[6],
 		        sampled_encoding[0], sampled_encoding[1], sampled_encoding[2]);
+		U_LOG_I("nxastc: stream %u CPU ms/frame fence+invalidate %.3f, lz4 %.3f, zstd %.3f, packet %.3f",
+		        unsigned(stream_idx), sampled_cpu_ms[0] / sampled_frames, sampled_cpu_ms[1] / sampled_frames,
+		        sampled_cpu_ms[2] / sampled_frames, sampled_cpu_ms[3] / sampled_frames);
+		sampled_cpu_ms.fill(0);
 		sampled_bytes = sampled_frames = 0;
 		sampled_quality.fill(0);
 		sampled_encoding.fill(0);
 	}
-	auto packet = std::make_shared<std::vector<uint8_t>>(nxastc_packet::header_size + payload_size);
-	auto header = nxastc_packet::make_header(extent.width, extent.height, payload_size, encoding);
-	std::memcpy(packet->data(), header.data(), header.size());
-	std::memcpy(packet->data() + header.size(), payload, payload_size);
 	return data{.encoder = this, .span = std::span<uint8_t>(*packet), .mem = packet};
 }

@@ -38,6 +38,7 @@ class video_encoder_astc : public video_encoder
 	std::unique_ptr<ZSTD_CCtx, decltype(&ZSTD_freeCCtx)> zstd_context{ZSTD_createCCtx(), ZSTD_freeCCtx};
 	std::atomic_uint32_t quality{6};
 	astc_rate_control rate_control;
+	std::array<double, 4> sampled_cpu_ms{};
 	uint64_t sampled_bytes = 0;
 	uint32_t sampled_frames = 0;
 	std::array<uint32_t, 7> sampled_quality{};

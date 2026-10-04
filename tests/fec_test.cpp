@@ -39,10 +39,12 @@
 #include "wivrn_packets.h"
 #include "wivrn_serialization.h"
 
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <optional>
 #include <span>
+#include <thread>
 #include <vector>
 
 using namespace wivrn;
@@ -446,6 +448,43 @@ void test_span_xor_matches_encoded_blob()
 		CHECK(not fec::xor_blob_into(shard, unchanged, expected.size() + 1));
 		CHECK(std::ranges::all_of(unchanged, [](uint8_t b) { return b == 0x5a; }));
 	}
+}
+
+void test_reused_blob_metadata_threads()
+{
+	std::printf("Part B5: reused metadata changes shape independently on four threads\n");
+	std::array<bool, 4> good{};
+	std::vector<std::thread> threads;
+	for (size_t worker = 0; worker < good.size(); ++worker)
+		threads.emplace_back([&, worker] {
+			good[worker] = true;
+			for (size_t iteration = 0; iteration < 200; ++iteration)
+			{
+				data_shard shard{};
+				if (iteration % 2)
+					shard.view_info = make_view_info();
+				if (iteration % 3)
+					shard.timing_info = timing_info_t{.send_begin = int64_t(worker), .send_end = int64_t(iteration)};
+				const size_t sizes[] = {0, 7, 31, 32, 1400};
+				std::vector<uint8_t> payload(sizes[iteration % 5], uint8_t(iteration + worker));
+				shard.payload = payload;
+				serialization_packet independent;
+				independent.serialize(shard.view_info);
+				independent.serialize(shard.timing_info);
+				independent.serialize(shard.payload);
+				std::vector<uint8_t> expected;
+				for (const auto span: static_cast<std::vector<std::span<uint8_t>> &>(independent))
+					expected.insert(expected.end(), span.begin(), span.end());
+				std::vector<uint8_t> encoded, recovered(expected.size(), 0);
+				fec::encode_blob(shard, encoded);
+				if (encoded != expected or not fec::xor_blob_into(shard, recovered, expected.size()) or recovered != expected)
+					good[worker] = false;
+			}
+		});
+	for (auto & thread: threads)
+		thread.join();
+	for (const bool result: good)
+		CHECK(result);
 }
 
 void test_malformed_bool_deserialization()
@@ -997,6 +1036,7 @@ int main()
 	test_round_trip();
 	test_recovery_blob_survives_send_mutation();
 	test_span_xor_matches_encoded_blob();
+	test_reused_blob_metadata_threads();
 	test_malformed_bool_deserialization();
 	test_graceful_failure();
 	test_dedup();

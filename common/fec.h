@@ -143,7 +143,9 @@ inline size_t group_end(const parity_shard & parity)
 // `out`, which is cleared first.
 inline void encode_blob(const data_shard & shard, std::vector<uint8_t> & out)
 {
-	serialization_packet p;
+	// Like socket sends, keep bounded metadata storage local to each thread.
+	thread_local serialization_packet p;
+	p.clear();
 	p.serialize(shard.view_info);
 	p.serialize(shard.timing_info);
 	p.serialize(shard.payload);
@@ -157,7 +159,8 @@ inline void encode_blob(const data_shard & shard, std::vector<uint8_t> & out)
 // Keep serialization centralized so field order and wire representation cannot drift.
 inline bool xor_blob_into(const data_shard & shard, std::span<uint8_t> recovered, size_t expected_size)
 {
-	serialization_packet packet;
+	thread_local serialization_packet packet;
+	packet.clear();
 	packet.serialize(shard.view_info);
 	packet.serialize(shard.timing_info);
 	packet.serialize(shard.payload);

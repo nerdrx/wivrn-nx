@@ -1056,17 +1056,13 @@ void scenes::stream::push_blit_handle(shard_accumulator * decoder, std::shared_p
 						history.pop_front();
 				}
 				auto & frames = decoders[stream].latest_frames;
-				if (retained_image_count() == 4)
-				{
-					std::array<std::optional<uint64_t>, image_buffer_size> ids{};
-					for (size_t i = 0; i < frames.size(); ++i)
-						if (frames[i]) ids[i] = frames[i]->feedback.frame_index;
-					if (auto slot = retained_frame_slot(ids, handle->feedback.frame_index))
-						std::swap(handle, frames[*slot]);
-					// A stale arrival remains in handle and follows normal dropped-frame feedback.
-				}
-				else
-					std::swap(handle, frames[handle->feedback.frame_index % retained_image_count()]);
+				std::array<std::optional<uint64_t>, image_buffer_size> ids{};
+				for (size_t i = 0; i < retained_image_count(); ++i)
+					if (frames[i]) ids[i] = frames[i]->feedback.frame_index;
+				// Lost frame IDs must not alias the same slot and evict a stereo match.
+				if (auto slot = retained_frame_slot(std::span(ids).first(retained_image_count()), handle->feedback.frame_index))
+					std::swap(handle, frames[*slot]);
+				// A stale arrival remains in handle and follows normal dropped-frame feedback.
 			}
 		}
 
@@ -1361,16 +1357,9 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, scenes::stream::deco
 
 std::shared_ptr<shard_accumulator::blit_handle> scenes::stream::accumulator_images::frame(uint64_t id) const
 {
-	if (retained_image_count() == 4)
-	{
-		for (const auto & frame : latest_frames)
-			if (frame and frame->feedback.frame_index == id) return frame;
-		return nullptr;
-	}
-	auto & frame = latest_frames[id % retained_image_count()];
-	if (frame and frame->feedback.frame_index != id)
-		return nullptr;
-	return frame;
+	for (const auto & frame : std::span(latest_frames).first(retained_image_count()))
+		if (frame and frame->feedback.frame_index == id) return frame;
+	return nullptr;
 }
 
 std::shared_ptr<shard_accumulator::blit_handle> scenes::stream::accumulator_images::previous_frame(uint64_t before) const

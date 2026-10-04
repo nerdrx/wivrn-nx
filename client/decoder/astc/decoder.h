@@ -27,7 +27,6 @@ class astc_decoder final : public decoder
 {
 	static constexpr size_t image_count = 6;
 	static constexpr size_t pending_limit = 2;
-	static constexpr size_t format_count = 3;
 
 	struct image
 	{
@@ -48,11 +47,10 @@ class astc_decoder final : public decoder
 
 	vk::raii::Device & device;
 	vk::raii::Sampler sampler_ = nullptr;
-	std::array<std::array<image, image_count>, format_count> images;
+	std::array<image, image_count> images;
 	vk::Extent2D extent;
+	vk::DeviceSize raw_bytes;
 	std::vector<uint8_t> cpu_scratch;
-	std::array<bool, format_count> pool_initialized{};
-	uint8_t stream_index;
 	std::weak_ptr<scenes::stream> weak_scene;
 	shard_accumulator * accumulator;
 	bool async_upload_enabled = true;
@@ -84,8 +82,7 @@ public:
 	static std::vector<video_codec> supported_codecs();
 
 private:
-	image * get_free(uint8_t block);
-	void initialize_pool(uint8_t block);
+	image * get_free();
 	void worker_function(uint32_t queue_family_index);
 };
 } // namespace wivrn

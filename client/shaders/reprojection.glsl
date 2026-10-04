@@ -168,7 +168,6 @@ layout(constant_id = 14) const bool static_bleed = false;
 // square boundary and two diagonal taps; mode 2 follows the encoder's rounded
 // tile-centre mask and uses four cardinal taps. Modes 3 and 4 add the remap and
 // two diagonal taps respectively; mode 5 blends neighbouring packed texels.
-// Mode 6 softens full-image chroma with two taps while preserving luma.
 // The default is compiled out.
 layout(constant_id = 10) const int peripheral_smooth = 0;
 
@@ -1081,25 +1080,6 @@ void main()
 		sample_uv = filtered_px / vec2(rgb_rect.zw);
 	}
 	vec4 colour = sample_rgb(sample_uv);
-	// Encoded-RGB chroma blur: preserve centre luma, alpha and temporal history.
-	// A gamut bound prevents clipped channels from turning white edges grey.
-	if (peripheral_smooth == 6 && !compact_centre && alpha == 0)
-	{
-		vec2 texel = 1.0 / vec2(rgb_rect.zw);
-		vec2 lo = vec2(motion.w + 0.5 * texel.x, 0.5 * texel.y);
-		vec2 hi = vec2(deband.w - 0.5 * texel.x, 1.0 - 0.5 * texel.y);
-		vec2 d = 3.0 * texel;
-		vec3 neighbours = (sample_rgb(clamp(sample_uv + d, lo, hi)).rgb +
-		                   sample_rgb(clamp(sample_uv - d, lo, hi)).rgb) * 0.5;
-		vec3 delta = (neighbours - colour.rgb) * 0.5;
-		delta -= vec3(dot(delta, vec3(0.2126, 0.7152, 0.0722)));
-		vec3 room = mix(colour.rgb, vec3(1.0) - colour.rgb, greaterThan(delta, vec3(0.0)));
-		vec3 limits = mix(vec3(1.0), room / max(abs(delta), vec3(1e-6)),
-		                  greaterThan(abs(delta), vec3(1e-6)));
-		float amount = clamp(min(limits.x, min(limits.y, limits.z)), 0.0, 1.0);
-		colour.rgb += delta * amount;
-	}
-
 	// Tiny spatial motion-blur approximation. Keep alpha untouched. Restrict to
 	// ordinary opaque decoded images; atlas/compact mappings need separate proof.
 	if (motion_blur && !static_post && motion.x > 0.0 && atlas_mode == 0 && !compact_centre && alpha == 0)

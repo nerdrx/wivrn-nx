@@ -1,16 +1,14 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #include "astc_encode_inverse.glsl"
-#include "astc_encode_footprint_tables.glsl"
 #include "astc_encode_colour.glsl"
-// ASTC 8x8/6x6 use a fitted 5x5 grid and optional dual-plane colour fit.
-// ASTC 4x4 stores a weight for every pixel and full 8-bit RGB endpoints.
+// Fixed ASTC 8x8: ordinary 5x5 weights with an optional 4x4 dual-plane colour fit.
 // Both retain one CEM8 partition and hardware sampling; no extra dispatch.
 layout(local_size_x=64) in;
 layout(set=0,binding=0) uniform sampler2D luma;
 layout(set=0,binding=1) uniform sampler2D chroma;
 layout(set=0,binding=2,std430) writeonly buffer Output { uvec4 blocks[]; } dst;
-layout(push_constant) uniform Push { uint width, height, fit, quality, direct_rgb, block; } pc;
+layout(push_constant) uniform Push { uint width, height, fit, quality, direct_rgb; } pc;
 
 vec3 pixel(ivec2 p) {
     p=clamp(p,ivec2(0),ivec2(pc.width,pc.height)-1);
@@ -49,18 +47,17 @@ uint quantWeight(float t) {
 }
 
 void main() {
-    uint side=pc.block, count=side*side;
-    uint id=gl_GlobalInvocationID.x, across=(pc.width+side-1u)/side;
-    if(id>=across*((pc.height+side-1u)/side)) return;
-    ivec2 base=ivec2(id%across,id/across)*int(side);
+    uint id=gl_GlobalInvocationID.x, across=(pc.width+7u)/8u;
+    if(id>=across*((pc.height+7u)/8u)) return;
+    ivec2 base=ivec2(id%across,id/across)*8;
     vec3 lo=vec3(255),hi=vec3(0),sum=vec3(0),diag=vec3(0),cross=vec3(0);
-    for(int y=0;y<int(side);y++) for(int x=0;x<int(side);x++) {
+    for(int y=0;y<8;y++) for(int x=0;x<8;x++) {
         vec3 v=pixel(base+ivec2(x,y));
         lo=min(lo,v);hi=max(hi,v);sum+=v;diag+=v*v;
         cross+=vec3(v.x*v.y,v.x*v.z,v.y*v.z);
     }
-    bool isFlat=pc.quality==0u || (pc.fit==3u && max(max(diag.x-sum.x*sum.x/float(count),diag.y-sum.y*sum.y/float(count)),diag.z-sum.z*sum.z/float(count))<16.0*float(count));
-    vec3 mean=sum/float(count);
+    bool isFlat=pc.quality==0u || (pc.fit==3u && max(max(diag.x-sum.x*sum.x/64.0,diag.y-sum.y*sum.y/64.0),diag.z-sum.z*sum.z/64.0)<1024.0);
+    vec3 mean=sum/64.0;
     mat3 cov=mat3(0.0);
     if(isFlat) {lo=mean;hi=lo;}
     else if(pc.fit!=0u) {
@@ -70,7 +67,7 @@ void main() {
         vec3 axis=diag.x>=diag.y&&diag.x>=diag.z?vec3(1,0,0):diag.y>=diag.z?vec3(0,1,0):vec3(0,0,1);
         for(int i=0;i<4;i++) {vec3 a=cov*axis;axis=a*inversesqrt(max(dot(a,a),1e-12));}
         float mn=1e30,mx=-1e30;
-        for(int y=0;y<int(side);y++) for(int x=0;x<int(side);x++) {
+        for(int y=0;y<8;y++) for(int x=0;x<8;x++) {
             vec3 v=pixel(base+ivec2(x,y));float t=dot(v,axis);
             mn=min(mn,t);mx=max(mx,t);
         }
@@ -79,42 +76,33 @@ void main() {
         lo=mean+axis*(mn-dot(mean,axis));
         hi=mean+axis*(mx-dot(mean,axis));
     }
-    uvec3 e0=side==4u?uvec3(round(clamp(lo,vec3(0),vec3(255)))):quantEndpoint(lo);
-    uvec3 e1=side==4u?uvec3(round(clamp(hi,vec3(0),vec3(255)))):quantEndpoint(hi);
+    uvec3 e0=quantEndpoint(lo),e1=quantEndpoint(hi);
     // CEM8 enters blue contraction if endpoint sums are reversed; use ordinary RGB.
-    uvec3 expanded0=side==4u?e0:((e0<<2)|(e0>>4)), expanded1=side==4u?e1:((e1<<2)|(e1>>4));
+    uvec3 expanded0=(e0<<2)|(e0>>4), expanded1=(e1<<2)|(e1>>4);
     if(expanded0.x+expanded0.y+expanded0.z>expanded1.x+expanded1.y+expanded1.z) {uvec3 tmp=e0;e0=e1;e1=tmp;}
-    vec3 a=side==4u?vec3(e0):unquantEndpoint(e0);
-    vec3 axis=(side==4u?vec3(e1):unquantEndpoint(e1))-a;
+    vec3 a=unquantEndpoint(e0),axis=unquantEndpoint(e1)-a;
     float inv=1.0/max(dot(axis,axis),1e-9);
-    uvec4 header=uvec4(side==4u?0x10053u:0x100f3u,0,0,0),weights=uvec4(0);
+    uvec4 header=uvec4(0x100f3u,0,0,0),weights=uvec4(0);
     uint baseGrid[25];
-    uint endpointBits=side==4u?8u:6u;
-    for(uint c=0u;c<3u;c++) {
-        put(header,17u+2u*c*endpointBits,endpointBits,e0[c]);
-        put(header,17u+(2u*c+1u)*endpointBits,endpointBits,e1[c]);
-    }
-    if(side==4u) {
-        for(uint y=0u;y<4u;y++) for(uint x=0u;x<4u;x++) {
-            uint w=quantWeight(dot(pixel(base+ivec2(x,y))-a,axis)*inv);
-            put(weights,3u*(y*4u+x),3u,w);
-        }
-    } else if(pc.fit>=2u && !isFlat) {
+    put(header,17,6,e0.r);put(header,23,6,e1.r);
+    put(header,29,6,e0.g);put(header,35,6,e1.g);
+    put(header,41,6,e0.b);put(header,47,6,e1.b);
+    if(pc.fit>=2u && !isFlat) {
         // Fit the actual ASTC interpolation grid instead of sampling 25 source points.
         // Clamp least-squares overshoot: endpoints/weights remain legal ASTC values.
         float target[64];
-        for(uint y=0;y<side;y++) for(uint x=0;x<side;x++)
-            target[y*side+x]=dot(pixel(base+ivec2(x,y))-a,axis)*inv;
+        for(uint y=0;y<8u;y++) for(uint x=0;x<8u;x++)
+            target[y*8u+x]=dot(pixel(base+ivec2(x,y))-a,axis)*inv;
         for(uint i=0;i<25u;i++) {
             float value=0;
-            for(uint j=0;j<count;j++) value+=(side==6u?astc6Inverse5[i*36u+j]:astc5x5InverseA[i*64u+j])*target[j];
+            for(uint j=0;j<64u;j++) value+=astc5x5InverseA[i*64u+j]*target[j];
             uint w=quantWeight(value);
             baseGrid[i]=weightDecode[w];
             put(weights,3u*i,3,w);
         }
     } else if(!isFlat) {
         for(uint y=0;y<5u;y++) for(uint x=0;x<5u;x++) {
-            vec3 v=bilinear(base,vec2(x,y)*(float(side-1u)/4.0));
+            vec3 v=bilinear(base,vec2(x,y)*1.75);
             uint w=quantWeight(dot(v-a,axis)*inv);
             baseGrid[y*5u+x]=weightDecode[w];
             put(weights,3u*(y*5u+x),3,w);
@@ -125,14 +113,14 @@ void main() {
     // The existing PCA covariance cheaply rejects ordinary-colour tiles before
     // their extra pixel cache and error evaluation. The inner gate is 500; allow
     // a small margin here for floating-point covariance cancellation.
-    float chromaVariance=(diag.x+2.0*diag.y+diag.z-2.0*cross.x-2.0*cross.z)/float(count);
-    if(side!=4u && pc.quality>=2u && pc.fit>=2u && !isFlat && chromaVariance>=499.0) {
+    float chromaVariance=(diag.x+2.0*diag.y+diag.z-2.0*cross.x-2.0*cross.z)/64.0;
+    if(pc.quality>=2u && pc.fit>=2u && !isFlat && chromaVariance>=499.0) {
         vec3 pixels[64];
         float baselineError=0;
         vec3 endpoint0=unquantEndpoint(e0),endpoint1=unquantEndpoint(e1);
-        for(uint i=0u;i<count;i++) {
-            pixels[i]=pixel(base+ivec2(int(i%side),int(i/side)));
-            uint weight=interpolate5(baseGrid,i,side);
+        for(uint i=0u;i<64u;i++) {
+            pixels[i]=pixel(base+ivec2(int(i%8u),int(i/8u)));
+            uint weight=interpolate5(baseGrid,i);
             vec3 decoded=floor((endpoint0*float(64u-weight)+endpoint1*float(weight)+vec3(32.0))*(1.0/64.0));
             vec3 error=pixels[i]-decoded;
             baselineError+=dot(error,error);
@@ -142,7 +130,7 @@ void main() {
         // At sharper settings require a larger error reduction to limit mode
         // changes under sub-block motion; coarse settings retain their colour fix.
         float requiredRatio=pc.quality>=4u?0.80:0.95;
-        if(dualCandidate(pixels,baselineError,mean,cov,candidate,candidateError,side) &&
+        if(dualCandidate(pixels,baselineError,mean,cov,candidate,candidateError) &&
            candidateError<baselineError*requiredRatio) result=candidate;
     }
     dst.blocks[id]=result;

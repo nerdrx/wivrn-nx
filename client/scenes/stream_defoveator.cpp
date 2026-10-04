@@ -60,20 +60,13 @@ static int peripheral_smooth_requested()
 {
 #ifdef __ANDROID__
 	char smooth[PROP_VALUE_MAX] = {}, centre[PROP_VALUE_MAX] = {};
-	if (__system_property_get("debug.wivrn.nx.peripheral_smooth", smooth) <= 0)
-		return 0;
-	if (smooth[0] == '6')
-		return 6; // Full-image chroma smoothing does not need the PLANAR centre.
-	if (__system_property_get("debug.wivrn.nx.planar_centre", centre) <= 0 || centre[0] == '0')
+	if (__system_property_get("debug.wivrn.nx.peripheral_smooth", smooth) <= 0 ||
+	    __system_property_get("debug.wivrn.nx.planar_centre", centre) <= 0 || centre[0] == '0')
 		return 0;
 #else
 	const char * smooth = std::getenv("WIVRN_NX_PERIPHERAL_SMOOTH");
 	const char * centre = std::getenv("WIVRN_NX_PLANAR_CENTRE");
-	if (!smooth)
-		return 0;
-	if (smooth[0] == '6')
-		return 6;
-	if (!centre || centre[0] == '0')
+	if (!smooth || !centre || centre[0] == '0')
 		return 0;
 #endif
 	return smooth[0] == '5' ? 5 : smooth[0] == '4' ? 4 : smooth[0] == '3' ? 3 : (smooth[0] == '2' ? 2 : (smooth[0] != '0' ? 1 : 0));

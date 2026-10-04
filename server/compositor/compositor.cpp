@@ -37,11 +37,13 @@
 #include "driver/pose_sanitize.h"
 #include "driver/wivrn_session.h"
 #include "encoder/video_encoder.h"
+#include "encoder/video_encoder_astc.h"
 #include "inplace_vector.hpp"
 #include "utils/method.h"
 #include "utils/wivrn_trace.h"
 
 #include <cinttypes>
+#include <future>
 #include <magic_enum.hpp>
 
 #if WIVRN_USE_PIPEWIRE
@@ -1637,6 +1639,8 @@ int compositor::acquire_image()
 
 void compositor::encoder_work(std::stop_token tok)
 {
+	const char * parallel_option = std::getenv("WIVRN_ASTC_PARALLEL_EYES");
+	const bool parallel_eyes = parallel_option && std::string_view(parallel_option) == "1";
 	while (not tok.stop_requested())
 	{
 		auto req = encode_request.exchange(-1);
@@ -1656,10 +1660,10 @@ void compositor::encoder_work(std::stop_token tok)
 		// thread half way through this loop must not change which object the
 		// rest of it talks to, and the one it replaced stays alive as long as
 		// this copy does.
-		for (auto & encoder: get_encoders())
-		{
+		auto encoders = get_encoders();
+		auto encode_one = [&](const std::shared_ptr<video_encoder> & encoder) {
 			if (not encoder)
-				continue;
+				return;
 
 			// Per encoder rather than around the loop: one stream's driver
 			// giving up must not cost the other eyes their frame as well.
@@ -1668,7 +1672,7 @@ void compositor::encoder_work(std::stop_token tok)
 				if (encoder->stream_idx == quad_stream_idx)
 				{
 					if (not image.quad_info)
-						continue;
+						return;
 					// Same frame index and same view info as the eyes,
 					// with the quad's placement attached and the eye
 					// foveation dropped: nothing on this stream is
@@ -1687,7 +1691,33 @@ void compositor::encoder_work(std::stop_token tok)
 				// decides what to do about it.
 				U_LOG_W("encode error on stream %d: %s", encoder->stream_idx, e.what());
 			}
+		};
+
+		// Only independent native ASTC eyes opt in. Keep auxiliary and hardware
+		// encoders serial until their shared state has been checked separately.
+		const bool independent_astc = parallel_eyes &&
+		        dynamic_cast<video_encoder_astc *>(encoders[0].get()) &&
+		        dynamic_cast<video_encoder_astc *>(encoders[1].get()) &&
+		        std::ranges::none_of(std::span(encoders).subspan(2), [](const auto & e) { return bool(e); });
+		std::future<void> right_eye;
+		if (independent_astc)
+		{
+			try
+			{
+				right_eye = std::async(std::launch::async, [&, encoder = encoders[1]] { encode_one(encoder); });
+			}
+			catch (const std::exception & e)
+			{
+				U_LOG_W("ASTC eye worker unavailable; encoding serially: %s", e.what());
+			}
 		}
+		for (size_t i = 0; i < encoders.size(); ++i)
+			if (i != 1 || !right_eye.valid())
+				encode_one(encoders[i]);
+		// Drain before reusing the image or taking the next frame. Each eye keeps
+		// its own codec state, and the snapshot survives hot encoder replacement.
+		if (right_eye.valid())
+			right_eye.get();
 		image.busy = false;
 	}
 }

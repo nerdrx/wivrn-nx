@@ -491,18 +491,14 @@ void scenes::stream::rebuild_fps_lines()
 		                                 fps.loop_rate,
 		                                 fps.display_period_ms);
 
-	// How old the pose reaching the panel is. Beside the loop rate because the two are
-	// read together: the same loop rate with a smaller age is the schedule working, and
-	// a smaller age bought by a slower loop is not a win at all. Suppressed when no frame
-	// in the window carried one, for the same reason the period above is.
+	// Nonnegative difference between the headset refresh target and the server-stamped
+	// target of the selected frame. This is schedule alignment, not source-pose age or
+	// motion-to-photon latency. Suppressed when no frame in the window carried one.
 	if (fps.pose_age_ms > 0)
-		fps_line_cache[0] += fmt::format(_F(" · pose age {:.1f} ms"), fps.pose_age_ms);
+		fps_line_cache[0] += fmt::format(_F(" · source-target lag {:.1f} ms"), fps.pose_age_ms);
 
-	// Edge bleed, on the same line as the pose age on purpose: the pose age is how late
-	// the frame on the panel is, and the margin is how much of that lateness the picture
-	// can absorb before a black band appears at the edge of the view. Reading one without
-	// the other is how you conclude the bleed is not working when the margin is simply
-	// smaller than the head is fast.
+	// Edge bleed, on the same line as the target lag: the margin is how much pose
+	// movement the picture can absorb before a black band appears at the edge of view.
 	//
 	// Placed before the NX Warp gate below because this is a client-side render feature
 	// and is just as active on an H.264 session. Absent entirely when both halves are

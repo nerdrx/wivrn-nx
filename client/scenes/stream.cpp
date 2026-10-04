@@ -1536,9 +1536,10 @@ struct render_probe
 	double motion_step_sum = 0;
 	double period_ms = 0, fence_ms = 0, query_ms = 0, submit_ms = 0, blit_ms = 0;
 	double selection_to_defoveate_ms = 0, selection_to_defoveate_max_ms = 0;
-	// Six contiguous source-to-refresh stages, sampled for the selected stream-0 frame.
-	// The first stage includes everything before the first packet; the last is signed
-	// lead to the predicted refresh. Repeats are intentionally included.
+	// Timing intervals around the selected stream-0 frame, anchored to its server-stamped
+	// predicted display target. The first offset can be negative when packets arrive before
+	// that target; the combined offset can be negative when a future-targeted ASTC frame is
+	// selected early. Neither is capture-to-display latency. Repeats are intentionally included.
 	std::array<double, 6> source_offset_ms{};
 	uint64_t source_offset_n = 0, source_offset_invalid = 0;
 	double app_gpu_ms = 0;
@@ -1995,12 +1996,10 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	else
 		++g_rp.source_offset_invalid;
 
-	// How stale the picture about to be drawn is: the refresh it is being drawn for,
-	// minus the display time the server stamped on the frame chosen for it. The pose in
-	// that frame is the pose the server rendered it from, so this is the age of the pose
-	// that will be on the panel -- the half of motion-to-photon the client can see, and
-	// the number just-in-time scheduling exists to move. Sampled here, immediately after
-	// the choice, because the choice is what the sleep above changes.
+	// Scheduling delta between this headset refresh target and the selected frame's
+	// server-stamped predicted display target. A negative value means the selected frame
+	// is targeted at a later refresh. It is not source-capture age or motion-to-photon;
+	// sampled after selection because the JIT sleep can change which frame is chosen.
 	if (const auto & h = current_blit_handles[0]; h and h->view_info.display_time)
 	{
 		const XrDuration age = frame_state.predictedDisplayTime - h->view_info.display_time;
@@ -3348,13 +3347,13 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		             jit.slept, g_rp.iters,
 		             double(jit.budget_ns()) / 1e6, double(jit.cost_ns()) / 1e6,
 		             double(jit.margin_ns) / 1e6, double(jit.sleep_cap_ns) / 1e6);
-		spdlog::info("render: source display-time offset {:.1f} ms mean (worst {:.1f}) over {} frames | submit lead {:.1f} ms mean (worst {:.1f}) | misses: {} overrun {} late {} skipped refresh",
+		spdlog::info("render: source-target to refresh-target offset {:.1f} ms mean (worst {:.1f}) over {} frames | submit lead {:.1f} ms mean (worst {:.1f}) | misses: {} overrun {} late {} skipped refresh",
 		             g_rp.pose_age_n ? g_rp.pose_age_ms / double(g_rp.pose_age_n) : 0.0,
 		             g_rp.pose_age_max_ms, g_rp.pose_age_n,
 		             jit.lead_n ? double(jit.lead_total_ns) / 1e6 / double(jit.lead_n) : 0.0,
 		             double(jit.lead_min_ns) / 1e6,
 		             jit.missed_overrun, jit.missed_late, jit.missed_skipped);
-		spdlog::info("render: source->first {:.1f} ms | wire {:.1f} | queue {:.1f} | decode {:.1f} | decode->selection {:.1f} | selection->predicted {:.1f} | sum {:.1f} over {} selected frames ({} invalid)",
+		spdlog::info("render: first-packet minus source-target {:.1f} ms | wire {:.1f} | queue {:.1f} | decode {:.1f} | decode->selection {:.1f} | selection->refresh-target {:.1f} | source-target to refresh-target offset {:.1f} ms over {} selected frames ({} invalid stage chains) | capture-to-display latency unavailable (no capture timestamp)",
 		             g_rp.source_offset_n ? g_rp.source_offset_ms[0] / g_rp.source_offset_n : 0.0,
 		             g_rp.source_offset_n ? g_rp.source_offset_ms[1] / g_rp.source_offset_n : 0.0,
 		             g_rp.source_offset_n ? g_rp.source_offset_ms[2] / g_rp.source_offset_n : 0.0,

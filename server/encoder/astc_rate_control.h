@@ -73,8 +73,14 @@ struct astc_rate_control
 				if (bytes[candidate] && uint64_t(bytes[candidate]) * 100 <= uint64_t(target_bytes) * 95)
 					return candidate;
 			const uint32_t candidate = quality + 1;
+			// Before probing an unknown footprint, scale the current packed cost
+			// by its block-count ratio. This avoids periodic failed 4x4 probes
+			// when 6x6 uses half the budget but 4x4 needs about 2.25x the blocks.
+			const uint64_t current_side = block(quality), next_side = block(candidate);
+			const bool predicted_fit = uint64_t(bytes[quality]) * current_side * current_side * 100 <=
+			                           uint64_t(target_bytes) * next_side * next_side * 95;
 			if (candidate < rungs && uint64_t(bytes[quality]) * 100 < uint64_t(target_bytes) * 70 &&
-			    (!bytes[candidate] || uint64_t(bytes[candidate]) * 100 <= uint64_t(target_bytes) * 95))
+			    (bytes[candidate] ? uint64_t(bytes[candidate]) * 100 <= uint64_t(target_bytes) * 95 : predicted_fit))
 				next = candidate;
 		}
 		else if (uint64_t(bytes[quality]) * 100 < uint64_t(target_bytes) * 70 && quality + 1 < rungs)

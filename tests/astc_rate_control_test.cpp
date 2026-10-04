@@ -27,6 +27,9 @@ int main()
 	assert(q < 6);
 	for (unsigned i = 0; i < 40; ++i)
 		q = c.update(q, simple[q], 600000); // bitrate rise
+	assert(q == 7); // 6x6 fits; unknown 4x4 needs more headroom to probe
+	for (unsigned i = 0; i < 40; ++i)
+		q = c.update(q, simple[q], 1200000);
 	assert(q == 8); // high budget buys the smallest 4x4 footprint
 
 	// A sudden scene change must use the current sample, not let a warm low
@@ -88,6 +91,10 @@ int main()
 		q = moderate_spike.update(q, 190000, 250000);
 	q = moderate_spike.update(q, 300000, 250000);
 	assert(q == 5);
+
+	wivrn::astc_rate_control no_bad_probe;
+	assert(no_bad_probe.update(7, 140000, 282745) == 7);
+	assert(no_bad_probe.update(7, 140000, 400000) == 8);
 
 	// Measured smaller footprints can win without an arbitrary 30% surplus.
 	wivrn::astc_rate_control footprints;

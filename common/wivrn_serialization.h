@@ -250,7 +250,10 @@ public:
 	{
 		check_remaining_size(size);
 
-		memcpy(data, buffer.data(), size);
+		// Empty vectors may have a null data pointer; memcpy still requires
+		// non-null arguments even when the requested byte count is zero.
+		if (size != 0)
+			memcpy(data, buffer.data(), size);
 		buffer = buffer.subspan(size);
 	}
 

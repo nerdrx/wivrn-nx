@@ -60,11 +60,12 @@ namespace wivrn
 class shard_history
 {
 public:
-	// Bytes of shard payload the ring holds. About 750 shards at the full 1400 byte
-	// datagram, which at the bitrates this runs at is a good handful of frames —
-	// several times the two frames a retransmission can still be useful within, so
-	// the bound that bites in practice is the age of the request, not the ring.
-	static constexpr size_t capacity = 1 << 20;
+	// Bounded plaintext recovery storage, allocated only while retransmission is on.
+	// At a 1 Gbit/s stereo payload budget / 90 Hz, one eye can spend ~694 kB
+	// per frame: 1 MiB already loses part of the previous frame. 2 MiB retains
+	// the modeled two-frame repair horizon, including current shard metadata.
+	// This is a byte bound, not a time guarantee for arbitrary payload bursts.
+	static constexpr size_t capacity = 2 << 20;
 	// And a hard bound on the bookkeeping, for a stream of very small shards
 	static constexpr size_t max_entries = 4096;
 	// Frames the shard counts go back. 32 at 90 Hz is a third of a second, far more
@@ -100,7 +101,7 @@ public:
 		if (enabled)
 			ring.resize(capacity);
 		else
-			ring = {}; // release, not clear: off must cost no memory
+			ring = std::vector<uint8_t>{}; // move an empty vector to release capacity
 	}
 
 	// Atomic rather than guarded so that the sender thread can skip the lock entirely
@@ -231,7 +232,7 @@ public:
 	size_t bytes() const
 	{
 		std::lock_guard lock(mutex);
-		return ring.size();
+		return ring.capacity();
 	}
 
 private:

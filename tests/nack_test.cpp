@@ -33,6 +33,7 @@
 #include "wivrn_packets.h"
 #include "wivrn_serialization.h"
 
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <optional>
@@ -708,11 +709,65 @@ void test_bitmap()
 	}
 }
 
+// The UI permits a 1 Gbit/s aggregate stream. At 90 Hz and two equal eyes,
+// a repair two source frames back must not be lost to the old 1 MiB byte ring.
+// Synthetic payload budget only; this does not assert actual Wi-Fi delivery.
+void test_high_bitrate_history()
+{
+	shard_history h;
+	h.set_enabled(true);
+	constexpr size_t bytes = 1'000'000'000ULL / 8 / 90 / 2;
+	std::vector<uint8_t> payload(bytes), blob;
+	uint16_t shards = 0;
+	for (uint64_t frame = 10; frame <= 12; ++frame)
+	{
+		std::fill(payload.begin(), payload.end(), uint8_t(frame));
+		size_t offset = 0;
+		uint16_t index = 0;
+		while (offset < bytes)
+		{
+			data_shard shard{};
+			shard.frame_idx = frame;
+			shard.shard_idx = index;
+			if (index == 0)
+				shard.view_info.emplace();
+			size_t size = std::min(bytes - offset, fec::shard_payload_budget(true) - serialized_size(shard.view_info));
+			shard.payload = std::span(payload).subspan(offset, size);
+			if (offset + size == bytes)
+				shard.timing_info.emplace();
+			fec::encode_blob(shard, blob);
+			h.push(frame, index, blob, true);
+			offset += size;
+			++index;
+		}
+		shards = index;
+	}
+	size_t retained = 0, retained_bytes = 0;
+	for (uint16_t first = 0; first < shards; first += 64)
+	{
+		std::array<uint8_t, 8> bitmap;
+		bitmap.fill(0xff);
+		std::vector<shard_history::hit> hits;
+		h.collect(10, first, bitmap, 64, hits);
+		for (const auto & hit: hits)
+		{
+			auto shard = fec::decode_blob(0, 10, hit.shard_idx, hit.blob);
+			CHECK(std::all_of(shard.payload.begin(), shard.payload.end(), [](uint8_t v) { return v == 10; }));
+			++retained;
+			retained_bytes += shard.payload.size();
+		}
+	}
+	CHECK(retained == shards);
+	CHECK(retained_bytes == bytes);
+	CHECK(h.held() <= shard_history::max_entries);
+}
+
 } // namespace
 
 int main()
 {
 	test_history_ring();
+	test_high_bitrate_history();
 	test_serving_a_request();
 	test_gap_detection();
 	test_rate_limit();

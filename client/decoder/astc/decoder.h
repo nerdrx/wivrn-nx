@@ -10,6 +10,7 @@
 #pragma once
 
 #include "decoder/decoder.h"
+#include "decoder/astc/packet_buffer_recycle.h"
 #include "vk/allocation.h"
 #include "wivrn_packets.h"
 #include "nxastc_motion.h"
@@ -67,6 +68,7 @@ class astc_decoder final : public decoder
 	std::condition_variable wake;
 	std::deque<frame> pending;
 	std::vector<uint8_t> assembling;
+	std::vector<uint8_t> recycled_packet;
 	uint64_t assembling_frame = 0;
 	bool have_frame = false;
 	bool invalid_frame = false;
@@ -90,6 +92,9 @@ public:
 	static std::vector<video_codec> supported_codecs();
 
 private:
+	void recycle_packet_locked(std::vector<uint8_t> & packet);
+	void recycle_packet(std::vector<uint8_t> & packet);
+	void use_recycled_packet_locked();
 	image * get_free();
 	void worker_function(uint32_t queue_family_index);
 };

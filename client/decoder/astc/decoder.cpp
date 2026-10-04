@@ -162,6 +162,7 @@ void astc_decoder::push_data(std::span<std::span<const uint8_t>> data, uint64_t 
 		if (have_frame && !assembling.empty())
 			spdlog::debug("ASTC decoder drops incomplete packet for frame {}", assembling_frame);
 		assembling.clear();
+		use_recycled_packet_locked();
 		assembling_frame = frame_index;
 		have_frame = true;
 		invalid_frame = false;
@@ -178,6 +179,25 @@ void astc_decoder::push_data(std::span<std::span<const uint8_t>> data, uint64_t 
 		if (!invalid_frame)
 			assembling.insert(assembling.end(), part.begin(), part.end());
 	}
+}
+
+void astc_decoder::recycle_packet_locked(std::vector<uint8_t> & packet)
+{
+	const size_t max_packet = size_t(raw_bytes) + nxastc_packet::motion_header_size;
+	if (exiting)
+		return;
+	astc_detail::recycle_packet_buffer_locked(recycled_packet, packet, max_packet);
+}
+
+void astc_decoder::recycle_packet(std::vector<uint8_t> & packet)
+{
+	std::lock_guard lock(mutex);
+	recycle_packet_locked(packet);
+}
+
+void astc_decoder::use_recycled_packet_locked()
+{
+	astc_detail::use_recycled_packet_buffer_locked(assembling, recycled_packet);
 }
 
 void astc_decoder::frame_completed(const from_headset::feedback & feedback,
@@ -201,11 +221,13 @@ void astc_decoder::frame_completed(const from_headset::feedback & feedback,
 	}
 	if (pending.size() == pending_limit)
 	{
+		recycle_packet_locked(pending.front().packet);
 		pending.pop_front();
 		spdlog::debug("ASTC decoder drops oldest queued frame to keep latency bounded");
 	}
 	pending.push_back({std::move(assembling), feedback, view_info});
 	assembling.clear();
+	use_recycled_packet_locked();
 	have_frame = false;
 	invalid_frame = false;
 	wake.notify_one();
@@ -305,6 +327,7 @@ void astc_decoder::worker_function(uint32_t queue_family_index)
 			if (!item)
 			{
 				spdlog::debug("ASTC image pool exhausted; dropping complete frame");
+				recycle_packet(current.packet);
 				continue;
 			}
 			const auto payload = std::span<const uint8_t>(current.packet).subspan(parsed->header_bytes);
@@ -488,6 +511,7 @@ void astc_decoder::worker_function(uint32_t queue_family_index)
 			}
 			spdlog::warn("ASTC decoder exception: {}", e.what());
 		}
+		recycle_packet(current.packet);
 		if (handed_off && ++timing_frames == 180)
 		{
 			decode_copy_ns += frame_decode_copy_ns; prewait_ns += frame_prewait_ns; syncwait_ns += frame_syncwait_ns; handoff_ns += frame_handoff_ns;

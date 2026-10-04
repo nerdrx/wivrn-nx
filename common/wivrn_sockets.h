@@ -23,6 +23,7 @@
 #include "socket_tos.h"
 #include "wivrn_serialization.h"
 
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -105,7 +106,13 @@ public:
 
 class UDP : public fd_base
 {
+	// Pool-owned batches, including active, are capped at 32 (1.25 MiB at 20×2048 B).
+	// Shard owners may keep evicted batches alive past this cap until they release them.
+	static constexpr size_t receive_buffer_pool_size = 32;
 	std::shared_ptr<uint8_t[]> buffer;
+	std::array<std::shared_ptr<uint8_t[]>, receive_buffer_pool_size> receive_buffer_pool{};
+	size_t receive_buffer_cursor = 0;
+	size_t active_receive_buffer_slot = receive_buffer_pool_size;
 	std::vector<std::span<uint8_t>> messages;
 
 	crypto::decrypt_context decrypter;

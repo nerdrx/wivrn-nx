@@ -347,12 +347,20 @@ shard_accumulator::window_t::step shard_accumulator::try_submit_front(shard_set 
 			return step::unusable;
 		}
 
-		std::vector<std::span<const uint8_t>> payload;
-		payload.reserve(last - first);
-		for (size_t idx = first; idx < last; ++idx)
-			payload.emplace_back(data_shards[idx]->payload);
+		if (last - first == 1)
+		{
+			std::span<const uint8_t> payload = data_shards[first]->payload;
+			decoder_->push_data(std::span(&payload, 1), data_shards[first]->frame_idx, not frame_complete);
+		}
+		else
+		{
+			std::vector<std::span<const uint8_t>> payload;
+			payload.reserve(last - first);
+			for (size_t idx = first; idx < last; ++idx)
+				payload.emplace_back(data_shards[idx]->payload);
 
-		decoder_->push_data(payload, data_shards[first]->frame_idx, not frame_complete);
+			decoder_->push_data(payload, data_shards[first]->frame_idx, not frame_complete);
+		}
 		current.submitted = last;
 	}
 

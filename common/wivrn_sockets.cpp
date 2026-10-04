@@ -357,9 +357,41 @@ wivrn::deserialization_packet wivrn::UDP::receive_raw()
 
 	static const size_t message_size = 2048;
 	static const size_t num_messages = 20;
-	if ((not buffer) or buffer.use_count() > 1)
+	// A shard keeps its receive batch alive because its payload is a span into it.
+	// Reuse the active buffer directly when it has no packet owners. Otherwise,
+	// return it to its reserved pool slot and take only an unshared cached buffer.
+	// The active buffer always occupies one of the bounded pool's slots.
+	if (not buffer or buffer.use_count() > 1)
 	{
-		buffer = std::make_shared_for_overwrite<uint8_t[]>(message_size * num_messages);
+		if (buffer)
+		{
+			assert(active_receive_buffer_slot < receive_buffer_pool_size);
+			receive_buffer_pool[active_receive_buffer_slot] = std::move(buffer);
+			active_receive_buffer_slot = receive_buffer_pool_size;
+		}
+		for (size_t i = 0; i < receive_buffer_pool_size; ++i)
+			if (receive_buffer_pool[i] and receive_buffer_pool[i].use_count() == 1)
+			{
+				buffer = std::move(receive_buffer_pool[i]);
+				active_receive_buffer_slot = i;
+				break;
+			}
+		if (not buffer)
+		{
+			for (size_t i = 0; i < receive_buffer_pool_size; ++i)
+				if (not receive_buffer_pool[i])
+				{
+					active_receive_buffer_slot = i;
+					break;
+				}
+			if (active_receive_buffer_slot == receive_buffer_pool_size)
+			{
+				active_receive_buffer_slot = receive_buffer_cursor;
+				receive_buffer_pool[active_receive_buffer_slot].reset();
+				receive_buffer_cursor = (receive_buffer_cursor + 1) % receive_buffer_pool_size;
+			}
+			buffer = std::make_shared_for_overwrite<uint8_t[]>(message_size * num_messages);
+		}
 	}
 	std::array<iovec, num_messages> iovecs;
 	std::array<mmsghdr, num_messages> mmsgs;

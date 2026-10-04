@@ -358,6 +358,27 @@ void part_d()
 	CHECK(near(h.quiet(), settled(40e6)));
 }
 
+void loss_with_bursty_delivery()
+{
+	std::printf("Part D2: loss cannot turn bursty delivery into an upward backoff\n");
+	harness h(mode::bbr, 20e6);
+	h.quiet();
+	const size_t first_change = h.changes.size();
+	uint32_t previous = h.current();
+	// Good packets arrive in a short burst while half the frames are lost.
+	// Their inflated delivery estimate must not raise the rate during backoff.
+	for (int i = 0; i < 360; ++i)
+	{
+		h.feed_raw(h.frame_bytes(), period / 2, i % 2 == 0);
+		if (h.current() != previous)
+		{
+			CHECK(h.current() <= previous);
+			previous = h.current();
+		}
+	}
+	CHECK(h.changes.size() > first_change);
+}
+
 void part_e()
 {
 	std::printf("Part E: app-limited frames are not capacity measurements\n");
@@ -639,6 +660,7 @@ int main(int argc, char ** argv)
 	part_b();
 	part_c();
 	part_d();
+	loss_with_bursty_delivery();
 	part_e();
 	part_f();
 	part_g();

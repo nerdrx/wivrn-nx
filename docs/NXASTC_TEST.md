@@ -1,7 +1,7 @@
 # NXVC ASTC: native texture streaming experiment
 
 The explicit `nxastc` encoder sends independent ASTC 8x8 texture blocks, using
-LZ4 only when its output is smaller than the raw block payload. The Pico uploads
+LZ4 or Zstd when their output is smaller than the raw block payload. The Pico uploads
 those blocks into a compressed Vulkan image. Its existing presentation shader
 samples the texture; there is no full-frame software ASTC decode or extra RGBA
 reconstruction pass.
@@ -66,16 +66,69 @@ upload buffer. Its backreferences read previously written bytes, so decompressin
 directly into sequential-write GPU staging memory was unnecessarily expensive.
 
 The user's isolated live test runs with the built-in `--no-encrypt` server option.
-One two-second window reported 180 fresh source updates and 180 submitted layers
-(89.7 iterations/s), with 1.9 ms reported decode time. The adjacent window reported
-142 fresh updates across 179 layers, so this is **not sustained 90 FPS proof**.
-Neither timestamp sums nor runtime estimates are optical photon-latency measurements.
+Short stationary WayVR checks on the updated Pico client reached approximately
+89–90 fresh updates/s, but the final restart also included a window with 164 fresh
+updates across 180 submitted layers. This is **not sustained or moving-scene
+90 FPS proof**. Neither timestamp sums nor runtime estimates are optical
+photon-latency measurements.
 
-ASTC endpoint precision now responds to the controller/slider budget using actual
-packet bytes, stepping between six and four bits with hysteresis. Dimensions remain
-native. This has a limited reduction range: earlier dark-frame measurements reduced
-LZ4 bytes by 7.4% at five bits and 14.5% at four bits. Targets below this quality floor
-are not enforced by this control; stronger rate control remains necessary.
+Neutral presentation now defaults to specialization mode 2, removing inactive
+post-processing and bleed branches from the existing shader. Enabling an effect
+restores the general path, which remains selected for that defoveator's lifetime
+to avoid per-frame pipeline rebuilds. Explicit
+`debug.wivrn.nx.static_post=0` (or `WIVRN_NX_STATIC_POST=0` on desktop) retains the
+general shader for comparisons. Two short Pico A/B runs reported this app's own
+GPU pass at 3.7–4.0 ms for mode 0 and 1.3–2.0 ms for mode 2 after startup.
+Those numbers exclude the system compositor, display scanout and photon latency.
+
+ASTC quality responds to the controller/slider budget using measured packet bytes.
+The seven rungs retain native dimensions: q6/q5/q4 use six/five/four-bit endpoints;
+q3 uses four-bit endpoints and four weight levels; q2 uses three-bit endpoints and
+four weight levels; q1 uses two-bit endpoints and constant weights; q0 sends coarse
+flat block means. q1/q0 are emergency quality levels with severe block artifacts.
+Size estimates expire after 30 encoded frames so a simpler scene can recover its
+detail. Current-frame overruns also trigger downshifts; overruns above 150% can
+skip two unmeasured rungs. An abrupt complexity increase invalidates stale
+lower-rung estimates. The warmed simple-to-complex regression reaches q2 after
+two significant overruns (q6 then q4); q2's 3.6% overrun is inside the existing
+10% tolerance. This is a controller model, not a two-frame transport guarantee.
+The controller uses hysteresis and chooses previously measured fitting rungs
+rather than continually toggling between two overloaded settings. This is
+adaptive quality, not a strict byte ceiling: a new scene or the q0 floor can still
+exceed the budget.
+
+Each encoder worker reuses a Zstd context and scratch buffer. Zstd level 3 is used
+only when it saves at least 10% against the smaller raw/LZ4 candidate. It preserves
+ASTC blocks exactly and uses independent frames, so it adds no reference recovery
+chain. Packet version 1 retains raw/LZ4; version 2 carries Zstd. **Update both
+server and client before testing this experimental profile.** Older clients reject
+version 2. The decoder verifies a single complete Zstd frame, declared raw size,
+and exact bounded output before uploading the texture.
+
+Offline 4352x2176 dark/forest screenshot fixtures measured q2 plus Zstd at
+251,029/133,680 bytes, versus the same-source q6 plus LZ4 at 508,605/318,924:
+50.6%/58.1% less payload. RGB PSNR fell from 31.74/40.04 to 27.41/28.80 dB;
+the quality loss is visible. These are synthetic stereo image fixtures, not live
+motion or Pico frame-rate proof. Smoother 3x3 weight fields saved only about 20%
+with Zstd and were not integrated. Native dimensions do not imply native detail.
+
+Additional per-eye fixtures measured q2 plus Zstd3 at 243,333/130,834 bytes for
+2176x2176 dark/forest, versus q6 plus LZ4 at 501,248/311,230: 51.5%/58.0% saved.
+A dense 2176x800 crowd crop saved only 39.2%, so halving bytes is not universal.
+Contrast-gated and luma-preserving endpoint variants increased bytes and were
+rejected. Zstd levels 6/9 saved somewhat more but did not halve the crowd payload;
+level 9 cost 3.9–9.7 ms per q2 host compression, so level 3 remains selected.
+
+A standalone Pico CPU benchmark of one 2176x2176 eye measured 30 decompressions:
+q6 LZ4 median/p95 0.433/0.442 ms, q6 Zstd 1.052/1.293 ms; four-level/three-bit
+ASTC LZ4 0.400/0.407 ms, Zstd 1.019/1.215 ms. All output bytes matched. This
+excludes upload, presentation and network handling. Debug builds now optimize
+only the hot bundled compression libraries while retaining symbols/assertions;
+the previous unoptimized Zstd cost up to 15 ms per eye on the PC.
+
+The BBR acute-loss path is capped to reduce its previous budget. A bursty delivery
+estimate previously allowed a nominal backoff to increase the budget during loss;
+a regression test reproduces that case and verifies the cap.
 
 Captured server and headset packets proved the former encrypted recovery bug: the
 server packet decompressed correctly, while the received packet differed across

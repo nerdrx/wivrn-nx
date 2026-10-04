@@ -7,7 +7,7 @@ layout(local_size_x=64) in;
 layout(set=0,binding=0) uniform sampler2D luma;
 layout(set=0,binding=1) uniform sampler2D chroma;
 layout(set=0,binding=2,std430) writeonly buffer Output { uvec4 blocks[]; } dst;
-layout(push_constant) uniform Push { uint width, height, fit, quantBits; } pc;
+layout(push_constant) uniform Push { uint width, height, fit, quality; } pc;
 
 vec3 pixel(ivec2 p) {
     p=clamp(p,ivec2(0),ivec2(pc.width,pc.height)-1);
@@ -27,10 +27,22 @@ void put(inout uvec4 b,uint offset,uint count,uint value) {
     if(shift+count>32u) b[word+1u]|=value>>(32u-shift);
 }
 uvec3 quantEndpoint(vec3 p) {
-    uint step=1u<<uint(6u-clamp(pc.quantBits,4u,6u));
+    uint endpointBits=pc.quality<=3u?pc.quality+1u:pc.quality;
+    uint step=1u<<uint(6u-clamp(endpointBits,1u,6u));
     return min(uvec3(round(clamp(p,vec3(0),vec3(255))*(63.0/255.0)/float(step)))*step,uvec3(63u));
 }
 vec3 unquantEndpoint(uvec3 q) { return vec3((q<<2)|(q>>4)); }
+uint quantWeight(float t) {
+    uint w=uint(round(clamp(t,0.0,1.0)*7.0));
+    if(pc.quality==3u) w=uint(round(round(float(w)*3.0/7.0)*7.0/3.0)); // 0, 2, 5, 7
+    if(pc.quality==2u) {
+        uint q=uint(round(clamp(t,0.0,1.0)*3.0));
+        w=q==0u?0u:q==1u?2u:q==2u?5u:7u;
+    }
+    if(pc.quality==1u) w=4u;
+    if(pc.quality==0u) w=0u;
+    return min(w,7u);
+}
 
 void main() {
     uint id=gl_GlobalInvocationID.x, across=(pc.width+7u)/8u;
@@ -42,7 +54,7 @@ void main() {
         lo=min(lo,v);hi=max(hi,v);sum+=v;diag+=v*v;
         cross+=vec3(v.x*v.y,v.x*v.z,v.y*v.z);
     }
-    bool isFlat=pc.fit==3u && max(max(diag.x-sum.x*sum.x/64.0,diag.y-sum.y*sum.y/64.0),diag.z-sum.z*sum.z/64.0)<1024.0;
+    bool isFlat=pc.quality==0u || (pc.fit==3u && max(max(diag.x-sum.x*sum.x/64.0,diag.y-sum.y*sum.y/64.0),diag.z-sum.z*sum.z/64.0)<1024.0);
     if(isFlat) {lo=sum/64.0;hi=lo;}
     else if(pc.fit!=0u) {
         vec3 mean=sum/64.0;
@@ -75,13 +87,13 @@ void main() {
         for(uint i=0;i<25u;i++) {
             float value=0;
             for(uint j=0;j<64u;j++) value+=astc5x5InverseA[i*64u+j]*target[j];
-            uint w=uint(round(clamp(value,0.0,1.0)*7.0));
+            uint w=quantWeight(value);
             put(weights,3u*i,3,w);
         }
     } else if(!isFlat) {
         for(uint y=0;y<5u;y++) for(uint x=0;x<5u;x++) {
             vec3 v=bilinear(base,vec2(x,y)*1.75);
-            uint w=uint(round(clamp(dot(v-a,axis)*inv,0.0,1.0)*7.0));
+            uint w=quantWeight(dot(v-a,axis)*inv);
             put(weights,3u*(y*5u+x),3,w);
         }
     }

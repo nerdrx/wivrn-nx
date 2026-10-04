@@ -88,10 +88,10 @@ static int static_post_requested()
 {
 #ifdef __ANDROID__
 	char value[PROP_VALUE_MAX] = {};
-	return __system_property_get("debug.wivrn.nx.static_post", value) > 0 ? std::clamp(value[0] - '0', 0, 2) : 0;
+	return __system_property_get("debug.wivrn.nx.static_post", value) > 0 ? std::clamp(value[0] - '0', 0, 2) : 2;
 #else
 	const char * value = std::getenv("WIVRN_NX_STATIC_POST");
-	return value ? std::clamp(value[0] - '0', 0, 2) : 0;
+	return value ? std::clamp(value[0] - '0', 0, 2) : 2;
 #endif
 }
 
@@ -1022,6 +1022,9 @@ void stream_defoveator::defoveate(vk::raii::CommandBuffer & command_buffer,
 	// instead of rebuilding pipelines whenever those values return to zero.
 	static_post_disabled |= !neutral_post;
 	const int static_post_mode = static_post_requested();
+	// The first neutral pipeline needs no per-pixel post-effect tests. Default mode 2
+	// bakes those exact no-op paths out; explicit mode 0 keeps the general shader available.
+	// Once any effect becomes active, retain the general shader for this defoveator's lifetime.
 	const bool static_post = static_post_mode > 0 && !static_post_disabled;
 	static_bleed_disabled |= post.bleed_margin != 0.f;
 	const bool static_bleed = static_post_mode > 1 && !static_bleed_disabled;

@@ -15,7 +15,7 @@ namespace
 {
 struct push_constants
 {
-	uint32_t width, height, fit, quant_bits;
+	uint32_t width, height, fit, quality;
 };
 
 vk::raii::CommandPool make_command_pool(wivrn::vk_bundle & vk)
@@ -113,7 +113,7 @@ wivrn::video_encoder_astc::video_encoder_astc(vk_bundle & vk, const encoder_sett
 	const uint64_t bytes = nxastc_packet::block_bytes(extent.width, extent.height);
 	if (bytes > UINT32_MAX)
 		throw std::runtime_error("NX ASTC frame is too large");
-	U_LOG_I("nxastc: stream %u, %ux%u, ASTC 8x8 fit3/6-bit endpoints, independent LZ4 packets",
+	U_LOG_I("nxastc: stream %u, %ux%u, ASTC 8x8 fit3 adaptive q0-q6, independent LZ4/Zstd packets",
 	        unsigned(stream_idx), unsigned(extent.width), unsigned(extent.height));
 	auto cmds = vk.device.allocateCommandBuffers({.commandPool = *cmd_pool, .commandBufferCount = num_slots});
 	std::array layouts{*ds_layout, *ds_layout};
@@ -167,7 +167,8 @@ void wivrn::video_encoder_astc::present_image(vk::Image image, vk::SemaphoreSubm
 	cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
 	cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *pipeline);
 	cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *pipeline_layout, 0, s.descriptor_set, {});
-	push_constants pc{extent.width, extent.height, 3, quality_bits.load(std::memory_order_relaxed)};
+	s.quality = quality.load(std::memory_order_relaxed);
+	push_constants pc{extent.width, extent.height, 3, s.quality};
 	cmd.pushConstants(*pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0, vk::ArrayProxy<const push_constants>{pc});
 	const uint32_t blocks_x = (extent.width + 7) / 8, blocks_y = (extent.height + 7) / 8;
 	cmd.dispatch((blocks_x * blocks_y + 63) / 64, 1, 1);
@@ -196,26 +197,51 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_astc::encode(uint
 	compressed.resize(LZ4_compressBound(raw_size));
 	const int n = LZ4_compress_default(reinterpret_cast<const char *>(raw), reinterpret_cast<char *>(compressed.data()), raw_size, compressed.size());
 	const bool use_lz4 = n > 0 && uint32_t(n) < raw_size;
-	const uint32_t payload_size = use_lz4 ? uint32_t(n) : raw_size;
-	// Move one endpoint-precision step at a time using actual prior-frame bytes.
-	// Four bits is the floor: beyond that the shader's fixed ASTC mode is unchanged.
+	uint32_t payload_size = use_lz4 ? uint32_t(n) : raw_size;
+	const uint8_t * payload = use_lz4 ? compressed.data() : raw;
+	auto encoding = use_lz4 ? nxastc_packet::compression::lz4 : nxastc_packet::compression::none;
+	// Keep lossless packing independent of other frames. Reuse the context and
+	// output buffer; Zstd must save at least 10% to justify its CPU decode cost.
+	if (zstd_context)
+	{
+		zstd_compressed.resize(ZSTD_compressBound(raw_size));
+		const size_t packed = ZSTD_compressCCtx(zstd_context.get(), zstd_compressed.data(), zstd_compressed.size(), raw, raw_size, 3);
+		if (!ZSTD_isError(packed) && packed > 0 && packed * 100 <= uint64_t(payload_size) * 90)
+		{
+			payload_size = uint32_t(packed);
+			payload = zstd_compressed.data();
+			encoding = nxastc_packet::compression::zstd;
+		}
+	}
+	// Choose the next ASTC quality rung from actual bytes; severe overruns can
+	// skip unmeasured rungs instead of waiting for the EMA to catch up.
 	const uint32_t bitrate = pending_bitrate.load(std::memory_order_relaxed);
-	const float fps = pending_framerate.load(std::memory_order_relaxed) > 0
-	                          ? pending_framerate.load(std::memory_order_relaxed)
-	                          : initial_fps;
+	const float live_fps = pending_framerate.load(std::memory_order_relaxed);
+	const float fps = live_fps > 0 ? live_fps : initial_fps;
 	if (fps > 0 && bitrate > 0)
 	{
 		const double target_bytes = double(bitrate) / (8.0 * double(fps));
 		const double actual_bytes = double(payload_size + nxastc_packet::header_size);
-		uint32_t bits = quality_bits.load(std::memory_order_relaxed);
-		if (actual_bytes > target_bytes * 1.10 && bits > 4)
-			quality_bits.store(bits - 1, std::memory_order_relaxed);
-		else if (actual_bytes < target_bytes * 0.70 && bits < 6)
-			quality_bits.store(bits + 1, std::memory_order_relaxed);
+		quality.store(rate_control.update(s.quality, uint32_t(actual_bytes), uint32_t(target_bytes)), std::memory_order_relaxed);
+	}
+	sampled_bytes += payload_size + nxastc_packet::header_size;
+	++sampled_quality[s.quality];
+	++sampled_encoding[uint8_t(encoding)];
+	if (++sampled_frames == 180)
+	{
+		U_LOG_I("nxastc: stream %u mean packet %llu bytes, target %.0f bytes; q0-q6 %u/%u/%u/%u/%u/%u/%u, raw/lz4/zstd %u/%u/%u",
+		        unsigned(stream_idx), static_cast<unsigned long long>(sampled_bytes / sampled_frames),
+		        fps > 0 ? double(bitrate) / (8.0 * fps) : 0.0,
+		        sampled_quality[0], sampled_quality[1], sampled_quality[2], sampled_quality[3],
+		        sampled_quality[4], sampled_quality[5], sampled_quality[6],
+		        sampled_encoding[0], sampled_encoding[1], sampled_encoding[2]);
+		sampled_bytes = sampled_frames = 0;
+		sampled_quality.fill(0);
+		sampled_encoding.fill(0);
 	}
 	auto packet = std::make_shared<std::vector<uint8_t>>(nxastc_packet::header_size + payload_size);
-	auto header = nxastc_packet::make_header(extent.width, extent.height, payload_size, use_lz4);
+	auto header = nxastc_packet::make_header(extent.width, extent.height, payload_size, encoding);
 	std::memcpy(packet->data(), header.data(), header.size());
-	std::memcpy(packet->data() + header.size(), use_lz4 ? compressed.data() : raw, payload_size);
+	std::memcpy(packet->data() + header.size(), payload, payload_size);
 	return data{.encoder = this, .span = std::span<uint8_t>(*packet), .mem = packet};
 }

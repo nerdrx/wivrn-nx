@@ -1193,8 +1193,9 @@ std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, 
 
 		bitrate = missing_scale ? clamp(uint64_t(previous * backoff_factor)) :
 		                          clamp(uint64_t(std::min(backoff_factor * bandwidth.get() * quality_scale, double(effective_ceiling()))));
-		if (quality_mode)
-			bitrate = std::min(bitrate, clamp(uint64_t(previous * backoff_factor)));
+		// A burst can inflate the delivery estimate while frames are still lost.
+		// Acute backoff must reduce the current rate, never rebound above it.
+		bitrate = std::min(bitrate, clamp(uint64_t(previous * backoff_factor)));
 		gain = backoff_factor;
 		reason = "backing off";
 

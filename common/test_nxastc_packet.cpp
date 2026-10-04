@@ -14,7 +14,8 @@ int main()
 		std::vector<uint8_t> packet(bytes.begin(), bytes.end());
 		packet.resize(header_size + size);
 		auto h = parse_packet(packet);
-		assert(h && h->width == 17 && h->height == 9 && h->raw_bytes == raw && h->compressed == compressed);
+		assert(h && h->width == 17 && h->height == 9 && h->raw_bytes == raw &&
+		       h->encoding == (compressed ? compression::lz4 : compression::none));
 		packet.pop_back();
 		assert(!parse_packet(packet));
 		packet.push_back(0);

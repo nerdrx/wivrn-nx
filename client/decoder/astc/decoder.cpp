@@ -10,9 +10,8 @@
 #include "decoder.h"
 
 #include "application.h"
-#include "nxastc_packet.h"
+#include "nxastc_packet_decode.h"
 #include "scenes/stream.h"
-#include <lz4.h>
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <climits>
@@ -246,27 +245,24 @@ void astc_decoder::worker_function(uint32_t queue_family_index)
 				spdlog::debug("ASTC image pool exhausted; dropping complete frame");
 				continue;
 			}
-			auto * payload = current.packet.data() + nxastc_packet::header_size;
-			if (parsed->compressed)
+			const auto payload = std::span<const uint8_t>(current.packet).subspan(nxastc_packet::header_size);
+			auto output = parsed->encoding == nxastc_packet::compression::none ?
+			                      std::span<uint8_t>(item->mapped, parsed->raw_bytes) :
+			                      std::span<uint8_t>(cpu_scratch);
+			const auto decode = nxastc_packet::decode_payload(*parsed, payload, output);
+			if (decode != nxastc_packet::decode_status::ok)
 			{
-				const int written = LZ4_decompress_safe(reinterpret_cast<const char *>(payload),
-				                                        reinterpret_cast<char *>(cpu_scratch.data()),
-				                                        int(parsed->payload_bytes),
-				                                        int(parsed->raw_bytes));
-				if (written != int(parsed->raw_bytes))
-				{
-					spdlog::warn("ASTC LZ4 decode mismatch frame={} decoded={} raw={} payload={} packet={}",
-					             current.feedback.frame_index,
-					             written,
-					             parsed->raw_bytes,
-					             parsed->payload_bytes,
-					             current.packet.size());
-					throw std::runtime_error("ASTC LZ4 payload did not decode to exact block length");
-				}
-				std::memcpy(item->mapped, cpu_scratch.data(), parsed->raw_bytes);
+				spdlog::warn("ASTC payload decode failed frame={} encoding={} raw={} payload={} packet={} reason={}",
+				             current.feedback.frame_index,
+				             unsigned(parsed->encoding),
+				             parsed->raw_bytes,
+				             parsed->payload_bytes,
+				             current.packet.size(),
+				             nxastc_packet::decode_status_message(decode));
+				throw std::runtime_error(nxastc_packet::decode_status_message(decode));
 			}
-			else
-				std::memcpy(item->mapped, payload, parsed->raw_bytes);
+			if (parsed->encoding != nxastc_packet::compression::none)
+				std::memcpy(item->mapped, cpu_scratch.data(), parsed->raw_bytes);
 			if (vmaFlushAllocation(vk_allocator::instance(), static_cast<VmaAllocation>(item->staging), 0, parsed->raw_bytes) != VK_SUCCESS)
 				throw std::runtime_error("failed to flush ASTC staging buffer");
 			vk::Result waited = device.waitForFences(*fence, true, UINT64_MAX);

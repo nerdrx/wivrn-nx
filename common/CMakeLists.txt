@@ -108,6 +108,13 @@ FetchContent_MakeAvailable(nx_zstd)
 set_target_properties(libzstd_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(wivrn-common PUBLIC libzstd_static)
 
+# These hot loops dominate real-time packet packing even in a diagnostic build.
+# Retain debug symbols/assertions, but avoid timing an unoptimized compressor.
+if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(wivrn-lz4 PRIVATE $<$<CONFIG:Debug>:-O3>)
+    target_compile_options(libzstd_static PRIVATE $<$<CONFIG:Debug>:-O3>)
+endif()
+
 if (WIVRN_BUILD_SERVER OR WIVRN_BUILD_CLIENT)
     add_subdirectory(pyrowave)
 endif()

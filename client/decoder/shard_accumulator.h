@@ -105,7 +105,7 @@ public:
 	        std::weak_ptr<scenes::stream> scene,
 	        uint8_t stream_index) :
 	        decoder_(decoder::make(device, physical_device, vk_queue_family_index, description, stream_index, scene, this)),
-	        window(shard_set(stream_index)),
+	        window(shard_set(stream_index), reassembly_skew(description.codec[stream_index])),
 	        weak_scene(scene),
 	        instance(instance)
 	{
@@ -130,6 +130,8 @@ public:
 	using blit_handle = decoder::blit_handle;
 
 private:
+	static uint64_t reassembly_skew(video_codec codec);
+
 	// Feed the decoder whatever the oldest frame has gained, and finish it if it is
 	// whole. Only ever the oldest: a decoder cannot be fed out of order, so a newer
 	// frame that completed first waits its turn. What it returns is what tells the

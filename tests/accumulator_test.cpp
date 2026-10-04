@@ -495,6 +495,48 @@ void part_e()
 	}
 }
 
+// The production window can opt into a shorter ASTC tolerance. This checks
+// retirement order and late-shard refusal; it does not exercise Vulkan or XR.
+void part_f()
+{
+	std::printf("Part F: opt-in independent-codec tolerance\n");
+	for (uint64_t tolerance: {uint64_t(0), uint64_t(1), uint64_t(3)})
+	{
+		window_t window{shard_set(0), tolerance};
+		std::vector<uint64_t> retired, delivered;
+		auto visit = [&](shard_set & set) {
+			if (!set.complete()) return window_t::step::wait;
+			delivered.push_back(set.frame_index());
+			return window_t::step::done;
+		};
+		auto retire = [&](shard_set & set) { retired.push_back(set.frame_index()); };
+		window.slot(0, retire)->insert(make_shard(0, 0, 2), 1000);
+		// Complete newer frames must wait only through the chosen tolerance.
+		for (uint64_t index = 1; index <= tolerance; ++index)
+		{
+			window.slot(index, retire)->insert(make_shard(index, 0, 1), 1000 + index);
+			window.note_complete(index);
+			window.drain(visit, retire);
+			CHECK(retired.empty());
+			CHECK(delivered.empty());
+		}
+		const uint64_t newest = tolerance + 1;
+		window.slot(newest, retire)->insert(make_shard(newest, 0, 1), 1000 + newest);
+		window.note_complete(newest);
+		window.drain(visit, retire);
+		CHECK(retired == std::vector<uint64_t>{0});
+		CHECK(delivered.size() == newest);
+		for (size_t i = 0; i < delivered.size(); ++i) CHECK(delivered[i] == i + 1);
+		CHECK(window.slot(0, retire) == nullptr);
+		CHECK(window.front_index() == newest + 1);
+	}
+	// Without any complete successor, a zero-skew window still waits for repair.
+	window_t window{shard_set(0), 0};
+	window.slot(0, [](auto &) {})->insert(make_shard(0, 0, 2), 1000);
+	window.drain([](auto &) { return window_t::step::wait; }, [](auto &) { CHECK(false); });
+	CHECK(window.front_index() == 0);
+}
+
 } // namespace
 
 int main()
@@ -505,6 +547,7 @@ int main()
 	part_c();
 	part_d();
 	part_e();
+	part_f();
 	std::printf("\n%d checks, %d failure(s)\n", checks, failures);
 	return failures ? 1 : 0;
 }

@@ -28,6 +28,9 @@
 #include <algorithm>
 #include <span>
 #include <vector>
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 
 namespace wivrn
 {
@@ -42,6 +45,20 @@ namespace
 // One line at most every this many nanoseconds, whatever the loss rate
 constexpr int64_t fec_report_period = 10'000'000'000;
 } // namespace
+
+uint64_t shard_accumulator::reassembly_skew([[maybe_unused]] video_codec codec)
+{
+#ifdef __ANDROID__
+	if (codec == video_codec::nxastc)
+	{
+		char value[PROP_VALUE_MAX] = {};
+		if (__system_property_get("debug.wivrn.nx.astc_skew", value) == 1 &&
+		    (value[0] == '0' || value[0] == '1'))
+			return uint64_t(value[0] - '0');
+	}
+#endif
+	return window_t::skew;
+}
 
 static void debug_why_not_sent(const shard_set & shards)
 {

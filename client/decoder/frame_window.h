@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -66,7 +67,10 @@ public:
 
 	// Every slot starts as a copy of `prototype` — which is how the stream index, the
 	// only thing a set carries that is not per frame, reaches all of them.
-	explicit frame_window(const set_t & prototype = set_t{})
+	// A smaller tolerance is an opt-in latency trade-off for independent codecs.
+	// Keep the default for codecs that depend on ordered reference frames.
+	explicit frame_window(const set_t & prototype = set_t{}, uint64_t allowed_skew = skew) :
+	        allowed_skew(std::min(allowed_skew, uint64_t(depth - 1)))
 	{
 		for (size_t i = 0; i < depth; ++i)
 		{
@@ -135,7 +139,7 @@ public:
 	// about whether it is complete — a complete front is submitted, not dropped.
 	bool front_stale() const
 	{
-		return has_complete and newest_complete > front_ + skew;
+		return has_complete and newest_complete > front_ + allowed_skew;
 	}
 
 	// What one look at the oldest frame came to.
@@ -217,6 +221,7 @@ private:
 		newest_complete = 0;
 	}
 
+	const uint64_t allowed_skew;
 	std::array<set_t, depth> sets;
 	uint64_t front_ = 0;
 	uint64_t newest_complete = 0;

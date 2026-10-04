@@ -537,6 +537,59 @@ void part_f()
 	CHECK(window.front_index() == 0);
 }
 
+void part_g()
+{
+	std::printf("Part G: arrival-driven ASTC deadline\n");
+	constexpr int64_t period = 10;
+	auto run = [](bool deadline_enabled, int64_t now, int64_t display_period, bool complete_successor,
+	              bool complete_front = false, bool incomplete_successor = false) {
+		window_t w{shard_set(0)};
+		auto retire = [](shard_set &) {};
+		w.slot(0, retire)->insert(make_shard(0, 0, 2), 100);
+		if (complete_successor)
+		{
+			w.slot(1, retire)->insert(make_shard(1, 0, 1), 101);
+			w.note_complete(1);
+		}
+		else if (incomplete_successor)
+			w.slot(1, retire)->insert(make_shard(1, 0, 2), 101);
+		if (complete_front)
+		{
+			w.front().insert(make_shard(0, 1, 2), 102);
+			w.note_complete(0);
+		}
+		std::vector<uint64_t> retired;
+		w.drain(
+		        [](shard_set & s) { return s.complete() ? window_t::step::done : window_t::step::wait; },
+		        [&](shard_set & s) { retired.push_back(s.frame_index()); },
+		        [&](const shard_set & s) {
+			        return wivrn::frame_deadline_expired(now, s.feedback.received_first_packet,
+			                                             display_period, deadline_enabled,
+			                                             w.has_newer_complete_than_front());
+		        });
+		return std::pair{w.front_index(), retired};
+	};
+
+	CHECK(run(true, 119, period, true).first == 0); // one tick before threshold
+	CHECK(run(true, 120, period, true).second == std::vector<uint64_t>{0});
+	CHECK(run(false, 120, period, true).first == 0); // default off
+	CHECK(run(true, 120, period, false).first == 0); // no complete successor
+	CHECK(run(true, 120, period, false, false, true).first == 0); // incomplete successor
+	CHECK(run(true, 120, period, true, true).first == 2); // complete front and successor submit
+	CHECK(not wivrn::frame_deadline_expired(120, 0, period, true, true)); // unknown first receive
+	CHECK(not wivrn::frame_deadline_expired(120, 100, 0, true, true)); // unknown period
+	CHECK(not wivrn::frame_deadline_expired(99, 100, period, true, true)); // clock rollback
+	CHECK(not wivrn::frame_deadline_expired(INT64_MAX, 1, INT64_MAX, true, true)); // multiply overflow
+
+	// Trickling shards do not restart the timer: shard_set retains first arrival.
+	shard_set trickle(0);
+	trickle.insert(make_shard(0, 0, 3), 100);
+	trickle.insert(make_shard(0, 1, 3), 119);
+	CHECK(trickle.feedback.received_first_packet == 100);
+	CHECK(wivrn::frame_deadline_expired(120, trickle.feedback.received_first_packet,
+	                                   period, true, true));
+}
+
 } // namespace
 
 int main()
@@ -548,6 +601,7 @@ int main()
 	part_d();
 	part_e();
 	part_f();
+	part_g();
 	std::printf("\n%d checks, %d failure(s)\n", checks, failures);
 	return failures ? 1 : 0;
 }

@@ -60,6 +60,18 @@ uint64_t shard_accumulator::reassembly_skew([[maybe_unused]] video_codec codec)
 	return window_t::skew;
 }
 
+bool shard_accumulator::reassembly_deadline([[maybe_unused]] video_codec codec)
+{
+#ifdef __ANDROID__
+	if (codec == video_codec::nxastc)
+	{
+		char value[PROP_VALUE_MAX] = {};
+		return __system_property_get("debug.wivrn.nx.astc_deadline", value) == 1 && value[0] == '1';
+	}
+#endif
+	return false;
+}
+
 static void debug_why_not_sent(const shard_set & shards)
 {
 	const auto & frame = shards.data;
@@ -123,7 +135,7 @@ void shard_accumulator::push_shard(video_stream_data_shard && shard)
 	// Only the oldest frame is ever handed to the decoder, and the pump is what
 	// does it; a shard for a newer one can only ever change whether the oldest is
 	// still worth waiting for.
-	pump();
+	pump(now);
 }
 
 void shard_accumulator::push_parity(video_stream_parity_shard && parity)
@@ -152,18 +164,27 @@ void shard_accumulator::push_parity(video_stream_parity_shard && parity)
 	if (set->complete())
 		window.note_complete(frame_idx);
 
-	try_nack(instance.now());
+	const XrTime now = instance.now();
+	try_nack(now);
 
-	pump();
+	pump(now);
 }
 
-void shard_accumulator::pump()
+void shard_accumulator::pump(XrTime now)
 {
+	XrDuration period = 0;
+	if (astc_deadline_enabled)
+		if (const auto scene = weak_scene.lock())
+			period = scene->display_period_ns();
 	window.drain(
 	        [this](shard_set & set) { return try_submit_front(set); },
 	        [this](shard_set & set) {
 		        debug_why_not_sent(set);
 		        send_feedback(set.feedback);
+	        },
+	        [this, now, period](const shard_set & set) {
+		        return frame_deadline_expired(now, set.feedback.received_first_packet, period,
+		                                      astc_deadline_enabled, window.has_newer_complete_than_front());
 	        });
 }
 

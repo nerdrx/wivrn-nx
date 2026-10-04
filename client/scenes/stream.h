@@ -739,6 +739,10 @@ private:
 
 public:
 	~stream();
+	XrDuration display_period_ns() const
+	{
+		return real_display_period.load(std::memory_order_relaxed);
+	}
 
 	static std::shared_ptr<stream> create(
 	        std::unique_ptr<wivrn_session> session,

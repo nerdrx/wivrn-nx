@@ -62,6 +62,7 @@ private:
 	window_t window;
 	std::weak_ptr<scenes::stream> weak_scene;
 	xr::instance & instance;
+	const bool astc_deadline_enabled;
 
 	// Shards rebuilt from parity since the last report, and when that report was
 	// made. Logging every reconstruction would itself become the problem on a link
@@ -107,7 +108,8 @@ public:
 	        decoder_(decoder::make(device, physical_device, vk_queue_family_index, description, stream_index, scene, this)),
 	        window(shard_set(stream_index), reassembly_skew(description.codec[stream_index])),
 	        weak_scene(scene),
-	        instance(instance)
+	        instance(instance),
+	        astc_deadline_enabled(reassembly_deadline(description.codec[stream_index]))
 	{
 	}
 
@@ -131,6 +133,7 @@ public:
 
 private:
 	static uint64_t reassembly_skew(video_codec codec);
+	static bool reassembly_deadline(video_codec codec);
 
 	// Feed the decoder whatever the oldest frame has gained, and finish it if it is
 	// whole. Only ever the oldest: a decoder cannot be fed out of order, so a newer
@@ -139,7 +142,7 @@ private:
 	window_t::step try_submit_front(shard_set &);
 	// Drain the window: submit and retire from the oldest end for as long as
 	// anything can be decided there.
-	void pump();
+	void pump(XrTime now);
 	void send_feedback(wivrn::from_headset::feedback & feedback);
 
 	// Try every parity shard `set` is holding and drop the ones that are spent.

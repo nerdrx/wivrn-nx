@@ -22,10 +22,19 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <utility>
 
 namespace wivrn
 {
+
+inline bool frame_deadline_expired(int64_t now, int64_t first_received, int64_t display_period, bool enabled, bool has_newer_complete)
+{
+	if (not enabled or not has_newer_complete or first_received <= 0 or display_period <= 0 or
+	    display_period > std::numeric_limits<int64_t>::max() / 2 or now < first_received)
+		return false;
+	return now - first_received >= display_period * 2;
+}
 
 // The frames of one video stream currently being reassembled, oldest first.
 //
@@ -142,6 +151,11 @@ public:
 		return has_complete and newest_complete > front_ + allowed_skew;
 	}
 
+	bool has_newer_complete_than_front() const
+	{
+		return has_complete and newest_complete > front_;
+	}
+
 	// What one look at the oldest frame came to.
 	enum class step
 	{
@@ -168,6 +182,12 @@ public:
 	template <typename visit_t, typename retire_t>
 	void drain(visit_t && visit, retire_t && retire)
 	{
+		drain(std::forward<visit_t>(visit), std::forward<retire_t>(retire), [](const set_t &) { return false; });
+	}
+
+	template <typename visit_t, typename retire_t, typename stale_t>
+	void drain(visit_t && visit, retire_t && retire, stale_t && extra_stale)
+	{
 		// Every iteration either advances the window or returns, and the window is
 		// `depth` deep, so this cannot run away.
 		for (size_t i = 0; i <= depth; ++i)
@@ -184,7 +204,7 @@ public:
 					continue;
 
 				case step::wait:
-					if (not front_stale())
+					if (not front_stale() and not extra_stale(front()))
 						return;
 					retire(front());
 					advance();

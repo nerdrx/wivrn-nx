@@ -21,6 +21,16 @@ changing it does not alter an active accumulator. It applies only to NX ASTC;
 HEVC, H.264 and other codecs retain their existing policy. No property was set,
 client installed, or active session restarted for this implementation.
 
+An independent optional age rule is also available through
+`debug.wivrn.nx.astc_deadline=1`. On an incoming shard or parity packet, it may
+retire an incomplete front only when a newer complete frame exists and at least
+two actual display periods have elapsed since the front's first packet. The
+first-packet time and period use the same XR clock. Unknown values and clock
+rollback do not expire a frame. This check is arrival-driven: there is no timer
+and no hard wall-clock deadline. The property is read at accumulator creation;
+unset or any value other than exactly `1` keeps it off. It also applies only to
+NX ASTC. FEC recovery and NACK processing run before each pump.
+
 At an illustrative 90 source images/s, the complete-successor thresholds are
 44.44, 22.22 and 11.11 ms for skew 3, 1 and 0. These are **frame-index arithmetic**,
 not wall-clock deadlines or measured latency. Slow or skipped source updates
@@ -40,8 +50,8 @@ but divergent retirements may reduce the number of usable common pairs. Try
 skew 1 before 0 and compare both fresh coherent updates and reassembly delay.
 It is not a safe default based on unit checks alone.
 
-Validation: the existing production frame-window/shard-set test plus opt-in
-threshold, delivery-order, late-shard and no-successor checks passes **188 checks**
-normally and with AddressSanitizer/UndefinedBehaviorSanitizer. Those tests do not
+Validation: the production frame-window/shard-set test plus opt-in
+threshold, delivery-order, late-shard, no-successor and deadline-boundary checks
+passes **200 checks** normally and with AddressSanitizer/UndefinedBehaviorSanitizer. Those tests do not
 exercise the Vulkan decoder, Android property route, live NACK timing, or XR
 stereo presentation. Build and headset validation must be reported separately.

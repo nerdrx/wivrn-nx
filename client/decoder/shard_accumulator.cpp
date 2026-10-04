@@ -72,6 +72,55 @@ bool shard_accumulator::reassembly_deadline([[maybe_unused]] video_codec codec)
 	return false;
 }
 
+std::optional<XrTime> shard_accumulator::next_nack_deadline(XrTime now)
+{
+	if (not nxastc_codec or not application::get_config().shard_retransmit)
+		return {};
+	auto scene = weak_scene.lock();
+	if (not scene)
+		return {};
+
+	uint64_t newest = 0;
+	bool any = false;
+	window.for_each([&](shard_set & set) {
+		if (set.empty())
+			return;
+		if (not any or set.frame_index() > newest)
+		{
+			newest = set.frame_index();
+			any = true;
+		}
+	});
+	if (not any)
+		return {};
+
+	std::optional<XrTime> earliest;
+	window.for_each([&](shard_set & set) {
+		auto due = nack_poll_deadline(
+		        now,
+		        set.last_shard,
+		        set.nack_last,
+		        set.nack_rounds,
+		        true,
+		        true,
+		        not set.empty(),
+		        set.complete(),
+		        [&]() {
+			        set.missing_shards(nack_scratch, set.frame_index() < newest);
+			        return not nack_scratch.empty();
+		        });
+		if (due and (not earliest or *due < *earliest))
+			earliest = *due;
+	});
+	return earliest;
+}
+
+void shard_accumulator::poll_nacks(XrTime now)
+{
+	if (nxastc_codec)
+		try_nack(now);
+}
+
 static void debug_why_not_sent(const shard_set & shards)
 {
 	const auto & frame = shards.data;
@@ -284,9 +333,9 @@ void shard_accumulator::try_nack(XrTime now)
 		// second copy of it would only spend bandwidth on the path that is already
 		// dropping packets.
 		const XrTime since = std::max(set.last_shard, set.nack_last);
-		if (since == 0 or now - since < nack_delay_ns)
+		if (not nack_quiet_elapsed(now, since))
 			return;
-		if (set.nack_rounds >= max_nack_rounds or set.empty() or set.complete())
+		if (set.nack_rounds >= nack_max_rounds or set.empty() or set.complete())
 			return;
 
 		set.missing_shards(nack_scratch, set.frame_index() < newest);

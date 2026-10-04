@@ -26,16 +26,36 @@
 #include "utils/named_thread.h"
 
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <spdlog/spdlog.h>
 #include <thread>
 #include <uni_algo/case.h>
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
+
+namespace
+{
+bool recovery_poll_enabled()
+{
+#ifdef __ANDROID__
+	char value[PROP_VALUE_MAX] = {};
+	return __system_property_get("debug.wivrn.nx.recovery_poll", value) == 1 and value[0] == '1';
+#else
+	const char * value = std::getenv("WIVRN_NX_RECOVERY_POLL");
+	return value and std::strcmp(value, "1") == 0;
+#endif
+}
+} // namespace
 
 void scenes::stream::process_packets()
 {
 #ifdef __ANDROID__
 	application::instance().setup_jni();
 #endif
+	const bool use_recovery_poll = recovery_poll_enabled();
 	while (state_ != state::shutdown)
 	{
 		try
@@ -43,7 +63,29 @@ void scenes::stream::process_packets()
 			// Short enough that the path selector, evaluated at the end of every
 			// poll, still reacts within a few hundred ms once the primary path
 			// has gone completely silent
-			network_session->poll(*this, std::chrono::milliseconds(100));
+			if (not use_recovery_poll)
+				network_session->poll(*this, std::chrono::milliseconds(100));
+			else
+			{
+				auto timeout = [this]() {
+					const auto now = instance.now();
+					auto wait = std::chrono::milliseconds(100);
+					std::shared_lock lock(decoder_mutex);
+					for (auto & item: decoders)
+						if (item.decoder and item.decoder->is_nxastc_codec())
+							wait = std::min(wait, wivrn::nack_poll_timeout(now, item.decoder->next_nack_deadline(now), wait));
+					return wait;
+				};
+				network_session->poll(*this, std::chrono::milliseconds(100), timeout);
+				if (state_ != state::shutdown)
+				{
+					const XrTime now = instance.now();
+					std::shared_lock lock(decoder_mutex);
+					for (auto & item: decoders)
+						if (item.decoder and item.decoder->is_nxastc_codec())
+							item.decoder->poll_nacks(now);
+				}
+			}
 		}
 		catch (std::exception & e)
 		{

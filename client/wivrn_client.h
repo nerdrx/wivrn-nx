@@ -23,6 +23,7 @@
 #include "path_selector.h"
 #include "wivrn_packets.h"
 #include "wivrn_sockets.h"
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <mutex>
@@ -290,8 +291,8 @@ public:
 		}
 	}
 
-	template <typename T>
-	int poll(T && visitor, std::chrono::milliseconds timeout)
+	template <typename T, typename TimeoutSupplier>
+	int poll(T && visitor, std::chrono::milliseconds max_timeout, TimeoutSupplier && timeout_supplier)
 	{
 		pollfd fds[3] = {};
 		fds[0].events = POLLIN;
@@ -337,6 +338,7 @@ public:
 			secondary_gen = secondary_generation;
 		}
 
+		const auto timeout = std::min(max_timeout, timeout_supplier());
 		int r = ::poll(fds, std::size(fds), timeout.count());
 		if (r < 0)
 			throw std::system_error(errno, std::system_category());
@@ -432,6 +434,12 @@ public:
 		update_paths();
 
 		return r;
+	}
+
+	template <typename T>
+	int poll(T && visitor, std::chrono::milliseconds timeout)
+	{
+		return poll(std::forward<T>(visitor), timeout, [timeout]() { return timeout; });
 	}
 
 	uint64_t bytes_received() const

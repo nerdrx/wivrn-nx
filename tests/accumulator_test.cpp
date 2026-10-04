@@ -31,6 +31,7 @@
 //   ./accumulator_test
 
 #include "frame_window.h"
+#include "nack_deadline.h"
 #include "shard_set.h"
 
 #include <cstdio>
@@ -590,6 +591,89 @@ void part_g()
 	                                   period, true, true));
 }
 
+void part_h()
+{
+	constexpr int64_t quiet = wivrn::nack_quiet_period_ns;
+	shard_set holes(0);
+	holes.insert(make_shard(0, 0, 4), 10'000'000);
+	holes.insert(make_shard(0, 2, 4), 10'000'000);
+	std::vector<uint16_t> missing;
+	int scans = 0;
+	auto due = [&](int64_t now, bool enabled = true, bool send_available = true) {
+		return wivrn::nack_poll_deadline(now, holes.last_shard, holes.nack_last, holes.nack_rounds, enabled, send_available, not holes.empty(), holes.complete(), [&]() {
+			++scans;
+			if (holes.complete())
+				return false;
+			holes.missing_shards(missing, false);
+			return not missing.empty();
+		});
+	};
+	const int64_t first_due = 10'000'000 + quiet;
+	CHECK(due(first_due - 1) == first_due);
+	CHECK(scans == 0); // no hole scan before due
+	CHECK(due(first_due) == first_due);
+	CHECK(missing == std::vector<uint16_t>{1});
+	CHECK(wivrn::nack_poll_timeout(first_due - 1, due(first_due - 1), std::chrono::milliseconds(100)).count() == 1);
+	CHECK(wivrn::nack_poll_timeout(1, 1'000'000'001, std::chrono::milliseconds(200)).count() == 100);
+	holes.nack_rounds = 1;
+	holes.nack_last = first_due;
+	CHECK(due(first_due + quiet) == first_due + quiet);
+	holes.nack_rounds = 2;
+	CHECK(not due(first_due + quiet * 2));
+	CHECK(wivrn::nack_poll_timeout(first_due + quiet * 2, due(first_due + quiet * 2), std::chrono::milliseconds(100)).count() == 100);
+
+	// An arrival drained immediately before poll restarts the quiet gate.
+	holes.nack_rounds = 0;
+	holes.insert(make_shard(0, 3, 4), first_due + quiet + 1);
+	CHECK(holes.last_shard == first_due + quiet + 1);
+	auto fresh_due = due(first_due + quiet * 2);
+	CHECK(fresh_due == std::optional<int64_t>(holes.last_shard + quiet));
+	CHECK(due(holes.last_shard + quiet) == std::optional<int64_t>(holes.last_shard + quiet));
+
+	// A contiguous prefix without an end marker has no actionable inferred tail.
+	shard_set unknown_tail(0);
+	unknown_tail.insert(make_shard(1, 0, 3), 20'000'000);
+	unknown_tail.insert(make_shard(1, 1, 3), 20'000'000);
+	int unknown_scans = 0;
+	auto unknown_due = [&](int64_t now) {
+		return wivrn::nack_poll_deadline(now, unknown_tail.last_shard, unknown_tail.nack_last, 0, true, true, true, false, [&]() {
+			++unknown_scans;
+			std::vector<uint16_t> holes;
+			unknown_tail.missing_shards(holes, false);
+			return not holes.empty();
+		});
+	};
+	CHECK(unknown_due(20'000'000 + quiet - 1) == 20'000'000 + quiet);
+	CHECK(not unknown_due(20'000'000 + quiet));
+	CHECK(unknown_scans == 1);
+	CHECK(wivrn::nack_poll_timeout(20'000'000 + quiet, unknown_due(20'000'000 + quiet), std::chrono::milliseconds(100)).count() == 100);
+
+	// If parity can fill the sole hole, it is not actionable for NACK.
+	shard_set parity(0);
+	parity.insert(make_shard(2, 0, 3), 30'000'000);
+	parity.insert(make_shard(2, 2, 3), 30'000'000);
+	wivrn::to_headset::video_stream_parity_shard p{};
+	p.first_shard_idx = 0;
+	p.shard_stride = 1;
+	p.blob_size = {1, 1, 1};
+	parity.parity.push_back(p);
+	std::vector<uint16_t> parity_holes;
+	CHECK(wivrn::nack_poll_deadline(30'000'000 + quiet, parity.last_shard, 0, 0, true, true, true, false, [&]() {
+		      parity.missing_shards(parity_holes, false);
+		      return not parity_holes.empty();
+	      }) == std::nullopt);
+	CHECK(parity_holes.empty());
+	CHECK(not due(first_due + quiet * 2 + 1, false, true));     // disabled
+	CHECK(not due(first_due + quiet * 2 + 1, true, false));     // unavailable sender/weak scene
+	CHECK(not wivrn::nack_quiet_elapsed(10, 11));               // rollback
+	CHECK(not wivrn::nack_quiet_elapsed(INT64_MAX, INT64_MAX)); // overflow-safe
+	CHECK(not wivrn::nack_poll_deadline(INT64_MAX, INT64_MAX, 0, 0, true, true, true, false, [] { return true; }));
+	CHECK(not wivrn::nack_poll_deadline(9, 10, 0, 0, true, true, true, false, [] { return true; })); // clock rollback
+	shard_set whole(0);
+	whole.insert(make_shard(3, 0, 1), 40'000'000);
+	CHECK(not wivrn::nack_poll_deadline(40'000'000 + quiet - 1, whole.last_shard, 0, 0, true, true, true, whole.complete(), [] { return true; }));
+}
+
 } // namespace
 
 int main()
@@ -602,6 +686,7 @@ int main()
 	part_e();
 	part_f();
 	part_g();
+	part_h();
 	std::printf("\n%d checks, %d failure(s)\n", checks, failures);
 	return failures ? 1 : 0;
 }

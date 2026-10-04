@@ -21,6 +21,7 @@
 
 #include "decoder.h"
 #include "frame_window.h"
+#include "nack_deadline.h"
 #include "shard_set.h"
 #include "wivrn_packets.h"
 
@@ -62,6 +63,7 @@ private:
 	window_t window;
 	std::weak_ptr<scenes::stream> weak_scene;
 	xr::instance & instance;
+	const bool nxastc_codec;
 	const bool astc_deadline_enabled;
 
 	// Shards rebuilt from parity since the last report, and when that report was
@@ -109,12 +111,19 @@ public:
 	        window(shard_set(stream_index), reassembly_skew(description.codec[stream_index])),
 	        weak_scene(scene),
 	        instance(instance),
+	        nxastc_codec(description.codec[stream_index] == video_codec::nxastc),
 	        astc_deadline_enabled(reassembly_deadline(description.codec[stream_index]))
 	{
 	}
 
 	void push_shard(wivrn::to_headset::video_stream_data_shard &&);
 	void push_parity(wivrn::to_headset::video_stream_parity_shard &&);
+	bool is_nxastc_codec() const
+	{
+		return nxastc_codec;
+	}
+	std::optional<XrTime> next_nack_deadline(XrTime now);
+	void poll_nacks(XrTime now);
 
 	vk::Sampler sampler()
 	{
@@ -173,12 +182,10 @@ private:
 	// beats the frame's display deadline, and on a LAN that is 2-5 ms of round trip
 	// against an 11 ms frame at 90 Hz. 2.5 ms leaves room for two rounds inside the
 	// budget and still sits well past the inter-shard spacing of a paced frame.
-	static constexpr int64_t nack_delay_ns = 2'500'000;
 	// Requests one frame may cost, ever. Two rounds is what the frame budget has room
 	// for; past that the frame is not going to be finished by asking again, and the
 	// incomplete-frame path — feedback with no sent_to_decoder, and the keyframe the
 	// server answers it with — is the way out that always worked.
-	static constexpr uint8_t max_nack_rounds = 2;
 	// One line at most every this many nanoseconds, whatever the loss rate
 	static constexpr int64_t nack_report_period = 10'000'000'000;
 };

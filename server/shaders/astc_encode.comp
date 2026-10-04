@@ -2,7 +2,7 @@
 #extension GL_GOOGLE_include_directive : require
 #include "astc_encode_inverse.glsl"
 // Fixed ASTC 8x8: one partition, CEM8, 5x5 three-bit weights, six-bit endpoints.
-// ponytail: no partition/mode search; keep the cheap path until visual evidence rejects it.
+// Project endpoint extrema onto the fitted colour line; no partition/mode search.
 layout(local_size_x=64) in;
 layout(set=0,binding=0) uniform sampler2D luma;
 layout(set=0,binding=1) uniform sampler2D chroma;
@@ -66,8 +66,12 @@ void main() {
         float mn=1e30,mx=-1e30;
         for(int y=0;y<8;y++) for(int x=0;x<8;x++) {
             vec3 v=pixel(base+ivec2(x,y));float t=dot(v,axis);
-            if(t<mn){mn=t;lo=v;} if(t>mx){mx=t;hi=v;}
+            mn=min(mn,t);mx=max(mx,t);
         }
+        // Actual extrema may contain unrelated colour components. Projecting
+        // onto the mean's PCA line reduces those errors without another pass.
+        lo=mean+axis*(mn-dot(mean,axis));
+        hi=mean+axis*(mx-dot(mean,axis));
     }
     uvec3 e0=quantEndpoint(lo),e1=quantEndpoint(hi);
     // CEM8 enters blue contraction if endpoint sums are reversed; use ordinary RGB.

@@ -58,6 +58,7 @@ struct ubo_data
 	uint32_t native_center_origin_x;
 	uint32_t native_center_origin_y;
 	uint32_t native_center_size;
+	uint32_t astc_direct_rgb_on;
 };
 
 vk::raii::Sampler make_sampler(wivrn::vk_bundle & vk)
@@ -575,8 +576,9 @@ uint32_t foveation::lens_mask_total()
 	return lens_mask_tiles[0].total();
 }
 
-foveation::foveation(wivrn::vk_bundle & bundle, vk::Extent3D foveated_size) :
+foveation::foveation(wivrn::vk_bundle & bundle, vk::Extent3D foveated_size, bool astc_direct_rgb) :
         foveated_size(foveated_size),
+        astc_direct_rgb(astc_direct_rgb),
         // normal sight line is between 10° and 15° below horizontal
         // https://apps.dtic.mil/sti/tr/pdf/AD0758339.pdf pages 393-394
         // testing shows 10° looks better
@@ -791,6 +793,7 @@ void foveation::update_ubo(
 	ubo.native_center_origin_x = (foveated_size.width / 2u - 128u) & ~31u;
 	ubo.native_center_origin_y = (foveated_size.height / 2u - 128u) & ~31u;
 	ubo.native_center_size = native_center ? 256u : 0u;
+	ubo.astc_direct_rgb_on = astc_direct_rgb ? 1u : 0u;
 	if (native_center && !native_footprint_logged) {
 		uint32_t min_x = UINT32_MAX, max_x = 0, min_y = UINT32_MAX, max_y = 0;
 		for (unsigned eye = 0; eye < 2; ++eye) for (unsigned i = 0; i < 256; ++i) {

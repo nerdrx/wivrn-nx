@@ -221,9 +221,53 @@ std::array<vk::Format, 5> image_formats(int bit_depth)
 	throw std::runtime_error(std::format("Unsupported bit depth {}", bit_depth));
 }
 
+bool astc_direct_rgb_enabled(std::span<wivrn::encoder_settings> encoders)
+{
+	const char * value = std::getenv("WIVRN_ASTC_DIRECT_RGB");
+	return value and std::string_view(value) == "1" and encoders.size() >= 3 and
+	       encoders[0].enabled and encoders[1].enabled and
+	       encoders[0].width == encoders[1].width and encoders[0].height == encoders[1].height and
+	       encoders[0].codec == wivrn::video_codec::nxastc and
+	       encoders[1].codec == wivrn::video_codec::nxastc and
+	       std::ranges::none_of(encoders.subspan(2), [](const auto & encoder) { return encoder.enabled; });
+}
+
 std::array<wivrn::compositor::image, 2> make_images(wivrn::vk_bundle & vk, vk::CommandPool command_pool, std::span<wivrn::encoder_settings> encoders)
 {
-	auto formats = image_formats(encoders[0].bit_depth);
+	for (auto & encoder: encoders)
+		encoder.options.erase("_wivrn_astc_direct_rgb");
+	auto planar_formats = image_formats(encoders[0].bit_depth);
+	std::vector<vk::Format> formats(planar_formats.begin(), planar_formats.end());
+	bool astc_direct_rgb = astc_direct_rgb_enabled(encoders);
+	if (astc_direct_rgb)
+	{
+		try
+		{
+			auto props = vk.physical_device.getImageFormatProperties(
+			        vk::Format::eR8G8B8A8Unorm,
+			        vk::ImageType::e2D,
+			        vk::ImageTiling::eOptimal,
+			        vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferSrc);
+			astc_direct_rgb = props.maxArrayLayers >= 3 and props.maxExtent.width >= encoders[0].width and
+			                  props.maxExtent.height >= encoders[0].height and props.maxExtent.width >= encoders[1].width and
+			                  props.maxExtent.height >= encoders[1].height;
+		}
+		catch (const vk::FormatNotSupportedError &)
+		{
+			astc_direct_rgb = false;
+		}
+		if (not astc_direct_rgb)
+			U_LOG_W("nxastc: direct RGB requested but RGBA8 storage/sampling is unsupported; retaining YCbCr input");
+	}
+	if (astc_direct_rgb)
+	{
+		formats = {vk::Format::eR8G8B8A8Unorm};
+		// Pass the selected compositor output format to each ASTC encoder through its
+		// session-local settings instead of inferring it from the VkImage handle.
+		encoders[0].options["_wivrn_astc_direct_rgb"] = "1";
+		encoders[1].options["_wivrn_astc_direct_rgb"] = "1";
+		U_LOG_I("nxastc: direct RGB compositor output enabled");
+	}
 	const bool native_center = [] {
 		const char * value = std::getenv("NX_DIRECT_NATIVE_CENTER");
 		return value and std::string_view(value) == "1";
@@ -245,7 +289,7 @@ std::array<wivrn::compositor::image, 2> make_images(wivrn::vk_bundle & vk, vk::C
 	                .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc,
 	        },
 	        vk::ImageFormatListCreateInfo{
-	                .viewFormatCount = formats.size(),
+	                .viewFormatCount = uint32_t(formats.size()),
 	                .pViewFormats = formats.data(),
 	        },
 	};
@@ -273,9 +317,11 @@ std::array<wivrn::compositor::image, 2> make_images(wivrn::vk_bundle & vk, vk::C
 		        vk.device,
 		        image_info.get(),
 		        VmaAllocationCreateInfo{.usage = VMA_MEMORY_USAGE_AUTO},
-		        std::format("compositor YCbCr image {}", i),
+		        std::format("compositor {} image {}", astc_direct_rgb ? "RGB" : "YCbCr", i),
 		};
 		vk::Image vk_image{image};
+		const auto plane0 = astc_direct_rgb ? vk::ImageAspectFlagBits::eColor : vk::ImageAspectFlagBits::ePlane0;
+		const auto plane1 = astc_direct_rgb ? vk::ImageAspectFlagBits::eColor : vk::ImageAspectFlagBits::ePlane1;
 		buffer_allocation native_buffer;
 		if (native_center)
 			native_buffer = buffer_allocation{
@@ -302,7 +348,7 @@ std::array<wivrn::compositor::image, 2> make_images(wivrn::vk_bundle & vk, vk::C
 		                        .viewType = vk::ImageViewType::e2DArray,
 		                        .format = formats[0],
 		                        .subresourceRange = {
-		                                .aspectMask = vk::ImageAspectFlagBits::ePlane0,
+		                                .aspectMask = plane0,
 		                                .levelCount = 1,
 		                                .layerCount = image_info.get().arrayLayers,
 		                        },
@@ -314,9 +360,9 @@ std::array<wivrn::compositor::image, 2> make_images(wivrn::vk_bundle & vk, vk::C
 		                        .pNext = &usage,
 		                        .image = vk_image,
 		                        .viewType = vk::ImageViewType::e2DArray,
-		                        .format = formats[1],
+		                        .format = astc_direct_rgb ? formats[0] : formats[1],
 		                        .subresourceRange = {
-		                                .aspectMask = vk::ImageAspectFlagBits::ePlane1,
+		                                .aspectMask = plane1,
 		                                .levelCount = 1,
 		                                .layerCount = image_info.get().arrayLayers,
 		                        },
@@ -1733,7 +1779,7 @@ compositor::compositor(wivrn_session & session) :
         frame_rate(settings[0].fps),
         pacer(U_TIME_1S_IN_NS / frame_rate),
         squasher(vk, render_extent(session.get_info())),
-        foveation(vk, images[0].image.info().extent)
+        foveation(vk, images[0].image.info().extent, settings[0].options.contains("_wivrn_astc_direct_rgb"))
 {
 	const char * source_fps = std::getenv("WIVRN_NX_SOURCE_FPS");
 	nx_source_cap_60 = source_fps and source_fps[0] == '6' and source_fps[1] == '0' and source_fps[2] == '\0';

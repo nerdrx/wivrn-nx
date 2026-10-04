@@ -44,6 +44,7 @@ class video_encoder_astc : public video_encoder
 	std::array<uint32_t, 7> sampled_quality{};
 	std::array<uint32_t, 3> sampled_encoding{};
 	const float initial_fps;
+	const bool direct_rgb_input;
 
 public:
 	video_encoder_astc(vk_bundle & vk, const encoder_settings & settings, uint8_t stream_idx);

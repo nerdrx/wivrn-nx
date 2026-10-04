@@ -16,7 +16,7 @@ namespace
 {
 struct push_constants
 {
-	uint32_t width, height, fit, quality;
+	uint32_t width, height, fit, quality, direct_rgb;
 };
 
 vk::raii::CommandPool make_command_pool(wivrn::vk_bundle & vk)
@@ -107,7 +107,8 @@ wivrn::video_encoder_astc::video_encoder_astc(vk_bundle & vk, const encoder_sett
         pipeline_layout(make_pipeline_layout(vk, *ds_layout)),
         pipeline(make_pipeline(vk, *pipeline_layout)),
         ds_pool(make_ds_pool(vk)),
-        initial_fps(settings.fps)
+        initial_fps(settings.fps),
+        direct_rgb_input(settings.options.contains("_wivrn_astc_direct_rgb"))
 {
 	if (settings.bit_depth != 8 || settings.eyes != 1)
 		throw std::runtime_error("NX ASTC requires 8-bit single-eye streams");
@@ -149,8 +150,12 @@ void wivrn::video_encoder_astc::present_image(vk::Image image, vk::SemaphoreSubm
 	auto it = image_views.find(VkImage(image));
 	if (it == image_views.end())
 	{
-		auto y = vk.device.createImageView({.image = image, .viewType = vk::ImageViewType::e2D, .format = vk::Format::eR8Unorm, .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::ePlane0, .levelCount = 1, .baseArrayLayer = src_layer, .layerCount = 1}});
-		auto uv = vk.device.createImageView({.image = image, .viewType = vk::ImageViewType::e2D, .format = vk::Format::eR8G8Unorm, .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::ePlane1, .levelCount = 1, .baseArrayLayer = src_layer, .layerCount = 1}});
+		const auto format = direct_rgb_input ? vk::Format::eR8G8B8A8Unorm : vk::Format::eR8Unorm;
+		const auto aspect = direct_rgb_input ? vk::ImageAspectFlagBits::eColor : vk::ImageAspectFlagBits::ePlane0;
+		auto y = vk.device.createImageView({.image = image, .viewType = vk::ImageViewType::e2D, .format = format, .subresourceRange = {.aspectMask = aspect, .levelCount = 1, .baseArrayLayer = src_layer, .layerCount = 1}});
+		auto uv = direct_rgb_input
+		                  ? vk.device.createImageView({.image = image, .viewType = vk::ImageViewType::e2D, .format = vk::Format::eR8G8B8A8Unorm, .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor, .levelCount = 1, .baseArrayLayer = src_layer, .layerCount = 1}})
+		                  : vk.device.createImageView({.image = image, .viewType = vk::ImageViewType::e2D, .format = vk::Format::eR8G8Unorm, .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::ePlane1, .levelCount = 1, .baseArrayLayer = src_layer, .layerCount = 1}});
 		it = image_views.emplace(VkImage(image), std::array{std::move(y), std::move(uv)}).first;
 	}
 	std::array images{
@@ -169,7 +174,7 @@ void wivrn::video_encoder_astc::present_image(vk::Image image, vk::SemaphoreSubm
 	cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *pipeline);
 	cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *pipeline_layout, 0, s.descriptor_set, {});
 	s.quality = quality.load(std::memory_order_relaxed);
-	push_constants pc{extent.width, extent.height, 3, s.quality};
+	push_constants pc{extent.width, extent.height, 3, s.quality, direct_rgb_input ? 1u : 0u};
 	cmd.pushConstants(*pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0, vk::ArrayProxy<const push_constants>{pc});
 	const uint32_t blocks_x = (extent.width + 7) / 8, blocks_y = (extent.height + 7) / 8;
 	cmd.dispatch((blocks_x * blocks_y + 63) / 64, 1, 1);

@@ -51,6 +51,7 @@ layout(set = 0, binding = 1, std430) buffer restrict Config
 	uint native_center_origin_x;
 	uint native_center_origin_y;
 	uint native_center_size;
+	uint astc_direct_rgb_on;
 } ubo;
 
 layout(set = 0, binding = 2) uniform writeonly restrict image2DArray luma;
@@ -157,21 +158,28 @@ void main()
 		native_center.rgb[iz * ubo.native_center_size * ubo.native_center_size + cy * ubo.native_center_size + cx] =
 			(uint(round(native_rgb.r * 255.0)) << 16u) | (uint(round(native_rgb.g * 255.0)) << 8u) | uint(round(native_rgb.b * 255.0));
 	}
-	colour.xyz = rgb_to_ycbcr(encoded_rgb);
-
 	// A 64x64 tile is 64 whole 8x8 workgroups, so this branch is uniform across the
 	// workgroup AND across every subgroup in it -- which is what makes it safe to take
 	// after the sampling loop and before the chroma reduction below, whose
 	// subgroupShuffleDown would be undefined if some lanes of a subgroup had left.
 	// Overriding the value rather than skipping the fetches also keeps the alpha channel
 	// genuine: only the picture is replaced.
+	bool masked = false;
 	if (ubo.mask_on != 0u)
 	{
 		uint tile = (iy >> 6) * ubo.mask_cols + (ix >> 6);
 		uint word = ubo.mask[MASK_WORDS * iz + (tile >> 5)];
-		if ((word & (1u << (tile & 31u))) != 0u)
-			colour.xyz = vec3(0.5); // neutral grey: Y, Cb and Cr all mid scale
+		masked = (word & (1u << (tile & 31u))) != 0u;
 	}
+	if (ubo.astc_direct_rgb_on != 0u)
+	{
+		vec3 rgb = masked ? vec3(0.5) : encoded_rgb;
+		imageStore(luma, ivec3(ix, iy, iz), vec4(rgb, 1.0));
+		return;
+	}
+	colour.xyz = rgb_to_ycbcr(encoded_rgb);
+	if (masked)
+		colour.xyz = vec3(0.5); // neutral grey: Y, Cb and Cr all mid scale
 
 	imageStore(luma, ivec3(ix, iy, iz), vec4(colour.x));
 

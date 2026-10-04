@@ -8,10 +8,11 @@ layout(local_size_x=64) in;
 layout(set=0,binding=0) uniform sampler2D luma;
 layout(set=0,binding=1) uniform sampler2D chroma;
 layout(set=0,binding=2,std430) writeonly buffer Output { uvec4 blocks[]; } dst;
-layout(push_constant) uniform Push { uint width, height, fit, quality; } pc;
+layout(push_constant) uniform Push { uint width, height, fit, quality, direct_rgb; } pc;
 
 vec3 pixel(ivec2 p) {
     p=clamp(p,ivec2(0),ivec2(pc.width,pc.height)-1);
+    if(pc.direct_rgb!=0u) return texelFetch(luma,p,0).rgb*255.0;
     float y=texelFetch(luma,p,0).r;
     vec2 uv=texelFetch(chroma,p/2,0).rg-vec2(0.5);
     return clamp(vec3(y+1.5748*uv.y, y-0.1873*uv.x-0.4681*uv.y, y+1.8556*uv.x),0.0,1.0)*255.0;

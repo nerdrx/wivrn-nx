@@ -86,8 +86,8 @@ astc_decoder::astc_decoder(vk::raii::Device & device,
 		spdlog::info("ASTC synchronous uploads forced by debug.wivrn.nx.astc_sync_upload");
 	}
 #endif
-	// LZ4 performs backward-reference reads while writing. Keep those accesses in
-	// ordinary CPU-cached memory, then do one forward copy into VMA's write staging.
+	// LZ4/Zstd read backward references while writing. Pico measurements favour
+	// ordinary CPU memory plus one forward copy, even when VMA reports HOST_CACHED.
 	cpu_scratch.resize(size_t(raw_bytes));
 
 	for (size_t i = 0; i < images.size(); ++i)

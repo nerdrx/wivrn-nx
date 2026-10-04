@@ -40,6 +40,7 @@ class foveation
 	std::mutex mutex;
 
 	const vk::Extent3D foveated_size; // per eye
+	const bool astc_direct_rgb;
 
 	// Natural vertical gaze angle
 	const float angle_offset;
@@ -123,7 +124,8 @@ class foveation
 
 public:
 	foveation(wivrn::vk_bundle &,
-	          vk::Extent3D foveated_size);
+	          vk::Extent3D foveated_size,
+	          bool astc_direct_rgb = false);
 
 	void update_tracking(const from_headset::tracking &);
 	void update_foveation_center_override(const from_headset::override_foveation_center &);

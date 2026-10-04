@@ -1198,6 +1198,19 @@ std::array<std::shared_ptr<shard_accumulator::blit_handle>, scenes::stream::deco
 		}
 	}
 	std::array<std::shared_ptr<shard_accumulator::blit_handle>, decoder_count> result;
+	const bool independent_astc = not alpha && video_stream_description &&
+	                              video_stream_description->codec[0] == video_codec::nxastc &&
+	                              video_stream_description->codec[1] == video_codec::nxastc;
+	if (independent_astc && current_blit_handles[0] && current_blit_handles[1] &&
+	    current_blit_handles[0]->feedback.frame_index == current_blit_handles[1]->feedback.frame_index)
+	{
+		const auto displayed = current_blit_handles[0]->feedback.frame_index;
+		// During loss, keep the coherent stereo pair rather than rewind or salvage
+		// different frame IDs for the two eyes. A newer common pair replaces it.
+		erase_if(common_frames, [displayed](auto frame) { return frame->feedback.frame_index < displayed; });
+		if (common_frames.empty())
+			return current_blit_handles;
+	}
 	if (common_frames.empty() && eyes_in_one_stream() && !alpha && latest_safety_handle &&
 	    latest_safety_handle->direct_valid && latest_safety_handle->direct_safety)
 	{

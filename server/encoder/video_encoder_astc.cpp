@@ -1,4 +1,5 @@
 #include "video_encoder_astc.h"
+#include "nxastc_compact.h"
 
 #include "encoder/encoder_settings.h"
 #include "nxastc_motion.h"
@@ -120,7 +121,9 @@ wivrn::video_encoder_astc::video_encoder_astc(vk_bundle & vk, const encoder_sett
         initial_fps(settings.fps),
         direct_rgb_input(settings.options.contains("_wivrn_astc_direct_rgb")),
         motion_delta_enabled(settings.options.contains("_wivrn_astc_motion_delta") &&
-                             settings.options.at("_wivrn_astc_motion_delta") == "1")
+                             settings.options.at("_wivrn_astc_motion_delta") == "1"),
+        compact_enabled(settings.options.contains("_wivrn_astc_compact") &&
+                        settings.options.at("_wivrn_astc_compact") == "1")
 {
 	if (settings.bit_depth != 8 || settings.eyes != 1)
 		throw std::runtime_error("NX ASTC requires 8-bit single-eye streams");
@@ -131,6 +134,8 @@ wivrn::video_encoder_astc::video_encoder_astc(vk_bundle & vk, const encoder_sett
 	        unsigned(stream_idx), unsigned(extent.width), unsigned(extent.height));
 	if (motion_delta_enabled)
 		U_LOG_I("nxastc: stream %u motion deltas enabled, ACK references up to 8 frames old", unsigned(stream_idx));
+	if (compact_enabled && !motion_delta_enabled)
+		U_LOG_I("nxastc: stream %u independent compact ASTC packing enabled (requires v4 client)", unsigned(stream_idx));
 	auto cmds = vk.device.allocateCommandBuffers({.commandPool = *cmd_pool, .commandBufferCount = num_slots});
 	std::array layouts{*ds_layout, *ds_layout};
 	auto sets = vk.device.allocateDescriptorSets({.descriptorPool = *ds_pool, .descriptorSetCount = num_slots, .pSetLayouts = layouts.data()});
@@ -238,6 +243,16 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_astc::encode(uint
 	size_t packet_header_size = nxastc_packet::header_size;
 	double motion_candidate_ms = 0;
 	bool motion_candidate_won = false, motion_reference_missing = false;
+	double compact_ms = 0;
+	bool compact_won = false;
+	bool compact_input = false;
+	if (compact_enabled && !motion_delta_enabled && zstd_context)
+	{
+		const auto begin = std::chrono::steady_clock::now();
+		compact_blocks.resize(size_t(raw_size / 16) * 14);
+		compact_input = nxastc_packet::compact_blocks(std::span<const uint8_t>(raw, raw_size), compact_blocks);
+		compact_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+	}
 	auto run_lz4 = [&] {
 		const auto begin = std::chrono::steady_clock::now();
 		compressed.resize(LZ4_compressBound(raw_size));
@@ -247,7 +262,11 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_astc::encode(uint
 	auto run_zstd = [&] {
 		const auto begin = std::chrono::steady_clock::now();
 		zstd_compressed.resize(ZSTD_compressBound(raw_size));
-		zstd_size = ZSTD_compressCCtx(zstd_context.get(), zstd_compressed.data(), zstd_compressed.size(), raw, raw_size, 3);
+		// One Zstd attempt per frame: probing both byte layouts would add another
+		// native compression call to the PC critical path for a small wire saving.
+		zstd_size = ZSTD_compressCCtx(zstd_context.get(), zstd_compressed.data(), zstd_compressed.size(),
+		                             compact_input ? compact_blocks.data() : raw,
+		                             compact_input ? compact_blocks.size() : raw_size, 3);
 		zstd_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
 	};
 	uint32_t payload_size = raw_size;
@@ -320,7 +339,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_astc::encode(uint
 	}
 	else
 	{
-		// Legacy v1/v2 selection remains unchanged while motion mode is off.
+		// Legacy selection is unchanged when both packing experiments are off.
 		const bool prefer_zstd = s.quality >= 4 && bool(zstd_context);
 		if (prefer_zstd)
 			run_zstd();
@@ -334,11 +353,13 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_astc::encode(uint
 		{
 			if (!prefer_zstd)
 				run_zstd();
-			if (!ZSTD_isError(zstd_size) && zstd_size > 0 && zstd_size * 100 <= uint64_t(payload_size) * 90)
+			if (!ZSTD_isError(zstd_size) && zstd_size > 0 && zstd_size * 100 <= uint64_t(payload_size) * 90 &&
+			    (!compact_input || zstd_size <= compact_blocks.size()))
 			{
 				payload_size = uint32_t(zstd_size);
 				payload = zstd_compressed.data();
-				encoding = nxastc_packet::compression::zstd;
+				encoding = compact_input ? nxastc_packet::compression::compact_zstd : nxastc_packet::compression::zstd;
+				compact_won = compact_input;
 			}
 		}
 	}
@@ -380,8 +401,11 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_astc::encode(uint
 		sampled_motion_wins += motion_candidate_won;
 		sampled_motion_missing_ref += motion_reference_missing;
 	}
+	else if (compact_won)
+		++sampled_compact_frames;
 	else
 		++sampled_encoding[uint8_t(encoding)];
+	sampled_compact_ms += compact_ms;
 	if (++sampled_frames == 180)
 	{
 		if (motion_delta_enabled)
@@ -399,10 +423,15 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_astc::encode(uint
 		U_LOG_I("nxastc: stream %u CPU ms/frame fence+invalidate %.3f, lz4 %.3f, zstd %.3f, packet %.3f",
 		        unsigned(stream_idx), sampled_cpu_ms[0] / sampled_frames, sampled_cpu_ms[1] / sampled_frames,
 		        sampled_cpu_ms[2] / sampled_frames, sampled_cpu_ms[3] / sampled_frames);
+		if (compact_enabled && !motion_delta_enabled)
+			U_LOG_I("nxastc: stream %u compact packets %u/180, input packing CPU %.3f ms/frame",
+			        unsigned(stream_idx), sampled_compact_frames, sampled_compact_ms / sampled_frames);
 		sampled_cpu_ms.fill(0);
 		sampled_bytes = sampled_frames = 0;
 		sampled_quality.fill(0);
 		sampled_encoding.fill(0);
+		sampled_compact_frames = 0;
+		sampled_compact_ms = 0;
 		sampled_motion_candidate_ms = 0;
 		sampled_worker_ms = 0;
 		sampled_motion_wins = sampled_motion_missing_ref = 0;

@@ -67,8 +67,16 @@ inline decode_status decode_payload(const packet_header & header,
 		                                        int(output.size()));
 		return decoded == int(output.size()) ? decode_status::ok : decode_status::lz4_mismatch;
 	}
-	if (header.encoding != compression::zstd)
+	const bool compact = header.encoding == compression::compact_zstd;
+	if (header.encoding != compression::zstd && !compact)
 		return decode_status::length_mismatch;
+	size_t zstd_output_bytes = output.size();
+	if (compact)
+	{
+		if (!header.width || !header.height || block_bytes(header.width, header.height) != output.size() ||
+		    output.size() != header.raw_bytes || !compact_bytes_for_raw(output.size(), zstd_output_bytes))
+			return decode_status::length_mismatch;
+	}
 
 	const size_t frame_size = ZSTD_findFrameCompressedSize(payload.data(), payload.size());
 	if (ZSTD_isError(frame_size))
@@ -80,11 +88,13 @@ inline decode_status decode_payload(const packet_header & header,
 		return decode_status::zstd_bad_frame;
 	if (content_size == ZSTD_CONTENTSIZE_UNKNOWN)
 		return decode_status::zstd_unknown_content_size;
-	if (content_size != output.size())
+	if (content_size != zstd_output_bytes)
 		return decode_status::zstd_wrong_content_size;
-	const size_t decoded = ZSTD_decompress(output.data(), output.size(), payload.data(), payload.size());
-	if (ZSTD_isError(decoded) || decoded != output.size())
+	const size_t decoded = ZSTD_decompress(output.data(), zstd_output_bytes, payload.data(), payload.size());
+	if (ZSTD_isError(decoded) || decoded != zstd_output_bytes)
 		return decode_status::zstd_decode_error;
+	if (compact && !expand_compact_blocks(output, zstd_output_bytes))
+		return decode_status::length_mismatch;
 	return decode_status::ok;
 }
 

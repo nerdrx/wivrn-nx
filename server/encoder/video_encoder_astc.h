@@ -37,6 +37,7 @@ class video_encoder_astc : public video_encoder
 	std::array<slot_t, num_slots> slots;
 	std::vector<uint8_t> compressed;
 	std::vector<uint8_t> zstd_compressed;
+	std::vector<uint8_t> compact_blocks;
 	std::unique_ptr<ZSTD_CCtx, decltype(&ZSTD_freeCCtx)> zstd_context{ZSTD_createCCtx(), ZSTD_freeCCtx};
 	std::atomic_uint32_t quality{6};
 	astc_rate_control rate_control;
@@ -45,6 +46,8 @@ class video_encoder_astc : public video_encoder
 	uint32_t sampled_frames = 0;
 	std::array<uint32_t, 7> sampled_quality{};
 	std::array<uint32_t, 3> sampled_encoding{};
+	uint32_t sampled_compact_frames = 0;
+	double sampled_compact_ms = 0;
 	struct motion_reference
 	{
 		uint64_t frame_index = 0;
@@ -62,6 +65,7 @@ class video_encoder_astc : public video_encoder
 	const float initial_fps;
 	const bool direct_rgb_input;
 	const bool motion_delta_enabled;
+	const bool compact_enabled;
 
 public:
 	video_encoder_astc(vk_bundle & vk, const encoder_settings & settings, uint8_t stream_idx);

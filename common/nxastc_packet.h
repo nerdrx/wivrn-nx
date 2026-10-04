@@ -1,5 +1,7 @@
 #pragma once
 
+#include "nxastc_compact.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -20,6 +22,7 @@ enum class compression : uint8_t
 	zstd = 2,
 	motion_zstd = 3,
 	motion_raw = 4,
+	compact_zstd = 5,
 };
 
 struct packet_header
@@ -62,9 +65,11 @@ inline std::array<uint8_t, header_size> make_header(uint32_t width, uint32_t hei
 	const uint64_t raw = block_bytes(width, height);
 	if (!width || !height || raw > std::numeric_limits<uint32_t>::max() || !payload_bytes || payload_bytes > raw ||
 	    (encoding == compression::none && payload_bytes != raw) ||
-	    (encoding != compression::none && encoding != compression::lz4 && encoding != compression::zstd))
+	    (encoding != compression::none && encoding != compression::lz4 && encoding != compression::zstd &&
+	     encoding != compression::compact_zstd) ||
+	    (encoding == compression::compact_zstd && payload_bytes > compact_block_bytes(width, height)))
 		throw std::invalid_argument("invalid NX ASTC packet dimensions or size");
-	const uint8_t version = encoding == compression::zstd ? 2 : 1;
+	const uint8_t version = encoding == compression::zstd ? 2 : encoding == compression::compact_zstd ? 4 : 1;
 	std::array<uint8_t, header_size> bytes{'N', 'A', 'S', 'T', version, uint8_t(encoding), 0, 0};
 	const std::array values{width, height, uint32_t(raw), payload_bytes};
 	for (size_t i = 0; i < values.size(); ++i)
@@ -109,7 +114,8 @@ inline std::optional<packet_header> parse_packet(std::span<const uint8_t> bytes)
 	const auto enc = compression(bytes[5]);
 	if (!((bytes[4] == 1 && (enc == compression::none || enc == compression::lz4)) ||
 	      (bytes[4] == 2 && enc == compression::zstd) ||
-	      (bytes[4] == 3 && (enc == compression::motion_zstd || enc == compression::motion_raw))))
+	      (bytes[4] == 3 && (enc == compression::motion_zstd || enc == compression::motion_raw)) ||
+	      (bytes[4] == 4 && enc == compression::compact_zstd)))
 		return {};
 	if (bytes[4] == 3)
 		hbytes = motion_header_size;
@@ -124,6 +130,8 @@ inline std::optional<packet_header> parse_packet(std::span<const uint8_t> bytes)
 		return {};
 	if ((h.encoding == compression::none || h.encoding == compression::lz4 || h.encoding == compression::zstd) &&
 	    (h.payload_bytes > h.raw_bytes || (h.encoding == compression::none && h.payload_bytes != h.raw_bytes)))
+		return {};
+	if (h.encoding == compression::compact_zstd && h.payload_bytes > compact_block_bytes(h.width, h.height))
 		return {};
 	if (h.encoding == compression::motion_raw &&
 	    (h.reference_frame != independent_frame || h.payload_bytes != h.raw_bytes))

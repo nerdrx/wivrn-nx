@@ -123,7 +123,7 @@ void shard_accumulator::poll_nacks(XrTime now)
 
 static void debug_why_not_sent(const shard_set & shards)
 {
-	const auto & frame = shards.data;
+	const auto & frame = shards.shards();
 	if (frame.empty())
 	{
 		spdlog::info("frame {} was not sent because no shard was received", shards.frame_index());
@@ -410,7 +410,7 @@ void shard_accumulator::report_nacks(XrTime now)
 shard_accumulator::window_t::step shard_accumulator::try_submit_front(shard_set & current)
 {
 	using step = window_t::step;
-	auto & data_shards = current.data;
+	const auto & data_shards = current.shards();
 
 	// Everything before `submitted` is already in the decoder's input buffer, and
 	// the decoder appends what it is given: the run to hand over starts there and

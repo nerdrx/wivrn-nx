@@ -36,6 +36,7 @@
 
 #include <cstdio>
 #include <string>
+#include <utility>
 #include <vector>
 
 using wivrn::shard_set;
@@ -125,7 +126,7 @@ struct harness
 	window_t::step submit(shard_set & set)
 	{
 		using step = window_t::step;
-		auto & d = set.data;
+		const auto & d = set.shards();
 
 		uint16_t first = set.submitted;
 		uint16_t last = first;
@@ -393,13 +394,13 @@ void part_d()
 	// The same shard again — which is what one arriving over each path would look
 	// like — changes nothing at all.
 	CHECK(not s.insert(make_shard(0, 0, 3), 200).has_value());
-	CHECK(s.data.size() == 1);
+	CHECK(s.shards().size() == 1);
 	CHECK(s.feedback.received_first_packet == 100);
 
 	// Out of order insertion grows the frame without losing the hole in between
 	CHECK(s.insert(make_shard(0, 2, 3), 300).value_or(-1) == 2);
-	CHECK(s.data.size() == 3);
-	CHECK(not s.data[1].has_value());
+	CHECK(s.shards().size() == 3);
+	CHECK(not s.shards()[1].has_value());
 	CHECK(not s.complete());
 
 	CHECK(s.insert(make_shard(0, 1, 3), 400).value_or(-1) == 1);
@@ -674,6 +675,73 @@ void part_h()
 	CHECK(not wivrn::nack_poll_deadline(40'000'000 + quiet - 1, whole.last_shard, 0, 0, true, true, true, whole.complete(), [] { return true; }));
 }
 
+void part_i()
+{
+	std::printf("Part I: received-count invariant across moves and parity growth\n");
+	shard_set source(7);
+	source.reset(12);
+	source.insert(make_shard(12, 0, 2), 100);
+	shard_set moved(std::move(source));
+	CHECK(not moved.complete());
+	CHECK(moved.shards().size() == 1);
+	CHECK(source.empty());
+	CHECK(source.feedback.stream_index == 7);
+	CHECK(source.frame_index() == 12);
+	CHECK(source.insert(make_shard(12, 0, 1), 101).has_value());
+	CHECK(source.complete()); // moved-from object is reusable without reset
+
+	shard_set assigned(3);
+	assigned.reset(4);
+	assigned = std::move(moved);
+	CHECK(not assigned.complete());
+	CHECK(assigned.shards().size() == 1);
+	CHECK(moved.empty());
+	CHECK(moved.insert(make_shard(12, 0, 1), 102).has_value());
+	CHECK(moved.complete());
+	assigned.insert(make_shard(12, 1, 2), 103);
+	CHECK(assigned.complete());
+	assigned = std::move(assigned);
+	CHECK(assigned.complete()); // self-move is a no-op
+	shard_set copied = assigned;
+	copied = copied;
+	CHECK(copied.complete());
+
+	shard_set resized(0);
+	resized.reset(20);
+	resized.insert(make_shard(20, 0, 2), 200);
+	shard_set::parity_shard bad_parity{};
+	bad_parity.first_shard_idx = 0;
+	bad_parity.shard_stride = 1;
+	bad_parity.blob_size = {0, 1};
+	CHECK(not resized.reconstruct(bad_parity, 201)); // resizes then cannot recover malformed empty payload
+	CHECK(resized.shards().size() == 2);
+	CHECK(not resized.complete());
+	CHECK(resized.insert(make_shard(20, 1, 2), 202).has_value());
+	CHECK(resized.complete()); // resize did not overcount; unique insert did
+
+	shard_set limited(0);
+	CHECK(not limited.insert(make_shard(0, shard_set::max_shards_per_frame, 0), 1));
+	CHECK(limited.empty());
+	CHECK(not limited.complete());
+
+	shard_set prefix(0);
+	prefix.reset(30);
+	prefix.insert(make_shard(30, 0, 3), 300);
+	prefix.insert(make_shard(30, 1, 3), 301);
+	std::vector<uint16_t> missing;
+	prefix.missing_shards(missing, false);
+	CHECK(missing.empty()); // contiguous newest prefix has no inferable tail
+	prefix.missing_shards(missing, true);
+	CHECK(missing == std::vector<uint16_t>{2}); // older frame may request one-past-end
+	shard_set::parity_shard tail_parity{};
+	tail_parity.first_shard_idx = 0;
+	tail_parity.shard_stride = 1;
+	tail_parity.blob_size = {0, 0, 1};
+	prefix.parity.push_back(tail_parity);
+	prefix.missing_shards(missing, true);
+	CHECK(missing.empty()); // parity suppression still includes the inferred tail
+}
+
 } // namespace
 
 int main()
@@ -687,6 +755,7 @@ int main()
 	part_f();
 	part_g();
 	part_h();
+	part_i();
 	std::printf("\n%d checks, %d failure(s)\n", checks, failures);
 	return failures ? 1 : 0;
 }

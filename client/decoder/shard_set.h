@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace wivrn
@@ -48,7 +49,13 @@ struct shard_set
 	static constexpr uint16_t max_shards_per_frame = 4096;
 
 	size_t min_for_reconstruction = -1;
+
+private:
 	std::vector<std::optional<data_shard>> data;
+	// Keep this in lockstep with successful insertions; vector size also includes holes.
+	size_t received_count = 0;
+
+public:
 	// Parity shards of this frame whose group still has a hole in it. A parity
 	// shard for a group that is already whole is dropped on arrival, so on a
 	// clean link this stays empty and costs nothing.
@@ -79,6 +86,45 @@ struct shard_set
 		feedback.stream_index = stream_index;
 	}
 
+	shard_set(const shard_set &) = default;
+	shard_set & operator=(const shard_set & other)
+	{
+		if (this != &other)
+		{
+			shard_set copy(other);
+			*this = std::move(copy);
+		}
+		return *this;
+	}
+
+	shard_set(shard_set && other) noexcept : shard_set(other.feedback.stream_index)
+	{
+		*this = std::move(other);
+	}
+
+	shard_set & operator=(shard_set && other) noexcept
+	{
+		if (this == &other)
+			return *this;
+
+		min_for_reconstruction = other.min_for_reconstruction;
+		data = std::move(other.data);
+		received_count = std::exchange(other.received_count, 0);
+		parity = std::move(other.parity);
+		submitted = other.submitted;
+		last_shard = other.last_shard;
+		nack_rounds = other.nack_rounds;
+		nack_last = other.nack_last;
+		feedback = other.feedback;
+		other.reset(other.feedback.frame_index);
+		return *this;
+	}
+
+	const std::vector<std::optional<data_shard>> & shards() const
+	{
+		return data;
+	}
+
 	uint64_t frame_index() const
 	{
 		return feedback.frame_index;
@@ -88,6 +134,7 @@ struct shard_set
 	{
 		min_for_reconstruction = -1;
 		data.clear();
+		received_count = 0;
 		parity.clear();
 		submitted = 0;
 		last_shard = 0;
@@ -112,10 +159,7 @@ struct shard_set
 			return false;
 		if (not(data.back() and data.back()->timing_info))
 			return false;
-		for (const auto & shard: data)
-			if (not shard)
-				return false;
-		return true;
+		return received_count == data.size();
 	}
 
 	// A duplicate — the same shard over the other path, or a copy arriving after
@@ -133,6 +177,7 @@ struct shard_set
 		if (data[idx])
 			return {};
 		data[idx] = std::move(shard);
+		++received_count;
 		last_shard = now;
 		return idx;
 	}
@@ -205,9 +250,12 @@ struct shard_set
 		if (data.empty())
 			return;
 
-		for (size_t i = 0; i < data.size(); ++i)
-			if (not data[i])
-				out.push_back(uint16_t(i));
+		if (received_count != data.size())
+		{
+			for (size_t i = 0; i < data.size(); ++i)
+				if (not data[i])
+					out.push_back(uint16_t(i));
+		}
 
 		if (frame_over and data.back() and not data.back()->timing_info and
 		    data.size() < max_shards_per_frame)

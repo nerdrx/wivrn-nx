@@ -123,7 +123,10 @@ wivrn::video_encoder_astc::video_encoder_astc(vk_bundle & vk, const encoder_sett
         motion_delta_enabled(settings.options.contains("_wivrn_astc_motion_delta") &&
                              settings.options.at("_wivrn_astc_motion_delta") == "1"),
         compact_enabled(settings.options.contains("_wivrn_astc_compact") &&
-                        settings.options.at("_wivrn_astc_compact") == "1")
+                        settings.options.at("_wivrn_astc_compact") == "1"),
+        independent_zstd_level(!motion_delta_enabled &&
+                               settings.options.contains("_wivrn_astc_fast_zstd") &&
+                               settings.options.at("_wivrn_astc_fast_zstd") == "1" ? 1 : 3)
 {
 	if (settings.bit_depth != 8 || settings.eyes != 1)
 		throw std::runtime_error("NX ASTC requires 8-bit single-eye streams");
@@ -136,6 +139,7 @@ wivrn::video_encoder_astc::video_encoder_astc(vk_bundle & vk, const encoder_sett
 		U_LOG_I("nxastc: stream %u motion deltas enabled, ACK references up to 8 frames old", unsigned(stream_idx));
 	if (compact_enabled && !motion_delta_enabled)
 		U_LOG_I("nxastc: stream %u independent compact ASTC packing enabled (requires v4 client)", unsigned(stream_idx));
+	U_LOG_I("nxastc: stream %u independent Zstd level %d", unsigned(stream_idx), independent_zstd_level);
 	auto cmds = vk.device.allocateCommandBuffers({.commandPool = *cmd_pool, .commandBufferCount = num_slots});
 	std::array layouts{*ds_layout, *ds_layout};
 	auto sets = vk.device.allocateDescriptorSets({.descriptorPool = *ds_pool, .descriptorSetCount = num_slots, .pSetLayouts = layouts.data()});
@@ -266,7 +270,7 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_astc::encode(uint
 		// native compression call to the PC critical path for a small wire saving.
 		zstd_size = ZSTD_compressCCtx(zstd_context.get(), zstd_compressed.data(), zstd_compressed.size(),
 		                             compact_input ? compact_blocks.data() : raw,
-		                             compact_input ? compact_blocks.size() : raw_size, 3);
+		                             compact_input ? compact_blocks.size() : raw_size, independent_zstd_level);
 		zstd_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
 	};
 	uint32_t payload_size = raw_size;

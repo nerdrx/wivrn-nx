@@ -1008,6 +1008,8 @@ void wivrn_session::on_frame_sent(uint64_t frame_index, uint8_t stream_index, ui
 	// Called from the encoder's send thread; the controller has its own mutex.
 	bitrate_ctl.on_frame_bytes(frame_index, stream_index, bytes, bitrate_controller::clock::now(),
 	                           quality_budget_bps, quality_period_ns);
+	if (feedback_csv)
+		dump_time("frame_bytes", frame_index, os_monotonic_get_ns(), stream_index, std::format(",{}", bytes).c_str());
 }
 
 void wivrn_session::operator()(from_headset::feedback && feedback)
@@ -1017,6 +1019,11 @@ void wivrn_session::operator()(from_headset::feedback && feedback)
 	// on_feedback may engage or restore the emergency half-rate mode (the rung below the
 	// bitrate floor); apply_auto_bitrate mirrors that onto the compositor, always.
 	apply_auto_bitrate(bitrate_ctl.on_feedback(feedback, compositor.get_frame_duration(), connection->is_active()));
+	if (feedback_csv)
+		dump_time("feedback_spans", feedback.frame_index, os_monotonic_get_ns(), feedback.stream_index,
+		          std::format(",{},{},{},{},{}", feedback.send_begin, feedback.send_end,
+	                      feedback.received_first_packet, feedback.received_last_packet,
+	                      feedback.sent_to_decoder).c_str());
 
 	clock_offset o = offset_est.get_offset();
 	if (not o)

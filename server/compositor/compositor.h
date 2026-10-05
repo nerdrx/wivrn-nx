@@ -106,6 +106,9 @@ private:
 	vk::raii::CommandBuffer cmd;
 	vk::raii::Semaphore sem;
 	uint64_t sem_value = 0;
+	// The compute timeline can signal before the recording submission retires.
+	vk::raii::Fence submission_fence;
+	bool submission_pending = false;
 
 	std::atomic<float> requested_refresh_rate;
 	std::atomic<float> frame_rate;

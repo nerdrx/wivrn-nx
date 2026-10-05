@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <utility>
 #include <vector>
 
 namespace wivrn
@@ -429,12 +430,51 @@ void bitrate_controller::close_frame(frame_state & frame, clock::time_point now)
 		if (wire_ns == 0)
 			wire_ns = int64_t(frame.last - frame.first);
 
+		// Rate bytes and their receive intervals must describe the same streams. The
+		// intervals' union excludes gaps between serially delivered eyes without changing
+		// the widest-single-stream span used for utilisation above.
+		std::array<std::pair<XrTime, XrTime>, frame_state::max_streams> intervals{};
+		size_t interval_count = 0;
+		uint64_t rate_bytes = 0;
+		int64_t rate_loaded_ns = 0;
+		for (size_t i = 0; i < frame_state::max_streams; ++i)
+		{
+			const XrTime first = frame.stream_first[i], last = frame.stream_last[i];
+			if (frame.stream_bytes[i] and first > 0 and last > first)
+			{
+				intervals[interval_count++] = {first, last};
+				rate_bytes += frame.stream_bytes[i];
+				rate_loaded_ns = std::max(rate_loaded_ns, int64_t(last - first));
+			}
+		}
+		std::sort(intervals.begin(), intervals.begin() + interval_count,
+		          [](const auto & a, const auto & b) { return a.first < b.first; });
+		uint64_t rate_wire_ns = 0;
+		if (interval_count)
+		{
+			XrTime first = intervals[0].first;
+			XrTime last = intervals[0].second;
+			for (size_t i = 1; i < interval_count; ++i)
+			{
+				if (intervals[i].first > last)
+				{
+					rate_wire_ns += uint64_t(last - first);
+					first = intervals[i].first;
+					last = intervals[i].second;
+				}
+				else
+					last = std::max(last, intervals[i].second);
+			}
+			rate_wire_ns += uint64_t(last - first);
+		}
+
 		double rate = 0;
 		// Only a frame that actually loaded the link says anything about how much the
-		// link can carry. See app_limited_wire_fraction.
-		if (mode_locked() == mode::bbr and wire_ns > 0 and frame.bytes and wire_ns >= min_loaded_wire_ns())
+		// link can carry. Apply the existing threshold to streams that contribute bytes;
+		// unmatched long intervals cannot admit a short, app-limited byte sample.
+		if (mode_locked() == mode::bbr and rate_loaded_ns >= min_loaded_wire_ns() and rate_bytes and rate_wire_ns > 0)
 		{
-			rate = 8e9 * double(frame.bytes) / double(wire_ns);
+			rate = 8e9 * double(rate_bytes) / double(rate_wire_ns);
 			bandwidth.update(rate, now, estimator_window);
 			++bandwidth_samples;
 			last_bandwidth_sample = now;
@@ -487,6 +527,7 @@ void bitrate_controller::on_frame_bytes(uint64_t frame_index, uint8_t stream_ind
 	}
 
 	frame.bytes += bytes;
+	frame.stream_bytes[stream_index] += bytes;
 	frame.quality_budget_bps = quality_budget_bps;
 	frame.quality_period_ns = quality_period_ns;
 	measured_stream_mask |= uint8_t(1u << stream_index);

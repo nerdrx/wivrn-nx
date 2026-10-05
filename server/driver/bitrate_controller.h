@@ -78,24 +78,22 @@ namespace wivrn
 // one frame, the acute lost/late detection and the radio trend are all shared and all still
 // apply — only the function that turns a window of samples into a bitrate differs.
 //
-// --- The delivery rate sample ---------------------------------------------------------
-// The headset says, per frame, when the first and the last packet of that frame arrived. The
-// server knows how many bytes it put on the wire for that frame (see on_frame_bytes: the
-// encoder reports them from its send path, parity shards included). For NX direct this is
-// datagram payload accounting, excluding outer WiVRn framing and tail padding. One frame yields
+// --- The delivery-rate sample ---------------------------------------------------------
+// The headset reports per-stream first/last packet times. The server records payload bytes per
+// video stream from its send path (including parity, excluding outer framing and tail padding).
+// For BBR, only bytes whose stream has a positive reported interval are sampled, and the rate
+// divides their sum by the union of those intervals. This avoids charging untimed bytes to one
+// eye's timestamps, or treating an idle gap between serial eye bursts as link use. It remains a
+// scoped estimate from sender payload accounting and decoder feedback, not a PHY-rate or exact
+// airtime measurement; repair traffic and outer framing are not part of that numerator.
 //
-//     delivery_rate = 8 * frame_bytes / (received_last - received_first)
-//
-// NX direct's controller input buys image detail before lossless compression; it is not
-// a wire-rate target. The encoder tags each frame with that input and its cadence. Only
-// the control output is converted through their ratio to the actual datagram bytes.
-// The delivery-rate estimator never receives the nominal quality budget as a byte count.
-//
-// which is a *lower bound* on the capacity of the bottleneck: those bytes really did get
-// through in that time. Both timestamps are in the client clock, so no clock offset is needed.
+// NX direct's controller input buys image detail before lossless compression; it is not a
+// wire-rate target. The encoder tags each frame with that input and its cadence. Only the
+// control output is converted through their ratio to the actual datagram bytes. The delivery-rate
+// estimator never receives the nominal quality budget as a byte count.
 //
 // --- App-limited samples --------------------------------------------------------------
-// A lower bound is only useful if the sender was actually trying. BBR calls a sample
+// A rate sample is only useful if the sender was actually trying. BBR calls a sample
 // "app-limited" when the application had nothing more to send, and refuses to let such a
 // sample lower its estimate. Here the analogous case is a frame that is small compared to what
 // the link could have carried in that window: a nearly static scene produces a 5 kB P-frame
@@ -111,7 +109,7 @@ namespace wivrn
 // deliberately spreads a frame over ~40% of a frame period whatever its size, so with pacing on
 // the measured delivery rate saturates at about bitrate / window: the sender, not the link, is
 // what limits it. That is a genuine app-limited regime and it is handled the way BBR handles
-// its own: the sample is still a valid lower bound, the estimate climbs to it, and the
+// its own: the sample remains useful, the estimate climbs to it, and the
 // controller keeps raising the bitrate until something else stops it — a ceiling, or the link
 // actually filling up, at which point the receive span stretches past the paced window and the
 // samples become real capacity measurements again. Pacing therefore costs v2 the ability to
@@ -468,13 +466,10 @@ public:
 	// chose over a Wi-Fi link that could not, not a licence to go past it. usb_bps is taken
 	// for the record (and for the log line) rather than added to anything.
 	//
-	// It does *not* credit the estimator with headroom either, and this is the important
-	// half. The delivery rate the v2 estimator measures is 8 * frame_bytes / (received_last
-	// - received_first), and both timestamps are the client's own: while combining, the
-	// bytes are the whole frame's, on both paths, and the span runs from the first arrival
-	// on either path to the last on either path. That is already an aggregate measurement —
-	// the frame really did cross both links inside that span — so the estimator needs no
-	// help to discover the extra capacity, and crediting it would double count.
+	// It does *not* credit the estimator with headroom either. The delivery-rate sample
+	// already sums the sender-accounted bytes for streams with valid receive intervals and
+	// divides by their interval union. Combining paths changes where those payloads travel,
+	// not the accounting; adding a second credit would double count.
 	//
 	// What it *does* do is make sure the failover clamp is out of the way (see
 	// effective_ceiling: the USB path budget applies to a session running *on* the USB
@@ -489,8 +484,8 @@ public:
 
 	// The delivered-bandwidth estimate in bits per second, or 0 when the v2 estimator is not
 	// the law in force or has not admitted enough samples yet. While video rides a single
-	// path this is a measurement of *that* path, which is what the striping scheduler latches
-	// as its Wi-Fi share when it enters the combine posture.
+	// path this is the scoped estimate for *that* path, which is what the striping scheduler
+	// latches as its Wi-Fi share when it enters the combine posture.
 	uint32_t bandwidth_estimate() const;
 
 	// Forget all measurements and go back to the ceiling, e.g. when the session is resumed.
@@ -529,17 +524,19 @@ private:
 		// the bitrate twice with ZERO lost datagrams.
 		//
 		// A frame's time on the wire is a property of one stream, so it is measured
-		// in one stream and the widest is taken. That is true for every codec and
-		// needs nothing on the wire.
+		// in one stream and the widest is taken for utilisation. BBR's delivery-rate
+		// sample is separate: it sums bytes only for streams with valid receive spans
+		// and divides by the union of those intervals, so staggered eyes do not count
+		// idle gaps as link use or pair one eye's bytes with the other's timing.
 		static constexpr size_t max_streams = 4;
 		std::array<XrTime, max_streams> stream_first{};
 		std::array<XrTime, max_streams> stream_last{};
+		std::array<uint64_t, max_streams> stream_bytes{};
 		bool valid = false;
 		bool lost = false; // at least one stream never arrived completely
 		bool late = false; // decoded but dropped before being displayed
 		// NX transport bytes sent for this frame (outer framing/tail packets excluded),
-		// summed over the video streams. Filled in
-		// from the encoder's send path, v2 only.
+		// summed over the video streams for quality scaling and legacy accounting.
 		uint64_t bytes = 0;
 		uint32_t quality_budget_bps = 0; // Controller input applied to this direct frame.
 		int64_t quality_period_ns = 0;

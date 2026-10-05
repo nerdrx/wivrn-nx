@@ -40,6 +40,7 @@
 #include "util/u_logging.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <optional>
@@ -228,6 +229,98 @@ struct harness
 		feed(90);
 	}
 };
+
+struct rate_stream
+{
+	uint32_t bytes;
+	int64_t offset_ns;
+	int64_t span_ns;
+	bool lost = false;
+	bool missing_timing = false;
+};
+
+std::pair<double, uint32_t> stereo_rate(const std::vector<rate_stream> & streams, bool duplicate_first_feedback = false)
+{
+	bitrate_controller ctl;
+	auto now = tp{} + 1h;
+	ctl.configure({.enabled = true}, 1'000'000'000, true, false, mode::bbr);
+	ctl.set_pacing_window(paced);
+
+	for (uint64_t index = 0; index < 60; ++index)
+	{
+		const XrTime base = 10'000'000'000LL + XrTime(index) * 20'000'000;
+		for (uint8_t stream = 0; stream < streams.size(); ++stream)
+		{
+			const auto & input = streams[stream];
+			ctl.on_frame_bytes(index, stream, input.bytes, now);
+			wivrn::from_headset::feedback fb{};
+			fb.frame_index = index;
+			fb.stream_index = stream;
+			if (not input.lost)
+			{
+				if (not input.missing_timing)
+				{
+					fb.received_first_packet = base + input.offset_ns;
+					fb.received_last_packet = fb.received_first_packet + input.span_ns;
+					fb.sent_to_decoder = std::max(fb.received_first_packet, fb.received_last_packet) + 1'000'000;
+				}
+				else
+					fb.sent_to_decoder = base + 20'000'000; // Complete, but no usable receive interval.
+			}
+			ctl.on_feedback(fb, period, true, now);
+			if (duplicate_first_feedback and index == 20 and stream == 0)
+				ctl.on_feedback(fb, period, true, now);
+		}
+		now += 20ms;
+	}
+	return {double(ctl.bandwidth_estimate()), ctl.current()};
+}
+
+void stereo_rate_uses_matching_stream_bytes_and_union_span()
+{
+	const std::vector one{rate_stream{400'000, 0, 6'000'000}};
+	const std::vector overlap{rate_stream{200'000, 0, 6'000'000}, rate_stream{200'000, 0, 6'000'000}};
+	const std::vector sequential{rate_stream{200'000, 0, 6'000'000}, rate_stream{200'000, 6'000'000, 6'000'000}};
+	const std::vector partial{rate_stream{200'000, 0, 6'000'000}, rate_stream{200'000, 3'000'000, 6'000'000}};
+	const std::vector gap{rate_stream{200'000, 0, 6'000'000}, rate_stream{200'000, 12'000'000, 6'000'000}};
+	const std::vector unequal{rate_stream{100'000, 0, 3'000'000}, rate_stream{300'000, 1'500'000, 6'000'000}};
+	const std::vector untimed{rate_stream{200'000, 0, 6'000'000}, rate_stream{200'000, 0, 0, false, true}};
+	const std::vector zero_span{rate_stream{200'000, 0, 6'000'000}, rate_stream{200'000, 0, 0}};
+	const std::vector reversed{rate_stream{200'000, 0, 6'000'000}, rate_stream{200'000, 12'000'000, -1'000'000}};
+	const std::vector chain{rate_stream{100'000, 0, 3'000'000}, rate_stream{100'000, 2'000'000, 3'000'000}, rate_stream{100'000, 4'000'000, 2'000'000}};
+	const std::vector short_bytes_long_timing{rate_stream{200'000, 0, 500'000}, rate_stream{0, 0, 6'000'000}};
+	const std::vector no_timing{rate_stream{200'000, 0, 0, false, true}, rate_stream{200'000, 0, 0, false, true}};
+
+	const auto [one_rate, one_target] = stereo_rate(one);
+	const auto [overlap_rate, overlap_target] = stereo_rate(overlap);
+	const auto [serial_rate, serial_target] = stereo_rate(sequential, true);
+	const auto [partial_rate, _partial_target] = stereo_rate(partial);
+	const auto [gap_rate, _gap_target] = stereo_rate(gap);
+	const auto [unequal_rate, _unequal_target] = stereo_rate(unequal);
+	const auto [untimed_rate, _untimed_target] = stereo_rate(untimed);
+	const auto [zero_rate, _zero_target] = stereo_rate(zero_span);
+	const auto [reversed_rate, _reversed_target] = stereo_rate(reversed);
+	const auto [chain_rate, _chain_target] = stereo_rate(chain);
+	const auto [short_rate, _short_target] = stereo_rate(short_bytes_long_timing);
+	const auto [no_timing_rate, _no_timing_target] = stereo_rate(no_timing);
+	std::printf("  matched receive-span samples (Mbps): one=%.3f/%u overlap=%.3f/%u serial=%.3f/%u partial=%.3f gap=%.3f unequal=%.3f untimed=%.3f no-timing=%.3f\n",
+	            one_rate / 1e6, one_target, overlap_rate / 1e6, overlap_target, serial_rate / 1e6, serial_target,
+	            partial_rate / 1e6, gap_rate / 1e6, unequal_rate / 1e6, untimed_rate / 1e6, no_timing_rate / 1e6);
+
+	CHECK(std::abs(one_rate - 533'333'333.0) < 1'000);
+	CHECK(std::abs(overlap_rate - one_rate) < 1'000);
+	CHECK(std::abs(serial_rate - 266'666'667.0) < 1'000);
+	CHECK(serial_target < overlap_target);
+	CHECK(std::abs(partial_rate - 355'555'556.0) < 1'000);
+	CHECK(std::abs(gap_rate - 266'666'667.0) < 1'000); // The idle gap is not counted.
+	CHECK(std::abs(unequal_rate - 426'666'667.0) < 1'000);
+	CHECK(std::abs(untimed_rate - 266'666'667.0) < 1'000);
+	CHECK(std::abs(zero_rate - 266'666'667.0) < 1'000);
+	CHECK(std::abs(reversed_rate - 266'666'667.0) < 1'000);
+	CHECK(std::abs(chain_rate - 400'000'000.0) < 1'000);
+	CHECK(short_rate == no_timing_rate); // A zero-byte stream's long span cannot admit the short burst.
+	CHECK(no_timing_rate == 0);
+}
 
 // The value the control law converges to on a link of capacity C, before any ceiling.
 uint32_t settled(double capacity)
@@ -656,6 +749,7 @@ int main(int argc, char ** argv)
 {
 	verbose = argc > 1 and std::string(argv[1]) == "-v";
 
+	stereo_rate_uses_matching_stream_bytes_and_union_span();
 	part_a();
 	part_b();
 	part_c();

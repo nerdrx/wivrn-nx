@@ -410,6 +410,11 @@ video_encoder::video_encoder(vk_bundle & vk,
         }
 {
 	assert(this->idr);
+	if (is_native_astc)
+	{
+		const char * timing = std::getenv("WIVRN_ASTC_SENDER_WAIT_TIMING");
+		astc_sender_wait_timing_enabled = timing and std::string_view(timing) == "1";
+	}
 
 	// Only a hardware encoder has somewhere to fall to. The software one is the
 	// floor, and the raw "encoder" is a debugging tool whose whole point is that it
@@ -758,7 +763,29 @@ void video_encoder::encode(wivrn_session & cnx,
 		return;
 
 	if (shared_sender)
-		shared_sender->wait_idle(this);
+	{
+		if (is_native_astc and astc_sender_wait_timing_enabled)
+		{
+			const int64_t wait_begin_ns = os_monotonic_get_ns();
+			shared_sender->wait_idle(this);
+			const int64_t elapsed_ns = os_monotonic_get_ns() - wait_begin_ns;
+			const uint64_t wait_ns = uint64_t(std::max<int64_t>(0, elapsed_ns));
+			astc_sender_wait_total_ns += wait_ns;
+			astc_sender_wait_max_ns = std::max(astc_sender_wait_max_ns, wait_ns);
+			if (++astc_sender_wait_samples == 180)
+			{
+				U_LOG_I("ASTC stream %u sender wait ms per frame, n=%u mean/max=%.3f/%.3f",
+				        unsigned(stream_idx), astc_sender_wait_samples,
+				        double(astc_sender_wait_total_ns) / astc_sender_wait_samples / 1e6,
+				        double(astc_sender_wait_max_ns) / 1e6);
+				astc_sender_wait_samples = 0;
+				astc_sender_wait_total_ns = 0;
+				astc_sender_wait_max_ns = 0;
+			}
+		}
+		else
+			shared_sender->wait_idle(this);
+	}
 	this->cnx = &cnx;
 	clock = cnx.get_offset();
 

@@ -19,6 +19,7 @@
 #include <format>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 #ifdef __ANDROID__
 #include <sys/system_properties.h>
 #endif
@@ -86,6 +87,9 @@ astc_decoder::astc_decoder(vk::raii::Device & device,
 		async_upload_enabled = false;
 		spdlog::info("ASTC synchronous uploads forced by debug.wivrn.nx.astc_sync_upload");
 	}
+	char queue_timing[PROP_VALUE_MAX] = {};
+	// Diagnostic only: no steady-clock reads or queue counters unless exactly enabled.
+	queue_timing_enabled = __system_property_get("debug.wivrn.nx.astc_queue_timing", queue_timing) == 1 && queue_timing[0] == '1';
 #endif
 	// LZ4/Zstd read backward references while writing. Pico measurements favour
 	// ordinary CPU memory plus one forward copy, even when VMA reports HOST_CACHED.
@@ -223,9 +227,14 @@ void astc_decoder::frame_completed(const from_headset::feedback & feedback,
 	{
 		recycle_packet_locked(pending.front().packet);
 		pending.pop_front();
+		if (queue_timing_enabled)
+			++pending_drop_count;
 		spdlog::debug("ASTC decoder drops oldest queued frame to keep latency bounded");
 	}
-	pending.push_back({std::move(assembling), feedback, view_info});
+	frame queued{std::move(assembling), feedback, view_info};
+	if (queue_timing_enabled)
+		queued.queued_at = std::chrono::steady_clock::now();
+	pending.push_back(std::move(queued));
 	assembling.clear();
 	use_recycled_packet_locked();
 	have_frame = false;
@@ -297,6 +306,14 @@ void astc_decoder::worker_function(uint32_t queue_family_index)
 			{
 				current = std::move(pending.front());
 				pending.pop_front();
+				if (queue_timing_enabled)
+				{
+					const uint64_t dwell_ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+					        std::chrono::steady_clock::now() - current.queued_at).count());
+					pending_dwell_ns += dwell_ns;
+					pending_max_dwell_ns = std::max(pending_max_dwell_ns, dwell_ns);
+					++pending_dequeue_count;
+				}
 			}
 		}
 		if (stopping)
@@ -515,7 +532,23 @@ void astc_decoder::worker_function(uint32_t queue_family_index)
 		if (handed_off && ++timing_frames == 180)
 		{
 			decode_copy_ns += frame_decode_copy_ns; prewait_ns += frame_prewait_ns; syncwait_ns += frame_syncwait_ns; handoff_ns += frame_handoff_ns;
-			spdlog::info("ASTC worker 180-frame mean us/frame: decode+staging-copy {:.1f}, prior-upload fence {:.1f}, sync post-submit fence {:.1f}, host submit-to-handoff {:.1f} ({}; async ends at host handoff, not GPU completion)", decode_copy_ns / 180000.0, prewait_ns / 180000.0, syncwait_ns / 180000.0, handoff_ns / 180000.0, async_upload_enabled ? "same-queue async" : "sync");
+			if (queue_timing_enabled)
+			{
+				uint64_t drops = 0, dwell_ns = 0, max_dwell_ns = 0, dequeues = 0;
+				{
+					std::lock_guard lock(mutex);
+					drops = std::exchange(pending_drop_count, 0);
+					dwell_ns = std::exchange(pending_dwell_ns, 0);
+					max_dwell_ns = std::exchange(pending_max_dwell_ns, 0);
+					dequeues = std::exchange(pending_dequeue_count, 0);
+				}
+				const double dwell_us = dequeues ? double(dwell_ns) / double(dequeues) / 1000.0 : 0.0;
+				spdlog::info("ASTC worker 180-frame mean us/frame: decode+staging-copy {:.1f}, prior-upload fence {:.1f}, sync post-submit fence {:.1f}, host submit-to-handoff {:.1f} ({}; async ends at host handoff, not GPU completion); pending queue since prior summary: mean/max dwell {:.1f}/{:.1f} us over {} dequeues, oldest-pending drops {}",
+				             decode_copy_ns / 180000.0, prewait_ns / 180000.0, syncwait_ns / 180000.0, handoff_ns / 180000.0,
+				             async_upload_enabled ? "same-queue async" : "sync", dwell_us, double(max_dwell_ns) / 1000.0, dequeues, drops);
+			}
+			else
+				spdlog::info("ASTC worker 180-frame mean us/frame: decode+staging-copy {:.1f}, prior-upload fence {:.1f}, sync post-submit fence {:.1f}, host submit-to-handoff {:.1f} ({}; async ends at host handoff, not GPU completion)", decode_copy_ns / 180000.0, prewait_ns / 180000.0, syncwait_ns / 180000.0, handoff_ns / 180000.0, async_upload_enabled ? "same-queue async" : "sync");
 			timing_frames = 0; decode_copy_ns = prewait_ns = syncwait_ns = handoff_ns = 0;
 		}
 		else if (handed_off)

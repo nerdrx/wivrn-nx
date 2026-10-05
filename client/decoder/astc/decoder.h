@@ -16,6 +16,7 @@
 #include "nxastc_motion.h"
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -45,6 +46,7 @@ class astc_decoder final : public decoder
 		std::vector<uint8_t> packet;
 		from_headset::feedback feedback;
 		to_headset::video_stream_data_shard::view_info_t view_info;
+		std::chrono::steady_clock::time_point queued_at{};
 	};
 
 	vk::raii::Device & device;
@@ -63,10 +65,15 @@ class astc_decoder final : public decoder
 	std::weak_ptr<scenes::stream> weak_scene;
 	shard_accumulator * accumulator;
 	bool async_upload_enabled = true;
+	bool queue_timing_enabled = false;
 
 	std::mutex mutex;
 	std::condition_variable wake;
 	std::deque<frame> pending;
+	uint64_t pending_drop_count = 0;
+	uint64_t pending_dwell_ns = 0;
+	uint64_t pending_max_dwell_ns = 0;
+	uint64_t pending_dequeue_count = 0;
 	std::vector<uint8_t> assembling;
 	std::vector<uint8_t> recycled_packet;
 	uint64_t assembling_frame = 0;

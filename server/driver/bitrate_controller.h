@@ -687,6 +687,8 @@ private:
 		// maximum is compared; v2 only.
 		double rate = 0;
 		size_t rate_count = 0;
+		size_t peak_epoch_rate_count = 0;
+		double peak_epoch_rate = 0;
 		double quality_scale = 0;
 	};
 
@@ -740,6 +742,8 @@ private:
 	// loaded frame has refreshed for a whole window is not evidence of a bottleneck any more
 	size_t bandwidth_samples = 0;
 	clock::time_point last_bandwidth_sample{};
+	// Start of the current strict estimator-maximum epoch; aligns slowdown samples to its peak.
+	std::optional<clock::time_point> bandwidth_peak_since;
 	// Value the bandwidth estimate had at the start of the current startup round, and how
 	// many consecutive rounds it has failed to grow
 	double startup_mark = 0;

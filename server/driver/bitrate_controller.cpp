@@ -258,6 +258,7 @@ void bitrate_controller::flush_estimator()
 	bandwidth.reset();
 	bandwidth_samples = 0;
 	last_bandwidth_sample = {};
+	bandwidth_peak_since = {};
 	bbr_st = bbr_state::startup;
 	startup_mark = 0;
 	startup_stalled = 0;
@@ -475,7 +476,11 @@ void bitrate_controller::close_frame(frame_state & frame, clock::time_point now)
 		if (mode_locked() == mode::bbr and rate_loaded_ns >= min_loaded_wire_ns() and rate_bytes and rate_wire_ns > 0)
 		{
 			rate = 8e9 * double(rate_bytes) / double(rate_wire_ns);
+			const bool had_peak = bandwidth.valid();
+			const double old_peak = had_peak ? bandwidth.get() : 0;
 			bandwidth.update(rate, now, estimator_window);
+			if (not had_peak or rate > old_peak)
+				bandwidth_peak_since = now;
 			++bandwidth_samples;
 			last_bandwidth_sample = now;
 		}
@@ -546,6 +551,7 @@ bitrate_controller::stats bitrate_controller::analyse(clock::time_point now)
 
 	std::vector<float> utilisations;
 	std::vector<double> rates;
+	std::vector<double> peak_epoch_rates;
 	utilisations.reserve(window.size());
 	for (const auto & s: window)
 	{
@@ -556,7 +562,14 @@ bitrate_controller::stats bitrate_controller::analyse(clock::time_point now)
 		if (s.late)
 			++res.late;
 		if (s.rate > 0)
+		{
 			rates.push_back(s.rate);
+			if (bandwidth_peak_since and s.when >= *bandwidth_peak_since)
+			{
+				peak_epoch_rates.push_back(s.rate);
+				++res.peak_epoch_rate_count;
+			}
+		}
 		// Use the most expensive compression ratio in this fresh feedback window.
 		if (s.quality_scale > 0)
 			res.quality_scale = res.quality_scale > 0 ? std::min(res.quality_scale, s.quality_scale) : s.quality_scale;
@@ -579,6 +592,13 @@ bitrate_controller::stats bitrate_controller::analyse(clock::time_point now)
 		size_t n = std::min(rates.size() - 1, size_t(utilisation_percentile * rates.size()));
 		std::nth_element(rates.begin(), rates.begin() + n, rates.end());
 		res.rate = rates[n];
+	}
+	if (not peak_epoch_rates.empty())
+	{
+		size_t n = std::min(peak_epoch_rates.size() - 1,
+		                    size_t(utilisation_percentile * peak_epoch_rates.size()));
+		std::nth_element(peak_epoch_rates.begin(), peak_epoch_rates.begin() + n, peak_epoch_rates.end());
+		res.peak_epoch_rate = peak_epoch_rates[n];
 	}
 
 	// A frame that never arrived is at least as bad as a fully saturated one.
@@ -1121,7 +1141,9 @@ std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, 
 	// has managed in the last ten seconds. Scale-free, offset-free, see the discussion in
 	// the header. Not applied during the startup ramp, where the bitrate is deliberately
 	// climbing faster than a two second window can follow.
-	const double slowdown = (bandwidth.valid() and s.rate > 0) ? bandwidth.get() / s.rate : 1;
+	const bool peak_confirmed = s.peak_epoch_rate_count >= estimator_min_samples;
+	const double slowdown_rate = quality_mode ? s.rate : (peak_confirmed ? s.peak_epoch_rate : 0);
+	const double slowdown = (bandwidth.valid() and slowdown_rate > 0) ? bandwidth.get() / slowdown_rate : 1;
 
 	// A probe is a deliberate overshoot: on a link that is already the bottleneck it stretches
 	// the frames past a frame period on purpose, and reading that back as congestion would
@@ -1134,6 +1156,7 @@ std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, 
 	                   (not overshooting and
 	                    (s.utilisation > (quality_mode ? 1.10 : utilisation_severe) or
 	                     (bbr_st != bbr_state::startup and slowdown > slowdown_backoff and
+	                      (quality_mode or peak_confirmed) and
 	                      (not quality_mode or s.utilisation > 1.10))));
 
 	// An estimate no loaded frame has refreshed for a whole window is not a bottleneck any
@@ -1143,6 +1166,7 @@ std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, 
 	{
 		bandwidth.reset();
 		bandwidth_samples = 0;
+		bandwidth_peak_since = {};
 		U_LOG_I("Automatic bitrate v2: no loaded frame for %d ms, dropping the bandwidth estimate",
 		        int(estimator_window.count()));
 	}
@@ -1199,6 +1223,7 @@ std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, 
 		// here on.
 		bandwidth.reset();
 		bandwidth.update(double(bitrate) / quality_scale, now, estimator_window);
+		bandwidth_peak_since = now;
 		bandwidth_samples = estimator_min_samples;
 		last_bandwidth_sample = now;
 	}
@@ -1225,6 +1250,7 @@ std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, 
 		// measurably doing right now, or, when every recent frame was app-limited and
 		// there is no such measurement, simply take a bite out of it.
 		bandwidth.cap(s.rate > 0 ? s.rate : backoff_factor * bw);
+		bandwidth_peak_since = now;
 
 		bbr_st = bbr_state::steady;
 		startup_stalled = startup_stall_rounds;
@@ -1333,6 +1359,20 @@ std::optional<uint32_t> bitrate_controller::evaluate_bbr(clock::time_point now, 
 		// merely to match that estimate. Decoder lateness also blocks upward probes.
 		if (quality_mode and not radio_hold)
 			target = s.late ? bitrate : std::max(bitrate, target);
+		// If the estimate outruns observed delivery, bound native growth by the
+		// loaded-rate p90. Keep the configured gain (including probe gain); a forced
+		// probe completion may drain below the current target, ordinary growth may not.
+		if (not quality_mode and bbr_st != bbr_state::startup and target > bitrate)
+		{
+			const double growth_rate = peak_confirmed ? s.peak_epoch_rate : s.rate;
+			if (growth_rate > 0 and bandwidth.valid() and bandwidth.get() / growth_rate > slowdown_backoff)
+			{
+				const uint32_t evidenced_target = clamp(uint64_t(std::min(gain * growth_rate * quality_scale, double(effective_ceiling()))));
+				target = forced ? std::min(target, evidenced_target) : std::min(target, std::max(bitrate, evidenced_target));
+			}
+			else if (growth_rate <= 0 and bbr_st == bbr_state::steady and not forced and not peak_confirmed)
+				target = bitrate;
+		}
 
 		// Do not chase the few percent the estimate wobbles by, and do not re-encode at a
 		// new bitrate more often than the selected steady interval after startup.

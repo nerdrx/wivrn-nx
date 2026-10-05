@@ -745,11 +745,74 @@ extern "C" enum u_logging_level u_log_get_global_level(void)
 	return U_LOGGING_INFO;
 }
 
+// A rising capacity maximum must not be compared with the old rate cohort.
+// Conversely, one loaded fast burst is not permission to double a steady target.
+void fresh_peak_requires_matching_evidence()
+{
+	{
+		harness h(mode::bbr, 24e6);
+		h.quiet();
+		const auto before = h.current();
+		h.capacity = 48e6;
+		uint32_t lowest = before;
+		for (int i = 0; i < 270; ++i)
+		{
+			h.feed_frame();
+			lowest = std::min(lowest, h.current());
+		}
+		CHECK(lowest >= before);
+		CHECK(h.current() >= 40'000'000);
+	}
+	// Both phases previously let an unconfirmed post-peak p90 raise the target.
+	for (int burst_frame: {8, 31})
+	{
+		harness h(mode::bbr, 24e6);
+		h.quiet();
+		uint32_t highest = h.current();
+		for (int i = 0; i < 270; ++i)
+		{
+			const auto bytes = h.frame_bytes();
+			const auto wire = i == burst_frame
+			                        ? std::max<int64_t>(period * paced, int64_t(8e9 * double(bytes) / 48e6))
+			                        : h.wire_ns(bytes);
+			h.feed_raw(bytes, wire);
+			highest = std::max(highest, h.current());
+		}
+		CHECK(highest <= 24'000'000);
+	}
+}
+
+
+// A late fast burst must not inflate the periodic probe or its completion.
+void probe_growth_uses_delivery_evidence()
+{
+	for (int burst_frame: {38, 46})
+	{
+		harness h(mode::bbr, 24e6);
+		h.quiet();
+		h.feed(360);
+		uint32_t highest = h.current();
+		for (int i = 0; i < 270; ++i)
+		{
+			const auto bytes = h.frame_bytes();
+			const auto wire = i == burst_frame
+			                        ? std::max<int64_t>(period * paced, int64_t(8e9 * double(bytes) / 48e6))
+			                        : h.wire_ns(bytes);
+			h.feed_raw(bytes, wire);
+			highest = std::max(highest, h.current());
+		}
+		// The ordinary 1.1-gain probe peaks near26.4Mbps, not the50Mbps ceiling.
+		CHECK(highest <= 26'500'000);
+	}
+}
+
 int main(int argc, char ** argv)
 {
 	verbose = argc > 1 and std::string(argv[1]) == "-v";
 
 	stereo_rate_uses_matching_stream_bytes_and_union_span();
+	fresh_peak_requires_matching_evidence();
+	probe_growth_uses_delivery_evidence();
 	part_a();
 	part_b();
 	part_c();

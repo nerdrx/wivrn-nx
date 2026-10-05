@@ -414,6 +414,8 @@ video_encoder::video_encoder(vk_bundle & vk,
 	{
 		const char * timing = std::getenv("WIVRN_ASTC_SENDER_WAIT_TIMING");
 		astc_sender_wait_timing_enabled = timing and std::string_view(timing) == "1";
+		const char * slot_timing = std::getenv("WIVRN_ASTC_SLOT_WAIT_TIMING");
+		astc_slot_wait_timing_enabled = slot_timing and std::string_view(slot_timing) == "1";
 	}
 
 	// Only a hardware encoder has somewhere to fall to. The software one is the
@@ -701,7 +703,27 @@ void video_encoder::present_image(vk::Image y_cbcr,
 	wivrn::trace::scope trace_present(wivrn::trace::cpu_track::encoder, stream_idx, frame_index, "present_image");
 	// Wait for encoder to be done
 	present_slot = (present_slot + 1) % num_slots;
-	state[present_slot].wait(busy);
+	if (is_native_astc and astc_slot_wait_timing_enabled)
+	{
+		const int64_t wait_begin_ns = os_monotonic_get_ns();
+		state[present_slot].wait(busy);
+		const int64_t elapsed_ns = os_monotonic_get_ns() - wait_begin_ns;
+		const uint64_t wait_ns = uint64_t(std::max<int64_t>(0, elapsed_ns));
+		astc_slot_wait_total_ns += wait_ns;
+		astc_slot_wait_max_ns = std::max(astc_slot_wait_max_ns, wait_ns);
+		if (++astc_slot_wait_samples == 180)
+		{
+			U_LOG_I("ASTC stream %u base slot busy-wait ms per present, n=%u mean/max=%.3f/%.3f",
+			        unsigned(stream_idx), astc_slot_wait_samples,
+			        double(astc_slot_wait_total_ns) / astc_slot_wait_samples / 1e6,
+			        double(astc_slot_wait_max_ns) / 1e6);
+			astc_slot_wait_samples = 0;
+			astc_slot_wait_total_ns = 0;
+			astc_slot_wait_max_ns = 0;
+		}
+	}
+	else
+		state[present_slot].wait(busy);
 	if (idr->should_skip(frame_index))
 	{
 		state[present_slot] = skip;

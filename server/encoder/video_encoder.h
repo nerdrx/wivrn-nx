@@ -262,6 +262,10 @@ private:
 	uint32_t astc_sender_wait_samples = 0;
 	uint64_t astc_sender_wait_total_ns = 0;
 	uint64_t astc_sender_wait_max_ns = 0;
+	bool astc_slot_wait_timing_enabled = false;
+	uint32_t astc_slot_wait_samples = 0;
+	uint64_t astc_slot_wait_total_ns = 0;
+	uint64_t astc_slot_wait_max_ns = 0;
 
 	// --- Forward error correction -------------------------------------------
 	// Headset toggle, read by the sender thread. Parity is only ever produced for

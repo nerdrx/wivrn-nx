@@ -615,6 +615,10 @@ void part_h()
 	CHECK(due(first_due) == first_due);
 	CHECK(missing == std::vector<uint16_t>{1});
 	CHECK(wivrn::nack_poll_timeout(first_due - 1, due(first_due - 1), std::chrono::milliseconds(100)).count() == 1);
+	CHECK(wivrn::nack_poll_timeout(first_due, due(first_due), std::chrono::milliseconds(100)).count() == 0);
+	CHECK(wivrn::nack_poll_timeout(first_due + 1, due(first_due + 1), std::chrono::milliseconds(100)).count() == 0);
+	CHECK(wivrn::nack_poll_timeout(first_due - quiet, due(first_due - quiet), std::chrono::milliseconds(100)).count() == 3);
+	CHECK(wivrn::nack_poll_timeout(first_due, due(first_due), std::chrono::milliseconds(0)).count() == 0);
 	CHECK(wivrn::nack_poll_timeout(1, 1'000'000'001, std::chrono::milliseconds(200)).count() == 100);
 	holes.nack_rounds = 1;
 	holes.nack_last = first_due;

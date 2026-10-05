@@ -59,8 +59,9 @@ inline std::chrono::milliseconds nack_poll_timeout(
 {
 	if (not due or max_wait.count() <= 0)
 		return max_wait;
+	// The caller services due repairs after poll, then recomputes the deadline.
 	if (now >= *due)
-		return std::chrono::milliseconds{1};
+		return std::chrono::milliseconds{0};
 
 	// Both times are positive and ordered (guaranteed by nack_poll_deadline).
 	const uint64_t remaining = uint64_t(*due) - uint64_t(now);

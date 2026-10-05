@@ -13,8 +13,12 @@ The timeout supplier runs after pending stream, control, and secondary packets
 have been drained. It uses each incomplete frame's existing last-shard/NACK
 timestamps and 2.5 ms quiet gate. An exact missing-shard check is deferred until
 that gate is due, preserving unknown-tail and parity suppression; at most two
-existing NACK rounds are possible. Completion checks can scan shard metadata;
-only exact missing-hole scans are deferred until due. A successful poll services NACKs on the same
+existing NACK rounds are possible. Completion checks use the received-count invariant;
+exact missing-hole scans are deferred until due. Already-confirmed due repairs
+use a zero poll timeout, avoiding an extra 1 ms wait; future deadlines still round
+up to whole milliseconds. Servicing a repair advances its last-NACK timestamp
+or exhausts its two-round budget before the next deadline calculation.
+A successful poll services NACKs on the same
 network thread under the existing decoder-array shared lock. Enabled polling
 adds two XR-clock queries per poll cycle, not per shard; device overhead and
 scheduler delays remain measurement gates. Send errors retain

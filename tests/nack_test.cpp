@@ -36,6 +36,7 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <span>
 #include <vector>
@@ -217,6 +218,7 @@ void test_history_ring()
 		send_frame(h, f);
 		CHECK(h.held() == 0);
 		CHECK(h.bytes() == 0);
+		CHECK(not h.collect_frame_end_candidate(7, {}, 1));
 		// The frame counts are kept either way — the adaptive parity ratio needs
 		// them whether or not anything is ever asked for again
 		auto cost = h.frame_cost(7);
@@ -389,6 +391,62 @@ void test_serving_a_request()
 		// A frame that is no longer tracked says nothing rather than lying
 		h.note_nacked(999, 5);
 		CHECK(not h.frame_cost(999).has_value());
+	}
+
+	// The optional end assist selects only the sender-counted, cached final shard.
+	{
+		auto end = h.collect_frame_end_candidate(7, {}, 1);
+		CHECK(end.has_value());
+		CHECK(end and end->shard_idx == 29);
+		if (end)
+		{
+			auto rebuilt = fec::decode_blob(0, 7, end->shard_idx, end->blob);
+			CHECK(same_shard(rebuilt, f.shards.back()));
+			CHECK(rebuilt.timing_info.has_value());
+		}
+		CHECK(not h.collect_frame_end_candidate(7, {}, 0));
+
+		std::array<shard_history::hit, 1> already{{{.shard_idx = 29}}};
+		CHECK(not h.collect_frame_end_candidate(7, already, 1));
+		CHECK(not h.collect_frame_end_candidate(999, {}, 1));
+		h.end_frame(7 + shard_history::tracked_frames, 4); // count-ring alias invalidates the old frame
+		CHECK(not h.collect_frame_end_candidate(7, {}, 1));
+	}
+	{
+		shard_history invalid;
+		invalid.set_enabled(true);
+		invalid.end_frame(10, 0);
+		CHECK(not invalid.collect_frame_end_candidate(10, {}, 1));
+		invalid.end_frame(10, uint32_t(std::numeric_limits<uint16_t>::max()) + 2);
+		CHECK(not invalid.collect_frame_end_candidate(10, {}, 1));
+	}
+	{
+		shard_history tcp;
+		tcp.set_enabled(true);
+		frame only_tcp = make_frame(4, 11);
+		send_frame(tcp, only_tcp, false);
+		CHECK(not tcp.collect_frame_end_candidate(11, {}, 1));
+	}
+	{
+		shard_history evicted;
+		evicted.set_enabled(true);
+		frame old = make_frame(4, 12);
+		send_frame(evicted, old);
+		std::vector<uint8_t> overwrite(shard_history::capacity, 0x5a);
+		evicted.push(13, 0, overwrite, true);
+		CHECK(evicted.frame_cost(12).has_value());
+		CHECK(not evicted.collect_frame_end_candidate(12, {}, 1));
+	}
+	{
+		shard_history no_marker;
+		no_marker.set_enabled(true);
+		frame partial = make_frame(4, 14);
+		partial.shards.back().timing_info.reset();
+		send_frame(no_marker, partial);
+		auto candidate = no_marker.collect_frame_end_candidate(14, {}, 1);
+		CHECK(candidate.has_value());
+		if (candidate)
+			CHECK(not fec::decode_blob(0, 14, candidate->shard_idx, candidate->blob).timing_info);
 	}
 }
 

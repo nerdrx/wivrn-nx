@@ -119,6 +119,8 @@ private:
 
 public:
 	const uint8_t stream_idx;
+	// Used to keep NXASTC-only diagnostics and recovery opt-ins off other codecs.
+	const bool is_native_astc;
 	// Array layer of the presented image this encoder reads. The three streams
 	// that share the eye image read their own layer, the quad layer stream has an
 	// image of its own and reads layer 0.

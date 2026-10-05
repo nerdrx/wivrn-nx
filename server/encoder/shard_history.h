@@ -24,9 +24,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace wivrn
@@ -198,6 +200,32 @@ public:
 			++found;
 		}
 		return found;
+	}
+
+	// Return the exact, still-cached final data shard recorded for this frame.
+	// The caller checks decoded timing_info before sending it. Existing NACK hits
+	// are passed to avoid returning a requested shard twice; `remaining_budget`
+	// prevents an assist from taking a slot from ordinary requested data.
+	std::optional<hit> collect_frame_end_candidate(uint64_t frame_idx,
+	                                               std::span<const hit> already_collected,
+	                                               size_t remaining_budget)
+	{
+		if (remaining_budget == 0)
+			return {};
+		auto frame = frame_cost(frame_idx);
+		if (not frame or frame->shards_sent == 0 or
+		    frame->shards_sent > uint32_t(std::numeric_limits<uint16_t>::max()) + 1)
+			return {};
+
+		const uint16_t last = uint16_t(frame->shards_sent - 1);
+		if (std::ranges::any_of(already_collected, [last](const hit & h) { return h.shard_idx == last; }))
+			return {};
+
+		const std::array<uint8_t, 1> bitmap{1};
+		std::vector<hit> candidate;
+		if (collect(frame_idx, last, bitmap, 1, candidate) != 1 or candidate.front().shard_idx != last)
+			return {};
+		return std::move(candidate.front());
 	}
 
 	// The headset asked for `count` shards of `frame_idx`. Folded into the frame's

@@ -32,8 +32,10 @@
 #include <algorithm>
 #include <bit>
 #include <cerrno>
+#include <cstdlib>
 #include <ctime>
 #include <string>
+#include <string_view>
 
 #if WIVRN_USE_NVENC
 #include "video_encoder_nvenc.h"
@@ -69,6 +71,15 @@ void sleep_until_ns(int64_t deadline_ns)
 
 	while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr) == EINTR)
 		;
+}
+
+bool nx_repair_end_enabled()
+{
+	static const bool enabled = [] {
+		const char * value = std::getenv("WIVRN_NX_REPAIR_END");
+		return value and std::string_view(value) == "1";
+	}();
+	return enabled;
 }
 } // namespace
 
@@ -375,6 +386,7 @@ video_encoder::video_encoder(vk_bundle & vk,
                              std::unique_ptr<idr_handler> idr,
                              bool async_send) :
         stream_idx(stream_idx),
+        is_native_astc(settings.codec == video_codec::nxastc),
         src_layer(settings.src_layer),
         target_queue(target_queue),
         src_layer_right(settings.src_layer_right),
@@ -569,6 +581,26 @@ void video_encoder::collect_retransmits(const from_headset::nack & n,
 		{
 			// A blob that no longer decodes is one the ring overwrote under us;
 			// there is nothing to send and nothing to report.
+		}
+	}
+
+	// NXASTC's final data shard carries the timing metadata needed to close a
+	// decoded frame. Only piggyback its real cached blob on a successful ordinary
+	// request; never guess an index or displace a requested shard.
+	if (is_native_astc and nx_repair_end_enabled() and found != 0 and hits.size() < budget)
+	{
+		if (auto end = history.collect_frame_end_candidate(n.frame_idx, hits, budget - hits.size()))
+		{
+			try
+			{
+				auto shard = fec::decode_blob(stream_idx, n.frame_idx, end->shard_idx, end->blob);
+				if (shard.timing_info)
+					out.push_back(std::move(shard));
+			}
+			catch (...)
+			{
+				// Invalidated/overwritten history is a cache miss, as above.
+			}
 		}
 	}
 

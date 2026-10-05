@@ -1,6 +1,7 @@
 #include "video_encoder_astc.h"
 #include "astc_gpu_timing.h"
 #include "nxastc_compact.h"
+#include "nxastc_zstd_jobs.h"
 
 #include "encoder/encoder_settings.h"
 #include "nxastc_motion.h"
@@ -144,6 +145,30 @@ wivrn::video_encoder_astc::video_encoder_astc(vk_bundle & vk, const encoder_sett
 	if (compact_enabled && !motion_delta_enabled)
 		U_LOG_I("nxastc: stream %u independent compact ASTC packing enabled (requires v4 client)", unsigned(stream_idx));
 	U_LOG_I("nxastc: stream %u independent Zstd level %d", unsigned(stream_idx), independent_zstd_level);
+	const bool zstd_jobs_requested = settings.options.contains("_wivrn_astc_zstd_jobs") &&
+	                                settings.options.at("_wivrn_astc_zstd_jobs") == "1";
+	if (zstd_jobs_requested)
+	{
+		const char * unsupported = motion_delta_enabled ? "motion delta is enabled" :
+		                          compact_enabled ? "compact packing is enabled" :
+		                          independent_zstd_level != 3 ? "independent Zstd level is not 3" :
+		                          !zstd_context ? "Zstd context is unavailable" : nullptr;
+		if (unsupported)
+			U_LOG_W("nxastc: stream %u ignoring independent Zstd jobs: %s", unsigned(stream_idx), unsupported);
+		else
+		{
+			const size_t configured = nxastc_zstd_jobs::configure(zstd_context.get());
+			if (ZSTD_isError(configured))
+				U_LOG_W("nxastc: stream %u independent Zstd jobs unavailable: %s; using legacy compression",
+				        unsigned(stream_idx), ZSTD_getErrorName(configured));
+			else
+			{
+				independent_zstd_jobs = true;
+				U_LOG_I("nxastc: stream %u independent Zstd jobs enabled (2 workers, 512 KiB jobs, no overlap)",
+				        unsigned(stream_idx));
+			}
+		}
+	}
 	if (const char * option = std::getenv("WIVRN_NX_ASTC_GPU_TIMING"); option and std::string_view{option} == "1")
 	{
 		try
@@ -328,9 +353,10 @@ std::optional<wivrn::video_encoder::data> wivrn::video_encoder_astc::encode(uint
 		zstd_compressed.resize(ZSTD_compressBound(raw_size));
 		// One Zstd attempt per frame: probing both byte layouts would add another
 		// native compression call to the PC critical path for a small wire saving.
-		zstd_size = ZSTD_compressCCtx(zstd_context.get(), zstd_compressed.data(), zstd_compressed.size(),
-		                             compact_input ? compact_blocks.data() : raw,
-		                             compact_input ? compact_blocks.size() : raw_size, independent_zstd_level);
+		zstd_size = nxastc_zstd_jobs::compress(zstd_context.get(), zstd_compressed.data(), zstd_compressed.size(),
+		                                      compact_input ? compact_blocks.data() : raw,
+		                                      compact_input ? compact_blocks.size() : raw_size,
+		                                      independent_zstd_jobs, independent_zstd_level);
 		zstd_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
 	};
 	uint32_t payload_size = raw_size;

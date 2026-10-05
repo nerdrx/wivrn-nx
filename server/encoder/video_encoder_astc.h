@@ -72,6 +72,7 @@ class video_encoder_astc : public video_encoder
 	const bool motion_delta_enabled;
 	const bool compact_enabled;
 	const int independent_zstd_level;
+	bool independent_zstd_jobs = false;
 
 public:
 	video_encoder_astc(vk_bundle & vk, const encoder_settings & settings, uint8_t stream_idx);

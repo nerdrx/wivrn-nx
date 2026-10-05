@@ -26,6 +26,7 @@
 #include "xr/instance.h"
 
 #include <algorithm>
+#include <limits>
 #include <span>
 #include <vector>
 #ifdef __ANDROID__
@@ -115,10 +116,35 @@ std::optional<XrTime> shard_accumulator::next_nack_deadline(XrTime now)
 	return earliest;
 }
 
+std::optional<XrTime> shard_accumulator::next_poll_deadline(XrTime now)
+{
+	auto due = next_nack_deadline(now);
+	if (not nxastc_codec or not astc_deadline_enabled or window.front().empty() or
+	    window.front().complete() or not window.has_newer_complete_than_front())
+		return due;
+
+	const auto scene = weak_scene.lock();
+	if (not scene)
+		return due;
+	const XrTime first = window.front().feedback.received_first_packet;
+	const XrDuration period = scene->display_period_ns();
+	if (first <= 0 or now < first or period <= 0 or
+	    period > (std::numeric_limits<XrTime>::max() - first) / 2)
+		return due;
+
+	const XrTime retirement = first + period * 2;
+	return due ? std::min(*due, retirement) : retirement;
+}
+
 void shard_accumulator::poll_nacks(XrTime now)
 {
 	if (nxastc_codec)
+	{
+		// Quiet traffic must service the same opt-in deadline as shard arrivals.
+		if (astc_deadline_enabled)
+			pump(now);
 		try_nack(now);
+	}
 }
 
 static void debug_why_not_sent(const shard_set & shards)

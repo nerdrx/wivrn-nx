@@ -73,7 +73,7 @@ void scenes::stream::process_packets()
 					std::shared_lock lock(decoder_mutex);
 					for (auto & item: decoders)
 						if (item.decoder and item.decoder->is_nxastc_codec())
-							wait = std::min(wait, wivrn::nack_poll_timeout(now, item.decoder->next_nack_deadline(now), wait));
+							wait = std::min(wait, wivrn::nack_poll_timeout(now, item.decoder->next_poll_deadline(now), wait));
 					return wait;
 				};
 				network_session->poll(*this, std::chrono::milliseconds(100), timeout);

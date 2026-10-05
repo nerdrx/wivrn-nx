@@ -123,6 +123,7 @@ public:
 		return nxastc_codec;
 	}
 	std::optional<XrTime> next_nack_deadline(XrTime now);
+	std::optional<XrTime> next_poll_deadline(XrTime now);
 	void poll_nacks(XrTime now);
 
 	vk::Sampler sampler()

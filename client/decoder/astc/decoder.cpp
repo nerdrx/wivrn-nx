@@ -543,9 +543,9 @@ void astc_decoder::worker_function(uint32_t queue_family_index)
 					dequeues = std::exchange(pending_dequeue_count, 0);
 				}
 				const double dwell_us = dequeues ? double(dwell_ns) / double(dequeues) / 1000.0 : 0.0;
-				spdlog::info("ASTC worker 180-frame mean us/frame: decode+staging-copy {:.1f}, prior-upload fence {:.1f}, sync post-submit fence {:.1f}, host submit-to-handoff {:.1f} ({}; async ends at host handoff, not GPU completion); pending queue since prior summary: mean/max dwell {:.1f}/{:.1f} us over {} dequeues, oldest-pending drops {}",
+				spdlog::info("ASTC worker 180-frame mean us/frame: decode+staging-copy {:.1f}, prior-upload fence {:.1f}, sync post-submit fence {:.1f}, host submit-to-handoff {:.1f} ({}; async ends at host handoff, not GPU completion); pending queue since prior summary: mean/max dwell {:.1f}/{:.1f} us over {} dequeues, oldest-pending drops {}, stream {}",
 				             decode_copy_ns / 180000.0, prewait_ns / 180000.0, syncwait_ns / 180000.0, handoff_ns / 180000.0,
-				             async_upload_enabled ? "same-queue async" : "sync", dwell_us, double(max_dwell_ns) / 1000.0, dequeues, drops);
+				             async_upload_enabled ? "same-queue async" : "sync", dwell_us, double(max_dwell_ns) / 1000.0, dequeues, drops, unsigned(current.feedback.stream_index));
 			}
 			else
 				spdlog::info("ASTC worker 180-frame mean us/frame: decode+staging-copy {:.1f}, prior-upload fence {:.1f}, sync post-submit fence {:.1f}, host submit-to-handoff {:.1f} ({}; async ends at host handoff, not GPU completion)", decode_copy_ns / 180000.0, prewait_ns / 180000.0, syncwait_ns / 180000.0, handoff_ns / 180000.0, async_upload_enabled ? "same-queue async" : "sync");

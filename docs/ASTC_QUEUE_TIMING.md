@@ -11,6 +11,8 @@ The new fields report:
   until the decoder worker removes it.
 - Number of dequeues used for that mean, including later-rejected packets.
 - Oldest pending packets dropped because the existing two-entry queue was full.
+- Stream index in each enabled summary, so left/right stream records can be
+  distinguished.
 
 Counters/timestamps are protected by the existing queue mutex. Summary counters
 reset together under that mutex; the queue window is described as “since prior

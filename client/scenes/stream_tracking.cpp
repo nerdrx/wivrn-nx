@@ -33,7 +33,6 @@
 #include <thread>
 
 #ifdef __ANDROID__
-#include "android/battery.h"
 #include "android/wifi.h"
 #endif
 

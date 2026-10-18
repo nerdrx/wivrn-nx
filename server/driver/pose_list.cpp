@@ -132,7 +132,7 @@ xrt_space_relation pose_list::extrapolate(const xrt_space_relation & a, const xr
 	{
 		xrt_vec3 dtheta = res.angular_velocity * dt;
 		xrt_quat dq;
-		math_quat_exp(&dtheta, &dq);
+		math_quat_exp_so3(&dtheta, &dq);
 
 		if (is_valid_orientation(dq))
 			map_quat(res.pose.orientation) = map_quat(res.pose.orientation) * map_quat(dq);
@@ -421,7 +421,7 @@ std::pair<XrTime, xrt_space_relation> pose_list::get_at(XrTime at_timestamp_ns)
 			        (*orientation.dy)[1],
 			        (*orientation.dy)[2],
 			        (*orientation.dy)[3]};
-			Eigen::Quaternionf half_ω = dq * q;
+			Eigen::Quaternionf half_ω = dq * q.conjugate();
 
 			const xrt_vec3 ω{
 			        2 * half_ω.x(),

@@ -587,7 +587,7 @@ void video_encoder::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo info
 	// Wait for encoder to be done
 	present_slot = (present_slot + 1) % num_slots;
 	state[present_slot].wait(busy);
-	if (idr->should_skip(frame_index))
+	if (idr->should_skip(frame_index, stream_idx))
 	{
 		state[present_slot] = skip;
 		++pending_presents;
@@ -717,7 +717,6 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 	{
 		// One SendData call per NAL; span the whole frame, not each call.
 		wivrn::trace::cpu_begin(wivrn::trace::cpu_track::network, stream_idx, shard.frame_idx, "SendData");
-		cnx->dump_time("send_begin", shard.frame_idx, os_monotonic_get_ns(), stream_idx);
 		timing_info.send_begin = clock.to_headset(os_monotonic_get_ns());
 		// The layout the whole frame is protected with, fixed here: the shard payload
 		// budget below is derived from the group size (see fec::payload_reserve) and a

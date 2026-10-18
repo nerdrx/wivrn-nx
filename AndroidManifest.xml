@@ -30,6 +30,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
     <!-- Required for WiFi locking, see https://developer.android.com/reference/android/net/wifi/WifiManager.WifiLock -->
@@ -58,6 +59,9 @@
     <!-- Required for passthrough on Quest -->
     <!-- https://developer.oculus.com/documentation/native/android/mobile-passthrough/ -->
     <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="false" />
+
+    <!-- Required for XR_META_boundary_visibility -->
+    <uses-permission android:name="com.oculus.permission.BOUNDARY_VISIBILITY" />
 
     <!-- See https://hub.vive.com/storage/docs/en-us/ConfigureAppCapabilities.html -->
     <uses-feature android:name="wave.feature.handtracking" android:required="false" />

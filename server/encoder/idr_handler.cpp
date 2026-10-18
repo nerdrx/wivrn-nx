@@ -40,7 +40,7 @@ void default_idr_handler::on_feedback(const from_headset::feedback & f)
 			                   if (f.sent_to_decoder)
 			                   {
 				                   U_LOG_D("IDR frame received, stream %d", f.stream_index);
-				                   state = idr_received{};
+				                   state = running{f.frame_index};
 			                   }
 			                   else
 			                   {
@@ -100,6 +100,8 @@ void default_idr_handler::on_feedback(const from_headset::feedback & f)
 				                   state = need_idr{};
 			                   }
 		                   }
+		                   else if (f.received_from_decoder)
+			                   r.last_ack = std::max(r.last_ack, f.frame_index);
 	                   },
 	                   [](need_invalidate) {},
 	           },
@@ -154,8 +156,9 @@ void default_idr_handler::set_ref_invalidation(bool enabled, uint32_t dpb_frames
 	}
 }
 
-bool default_idr_handler::should_skip(uint64_t frame_id)
+bool default_idr_handler::should_skip(uint64_t frame_id, uint8_t stream_idx)
 {
+	(void)stream_idx;
 	std::unique_lock lock(mutex);
 	return std::visit(utils::overloaded{
 	                          [this, frame_id](wait_idr_feedback w) {
@@ -193,8 +196,9 @@ uint64_t default_idr_handler::invalidate_target()
 	return invalidate_frame;
 }
 
-default_idr_handler::frame_type default_idr_handler::get_type(uint64_t frame_index)
+default_idr_handler::frame_type default_idr_handler::get_type(uint64_t frame_index, uint8_t stream_idx)
 {
+	(void)stream_idx;
 	std::unique_lock lock(mutex);
 	// How old a reported loss is, is measured against this. Frames are handed to the
 	// encoders in order, but the streams do not all skip the same ones, so take the newest
@@ -202,12 +206,16 @@ default_idr_handler::frame_type default_idr_handler::get_type(uint64_t frame_ind
 	newest_frame = std::max(newest_frame, frame_index);
 	return std::visit(utils::overloaded{
 	                          [this, frame_index](need_idr) {
-		                          U_LOG_D("IDR frame needed");
 		                          state = wait_idr_feedback{frame_index};
 		                          return frame_type::i;
 	                          },
-	                          [this, frame_index](idr_received) {
-		                          state = running{frame_index};
+	                          [this, frame_index, stream_idx](running s) {
+		                          if (frame_index > s.last_ack + 60)
+		                          {
+			                          U_LOG_D("stale decoder on stream %d", stream_idx);
+			                          state = wait_idr_feedback{frame_index};
+			                          return frame_type::i;
+		                          }
 		                          return frame_type::p;
 	                          },
 	                          [this, frame_index](need_invalidate s) {

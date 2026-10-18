@@ -45,7 +45,6 @@
 #include "wivrn_uinput.h"
 #include "xrt/xrt_results.h"
 #include "xrt/xrt_system.h"
-#include <fstream>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -162,6 +161,8 @@ class wivrn_session : public xrt_system_devices
 	std::jthread net_thread;
 	std::jthread worker_thread;
 
+	thread_safe<std::exception_ptr> net_exception;
+
 	wivrn_session(std::unique_ptr<wivrn_connection> connection, b_system &);
 
 public:
@@ -177,7 +178,7 @@ public:
 	void start(ipc_server *);
 	void stop();
 
-	bool request_stop();
+	void request_stop();
 	void quit_if_no_client();
 
 	clock_offset get_offset();
@@ -287,13 +288,29 @@ public:
 	template <typename T>
 	void send_stream(T && packet)
 	{
-		connection->send_stream(std::forward<T>(packet));
+		try
+		{
+			connection->send_stream(std::forward<T>(packet));
+		}
+		catch (std::exception & e)
+		{
+			*net_exception.lock() = std::current_exception();
+			throw;
+		}
 	}
 
 	template <typename T>
 	void send_control(T && packet)
 	{
-		connection->send_control(std::forward<T>(packet));
+		try
+		{
+			connection->send_control(std::forward<T>(packet));
+		}
+		catch (std::exception & e)
+		{
+			*net_exception.lock() = std::current_exception();
+			throw;
+		}
 	}
 
 	// One video shard onto the secondary path while combining. False when it did
@@ -342,6 +359,7 @@ private:
 	// Assemble and send one to_headset::transport_status, if the subscription lease is
 	// still valid. Worker thread.
 	void send_transport_status();
+	void stop_application(std::optional<uint32_t> id, int64_t timeout_ns);
 
 	void update_client_states(bool visible, bool focused);
 	void poll_session_loss();

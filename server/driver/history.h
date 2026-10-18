@@ -110,7 +110,7 @@ public:
 			if (span <= 0)
 				return {produced, *after};
 
-			float t = float(after->at_timestamp_ns - at_timestamp_ns) / float(span);
+			float t = float(at_timestamp_ns - before->at_timestamp_ns) / float(span);
 			t = std::clamp(t, 0.f, 1.f);
 			return {produced, static_cast<Derived *>(this)->interpolate(*before, *after, t)};
 		}

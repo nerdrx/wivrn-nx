@@ -43,6 +43,8 @@ struct deleter
 	}
 	void operator()(pw_stream * stream)
 	{
+		pw_stream_set_active(stream, false);
+		pw_stream_flush(stream, false);
 		pw_stream_destroy(stream);
 	}
 };
@@ -122,7 +124,6 @@ struct pipewire_device : public audio_device
 			// Calculate quantum size: 5ms buffer for low latency while maintaining stability
 			// Smaller buffers (<5ms) risk underruns, larger ones (>10ms) add perceptible latency
 			uint32_t quantum_size = (desc.speaker->sample_rate * 5) / 1000;
-			uint32_t frame_size = desc.speaker->num_channels * sizeof(int16_t);
 
 			std::string rate_str = std::format("1/{}", desc.speaker->sample_rate);
 			std::string latency_str = std::format("{}/{}", quantum_size, desc.speaker->sample_rate);
@@ -203,7 +204,6 @@ struct pipewire_device : public audio_device
 			// Calculate quantum size: 5ms buffer for low latency while maintaining stability
 			// Smaller buffers (<5ms) risk underruns, larger ones (>10ms) add perceptible latency
 			uint32_t quantum_size = (desc.microphone->sample_rate * 5) / 1000;
-			uint32_t frame_size = desc.microphone->num_channels * sizeof(int16_t);
 
 			std::string rate_str = std::format("1/{}", desc.microphone->sample_rate);
 			std::string latency_str = std::format("{}/{}", quantum_size, desc.microphone->sample_rate);

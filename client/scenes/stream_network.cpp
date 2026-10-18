@@ -101,7 +101,23 @@ std::unique_ptr<wivrn_session> scenes::stream::build_reconnect_session()
 	auto pin_cb = [pin = target.pin](int) { return pin.empty() ? std::string("000000") : pin; };
 
 	return std::visit([&](auto address) -> std::unique_ptr<wivrn_session> {
-		return std::make_unique<wivrn_session>(address, target.port, target.tcp_only, keypair, pin_cb);
+		using address_type = decltype(address);
+		if constexpr (std::is_same_v<address_type, in_addr>)
+		{
+			sockaddr_in socket_address{};
+			socket_address.sin_family = AF_INET;
+			socket_address.sin_port = htons(target.port);
+			socket_address.sin_addr = address;
+			return std::make_unique<wivrn_session>(socket_address, target.tcp_only, keypair, pin_cb);
+		}
+		else
+		{
+			sockaddr_in6 socket_address{};
+			socket_address.sin6_family = AF_INET6;
+			socket_address.sin6_port = htons(target.port);
+			socket_address.sin6_addr = address;
+			return std::make_unique<wivrn_session>(socket_address, target.tcp_only, keypair, pin_cb);
+		}
 	},
 	                  target.address);
 }

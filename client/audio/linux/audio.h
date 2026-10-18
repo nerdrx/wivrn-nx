@@ -94,6 +94,13 @@ public:
 	void operator()(wivrn::audio_data &&);
 	void set_mic_state(bool running);
 
+	// NX packet concealment and selectable lossy audio are Android-only.
+	void set_low_latency(bool) {}
+	uint64_t concealment_events() const
+	{
+		return 0;
+	}
+
 	static void get_audio_description(wivrn::from_headset::headset_info_packet & info);
 };
 } // namespace wivrn::linux_audio

@@ -528,16 +528,18 @@ void scenes::stream::gui_transport()
 			        .stride = sizeof(transport_metric),
 			        .multiplier = multiplier,
 			};
-			ImPlot::SetNextLineStyle(p.color);
-			ImPlot::SetNextFillStyle(p.color, 0.2f);
-			ImPlot::PlotLineG("", getter, &gdata, transport_metrics.size(), ImPlotLineFlags_Shaded);
+			ImPlotSpec spec;
+			spec.LineColor = p.color;
+			spec.FillColor = p.color;
+			spec.FillAlpha = 0.2f;
+			spec.Flags = ImPlotLineFlags_Shaded;
+			ImPlot::PlotLineG("", getter, &gdata, transport_metrics.size(), spec);
 		}
 
 		// Where the ring wraps, i.e. the present
 		double x[] = {double(transport_offset), double(transport_offset)};
 		double y[] = {0, 1e12};
-		ImPlot::SetNextLineStyle(t.border);
-		ImPlot::PlotLine("", x, y, 2);
+		ImPlot::PlotLine("", x, y, 2, {ImPlotProp_LineColor, t.border});
 
 		ImPlot::EndPlot();
 	};

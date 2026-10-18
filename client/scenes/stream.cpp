@@ -326,18 +326,6 @@ void scenes::stream::send_initial_control_packets(wivrn_session & net, float gue
 		        .variant = application::get_messages_info().variant,
 		};
 
-		{
-			auto [flags, views] = session.locate_views(
-			        XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
-			        instance.now(),
-			        application::space(xr::spaces::view));
-
-			assert(views.size() == info.fov.size());
-
-			for (auto [i, j]: std::views::zip(views, info.fov))
-				j = i.fov;
-		}
-
 		const auto & config = application::get_config();
 
 		{
@@ -460,7 +448,8 @@ void scenes::stream::send_initial_control_packets(wivrn_session & net, float gue
 
 		if (config.codec)
 		{
-			info.supported_codecs = {*config.codec};
+			const bool supports_10bit = decoder::supports_10bit(*config.codec);
+			info.supported_codecs = {{.codec = *config.codec, .supports_10bit = supports_10bit}};
 			switch (*config.codec)
 			{
 				case h264:
@@ -468,11 +457,13 @@ void scenes::stream::send_initial_control_packets(wivrn_session & net, float gue
 					break;
 				case h265:
 				case av1:
-					info.bit_depth = config.bit_depth;
+					info.bit_depth = supports_10bit ? config.bit_depth : 8;
 			}
 		}
 		else
+		{
 			info.supported_codecs = decoder::supported_codecs();
+		}
 
 		return info;
 	}());

@@ -668,8 +668,8 @@ void video_encoder::encode(wivrn_session & cnx,
 	// is what success looks like.
 	watchdog.encode_end(os_monotonic_get_ns(), data.has_value() or not shared_sender);
 
-	cnx.dump_time("encode_begin", frame_index, encode_begin, stream_idx);
-	cnx.dump_time("encode_end", frame_index, os_monotonic_get_ns(), stream_idx);
+	wivrn::trace::instant_feedback("encode_begin", encode_begin, frame_index, stream_idx);
+	wivrn::trace::instant_feedback("encode_end", os_monotonic_get_ns(), frame_index, stream_idx);
 	if (data)
 	{
 		timing_info.encode_end = clock.to_headset(os_monotonic_get_ns());
@@ -883,7 +883,7 @@ void video_encoder::SendData(std::span<uint8_t> data, bool end_of_frame, bool co
 		// ratio needs it either way.
 		history.end_frame(shard.frame_idx, shard.shard_idx);
 
-		cnx->dump_time("send_end", shard.frame_idx, os_monotonic_get_ns(), stream_idx);
+		wivrn::trace::instant_feedback("send_end", os_monotonic_get_ns(), shard.frame_idx, stream_idx);
 		wivrn::trace::cpu_end(wivrn::trace::cpu_track::network, stream_idx, shard.frame_idx, "SendData");
 
 		// The bandwidth estimating bitrate control law divides these bytes by the time

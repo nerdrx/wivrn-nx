@@ -255,6 +255,7 @@ void scenes::stream::tracking()
 	XrTime next_battery_check = 0;
 	const XrDuration battery_check_interval = 30'000'000'000; // 30s
 
+#ifdef __ANDROID__
 	// The server builds a trend out of these, so they have to come often enough for a few
 	// of them to fit inside its window, and rarely enough to be free. 1 Hz is both.
 	XrTime next_wifi_check = 0;
@@ -587,6 +588,7 @@ void scenes::stream::tracking()
 				next_battery_check = now + battery_check_interval;
 			}
 
+#ifdef __ANDROID__
 			// The Wi-Fi radio, as a leading indicator for the server's bitrate control.
 			// Read live so that toggling the setting takes effect without reconnecting;
 			// a second of staleness either way is of no consequence.

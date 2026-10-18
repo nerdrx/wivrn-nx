@@ -741,8 +741,7 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	images[i].quad_info = promoted ? std::optional(promoted->info) : std::nullopt;
 	quad_last_swapchain = promoted ? promoted->swapchain : nullptr;
 
-	trace::instant_feedback("begin", frame.rendering.id, os_monotonic_get_ns());
-	session.dump_time("begin", frame.rendering.id, os_monotonic_get_ns());
+	trace::instant_feedback("begin", os_monotonic_get_ns(), frame.rendering.id);
 
 	cmd_pool.reset();
 	cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});

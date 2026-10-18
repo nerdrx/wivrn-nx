@@ -327,8 +327,6 @@ public:
 
 	void set_foveated_size(uint32_t width, uint32_t height);
 
-	void dump_time(const std::string & event, uint64_t frame, int64_t time, uint8_t stream = -1, const char * extra = "");
-
 	// One video frame of one stream finished going out, with the number of bytes it put on
 	// the wire (parity shards included). Called from the encoder's send path; only the
 	// bandwidth estimating bitrate control law uses it, and it takes no lock of its own.

@@ -85,8 +85,8 @@ void default_idr_handler::on_feedback(const from_headset::feedback & f)
 			                   if (invalidate_enabled and f.frame_index <= newest_frame and newest_frame - f.frame_index < invalidate_dpb)
 			                   {
 				                   U_LOG_I("Reference invalidation of frame %lu on stream %d",
-						           (unsigned long)f.frame_index,
-						           f.stream_index);
+				                           (unsigned long)f.frame_index,
+				                           f.stream_index);
 				                   state = need_invalidate{f.frame_index};
 			                   }
 			                   else if (refresh_enabled)

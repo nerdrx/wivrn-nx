@@ -120,7 +120,10 @@ struct step_result
 step_result step(default_idr_handler & h, uint64_t frame)
 {
 	if (h.should_skip(frame))
+	{
+		CHECK(h.is_non_ref_frame(frame));
 		return {.skipped = true, .type = frame_type::p};
+	}
 	auto t = h.get_type(frame);
 	if (verbose)
 		std::printf("    frame %3llu -> %s\n", (unsigned long long)frame, name(t));
@@ -135,6 +138,7 @@ wivrn::from_headset::feedback report(uint64_t frame, bool delivered)
 	f.frame_index = frame;
 	f.stream_index = 0;
 	f.sent_to_decoder = delivered ? 1 : 0;
+	f.received_from_decoder = delivered ? 1 : 0;
 	return f;
 }
 
@@ -771,6 +775,27 @@ void part_m()
 	}
 }
 
+// A silent decoder can fall behind without reporting a dropped frame. Preserve upstream's
+// stale-decoder fallback while NX repair continues to handle explicit loss reports.
+void part_n()
+{
+	std::printf("Part N: a silent decoder eventually gets an IDR\n");
+
+	default_idr_handler h;
+	uint64_t frame = start_stream(h);
+	for (int i = 0; i < 60; ++i, ++frame)
+	{
+		auto s = step(h, frame);
+		CHECK(not s.skipped);
+		CHECK(s.type == frame_type::p);
+	}
+
+	auto stale = step(h, frame);
+	CHECK(not stale.skipped);
+	CHECK(stale.type == frame_type::i);
+	CHECK(step(h, frame + 1).skipped);
+}
+
 } // namespace
 
 // The handler logs through Monado's u_log; standing in for it is all it takes to run the
@@ -810,6 +835,7 @@ int main(int argc, char ** argv)
 	part_k();
 	part_l();
 	part_m();
+	part_n();
 
 	std::printf("\n%d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;

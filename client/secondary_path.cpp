@@ -160,11 +160,13 @@ void secondary_path_manager::attach()
 		keypair = crypto::key::from_private_key(std::string{(std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()});
 	}
 
-	in_addr loopback{};
-	loopback.s_addr = htonl(INADDR_LOOPBACK);
+	sockaddr_in loopback{};
+	loopback.sin_family = AF_INET;
+	loopback.sin_port = htons(port);
+	loopback.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
 	// Connecting to the loopback either succeeds at once or fails at once
-	wivrn_session::control_socket_t socket(loopback, port);
+	wivrn_session::control_socket_t socket(loopback);
 
 	socket.send(from_headset::attach_path{
 	        .protocol_version = wivrn::protocol_version,

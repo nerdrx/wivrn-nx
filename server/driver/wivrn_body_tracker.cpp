@@ -197,7 +197,6 @@ void body_joints_list::update_tracking(const wivrn::from_headset::meta_body & tr
 
 			                   if (auto it = parent.virtual_trackers.find(joint); it != parent.virtual_trackers.cend())
 			                   {
-				                   const auto body_part = parent.joint_body_parts.at(joint);
 				                   auto & tracker = it->second;
 
 				                   // Quest reports VALID bit not TRACKED bit, make sure TRACKED is set when VALID
@@ -240,7 +239,6 @@ void body_joints_list::update_tracking(const wivrn::from_headset::bd_body & trac
 
 		if (auto it = parent.virtual_trackers.find(joint); it != parent.virtual_trackers.cend())
 		{
-			const auto body_part = parent.joint_body_parts.at(joint);
 			auto & tracker = it->second;
 			tracker.update_tracking(tracking.production_timestamp, tracking.timestamp, pose, offset);
 		}
@@ -341,12 +339,13 @@ wivrn_body_tracker::wivrn_body_tracker(xrt_device * hmd, wivrn::wivrn_session & 
 	for (auto & [joint, body_part]: joint_body_parts)
 	{
 		auto & name = body_part_pretty_names.at(body_part);
-		auto [it, success] = virtual_trackers.emplace(std::piecewise_construct,
-		                                              std::forward_as_tuple(joint),
-		                                              std::forward_as_tuple(name, hmd, cnx));
+		[[maybe_unused]] auto [it, success] = virtual_trackers.emplace(std::piecewise_construct,
+		                                                               std::forward_as_tuple(joint),
+		                                                               std::forward_as_tuple(name, hmd, cnx));
 		assert(success);
-		device_add_callback(it->second);
 	}
+	for (auto & [_, dev]: virtual_trackers)
+		device_add_callback(dev);
 	(*this)(*cnx.get_settings());
 }
 

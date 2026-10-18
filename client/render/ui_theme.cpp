@@ -110,10 +110,10 @@ static theme nx()
 	t.accent_hovered = rgb(154, 60, 255); // violet-soft #9a3cff
 	t.accent_active = rgb(102, 0, 219);
 
-	t.background = rgb(10, 7, 20); // deep space field #0a0714
-	t.card = rgb(23, 16, 40);      // panel #171028
+	t.background = rgb(10, 7, 20);    // deep space field #0a0714
+	t.card = rgb(23, 16, 40);         // panel #171028
 	t.card_hovered = rgb(29, 20, 51); // panel-2 #1d1433
-	t.control = rgb(38, 28, 66);   // recessed well, one step above panel-2
+	t.control = rgb(38, 28, 66);      // recessed well, one step above panel-2
 	t.control_hovered = rgb(48, 36, 84);
 	t.control_active = rgb(59, 45, 102);
 

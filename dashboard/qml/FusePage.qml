@@ -13,6 +13,8 @@ Kirigami.ScrollablePage {
     Component.onCompleted: FuseService.connectService()
     Shortcut { sequence: "Ctrl+D"; enabled: root.isCurrentPage; onActivated: { debugWindow.show(); debugWindow.raise(); debugWindow.requestActivate(); } }
     readonly property var pose: FuseService.connected ? FuseService.state : ({})
+    readonly property var liveTracking: FuseService.tracking || ({})
+    readonly property bool liveTrackingConnected: !!liveTracking.enabled && !!liveTracking.connected
     readonly property var observations: pose.observations || []
     readonly property bool cameraOnly: !!pose.camera_only
     readonly property bool wide: width > 850
@@ -71,10 +73,11 @@ Kirigami.ScrollablePage {
                 delegate: Controls.Label { required property string modelData; text: modelData; color: root.muted; font.pixelSize: 11; Layout.fillWidth: true; wrapMode: Text.WordWrap }
             }
             Repeater {
-                model: root.observations
+                model: root.observations.length
                 delegate: RowLayout {
                     id: observationRow
-                    required property var modelData
+                    required property int index
+                    readonly property var modelData: root.observations[index] || ({})
                     Layout.columnSpan: 4
                     Layout.fillWidth: true
                     spacing: 16
@@ -91,23 +94,42 @@ Kirigami.ScrollablePage {
 
     ColumnLayout {
         spacing: 20
-        Controls.Label { text: i18n("BODY TRACKING LAB / OBSERVATION + SIMULATION"); color: "#bc91ff"; font.pixelSize: 11; font.letterSpacing: 1.6; Layout.fillWidth: true; wrapMode: Text.WordWrap }
-        Controls.Label { text: i18n("A little more grounded."); color: root.ink; font.pixelSize: 30; font.weight: Font.DemiBold; Layout.fillWidth: true; wrapMode: Text.WordWrap }
-        Copy { text: i18n("Inspect cameras and WiVRn tracking, calibrate camera lenses, and test assisted or camera-only fusion in a separate simulation.") }
+        Controls.Label { text: i18n("LIVE TRACKING / OBSERVATION + SIMULATION"); color: "#bc91ff"; font.pixelSize: 11; font.letterSpacing: 1.6; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+        Controls.Label { text: i18n("Live headset poses first."); color: root.ink; font.pixelSize: 30; font.weight: Font.DemiBold; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+        Copy { text: i18n("View received WiVRn poses and camera estimates. The optional simulation is a separate test tool.") }
         Flow {
             Layout.fillWidth: true
             spacing: 10
-            Controls.Button { text: i18n("Connect to Fuse"); enabled: !FuseService.busy; onClicked: FuseService.connectService() }
-            Controls.Button { text: FuseService.running ? i18n("Worker running") : i18n("Start local worker"); enabled: FuseService.workerAvailable && !FuseService.running && !FuseService.busy; onClicked: FuseService.startWorker() }
-            Controls.Button { text: FuseService.running ? i18n("Stop worker") : i18n("Disconnect from Fuse"); enabled: (FuseService.running || FuseService.connected) && !FuseService.busy; onClicked: FuseService.stopWorker() }
+            Controls.Button { text: i18n("Connect to Fuse"); enabled: !FuseService.connected; onClicked: FuseService.connectService() }
+            Controls.Button { text: FuseService.running ? i18n("Worker running") : i18n("Start local worker"); enabled: FuseService.workerAvailable && !FuseService.running && !FuseService.connected; onClicked: FuseService.startWorker() }
+            Controls.Button { text: FuseService.running ? i18n("Stop worker") : i18n("Disconnect from Fuse"); enabled: FuseService.running || FuseService.connected; onClicked: FuseService.stopWorker() }
         }
         Copy { text: FuseService.connected ? i18n("Connected to Fuse · observation tools ready · fusion output remains simulated") : i18n("Disconnected. Start the local worker or connect to an existing instance."); color: FuseService.connected ? "#00e5ff" : "#ffcd80" }
         Kirigami.InlineMessage { Layout.fillWidth: true; visible: FuseService.error.length > 0; text: FuseService.error; type: Kirigami.MessageType.Error }
+        Kirigami.InlineMessage {
+            Layout.fillWidth: true
+            visible: !root.liveTrackingConnected
+            type: Kirigami.MessageType.Warning
+            text: root.liveTracking.enabled
+                  ? i18n("Live tracking is enabled but not connected. Launch the tracking lab and connect a headset to see Pico poses.")
+                  : i18n("Live tracking is off. Enable the tracking lab connection to see Pico poses; the panels below are simulation only.")
+        }
         Panel {
             Layout.fillWidth: true
-            contentItem: FuseTrackingView {}
+            contentItem: ColumnLayout {
+                spacing: 10
+                SectionTitle { text: i18n("Live WiVRn tracking · read only") }
+                Copy { text: root.liveTrackingConnected ? i18n("Pico/headset poses received here. No camera correction or VR output is applied by this view.") : i18n("No live Pico poses received yet.") }
+                FuseTrackingView { Layout.fillWidth: true }
+            }
+        }
+        Controls.CheckBox {
+            id: showSimulation
+            text: i18n("Show simulation tools")
+            checked: false
         }
         GridLayout {
+            visible: showSimulation.checked
             Layout.fillWidth: true
             columns: root.wide ? 2 : 1
             columnSpacing: 20
@@ -119,11 +141,11 @@ Kirigami.ScrollablePage {
                 contentItem: ColumnLayout {
                     spacing: 14
                     RowLayout {
-                        SectionTitle { text: i18n("Body observatory") }
+                        SectionTitle { text: i18n("Simulation preview · not live Pico data") }
                         Controls.ComboBox { id: view; model: [i18n("Front"),i18n("Side")]; Accessible.name: i18n("Skeleton viewing direction") }
                     }
                     FuseSkeleton { Layout.fillWidth: true; Layout.preferredHeight: 370; poseData: root.pose; connected: FuseService.connected; sideView: view.currentIndex===1 }
-                    Copy { text: root.cameraOnly ? i18n("Cyan: camera body + VR anchors · Violet: head and hand baseline") : i18n("Cyan: assisted output · Violet: Pico baseline") }
+                    Copy { text: i18n("This synthetic body drawing is a Fuse simulation. It does not display live Pico tracking data or send poses to VR.") }
                     SectionTitle { text: root.sourceName(); color: "#00e5ff" }
                 }
             }
@@ -134,17 +156,17 @@ Kirigami.ScrollablePage {
                 contentItem: ColumnLayout {
                     spacing: 14
                     SectionTitle { text: i18n("Tracking foundation") }
-                    Controls.Switch { text: i18n("Camera-only simulation"); checked: root.cameraOnly; enabled: FuseService.connected && !FuseService.busy; onClicked: FuseService.setControl("camera_only",checked) }
+                    Controls.Switch { text: i18n("Camera-only simulation"); checked: root.cameraOnly; enabled: FuseService.connected; onClicked: FuseService.setControl("camera_only",checked) }
                     Copy { text: i18n("No wearable body trackers. Head and hands remain simulated VR anchors.") }
-                    Controls.Switch { text: i18n("Camera assistance"); checked: !!root.pose.enabled; enabled: FuseService.connected && !FuseService.busy && !root.cameraOnly; onClicked: FuseService.setControl("enabled",checked) }
+                    Controls.Switch { text: i18n("Camera assistance"); checked: !!root.pose.enabled; enabled: FuseService.connected && !root.cameraOnly; onClicked: FuseService.setControl("enabled",checked) }
                     Copy { text: i18n("Correct the synthetic Pico body estimate where camera observations are available.") }
-                    Controls.Switch { text: i18n("Simulate occlusion"); checked: !!root.pose.occluded; enabled: FuseService.connected && !FuseService.busy; onClicked: FuseService.setControl("occluded",checked) }
+                    Controls.Switch { text: i18n("Simulate occlusion"); checked: !!root.pose.occluded; enabled: FuseService.connected; onClicked: FuseService.setControl("occluded",checked) }
                     Copy { text: root.cameraOnly ? i18n("No body tracker fallback. Hidden body joints become unavailable; head and hand anchors remain.") : i18n("Camera loss gradually releases corrections. Disabling assistance immediately restores the Pico baseline.") }
                     SectionTitle { text: i18n("Camera devices") }
                     Copy { text: i18n("Capture starts only from the camera preview controls below. Video nodes may include metadata endpoints.") }
                     Repeater {
-                        model: FuseService.devices || []
-                        delegate: Copy { required property var modelData; text: (modelData.name || modelData.id)+" · "+(modelData.streaming ? i18n("streaming") : i18n("stopped")) }
+                        model: (FuseService.devices || []).length
+                        delegate: Copy { required property int index; readonly property var modelData: FuseService.devices[index] || ({}); text: (modelData.name || modelData.id)+" · "+(modelData.streaming ? i18n("streaming") : i18n("stopped")) }
                     }
                     Copy { visible: !(FuseService.devices || []).length; text: i18n("No discovered video devices. Simulation needs no camera.") }
                 }

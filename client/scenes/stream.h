@@ -20,7 +20,9 @@
 #pragma once
 
 #include "app_launcher.h"
+#include "application.h"
 #include "audio/audio.h"
+#include "configuration.h"
 #include "constants.h"
 #include "decoder/dejitter.h"
 #include "decoder/shard_accumulator.h"

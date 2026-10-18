@@ -86,7 +86,7 @@ std::optional<wivrn::video_encoder::data> video_encoder_ffmpeg::encode(uint8_t s
 	// intra refresh or reference invalidation on for the FFmpeg encoders, because none of
 	// them exposes a control for either (see video_encoder_va.cpp). Both map to a plain P
 	// frame anyway, which is what they are.
-	bool is_idr = idr_handler.get_type(frame_index) == default_idr_handler::frame_type::i;
+	bool is_idr = idr_handler.get_type(frame_index, stream_idx) == default_idr_handler::frame_type::i;
 
 	std::shared_ptr<AVPacket> enc_pkt(av_packet_alloc(), [](AVPacket * d) { av_packet_free(&d); });
 	int err;

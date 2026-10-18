@@ -18,6 +18,7 @@
  */
 
 #include "lobby.h"
+
 #include "application.h"
 #include "configuration.h"
 #include "constants.h"
@@ -62,6 +63,10 @@
 #include "wivrn_config.h"
 #if WIVRN_FEATURE_RENDERDOC
 #include "vk/renderdoc.h"
+#endif
+
+#ifdef __ANDROID__
+#include "android/usb.h"
 #endif
 
 using namespace std::chrono_literals;
@@ -198,6 +203,16 @@ static std::string ip_address_to_string(const in6_addr & addr)
 	return buf;
 }
 
+static std::string ip_address_to_string(const sockaddr_in & addr)
+{
+	return ip_address_to_string(addr.sin_addr);
+}
+
+static std::string ip_address_to_string(const sockaddr_in6 & addr)
+{
+	return ip_address_to_string(addr.sin6_addr);
+}
+
 std::unique_ptr<wivrn_session> scenes::lobby::connect_to_session(wivrn_discover::service service, bool manual_connection)
 {
 	if (!manual_connection)
@@ -239,12 +254,18 @@ std::unique_ptr<wivrn_session> scenes::lobby::connect_to_session(wivrn_discover:
 		{
 			switch (i->ai_family)
 			{
-				case AF_INET:
-					service.addresses.push_back(((sockaddr_in *)i->ai_addr)->sin_addr);
-					break;
-				case AF_INET6:
-					service.addresses.push_back(((sockaddr_in6 *)i->ai_addr)->sin6_addr);
-					break;
+				case AF_INET: {
+					auto addr = (sockaddr_in *)i->ai_addr;
+					addr->sin_port = htons(service.port);
+					service.addresses.push_back({.address = *addr});
+				}
+				break;
+				case AF_INET6: {
+					auto addr = (sockaddr_in6 *)i->ai_addr;
+					addr->sin6_port = htons(service.port);
+					service.addresses.push_back({.address = *addr});
+				}
+				break;
 			}
 		}
 
@@ -252,22 +273,22 @@ std::unique_ptr<wivrn_session> scenes::lobby::connect_to_session(wivrn_discover:
 	}
 
 	std::string error;
-	for (const std::variant<in_addr, in6_addr> & address: service.addresses)
+	for (const auto & entry: service.addresses)
 	{
-		std::string address_string = std::visit([](auto & address) {
+		std::string address_string = std::visit([](const auto & address) {
 			return ip_address_to_string(address);
 		},
-		                                        address);
+		                                        entry.address);
 
 		struct connection_cancelled
 		{};
 
 		try
 		{
-			spdlog::debug("Connection to {}", address_string);
+			spdlog::info("Connection to {}", address_string);
 
 			return std::visit([this, &service](auto & address) {
-				return std::make_unique<wivrn_session>(address, service.port, service.tcp_only, keypair, [&](int fd) {
+				return std::make_unique<wivrn_session>(address, service.tcp_only, keypair, [&](int fd) {
 					auto request = pin_request.lock();
 					request->pin_requested = true;
 					request->pin_cancelled = false;
@@ -309,7 +330,7 @@ std::unique_ptr<wivrn_session> scenes::lobby::connect_to_session(wivrn_discover:
 					return request->pin;
 				});
 			},
-			                  address);
+			                  entry.address);
 		}
 		catch (connection_cancelled)
 		{
@@ -339,6 +360,11 @@ void scenes::lobby::update_server_list()
 {
 	if (not discover)
 		return;
+
+#ifdef __ANDROID__
+	if (usb_link_properties_changed())
+		discover.emplace();
+#endif
 
 	std::vector<wivrn_discover::service> discovered_services = discover->get_services();
 
@@ -513,57 +539,54 @@ void scenes::lobby::update_lobby_animation(const XrFrameState & frame_state)
 
 std::optional<glm::vec3> scenes::lobby::check_recenter_gesture(
         xr::spaces space,
-        const std::optional<std::array<xr::hand_tracker::joint, XR_HAND_JOINT_COUNT_EXT>> & joints,
+        const xr::hand_tracker::joint_array & joints,
         const std::pair<glm::vec3, glm::quat> & head_pose)
 {
 	if (recentering_context and std::get<0>(*recentering_context) != space)
 		return std::nullopt;
 
-	if (joints)
+	const auto & palm = joints[XR_HAND_JOINT_PALM_EXT].first;
+	const auto palm_y = glm::rotate(glm_cast(palm.pose.orientation), glm::vec3(0, 1, 0));
+
+	for (XrHandJointEXT index: {
+	             XR_HAND_JOINT_INDEX_PROXIMAL_EXT,
+	             XR_HAND_JOINT_INDEX_INTERMEDIATE_EXT,
+	             XR_HAND_JOINT_INDEX_DISTAL_EXT,
+
+	             XR_HAND_JOINT_MIDDLE_PROXIMAL_EXT,
+	             XR_HAND_JOINT_MIDDLE_INTERMEDIATE_EXT,
+	             XR_HAND_JOINT_MIDDLE_DISTAL_EXT,
+
+	             XR_HAND_JOINT_RING_PROXIMAL_EXT,
+	             XR_HAND_JOINT_RING_INTERMEDIATE_EXT,
+	             XR_HAND_JOINT_RING_DISTAL_EXT,
+
+	             XR_HAND_JOINT_LITTLE_PROXIMAL_EXT,
+	             XR_HAND_JOINT_LITTLE_INTERMEDIATE_EXT,
+	             XR_HAND_JOINT_LITTLE_DISTAL_EXT,
+	     })
 	{
-		const auto & palm = (*joints)[XR_HAND_JOINT_PALM_EXT].first;
-		const auto palm_y = glm::rotate(glm_cast(palm.pose.orientation), glm::vec3(0, 1, 0));
+		const auto fingertip_y = glm::rotate(glm_cast(joints[index].first.pose.orientation), glm::vec3(0, 1, 0));
 
-		for (XrHandJointEXT index: {
-		             XR_HAND_JOINT_INDEX_PROXIMAL_EXT,
-		             XR_HAND_JOINT_INDEX_INTERMEDIATE_EXT,
-		             XR_HAND_JOINT_INDEX_DISTAL_EXT,
-
-		             XR_HAND_JOINT_MIDDLE_PROXIMAL_EXT,
-		             XR_HAND_JOINT_MIDDLE_INTERMEDIATE_EXT,
-		             XR_HAND_JOINT_MIDDLE_DISTAL_EXT,
-
-		             XR_HAND_JOINT_RING_PROXIMAL_EXT,
-		             XR_HAND_JOINT_RING_INTERMEDIATE_EXT,
-		             XR_HAND_JOINT_RING_DISTAL_EXT,
-
-		             XR_HAND_JOINT_LITTLE_PROXIMAL_EXT,
-		             XR_HAND_JOINT_LITTLE_INTERMEDIATE_EXT,
-		             XR_HAND_JOINT_LITTLE_DISTAL_EXT,
-		     })
+		if (glm::dot(palm_y, fingertip_y) < constants::lobby::recenter_cos_fingertip_angle_max)
 		{
-			const auto fingertip_y = glm::rotate(glm_cast((*joints)[index].first.pose.orientation), glm::vec3(0, 1, 0));
-
-			if (glm::dot(palm_y, fingertip_y) < constants::lobby::recenter_cos_fingertip_angle_max)
-			{
-				recentering_context.reset();
-				return std::nullopt;
-			}
+			recentering_context.reset();
+			return std::nullopt;
 		}
+	}
 
-		const auto q = glm_cast(palm.pose.orientation);
-		const auto x = glm_cast(palm.pose.position);
+	const auto q = glm_cast(palm.pose.orientation);
+	const auto x = glm_cast(palm.pose.position);
 
-		// Make the up vector orthogonal to forward
-		const glm::vec3 forward = glm::rotate(head_pose.second, glm::vec3{0, 0, -1});
-		const glm::vec3 up = glm::normalize(glm::vec3{0, 1, 0} - forward * glm::dot(forward, {0, 1, 0}));
+	// Make the up vector orthogonal to forward
+	const glm::vec3 forward = glm::rotate(head_pose.second, glm::vec3{0, 0, -1});
+	const glm::vec3 up = glm::normalize(glm::vec3{0, 1, 0} - forward * glm::dot(forward, {0, 1, 0}));
 
-		// Y is pointing to the back of the hand
-		if (glm::dot(q * glm::vec3(0, -1, 0), up) > constants::lobby::recenter_cos_palm_angle_min)
-		{
-			recentering_context.emplace(space, glm::vec3{}, 0);
-			return x + glm::rotate(q, glm::vec3{0, -constants::lobby::recenter_distance_up, -constants::lobby::recenter_distance_front});
-		}
+	// Y is pointing to the back of the hand
+	if (glm::dot(q * glm::vec3(0, -1, 0), up) > constants::lobby::recenter_cos_palm_angle_min)
+	{
+		recentering_context.emplace(space, glm::vec3{}, 0);
+		return x + glm::rotate(q, glm::vec3{0, -constants::lobby::recenter_distance_up, -constants::lobby::recenter_distance_front});
 	}
 
 	recentering_context.reset();
@@ -731,7 +754,7 @@ static void stick_finger_to_gui(std::array<xr::hand_tracker::joint, XR_HAND_JOIN
 	std::vector<std::pair<glm::vec3, float>> intersections; // Target position of the finger tip, distance to the GUI plane
 	for (const imgui_context::window_viewport & layer: layers)
 	{
-		// Ignore layers that are not absolutely positionned
+		// Ignore layers that are not absolutely positioned
 		if (layer.space != xr::spaces::world)
 			continue;
 
@@ -1035,10 +1058,23 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 	renderdoc_begin(*vk_instance);
 #endif
 
-	XrSpace world_space = application::space(xr::spaces::world);
+	// Locating everything against this instead of the raw world space lets the configured
+	// player height offset be previewed here, the same shift a stream would apply.
+	if (float offset = application::get_config().get_height_offset(); not height_offset_space or offset != applied_height_offset)
+	{
+		applied_height_offset = offset;
+		height_offset_space = session.create_reference_space(XR_REFERENCE_SPACE_TYPE_STAGE, {{0, 0, 0, 1}, {0, -offset, 0}});
+	}
+	XrSpace world_space = height_offset_space;
 	auto [flags, views] = session.locate_views(viewconfig, frame_state.predictedDisplayTime, world_space);
 	// assert(views.size() == swapchains_lobby.size());
 	assert(views.size() == 2); // FIXME
+
+	if (not(flags & XR_VIEW_STATE_POSITION_VALID_BIT and flags & XR_VIEW_STATE_ORIENTATION_VALID_BIT))
+	{
+		spdlog::warn("Invalid view state, skip frame");
+		return;
+	}
 
 	bool hide_left_controller = false;
 	bool hide_right_controller = false;
@@ -1057,26 +1093,28 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 		auto windows = imgui_ctx->windows();
 
 		auto left = left_hand->locate(world_space, frame_state.predictedDisplayTime);
-		if (left)
+		if (left.joints)
 		{
-			stick_finger_to_gui(*left, windows);
+			if (left.is_input_source())
+				stick_finger_to_gui(*left.joints, windows);
 			hide_left_controller = true;
 		}
 
 		auto right = right_hand->locate(world_space, frame_state.predictedDisplayTime);
-		if (right)
+		if (right.joints)
 		{
-			stick_finger_to_gui(*right, windows);
+			if (right.is_input_source())
+				stick_finger_to_gui(*right.joints, windows);
 			hide_right_controller = true;
 		}
 
-		hand_model::apply(world, left, right);
+		hand_model::apply(world, left.joints ? &*left.joints : nullptr, right.joints ? &*right.joints : nullptr);
 
-		if (not new_gui_position and head_position)
-			new_gui_position = check_recenter_gesture(xr::spaces::palm_left, left, *head_position);
+		if (not new_gui_position and head_position and left.joints and left.is_input_source())
+			new_gui_position = check_recenter_gesture(xr::spaces::palm_left, *left.joints, *head_position);
 
-		if (not new_gui_position and head_position)
-			new_gui_position = check_recenter_gesture(xr::spaces::palm_right, right, *head_position);
+		if (not new_gui_position and head_position and right.joints and right.is_input_source())
+			new_gui_position = check_recenter_gesture(xr::spaces::palm_right, *right.joints, *head_position);
 	}
 
 	if (head_position and new_gui_position)
@@ -1548,6 +1586,7 @@ scene::meta & scenes::lobby::get_meta_scene()
 	                                "/interaction_profiles/bytedance/pico4s_controller",
 	                                "/interaction_profiles/yvr/touch_controller_yvr",
 	                                "/interaction_profiles/htc/vive_focus3_controller",
+	                                "/interaction_profiles/valve/frame_controller_valve",
 	                        },
 	                        {
 	                                {"left_aim", "/user/hand/left/input/aim/pose"},

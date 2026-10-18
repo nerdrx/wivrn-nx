@@ -17,8 +17,6 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#define IMGUI_DEFINE_MATH_OPERATORS
-
 #include "stream.h"
 
 #include "application.h"
@@ -35,7 +33,7 @@
 #include "transport_rates.h"
 #include "utils/i18n.h"
 #include "utils/ranges.h"
-#include <IconsFontAwesome6.h>
+#include <IconsFontAwesome7.h>
 #include <chrono>
 #include <cmath>
 #include <glm/ext.hpp>
@@ -233,8 +231,11 @@ void scenes::stream::gui_performance_metrics()
 			std::string title_with_units = std::string(title) + " [" + prefix + unit + "]";
 			ImPlot::SetupAxes(nullptr, title_with_units.c_str(), ImPlotAxisFlags_NoDecorations, 0);
 			ImPlot::SetupAxesLimits(0, global_metrics.size() - 1, min_v * multiplier, axis_scale[n] * multiplier, ImGuiCond_Always);
-			ImPlot::SetNextLineStyle(color);
-			ImPlot::SetNextFillStyle(color, 0.25);
+			ImPlotSpec spec;
+			spec.LineColor = color;
+			spec.FillColor = color;
+			spec.FillAlpha = 0.25;
+			spec.Flags = ImPlotLineFlags_Shaded;
 
 			for (const auto & [subtitle, data]: subplots)
 			{
@@ -243,12 +244,12 @@ void scenes::stream::gui_performance_metrics()
 				        .stride = sizeof(global_metric),
 				        .multiplier = multiplier,
 				};
-				ImPlot::PlotLineG(subtitle.c_str(), getter, &gdata, global_metrics.size(), ImPlotLineFlags_Shaded);
+				ImPlot::PlotLineG(subtitle.c_str(), getter, &gdata, global_metrics.size(), spec);
 
 				double x[] = {double(metrics_offset), double(metrics_offset)};
 				double y[] = {0, axis_scale[n] * multiplier};
-				ImPlot::SetNextLineStyle(ImVec4(1, 1, 1, 1));
-				ImPlot::PlotLine("", x, y, 2);
+				spec.LineColor = ImVec4(1, 1, 1, 1);
+				ImPlot::PlotLine("", x, y, 2, spec);
 			}
 			ImPlot::EndPlot();
 		}
@@ -342,8 +343,7 @@ void scenes::stream::gui_performance_metrics()
 
 			double x[] = {double(metrics_offset), double(metrics_offset)};
 			double y[] = {0, 1e9};
-			ImPlot::SetNextLineStyle(ImVec4(1, 1, 1, 1));
-			ImPlot::PlotLine("", x, y, 2);
+			ImPlot::PlotLine("", x, y, 2, {ImPlotProp_LineColor, ImVec4(1, 1, 1, 1)});
 
 			ImPlot::EndPlot();
 		}
@@ -528,16 +528,18 @@ void scenes::stream::gui_transport()
 			        .stride = sizeof(transport_metric),
 			        .multiplier = multiplier,
 			};
-			ImPlot::SetNextLineStyle(p.color);
-			ImPlot::SetNextFillStyle(p.color, 0.2f);
-			ImPlot::PlotLineG("", getter, &gdata, transport_metrics.size(), ImPlotLineFlags_Shaded);
+			ImPlotSpec spec;
+			spec.LineColor = p.color;
+			spec.FillColor = p.color;
+			spec.FillAlpha = 0.2f;
+			spec.Flags = ImPlotLineFlags_Shaded;
+			ImPlot::PlotLineG("", getter, &gdata, transport_metrics.size(), spec);
 		}
 
 		// Where the ring wraps, i.e. the present
 		double x[] = {double(transport_offset), double(transport_offset)};
 		double y[] = {0, 1e12};
-		ImPlot::SetNextLineStyle(t.border);
-		ImPlot::PlotLine("", x, y, 2);
+		ImPlot::PlotLine("", x, y, 2, {ImPlotProp_LineColor, t.border});
 
 		ImPlot::EndPlot();
 	};
@@ -852,8 +854,6 @@ void scenes::stream::gui_transport()
 
 void scenes::stream::gui_compact_view()
 {
-	const auto & metrics = global_metrics[(metrics_offset + global_metrics.size() - 1) % global_metrics.size()];
-
 	if (ImGui::BeginTable("metrics", 2))
 	{
 		auto f = [&](const char * label, float value, const char * unit) {
@@ -1647,10 +1647,12 @@ void scenes::stream::draw_gui(XrTime predicted_display_time, XrDuration predicte
 			auto left = left_hand->locate(world_space, predicted_display_time);
 			auto right = right_hand->locate(world_space, predicted_display_time);
 
-			if (left and xr::hand_tracker::check_flags(*left, XR_SPACE_LOCATION_POSITION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT, 0))
+			if (left.joints and left.is_input_source() and
+			    xr::hand_tracker::check_flags(*left.joints, XR_SPACE_LOCATION_POSITION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT, 0))
 				hide_left_controller = true;
 
-			if (right and xr::hand_tracker::check_flags(*right, XR_SPACE_LOCATION_POSITION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT, 0))
+			if (right.joints and right.is_input_source() and
+			    xr::hand_tracker::check_flags(*right.joints, XR_SPACE_LOCATION_POSITION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT, 0))
 				hide_right_controller = true;
 		}
 

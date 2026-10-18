@@ -245,21 +245,22 @@ public:
 		if (config.codec == video_codec::raw or config.name == encoder_raw)
 			return {encoder_raw, video_codec::raw};
 
-#if WIVRN_USE_NVENC
-		if ((nvidia and config.name.empty()) or config.name == encoder_nvenc)
+		std::vector<video_codec> codecs;
+		if (config.codec)
 		{
-			for (auto codec: config.codec ? std::vector{*config.codec} : info.supported_codecs)
-			{
-				if (check_nvenc(codec))
-					return {encoder_nvenc, codec};
-			}
+			codecs.push_back(*config.codec);
 		}
-#endif
+		else
+		{
+			codecs.reserve(info.supported_codecs.size());
+			for (const auto & capability: info.supported_codecs)
+				codecs.push_back(capability.codec);
+		}
 
 #if WIVRN_USE_VULKAN_ENCODE
 		if (config.name.empty() or config.name == encoder_vulkan)
 		{
-			for (auto codec: config.codec ? std::vector{*config.codec} : info.supported_codecs)
+			for (auto codec: codecs)
 			{
 				if (has_vk(codec))
 					return {encoder_vulkan, codec};
@@ -267,10 +268,21 @@ public:
 		}
 #endif
 
+#if WIVRN_USE_NVENC
+		if ((nvidia and config.name.empty()) or config.name == encoder_nvenc)
+		{
+			for (auto codec: codecs)
+			{
+				if (check_nvenc(codec))
+					return {encoder_nvenc, codec};
+			}
+		}
+#endif
+
 #if WIVRN_USE_VAAPI
 		if (config.name.empty() or config.name == encoder_vaapi)
 		{
-			for (auto codec: config.codec ? std::vector{*config.codec} : info.supported_codecs)
+			for (auto codec: codecs)
 			{
 				if (check_vaapi(codec))
 					return {encoder_vaapi, codec};
@@ -368,12 +380,24 @@ std::array<encoder_settings, num_streams> get_encoder_settings(wivrn::vk_bundle 
 	if (bit_depth and bit_depth != 8 and bit_depth != 10)
 		throw std::runtime_error("invalid bit-depth setting. supported values: 8, 10");
 
+	const bool all_encoders_10bit = std::ranges::all_of(res, [&](const encoder_settings & encoder) {
+		auto it = std::ranges::find(info.supported_codecs, encoder.codec, &video_codec_capability::codec);
+		return it != info.supported_codecs.end() and it->supports_10bit;
+	});
+
 	auto enabled_encoders = res | std::views::filter(&encoder_settings::enabled);
 	if (std::ranges::contains(enabled_encoders, video_codec::h264, &encoder_settings::codec) or
 	    std::ranges::contains(enabled_encoders, video_codec::raw, &encoder_settings::codec))
 		bit_depth = 8;
+	else if (bit_depth == 10 and not all_encoders_10bit)
+	{
+		U_LOG_I("Using 8-bit encoding due to mixed encoder support.");
+		bit_depth = 8;
+	}
 	else if (not bit_depth)
-		bit_depth = 10;
+	{
+		bit_depth = all_encoders_10bit ? 10 : 8;
+	}
 
 	auto check_format = [&](vk::Format format) {
 		try

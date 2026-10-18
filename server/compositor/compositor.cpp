@@ -457,7 +457,7 @@ xrt_result_t compositor::mark_frame(int64_t frame_id,
 	switch (point)
 	{
 		case XRT_COMPOSITOR_FRAME_POINT_WOKE:
-			session.dump_time("wake_up", frame_id, when_ns);
+			trace::instant_feedback("wake_up", when_ns, frame_id);
 			return XRT_SUCCESS;
 		default:
 			assert(false);
@@ -741,7 +741,7 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	images[i].quad_info = promoted ? std::optional(promoted->info) : std::nullopt;
 	quad_last_swapchain = promoted ? promoted->swapchain : nullptr;
 
-	session.dump_time("begin", frame.rendering.id, os_monotonic_get_ns());
+	trace::instant_feedback("begin", os_monotonic_get_ns(), frame.rendering.id);
 
 	cmd_pool.reset();
 	cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
@@ -1042,7 +1042,7 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 		        info.frame_id);
 	}
 
-	auto j = encode_request.exchange(i);
+	[[maybe_unused]] auto j = encode_request.exchange(i);
 	encode_request.notify_all();
 	assert(j == -1);
 
@@ -1436,6 +1436,8 @@ xrt_result_t compositor::get_view_config(
 			}
 			return XRT_SUCCESS;
 		case XRT_VIEW_TYPE_QUAD:
+		case XRT_VIEW_TYPE_INVALID:
+		case XRT_VIEW_TYPE_MAX:
 			return XRT_ERROR_UNSUPPORTED_VIEW_TYPE;
 	}
 	return XRT_ERROR_UNSUPPORTED_VIEW_TYPE;

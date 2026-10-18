@@ -39,7 +39,7 @@ XrTime wivrn::clock_offset::from_headset(XrTime timestamp) const
 	return timestamp - b;
 }
 
-static int bind_receiver(const char * path)
+static int bind_receiver(const char * path, mode_t mode = 0600)
 {
 	int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
 	sockaddr_un address{};
@@ -47,24 +47,22 @@ static int bind_receiver(const char * path)
 	std::strncpy(address.sun_path, path, sizeof(address.sun_path) - 1);
 	if (bind(fd, reinterpret_cast<sockaddr *>(&address), sizeof(address)) != 0)
 		return -1;
-	chmod(path, 0600);
+	chmod(path, mode);
 	timeval timeout{.tv_sec = 1, .tv_usec = 0};
 	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 	return fd;
 }
 
-static void print_packet(int fd)
+static bool print_packet(int fd)
 {
 	std::array<unsigned char, 4096> bytes{};
 	const auto count = recv(fd, bytes.data(), bytes.size(), 0);
 	if (count <= 0)
-	{
-		std::fprintf(stderr, "tap packet timeout\n");
-		std::exit(2);
-	}
+		return false;
 	for (int i = 0; i < count; ++i)
 		std::printf("%02x", bytes[size_t(i)]);
 	std::putchar('\n');
+	return true;
 }
 
 static from_headset::tracking anchors()
@@ -97,12 +95,18 @@ int main(int argc, char ** argv)
 	disabled.emit_tracking(tracking, offset, 1);
 
 	setenv("NX_FUSE_TAP", argv[1], 1);
-	const int receiver = bind_receiver(argv[1]);
+	unlink(argv[1]);
+	const int receiver = bind_receiver(argv[1], 0666);
 	if (receiver < 0)
 		return 3;
 	nx_fuse_tap tap;
+	// Tap may start before its private worker socket is safely ready.
+	tap.emit_tracking(anchors(), offset, tap.current_generation());
+	chmod(argv[1], 0600);
+	usleep(1'500'000);
 	tap.emit_tracking(tracking, offset, tap.current_generation());
-	print_packet(receiver);
+	if (!print_packet(receiver))
+		return 2;
 
 	from_headset::bd_body bd{};
 	bd.timestamp = os_monotonic_get_ns();
@@ -112,7 +116,7 @@ int main(int argc, char ** argv)
 	bd.joints[XRT_BODY_JOINT_PELVIS_BD].orientation = packed_quaternion::from_quaternion({.w = 1});
 	bd.joints[XRT_BODY_JOINT_PELVIS_BD].flags = 0xff;
 	tap.emit_bd(bd, offset, tap.current_generation());
-	print_packet(receiver);
+	if (!print_packet(receiver)) return 2;
 
 	from_headset::htc_body htc{};
 	htc.timestamp = os_monotonic_get_ns();
@@ -120,7 +124,7 @@ int main(int argc, char ** argv)
 	htc.poses[0].pose.position.x = 4;
 	htc.poses[0].flags = 0xff;
 	tap.emit_htc(htc, offset, tap.current_generation());
-	print_packet(receiver);
+	if (!print_packet(receiver)) return 2;
 
 	const auto old_generation = tap.current_generation();
 	tap.recenter();
@@ -128,7 +132,19 @@ int main(int argc, char ** argv)
 		return 4;
 	tracking.timestamp = os_monotonic_get_ns();
 	tap.emit_tracking(tracking, offset, tap.current_generation());
-	print_packet(receiver);
+	if (!print_packet(receiver)) return 2;
 	close(receiver);
+	unlink(argv[1]);
+	// Replacing worker socket must recover without changing sequence or generation.
+	usleep(1'500'000);
+	const int replacement = bind_receiver(argv[1]);
+	if (replacement < 0)
+		return 5;
+	tap.emit_tracking(tracking, offset, tap.current_generation());
+	usleep(1'500'000);
+	tap.emit_tracking(tracking, offset, tap.current_generation());
+	if (!print_packet(replacement))
+		return 5;
+	close(replacement);
 	return 0;
 }

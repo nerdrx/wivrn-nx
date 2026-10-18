@@ -2,6 +2,7 @@ set(U_GIT_TAG_CPP "${CMAKE_BINARY_DIR}/u_git_tag.cpp")
 
 set(XRT_BUILD_DRIVER_ARDUINO            OFF)
 set(XRT_BUILD_DRIVER_BLUBUR_S1          OFF)
+set(XRT_BUILD_DRIVER_CONTACTGLOVE       OFF)
 set(XRT_BUILD_DRIVER_DAYDREAM           OFF)
 set(XRT_BUILD_DRIVER_EUROC              OFF)
 set(XRT_BUILD_DRIVER_HDK                OFF)
@@ -12,6 +13,7 @@ set(XRT_BUILD_DRIVER_OPENGLOVES         OFF)
 set(XRT_BUILD_DRIVER_PSMV               OFF)
 set(XRT_BUILD_DRIVER_PSSENSE            OFF)
 set(XRT_BUILD_DRIVER_PSVR               OFF)
+set(XRT_BUILD_DRIVER_PSVR2              OFF)
 set(XRT_BUILD_DRIVER_QWERTY             OFF)
 set(XRT_BUILD_DRIVER_REMOTE             OFF)
 set(XRT_BUILD_DRIVER_RIFT               OFF)
@@ -21,6 +23,7 @@ set(XRT_BUILD_DRIVER_SIMULATED          OFF)
 set(XRT_BUILD_DRIVER_STEAMVR_LIGHTHOUSE ${WIVRN_FEATURE_STEAMVR_LIGHTHOUSE})
 set(XRT_BUILD_DRIVER_SOLARXR            ${WIVRN_FEATURE_SOLARXR})
 set(XRT_BUILD_DRIVER_TWRAP              OFF)
+set(XRT_BUILD_DRIVER_UVC                OFF)
 set(XRT_BUILD_DRIVER_VF                 OFF)
 set(XRT_BUILD_DRIVER_VIVE               OFF)
 set(XRT_BUILD_DRIVER_WMR                OFF)
@@ -49,6 +52,8 @@ set(XRT_FEATURE_OPENXR_INTERACTION_VIVE_FOCUS3   ON)
 set(XRT_FEATURE_OPENXR_INTERACTION_TOUCH_PRO     ON)
 set(XRT_FEATURE_OPENXR_INTERACTION_TOUCH_PLUS    ON)
 set(XRT_FEATURE_OPENXR_LAYER_COLOR_SCALE_BIAS    ON)
+set(XRT_FEATURE_OPENXR_LAYER_DEPTH              OFF)
+set(XRT_FEATURE_OPENXR_VARJO_QUAD_VIEWS         OFF)
 
 set(XRT_HAVE_BLUETOOTH               OFF)
 set(XRT_HAVE_GST                     OFF)
@@ -121,6 +126,8 @@ if (WIVRN_BUILD_SERVER)
 			driver/bitrate_controller.cpp
 			driver/clock_offset.cpp
 			driver/nx_fuse_tap.cpp
+			driver/nx_fuse_corrections.cpp
+			driver/nx_fuse_tracker.cpp
 			driver/configuration.cpp
 			driver/hand_joints_list.cpp
 			driver/pose_list.cpp
@@ -285,6 +292,10 @@ if (WIVRN_BUILD_SERVER)
 		)
 
 	target_compile_definitions(wivrn-server PRIVATE JSON_DIAGNOSTICS=1)
+	# Keep direct server builds aligned with the OpenXR runtime they ship.
+	if (TARGET openxr_wivrn)
+		add_dependencies(wivrn-server openxr_wivrn)
+	endif()
 
 	configure_file(dist/wivrn.service.in wivrn.service)
 	install(FILES ${CMAKE_CURRENT_BINARY_DIR}/wivrn.service

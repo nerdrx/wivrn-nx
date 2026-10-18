@@ -38,6 +38,7 @@ Build-Depends:
  mesa-common-dev,
  nlohmann-json3-dev,
  qt6-base-dev,
+ qt6-multimedia-dev,
  qt6-tools-dev,
  qcoro-qt6-dev,
  xz-utils

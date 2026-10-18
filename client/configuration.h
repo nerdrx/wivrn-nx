@@ -51,6 +51,12 @@ enum class feature
 	body_tracking,
 };
 
+enum class posture
+{
+	standing,
+	seated,
+};
+
 class configuration
 {
 public:
@@ -67,7 +73,7 @@ public:
 	std::map<std::string, server_data> servers;
 	float preferred_refresh_rate = 0;
 	std::optional<float> minimum_refresh_rate;
-	float resolution_scale = 1.0;
+	float resolution_scale = 1.2;
 	std::optional<wivrn::video_codec> codec;
 	uint32_t bitrate_bps = 50'000'000;
 	// Let the server adapt the bitrate to the link quality, using bitrate_bps as the maximum
@@ -292,6 +298,8 @@ public:
 	bool reduce_gpu_load = false;
 
 	bool passthrough_enabled = false;
+	// XR_META_boundary_visibility, the boundary is always shown outside passthrough
+	bool passthrough_boundary_enabled = false;
 	bool mic_unprocessed_audio = false;
 
 	// Send audio on the same loss-tolerant path as the video instead of sharing the
@@ -349,6 +357,8 @@ public:
 	bool high_power_mode = true;
 	uint32_t fps_divider = 1;
 
+	bool usb_network = false;
+
 	// Allow unsafe config values
 	bool extended_config = false;
 
@@ -359,10 +369,16 @@ public:
 	bool check_feature(feature f) const;
 	void set_feature(feature f, bool state);
 
+	static constexpr float default_height_offset_standing = 0;
+	static constexpr float default_height_offset_seated = 0.45;
+
 private:
 	mutable std::mutex mutex;
 	std::map<feature, bool> features;
 	std::optional<float> stream_scale;
+	float height_offset_standing = default_height_offset_standing;
+	float height_offset_seated = default_height_offset_seated;
+	posture default_posture = posture::standing;
 
 	// table of scalar settings shared by save()/load(); non-scalar settings are explicit
 	static const std::vector<config_field> & config_fields();
@@ -376,6 +392,12 @@ public:
 	void set_stream_scale(float);
 	float get_stream_scale() const;
 	float get_default_stream_scale() const;
+
+	float get_height_offset() const;
+	void set_height_offset(float);
+
+	posture get_posture() const;
+	void set_posture(posture);
 
 	uint32_t max_bitrate(bool extended) const
 	{

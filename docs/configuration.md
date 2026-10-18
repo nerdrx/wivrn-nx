@@ -1,6 +1,6 @@
 # Configurable items
 
-Configuration is done on server side.
+Configuration is split between headset and server. Headset contains most configuration, while server has system specific items such as encoders and paths.
 Files are read from
 - `/usr/share/wivrn/config.json` (where `/usr` is selected at configure time with `CMAKE_INSTALL_PREFIX`)
 - `/etc/wivrn/config.json`
@@ -13,9 +13,9 @@ If you installed WiVRn from a flatpack, the config is in `$HOME/.var/app/io.gith
 All elements are optional and have default values.
 
 ## `bit-depth`
-Default value: `8` (bits)
+Default value: 10-bit if supported by the selected codec, encoder and decoder. 8-bit otherwise.
 
-Bit depth of the video. 8-bit is supported by all encoders. 10-bit is supported by `vaapi` and `nvenc` encoders using `h265` or `av1`.
+Bit depth of the video. 8-bit is supported by all encoders. 10-bit is supported by `vulkan`, `vaapi` and `nvenc` with `h265` or `av1` codecs.
 
 ## `bitrate-auto`
 Default value: `true`
@@ -334,13 +334,13 @@ When a string it is used, it is equivalent to the `encoder` item of the object.
 WiVRn encodes each eye separately, and the alpha channel as one for both eyes. Each stream is processed independently, this may use resources more effectively and reduce latency.
 
 ### `encoder`
-Default value: `nvenc` if Nvidia GPU and compiled with nvenc, `vaapi` for all other GPU when compiled with ffmpeg, else `x264`.
+Default value, in order: `vulkan` if supported, `nvenc` on Nvidia GPU, `vaapi` on all other GPU, else `x264`.
 
 Identifier of the encoder, one of
 * `x264`: software encoding
 * `nvenc`: Nvidia hardware encoding
 * `vaapi`: AMD/Intel hardware encoding
-* `vulkan`: experimental, for any GPU that supports vulkan video encode
+* `vulkan`: Vulkan Video encode, cross-vendor hardware encoding
 
 ### `codec`
 Default value: best supported by both headset and encoder of `av1`, `h264`, `h265`.
@@ -534,9 +534,16 @@ Enables the Monado debug gui.
 ## `use-steamvr-lh`
 Default value: `false`
 
-Only available when built with `WIVRN_FEATURE_STEAMVR_LIGHTHOUSE`
+Only available when built with `WIVRN_FEATURE_STEAMVR_LIGHTHOUSE`.
 
 Enables the driver to load SteamVR Lighthouse devices.
+
+## `lh-max-extrapolation`
+Default value: unset
+
+Only available when built with `WIVRN_FEATURE_STEAMVR_LIGHTHOUSE`.
+
+Maximum time in milliseconds that poses may be extrapolated ahead for SteamVR Lighthouse devices.
 
 ## `lh-stick-deadzone`
 Default value: `0`

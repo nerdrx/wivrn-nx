@@ -40,7 +40,7 @@ void default_idr_handler::on_feedback(const from_headset::feedback & f)
 			                   if (f.sent_to_decoder)
 			                   {
 				                   U_LOG_D("IDR frame received, stream %d", f.stream_index);
-				                   state = idr_received{};
+				                   state = idr_received{f.frame_index};
 			                   }
 			                   else
 			                   {
@@ -72,10 +72,10 @@ void default_idr_handler::on_feedback(const from_headset::feedback & f)
 		                   if (f.sent_to_decoder and f.frame_index == r.first and not r.lost)
 		                   {
 			                   U_LOG_D("Reference invalidation acknowledged, stream %d", f.stream_index);
-			                   state = running{r.first};
+			                   state = running{r.first, r.first};
 		                   }
 	                   },
-	                   [this, &f](running r) {
+	                   [this, &f](running & r) {
 		                   if (not f.sent_to_decoder and f.frame_index >= r.first_p and not is_non_ref_frame(f.frame_index))
 		                   {
 			                   // Cheapest rung first. The lost frame has to still be a
@@ -100,6 +100,8 @@ void default_idr_handler::on_feedback(const from_headset::feedback & f)
 				                   state = need_idr{};
 			                   }
 		                   }
+		                   else if (f.received_from_decoder)
+			                   r.last_ack = std::max(r.last_ack, f.frame_index);
 	                   },
 	                   [](need_invalidate) {},
 	           },
@@ -154,26 +156,29 @@ void default_idr_handler::set_ref_invalidation(bool enabled, uint32_t dpb_frames
 	}
 }
 
-bool default_idr_handler::should_skip(uint64_t frame_id)
+bool default_idr_handler::should_skip(uint64_t frame_id, uint8_t stream_idx)
 {
 	std::unique_lock lock(mutex);
-	return std::visit(utils::overloaded{
-	                          [this, frame_id](wait_idr_feedback w) {
-		                          if (frame_id > w.idr_id + 100)
-		                          {
-			                          U_LOG_W("IDR frame timeout");
-			                          state = need_idr{};
-			                          return false;
-		                          }
-		                          return true;
+	auto skipped = std::visit(utils::overloaded{
+	                                  [this, frame_id, stream_idx](wait_idr_feedback w) {
+		                                  if (frame_id > w.idr_id + 100)
+		                                  {
+			                                  U_LOG_W("IDR frame timeout on stream %d", stream_idx);
+			                                  state = need_idr{};
+			                                  return false;
+		                                  }
+		                                  return true;
+	                                  },
+	                                  // Never skip during a sweep: the intra blocks that repair the
+	                                  // picture ride the frames, so skipping is skipping the repair.
+	                                  [](auto) {
+		                                  return false;
+	                                  },
 	                          },
-	                          // Never skip during a sweep: the intra blocks that repair the
-	                          // picture ride the frames, so skipping is skipping the repair.
-	                          [](auto) {
-		                          return false;
-	                          },
-	                  },
-	                  state);
+	                          state);
+	if (skipped)
+		non_ref_frames[frame_id % non_ref_frames.size()] = frame_id;
+	return skipped;
 }
 
 void default_idr_handler::set_non_ref(uint64_t frame_index)
@@ -193,7 +198,7 @@ uint64_t default_idr_handler::invalidate_target()
 	return invalidate_frame;
 }
 
-default_idr_handler::frame_type default_idr_handler::get_type(uint64_t frame_index)
+default_idr_handler::frame_type default_idr_handler::get_type(uint64_t frame_index, uint8_t stream_idx)
 {
 	std::unique_lock lock(mutex);
 	// How old a reported loss is, is measured against this. Frames are handed to the
@@ -202,12 +207,20 @@ default_idr_handler::frame_type default_idr_handler::get_type(uint64_t frame_ind
 	newest_frame = std::max(newest_frame, frame_index);
 	return std::visit(utils::overloaded{
 	                          [this, frame_index](need_idr) {
-		                          U_LOG_D("IDR frame needed");
 		                          state = wait_idr_feedback{frame_index};
 		                          return frame_type::i;
 	                          },
-	                          [this, frame_index](idr_received) {
-		                          state = running{frame_index};
+	                          [this, frame_index](idr_received s) {
+		                          state = running{frame_index, s.last_ack};
+		                          return frame_type::p;
+	                          },
+	                          [this, frame_index, stream_idx](running s) {
+		                          if (frame_index > s.last_ack + 60)
+		                          {
+			                          U_LOG_D("stale decoder on stream %d", stream_idx);
+			                          state = wait_idr_feedback{frame_index};
+			                          return frame_type::i;
+		                          }
 		                          return frame_type::p;
 	                          },
 	                          [this, frame_index](need_invalidate s) {
@@ -232,7 +245,7 @@ default_idr_handler::frame_type default_idr_handler::get_type(uint64_t frame_ind
 			                          // worked; treating silence as failure would spend a
 			                          // sweep on every stream whose feedback is simply late.
 			                          U_LOG_D("Reference invalidation complete");
-			                          state = running{frame_index};
+			                          state = running{frame_index, frame_index};
 			                          return frame_type::p;
 		                          }
 
@@ -271,7 +284,7 @@ default_idr_handler::frame_type default_idr_handler::get_type(uint64_t frame_ind
 		                          {
 			                          U_LOG_D("Intra refresh complete");
 			                          failed_refreshes = 0;
-			                          state = running{frame_index};
+			                          state = running{frame_index, frame_index};
 			                          return frame_type::p;
 		                          }
 

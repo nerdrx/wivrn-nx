@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstdint>
+#include <string>
 
 namespace wivrn
 {
@@ -18,12 +19,15 @@ class nx_fuse_tap
 	static constexpr size_t datagram_size = header_size + max_records * record_size;
 
 	int socket_fd = -1;
+	std::string socket_path;
+	uint64_t reconnect_after_ns = 0;
 	uint64_t sequence = 1;
 	uint64_t generation = 1;
 
-	void emit(uint8_t route, uint64_t generation, XrTime sample_time, const std::array<xrt_space_relation, max_records> & poses,
-	          const std::array<uint16_t, max_records> & roles, const std::array<uint16_t, max_records> & sources, size_t count,
-	          const clock_offset & offset);
+	bool connect_socket();
+	void disconnect_socket();
+
+	void emit(uint8_t route, uint64_t generation, XrTime sample_time, const std::array<xrt_space_relation, max_records> & poses, const std::array<uint16_t, max_records> & roles, const std::array<uint16_t, max_records> & sources, size_t count, const clock_offset & offset);
 
 public:
 	nx_fuse_tap();
@@ -36,7 +40,10 @@ public:
 	void emit_bd(const from_headset::bd_body &, const clock_offset &, uint64_t generation);
 	void emit_htc(const from_headset::htc_body &, const clock_offset &, uint64_t generation);
 	void recenter();
-	uint64_t current_generation() const { return generation; }
+	uint64_t current_generation() const
+	{
+		return generation;
+	}
 };
 
 } // namespace wivrn

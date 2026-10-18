@@ -21,7 +21,6 @@
 // ui:: widget for each, rebuilt every frame so dynamic options/descriptions just work
 // same pages serve the lobby and the in-stream window, gated by ctx.in_game
 
-#define IMGUI_DEFINE_MATH_OPERATORS
 #include "scenes/gui_common.h"
 
 #include "gui_settings.h"
@@ -269,16 +268,20 @@ void settings_video(const settings_context & ctx)
 	auto & default_config = ctx.default_config;
 	const std::string disconnect_tip = ctx.in_game ? _C("tooltip for disabled settings", "Disconnect to change this setting.") : std::string{};
 	std::vector<setting> list;
+	const auto rates = ctx.session.get_refresh_rates();
 
-	if (const auto rates = ctx.session.get_refresh_rates(); not rates.empty())
+	if (not rates.empty())
 	{
+		const auto system_managed = rates.size() < 2;
 		int default_rate_index = index(rates, default_config.preferred_refresh_rate).value_or(-1) + 1;
 
 		list.push_back({
 		        .id = "##refresh",
 		        .label = _("Refresh rate"),
-		        .description = _("Use 'auto' to select the refresh rate based on measured application performance. May cause flicker when a change happens."),
-		        .ui = ui_kind::segmented,
+		        .description = system_managed
+		                               ? _("WiVRn can't directly change the refresh rate on this device. See your device's settings to change the refresh rate.")
+		                               : _("Use 'auto' to select the refresh rate based on measured application performance. May cause flicker when a change happens."),
+		        .ui = rates.size() < 7 ? ui_kind::segmented : ui_kind::combo,
 		        .get_int = [&config, rates] {
 			        for (size_t i = 0; i < rates.size(); ++i)
 				        if (rates[i] == config.preferred_refresh_rate)
@@ -305,6 +308,7 @@ void settings_video(const settings_context & ctx)
 				        opts.push_back(fmt::format("{}", int(r)));
 			        return opts; },
 		        .default_int = default_rate_index,
+		        .enabled = [system_managed] { return not system_managed; },
 		});
 	}
 
@@ -327,7 +331,7 @@ void settings_video(const settings_context & ctx)
 		});
 	}
 
-	if (ctx.instance.has_extension(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME))
+	if (rates.size() > 1 && ctx.instance.has_extension(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME))
 	{
 		list.push_back({
 		        .id = "##spacewarp",
@@ -371,9 +375,9 @@ void settings_streaming(const settings_context & ctx)
 	};
 
 	std::vector<wivrn::video_codec> codecs;
-	for (auto c: wivrn::decoder::supported_codecs())
-		if (c != wivrn::raw)
-			codecs.push_back(c);
+	for (auto capability: wivrn::decoder::supported_codecs())
+		if (capability.codec != wivrn::raw)
+			codecs.push_back(capability.codec);
 
 	// Manual / Adaptive / Adaptive v2. bitrate_auto stays the switch it always was — the
 	// dashboard and the server both still read it — and bitrate_bbr only says which control
@@ -464,7 +468,7 @@ void settings_streaming(const settings_context & ctx)
 	        .disabled_tooltip = disconnect_tip,
 	});
 
-	if (config.codec == wivrn::h265 or config.codec == wivrn::av1)
+	if (config.codec && wivrn::decoder::supports_10bit(*config.codec))
 	{
 		list.push_back({
 		        .id = "##ten_bit",
@@ -871,7 +875,7 @@ void settings_post_processing(const settings_context & ctx)
 					        o.push_back(flag_name(f));
 				        return o; },
 			        .title = std::move(title),
-			        .default_int = index(flags, config.openxr_post_processing.*member).value_or(0),
+			        .default_int = index(flags, default_config.openxr_post_processing.*member).value_or(0),
 			});
 		};
 
@@ -1030,6 +1034,7 @@ void settings_audio(const settings_context & ctx)
 	        .disabled_tooltip = disconnect_tip,
 	});
 
+#ifdef __ANDROID__
 	list.push_back({
 	        .id = "##unprocessed",
 	        .label = _C("setting name", "Unprocessed audio"),
@@ -1041,6 +1046,7 @@ void settings_audio(const settings_context & ctx)
 	        .enabled = [&ctx, &config] { return not ctx.in_game and config.check_feature(feature::microphone); },
 	        .disabled_tooltip = disconnect_tip,
 	});
+#endif
 
 	list.push_back({
 	        .id = "##low_latency_audio",
@@ -1066,6 +1072,7 @@ void settings_devices(const settings_context & ctx)
 	auto & default_config = ctx.default_config;
 	std::vector<setting> list;
 
+#ifdef __ANDROID__
 	list.push_back({
 	        .id = "##keyboard",
 	        .label = _C("setting name", "Keyboard"),
@@ -1085,6 +1092,7 @@ void settings_devices(const settings_context & ctx)
 	        .set_bool = [&config](bool v) { config.forward_mouse = v; config.save(); },
 	        .default_bool = default_config.forward_mouse,
 	});
+#endif
 
 	list.push_back({
 	        .id = "##gamepad",
@@ -1108,7 +1116,37 @@ bool settings_tracking(const settings_context & ctx)
 	auto & config = ctx.config;
 	auto & default_config = ctx.default_config;
 	const std::string disconnect_tip = ctx.in_game ? _C("tooltip for disabled settings", "Disconnect to change this setting.") : std::string{};
-	std::vector<setting> list;
+	std::vector<setting> list, posture_items;
+
+	const posture current_posture = config.get_posture();
+	const bool seated = current_posture == posture::seated;
+	const float default_height_offset = seated ? configuration::default_height_offset_seated : configuration::default_height_offset_standing;
+
+	posture_items.push_back({
+	        .id = "##posture",
+	        .label = _C("setting name", "Posture"),
+	        .description = _("Posture assumed when a stream connects."),
+	        .ui = ui_kind::segmented,
+	        .get_int = [seated] { return seated ? 1 : 0; },
+	        .set_int = [&config](int v) { config.set_posture(v ? posture::seated : posture::standing); config.save(); },
+	        .options = [] { return std::vector<std::string>{_C("posture", "Standing"), _C("posture", "Seated")}; },
+	        .default_int = default_config.get_posture() == posture::seated ? 1 : 0,
+	});
+
+	posture_items.push_back({
+	        .id = "##height_offset",
+	        .label = _C("setting name", "Height adjustment"),
+	        .description = seated
+	                               ? _("Corrects the height reported to the PC when seated, useful for games without native seated support.")
+	                               : _("Corrects the height reported to the PC when standing, useful for a miscalibrated floor."),
+	        .ui = ui_kind::slider,
+	        .get_int = [&config] { return int(std::lround(config.get_height_offset() * 100)); },
+	        .set_int = [&config](int v) { config.set_height_offset(v / 100.f); config.save(); },
+	        .v_min = -30,
+	        .v_max = 70,
+	        .fmt = "%d cm",
+	        .default_int = int(std::lround(default_height_offset * 100)),
+	});
 
 	auto feature_toggle = [&](const char * id, std::string label, std::string desc, feature f) {
 		list.push_back({
@@ -1198,6 +1236,7 @@ bool settings_tracking(const settings_context & ctx)
 
 	ui::page_header(_cS("page header title", "Tracking"), _cS("page header subtitle", "Body and input tracking sent to the PC."));
 	render_settings(ctx, "##tracking", list);
+	render_settings(ctx, "##posture", posture_items);
 
 	return changed;
 }
@@ -1250,6 +1289,19 @@ void settings_system(const settings_context & ctx)
 	        .default_int = language_index(default_config),
 	});
 
+#ifdef __ANDROID__
+	if (application::get_hmd_traits().usb_net)
+		list.push_back({
+		        .id = "##usbnet",
+		        .label = _C("setting name", "USB networking"),
+		        .description = _("Enables connection by USB without ADB or developer mode.\nMake sure the server allows IPv6 link-local only connections."),
+		        .ui = ui_kind::toggle,
+		        .get_bool = [&config] { return config.usb_network; },
+		        .set_bool = [&config](bool v) { config.usb_network = v;config.save(); application::instance().set_usb_networking(v); },
+		        .default_bool = default_config.usb_network,
+		});
+#endif
+
 	list.push_back({
 	        .id = "##extended",
 	        .label = _C("setting name", "Extended configuration"),
@@ -1270,6 +1322,19 @@ void settings_system(const settings_context & ctx)
 		        .get_bool = [&config] { return config.high_power_mode; },
 		        .set_bool = [&config](bool v) { config.high_power_mode = v; config.save(); },
 		        .default_bool = default_config.high_power_mode,
+		});
+	}
+
+	if (ctx.session.boundary_visibility_supported())
+	{
+		list.push_back({
+		        .id = "##passthrough_boundary",
+		        .label = _C("setting name", "Enable boundary in passthrough"),
+		        .description = _("Shows the boundary while passthrough is on. Disable to walk freely outside of it. The boundary is always shown in VR."),
+		        .ui = ui_kind::toggle,
+		        .get_bool = [&config] { return config.passthrough_boundary_enabled; },
+		        .set_bool = [&ctx, &config](bool v) { config.passthrough_boundary_enabled = v; config.save(); ctx.session.set_passthrough_boundary_enabled(v); },
+		        .default_bool = default_config.passthrough_boundary_enabled,
 		});
 	}
 

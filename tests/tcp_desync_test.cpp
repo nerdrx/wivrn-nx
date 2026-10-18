@@ -40,15 +40,15 @@ using namespace std::chrono_literals;
 static int failures = 0;
 static int checks = 0;
 
-#define CHECK(cond)                                                       \
-	do                                                                    \
-	{                                                                     \
-		++checks;                                                         \
-		if (!(cond))                                                      \
-		{                                                                 \
-			++failures;                                                   \
-			std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);   \
-		}                                                                 \
+#define CHECK(cond)                                                                 \
+	do                                                                          \
+	{                                                                           \
+		++checks;                                                           \
+		if (!(cond))                                                        \
+		{                                                                   \
+			++failures;                                                 \
+			std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+		}                                                                   \
 	} while (0)
 
 // Deterministic bytes, no global state
@@ -82,7 +82,8 @@ static std::pair<wivrn::TCP, wivrn::TCP> tcp_pair()
 	if (getsockname(listener.get_fd(), (sockaddr *)&addr, &len) < 0)
 		throw std::system_error{errno, std::generic_category()};
 
-	wivrn::TCP client(in6addr_loopback, ntohs(addr.sin6_port));
+	addr.sin6_addr = in6addr_loopback;
+	wivrn::TCP client(addr);
 	auto [server, peer] = listener.accept<wivrn::TCP>();
 
 	return {std::move(client), std::move(server)};

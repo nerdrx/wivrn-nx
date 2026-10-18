@@ -1,16 +1,16 @@
 #pragma once
 
-#include <QObject>
-#include <QVariantMap>
-#include <QNetworkAccessManager>
-#include <QProcess>
-#include <QTimer>
 #include <QElapsedTimer>
 #include <QJsonObject>
 #include <QMap>
+#include <QNetworkAccessManager>
+#include <QObject>
+#include <QProcess>
+#include <QTimer>
 #include <QUrl>
-#include <functional>
+#include <QVariantMap>
 #include <QtQmlIntegration/qqmlintegration.h>
+#include <functional>
 
 // Development simulator transport, deliberately separate from VR tracking.
 class FuseService : public QObject
@@ -37,21 +37,63 @@ class FuseService : public QObject
 public:
 	explicit FuseService(QObject * parent = nullptr);
 	~FuseService() override;
-	QVariantMap state() const { return m_state; }
-	QVariantList cameraChoices() const { return m_cameraChoices; }
-	QVariantList devices() const { return m_devices; }
-	QVariantMap tracking() const { return m_tracking; }
-	QVariantMap calibration() const { return m_calibration; }
-	QVariantMap alignment() const { return m_alignment; }
-	QVariantMap shadow() const { return m_shadow; }
-	QVariantMap assistance() const { return m_assistance; }
-	bool connected() const { return m_connected; }
-	bool busy() const { return m_busy; }
-	bool running() const { return m_process.state() != QProcess::NotRunning; }
+	QVariantMap state() const
+	{
+		return m_state;
+	}
+	QVariantList cameraChoices() const
+	{
+		return m_cameraChoices;
+	}
+	QVariantList devices() const
+	{
+		return m_devices;
+	}
+	QVariantMap tracking() const
+	{
+		return m_tracking;
+	}
+	QVariantMap calibration() const
+	{
+		return m_calibration;
+	}
+	QVariantMap alignment() const
+	{
+		return m_alignment;
+	}
+	QVariantMap shadow() const
+	{
+		return m_shadow;
+	}
+	QVariantMap assistance() const
+	{
+		return m_assistance;
+	}
+	bool connected() const
+	{
+		return m_connected;
+	}
+	bool busy() const
+	{
+		return m_busy;
+	}
+	bool running() const
+	{
+		return m_process.state() != QProcess::NotRunning;
+	}
 	bool workerAvailable() const;
-	QString error() const { return m_error; }
-	QString cameraError() const { return m_cameraError; }
-	QString serviceUrl() const { return QStringLiteral("http://127.0.0.1:%1").arg(m_port); }
+	QString error() const
+	{
+		return m_error;
+	}
+	QString cameraError() const
+	{
+		return m_cameraError;
+	}
+	QString serviceUrl() const
+	{
+		return QStringLiteral("http://127.0.0.1:%1").arg(m_port);
+	}
 	Q_INVOKABLE void connectService();
 	Q_INVOKABLE void startWorker();
 	Q_INVOKABLE void stopWorker();
@@ -78,15 +120,14 @@ signals:
 	void assistanceChanged();
 	void cameraChoicesChanged();
 
-
 private:
-	template<class T>
+	template <class T>
 	void update(T & target, T value, void (FuseService::*signal)())
 	{
 		if (target == value)
 			return;
 		target = std::move(value);
-		emit (this->*signal)();
+		emit(this->*signal)();
 	}
 	using Completion = std::function<void(QJsonObject, QString, bool)>;
 	void request(const QString & path, const QJsonObject & body, Completion done);

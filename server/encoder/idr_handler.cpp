@@ -85,8 +85,8 @@ void default_idr_handler::on_feedback(const from_headset::feedback & f)
 			                   if (invalidate_enabled and f.frame_index <= newest_frame and newest_frame - f.frame_index < invalidate_dpb)
 			                   {
 				                   U_LOG_I("Reference invalidation of frame %lu on stream %d",
-				                           (unsigned long)f.frame_index,
-				                           f.stream_index);
+						           (unsigned long)f.frame_index,
+						           f.stream_index);
 				                   state = need_invalidate{f.frame_index};
 			                   }
 			                   else if (refresh_enabled)
@@ -160,22 +160,22 @@ bool default_idr_handler::should_skip(uint64_t frame_id, uint8_t stream_idx)
 {
 	std::unique_lock lock(mutex);
 	auto skipped = std::visit(utils::overloaded{
-	                          [this, frame_id, stream_idx](wait_idr_feedback w) {
-		                          if (frame_id > w.idr_id + 100)
-		                          {
-			                          U_LOG_W("IDR frame timeout on stream %d", stream_idx);
-			                          state = need_idr{};
-			                          return false;
-		                          }
-		                          return true;
+	                                  [this, frame_id, stream_idx](wait_idr_feedback w) {
+		                                  if (frame_id > w.idr_id + 100)
+		                                  {
+			                                  U_LOG_W("IDR frame timeout on stream %d", stream_idx);
+			                                  state = need_idr{};
+			                                  return false;
+		                                  }
+		                                  return true;
+	                                  },
+	                                  // Never skip during a sweep: the intra blocks that repair the
+	                                  // picture ride the frames, so skipping is skipping the repair.
+	                                  [](auto) {
+		                                  return false;
+	                                  },
 	                          },
-	                          // Never skip during a sweep: the intra blocks that repair the
-	                          // picture ride the frames, so skipping is skipping the repair.
-	                          [](auto) {
-		                          return false;
-	                          },
-	                  },
-	                  state);
+	                          state);
 	if (skipped)
 		non_ref_frames[frame_id % non_ref_frames.size()] = frame_id;
 	return skipped;

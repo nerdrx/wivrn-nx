@@ -27,9 +27,7 @@ class nx_fuse_tap
 	bool connect_socket();
 	void disconnect_socket();
 
-	void emit(uint8_t route, uint64_t generation, XrTime sample_time, const std::array<xrt_space_relation, max_records> & poses,
-	          const std::array<uint16_t, max_records> & roles, const std::array<uint16_t, max_records> & sources, size_t count,
-	          const clock_offset & offset);
+	void emit(uint8_t route, uint64_t generation, XrTime sample_time, const std::array<xrt_space_relation, max_records> & poses, const std::array<uint16_t, max_records> & roles, const std::array<uint16_t, max_records> & sources, size_t count, const clock_offset & offset);
 
 public:
 	nx_fuse_tap();
@@ -42,7 +40,10 @@ public:
 	void emit_bd(const from_headset::bd_body &, const clock_offset &, uint64_t generation);
 	void emit_htc(const from_headset::htc_body &, const clock_offset &, uint64_t generation);
 	void recenter();
-	uint64_t current_generation() const { return generation; }
+	uint64_t current_generation() const
+	{
+		return generation;
+	}
 };
 
 } // namespace wivrn

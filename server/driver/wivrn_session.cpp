@@ -778,15 +778,21 @@ void wivrn_session::operator()(const from_headset::tracking & tracking)
 	auto offset = offset_est.get_offset();
 	nx_tap.emit_tracking(tracking, offset, nx_tap.current_generation());
 	nx_corrections.poll(nx_tap.current_generation());
-	if (!nx_camera_trackers.empty()) {
+	if (!nx_camera_trackers.empty())
+	{
 		std::array<nx_fuse_corrections::camera_pose, 5> poses{};
 		uint64_t sample_ns = 0;
 		size_t n = nx_corrections.camera_snapshot(nx_tap.current_generation(), poses, &sample_ns);
 		static constexpr std::array roles{uint16_t(10), uint16_t(14), uint16_t(15), uint16_t(16), uint16_t(17)};
-		for (size_t i=0;i<roles.size();++i) {
-			size_t found = 0; while (found < n && poses[found].role != roles[i]) ++found;
-			if (found < n && nx_camera_trackers[i]) nx_camera_trackers[i]->publish(nx_tap.current_generation(), sample_ns, {poses[found].position.x, poses[found].position.y, poses[found].position.z}, {poses[found].orientation.x, poses[found].orientation.y, poses[found].orientation.z, poses[found].orientation.w});
-			else if (nx_camera_trackers[i]) nx_camera_trackers[i]->invalidate(nx_tap.current_generation());
+		for (size_t i = 0; i < roles.size(); ++i)
+		{
+			size_t found = 0;
+			while (found < n && poses[found].role != roles[i])
+				++found;
+			if (found < n && nx_camera_trackers[i])
+				nx_camera_trackers[i]->publish(nx_tap.current_generation(), sample_ns, {poses[found].position.x, poses[found].position.y, poses[found].position.z}, {poses[found].orientation.x, poses[found].orientation.y, poses[found].orientation.z, poses[found].orientation.w});
+			else if (nx_camera_trackers[i])
+				nx_camera_trackers[i]->invalidate(nx_tap.current_generation());
 		}
 	}
 

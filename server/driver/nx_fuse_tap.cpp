@@ -1,18 +1,18 @@
 #include "nx_fuse_tap.h"
 
-#include "xrt_cast.h"
 #include "os/os_time.h"
+#include "xrt_cast.h"
 
 #include <array>
 #include <cerrno>
-#include <cstring>
 #include <cstdlib>
+#include <cstring>
 #include <fcntl.h>
+#include <string_view>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
-#include <string_view>
 
 namespace wivrn
 {
@@ -150,11 +150,7 @@ void nx_fuse_tap::recenter()
 		generation = 1;
 }
 
-void nx_fuse_tap::emit(uint8_t route, uint64_t generation, XrTime sample_time,
-                       const std::array<xrt_space_relation, max_records> & poses,
-                       const std::array<uint16_t, max_records> & roles,
-                       const std::array<uint16_t, max_records> & sources, size_t count,
-                       const clock_offset & offset)
+void nx_fuse_tap::emit(uint8_t route, uint64_t generation, XrTime sample_time, const std::array<xrt_space_relation, max_records> & poses, const std::array<uint16_t, max_records> & roles, const std::array<uint16_t, max_records> & sources, size_t count, const clock_offset & offset)
 {
 	if (not offset || count == 0 || count > max_records)
 		return;
@@ -192,8 +188,7 @@ void nx_fuse_tap::emit(uint8_t route, uint64_t generation, XrTime sample_time,
 		put_f32(out + 56, poses[i].angular_velocity.z);
 		put_u64(out + 60, offset ? offset.from_headset(sample_time) : 0);
 	}
-	if (send(socket_fd, packet.data(), header_size + count * record_size, MSG_DONTWAIT | MSG_NOSIGNAL) < 0
-	    && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR && errno != ENOBUFS)
+	if (send(socket_fd, packet.data(), header_size + count * record_size, MSG_DONTWAIT | MSG_NOSIGNAL) < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR && errno != ENOBUFS)
 		disconnect_socket();
 }
 
@@ -205,24 +200,38 @@ void nx_fuse_tap::emit_tracking(const from_headset::tracking & tracking, const c
 	std::array<uint16_t, max_records> roles{};
 	std::array<uint16_t, max_records> sources{};
 	size_t count = 0;
-	for (const auto & pose : tracking.device_poses)
+	for (const auto & pose: tracking.device_poses)
 	{
 		uint16_t role;
 		switch (pose.device)
 		{
-		case device_id::HEAD: role = role_head; break;
-		case device_id::LEFT_GRIP: role = role_left_grip; break;
-		case device_id::LEFT_AIM: role = role_left_aim; break;
-		case device_id::LEFT_PALM: role = role_left_palm; break;
-		case device_id::RIGHT_GRIP: role = role_right_grip; break;
-		case device_id::RIGHT_AIM: role = role_right_aim; break;
-		case device_id::RIGHT_PALM: role = role_right_palm; break;
-		default: continue;
+			case device_id::HEAD:
+				role = role_head;
+				break;
+			case device_id::LEFT_GRIP:
+				role = role_left_grip;
+				break;
+			case device_id::LEFT_AIM:
+				role = role_left_aim;
+				break;
+			case device_id::LEFT_PALM:
+				role = role_left_palm;
+				break;
+			case device_id::RIGHT_GRIP:
+				role = role_right_grip;
+				break;
+			case device_id::RIGHT_AIM:
+				role = role_right_aim;
+				break;
+			case device_id::RIGHT_PALM:
+				role = role_right_palm;
+				break;
+			default:
+				continue;
 		}
 		if (count == max_records)
 			break;
-		poses[count] = {.relation_flags = from_pose_flags(pose.flags), .pose = xrt_cast(pose.pose),
-		                .linear_velocity = xrt_cast(pose.linear_velocity), .angular_velocity = xrt_cast(pose.angular_velocity)};
+		poses[count] = {.relation_flags = from_pose_flags(pose.flags), .pose = xrt_cast(pose.pose), .linear_velocity = xrt_cast(pose.linear_velocity), .angular_velocity = xrt_cast(pose.angular_velocity)};
 		roles[count] = role;
 		sources[count++] = static_cast<uint16_t>(pose.device);
 	}
@@ -242,15 +251,33 @@ void nx_fuse_tap::emit_bd(const from_headset::bd_body & tracking, const clock_of
 		poses[i] = {.relation_flags = from_pose_flags(pose.flags), .pose = xrt_cast(XrPosef{.orientation = pose.orientation, .position = pose.position})};
 		switch (i)
 		{
-		case XRT_BODY_JOINT_PELVIS_BD: roles[i] = role_hip; break;
-		case XRT_BODY_JOINT_SPINE3_BD: roles[i] = role_chest; break;
-		case XRT_BODY_JOINT_LEFT_ELBOW_BD: roles[i] = role_left_elbow; break;
-		case XRT_BODY_JOINT_RIGHT_ELBOW_BD: roles[i] = role_right_elbow; break;
-		case XRT_BODY_JOINT_LEFT_KNEE_BD: roles[i] = role_left_knee; break;
-		case XRT_BODY_JOINT_RIGHT_KNEE_BD: roles[i] = role_right_knee; break;
-		case XRT_BODY_JOINT_LEFT_FOOT_BD: roles[i] = role_left_foot; break;
-		case XRT_BODY_JOINT_RIGHT_FOOT_BD: roles[i] = role_right_foot; break;
-		default: roles[i] = uint16_t(0x0100 | i); break;
+			case XRT_BODY_JOINT_PELVIS_BD:
+				roles[i] = role_hip;
+				break;
+			case XRT_BODY_JOINT_SPINE3_BD:
+				roles[i] = role_chest;
+				break;
+			case XRT_BODY_JOINT_LEFT_ELBOW_BD:
+				roles[i] = role_left_elbow;
+				break;
+			case XRT_BODY_JOINT_RIGHT_ELBOW_BD:
+				roles[i] = role_right_elbow;
+				break;
+			case XRT_BODY_JOINT_LEFT_KNEE_BD:
+				roles[i] = role_left_knee;
+				break;
+			case XRT_BODY_JOINT_RIGHT_KNEE_BD:
+				roles[i] = role_right_knee;
+				break;
+			case XRT_BODY_JOINT_LEFT_FOOT_BD:
+				roles[i] = role_left_foot;
+				break;
+			case XRT_BODY_JOINT_RIGHT_FOOT_BD:
+				roles[i] = role_right_foot;
+				break;
+			default:
+				roles[i] = uint16_t(0x0100 | i);
+				break;
 		}
 		sources[i] = uint16_t(i);
 	}
@@ -267,8 +294,7 @@ void nx_fuse_tap::emit_htc(const from_headset::htc_body & tracking, const clock_
 	for (size_t i = 0; i < tracking.poses.size() && i < max_records; ++i)
 	{
 		const auto & pose = tracking.poses[i];
-		poses[i] = {.relation_flags = from_pose_flags(pose.flags), .pose = xrt_cast(pose.pose),
-		            .linear_velocity = xrt_cast(pose.linear_velocity), .angular_velocity = xrt_cast(pose.angular_velocity)};
+		poses[i] = {.relation_flags = from_pose_flags(pose.flags), .pose = xrt_cast(pose.pose), .linear_velocity = xrt_cast(pose.linear_velocity), .angular_velocity = xrt_cast(pose.angular_velocity)};
 		roles[i] = uint16_t(role_htc_generic_base | i);
 		sources[i] = uint16_t(i);
 	}

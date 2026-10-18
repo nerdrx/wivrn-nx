@@ -587,7 +587,7 @@ size_t wivrn::TCP::send_iovecs(iovec * iov, size_t iovcnt)
 		total_sent += sent;
 
 		// iov fully consumed
-		while (iovcnt > 0 and (size_t)sent >= iov->iov_len)
+		while (iovcnt > 0 and (size_t) sent >= iov->iov_len)
 		{
 			sent -= iov->iov_len;
 			++iov;
